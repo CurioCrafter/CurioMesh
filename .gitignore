@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.tools/
+*.blend1
+*.blend2
+*.log
+
+core_build/
+build/
+dist/
+*.pyd
+*.so
+*.dylib

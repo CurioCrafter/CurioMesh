@@ -1,108 +1,161 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+
 import bpy
-from typing import Iterable, Set
 
 
-def ensure_uvs(obj: bpy.types.Object, method: str = "SMART") -> None:
-    if obj.type != 'MESH':
+def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART") -> None:
+    if obj.type != "MESH" or obj.data.uv_layers:
         return
-    mesh = obj.data
-    if not mesh.uv_layers:
-        # Enter edit mode ops context
-        bpy.ops.object.mode_set(mode='EDIT')
+
+    previous_active = bpy.context.view_layer.objects.active
+    previous_selection = list(bpy.context.selected_objects)
+    try:
+        bpy.ops.object.mode_set(mode="OBJECT")
+    except Exception:
+        pass
+
+    try:
+        for selected in bpy.context.selected_objects:
+            selected.select_set(False)
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        if method == "UNWRAP":
+            bpy.ops.uv.unwrap(method="ANGLE_BASED", margin=0.002)
+        else:
+            bpy.ops.uv.smart_project(angle_limit=1.15192, island_margin=0.02)
+    finally:
         try:
-            if method == 'UNWRAP':
-                bpy.ops.uv.unwrap(method='ANGLE_BASED', margin=0.001)
-            else:
-                bpy.ops.uv.smart_project(angle_limit=66.0, island_margin=0.02)
-        finally:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.mode_set(mode="OBJECT")
+        except Exception:
+            pass
+        for selected in bpy.context.selected_objects:
+            selected.select_set(False)
+        for selected in previous_selection:
+            if selected.name in bpy.data.objects:
+                selected.select_set(True)
+        if previous_active and previous_active.name in bpy.data.objects:
+            bpy.context.view_layer.objects.active = previous_active
 
 
-def create_bake_image(name: str, res: int) -> bpy.types.Image:
-    img = bpy.data.images.new(name=name, width=res, height=res, alpha=True, float_buffer=False)
-    return img
+def create_bake_image(name: str, resolution: int) -> bpy.types.Image:
+    image = bpy.data.images.new(
+        name=name,
+        width=max(64, int(resolution)),
+        height=max(64, int(resolution)),
+        alpha=True,
+        float_buffer=False,
+    )
+    image.generated_color = (0.0, 0.0, 0.0, 1.0)
+    return image
 
 
-def assign_image_to_material(target_obj: bpy.types.Object, image: bpy.types.Image, color_attr: str) -> None:
-    me = target_obj.data
-    if not me.materials:
-        me.materials.append(bpy.data.materials.new(name=f"{target_obj.name}_Mat"))
-    for mat in me.materials:
-        if mat is None:
+def assign_image_to_material(obj: bpy.types.Object, image: bpy.types.Image, label: str) -> None:
+    mesh = obj.data
+    if not mesh.materials:
+        mesh.materials.append(bpy.data.materials.new(name=f"{obj.name}_Material"))
+
+    for material in mesh.materials:
+        if material is None:
             continue
-        mat.use_nodes = True
-        nodes = mat.node_tree.nodes
-        links = mat.node_tree.links
-        # Find or create an Image Texture node named per color_attr
-        tex = next((n for n in nodes if n.type == 'TEX_IMAGE' and (n.label == color_attr or n.name == color_attr)), None)
+        material.use_nodes = True
+        nodes = material.node_tree.nodes
+        tex = next((node for node in nodes if node.type == "TEX_IMAGE" and node.label == label), None)
         if tex is None:
-            tex = nodes.new('ShaderNodeTexImage')
-            tex.label = color_attr
-            tex.name = color_attr
+            tex = nodes.new("ShaderNodeTexImage")
+            tex.label = label
+            tex.name = label
         tex.image = image
-        # Ensure it's the active image for baking
         nodes.active = tex
 
 
-def bake_maps(source_obj: bpy.types.Object,
-              target_obj: bpy.types.Object,
-              maps: Set[str],
-              res: int = 2048,
-              margin: int = 8,
-              uv_method: str = 'SMART') -> None:
-    # Ensure consistent transforms by temporarily duplicating source and aligning transforms
-    # Apply scale on both to minimize projection errors
-    bpy.ops.object.select_all(action='DESELECT')
-    bpy.context.view_layer.objects.active = target_obj
-    try:
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    except Exception:
-        pass
-    try:
-        bpy.context.view_layer.objects.active = source_obj
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    except Exception:
-        pass
+def bake_selected_to_active(
+    source_obj: bpy.types.Object,
+    target_obj: bpy.types.Object,
+    *,
+    maps: Iterable[str],
+    resolution: int = 2048,
+    margin: int = 8,
+    uv_method: str = "SMART",
+) -> list[bpy.types.Image]:
+    ensure_target_uvs(target_obj, uv_method)
+    baked: list[bpy.types.Image] = []
 
-    # Ensure both have UVs
-    ensure_uvs(target_obj, method=uv_method)
-
-    # Select source then target; active = target
-    bpy.ops.object.select_all(action='DESELECT')
-    source_obj.select_set(True)
-    target_obj.select_set(True)
-    bpy.context.view_layer.objects.active = target_obj
-
-    # Bake settings
+    previous_active = bpy.context.view_layer.objects.active
+    previous_selection = list(bpy.context.selected_objects)
     scene = bpy.context.scene
-    scene.render.engine = 'CYCLES'
-    scene.cycles.bake_type = 'DIFFUSE'
-    scene.cycles.samples = max(1, scene.cycles.samples)
-    scene.render.bake.margin = margin
-    scene.render.bake.use_selected_to_active = True
-    scene.render.bake.cage_extrusion = 0.05
+    previous_engine = scene.render.engine
+    visibility_state = {}
 
-    def do_bake(pass_name: str, bake_type: str, use_direct: bool = True, use_indirect: bool = True, use_color: bool = True):
-        img = create_bake_image(f"{target_obj.name}_{pass_name}", res)
-        assign_image_to_material(target_obj, img, pass_name)
-        if bake_type == 'DIFFUSE':
-            scene.cycles.bake_type = 'DIFFUSE'
-            scene.render.bake.use_pass_direct = use_direct
-            scene.render.bake.use_pass_indirect = use_indirect
-            scene.render.bake.use_pass_color = use_color
-        else:
-            scene.cycles.bake_type = bake_type
-        bpy.ops.object.bake(type=bake_type)
+    try:
+        bpy.ops.object.mode_set(mode="OBJECT")
+    except Exception:
+        pass
 
-    if 'COLOR' in maps:
-        do_bake('BaseColor', 'DIFFUSE', use_direct=False, use_indirect=False, use_color=True)
-    if 'ROUGHNESS' in maps:
-        do_bake('Roughness', 'ROUGHNESS')
-    if 'METALLIC' in maps:
-        do_bake('Metallic', 'METALLIC')
-    if 'NORMAL' in maps:
-        do_bake('Normal', 'NORMAL')
-    if 'EMIT' in maps:
-        do_bake('Emission', 'EMIT')
+    try:
+        for obj in (source_obj, target_obj):
+            visibility_state[obj.name] = (
+                obj.hide_select,
+                obj.hide_viewport,
+                obj.hide_render,
+                obj.hide_get(),
+            )
+            obj.hide_select = False
+            obj.hide_viewport = False
+            obj.hide_render = False
+            obj.hide_set(False)
 
+        for selected in bpy.context.selected_objects:
+            selected.select_set(False)
+        source_obj.select_set(True)
+        target_obj.select_set(True)
+        bpy.context.view_layer.objects.active = target_obj
 
+        scene.render.engine = "CYCLES"
+        scene.cycles.samples = max(16, int(scene.cycles.samples))
+        scene.render.bake.use_selected_to_active = True
+        scene.render.bake.cage_extrusion = 0.04
+        scene.render.bake.margin = max(0, int(margin))
+
+        for map_name in maps:
+            pass_name = str(map_name).upper()
+            if pass_name == "COLOR":
+                bake_type = "DIFFUSE"
+                label = "CurioMesh_BaseColor"
+                scene.render.bake.use_pass_direct = False
+                scene.render.bake.use_pass_indirect = False
+                scene.render.bake.use_pass_color = True
+            elif pass_name in {"ROUGHNESS", "METALLIC", "NORMAL", "EMIT"}:
+                bake_type = pass_name
+                label = f"CurioMesh_{pass_name.title()}"
+            else:
+                continue
+
+            image = create_bake_image(f"{target_obj.name}_{label}", int(resolution))
+            assign_image_to_material(target_obj, image, label)
+            bpy.ops.object.bake(type=bake_type)
+            try:
+                image.pack()
+            except Exception:
+                pass
+            baked.append(image)
+    finally:
+        scene.render.engine = previous_engine
+        for obj in (source_obj, target_obj):
+            state = visibility_state.get(obj.name)
+            if state is None or obj.name not in bpy.data.objects:
+                continue
+            obj.hide_select, obj.hide_viewport, obj.hide_render, hidden = state
+            obj.hide_set(hidden)
+        for selected in bpy.context.selected_objects:
+            selected.select_set(False)
+        for selected in previous_selection:
+            if selected.name in bpy.data.objects:
+                selected.select_set(True)
+        if previous_active and previous_active.name in bpy.data.objects:
+            bpy.context.view_layer.objects.active = previous_active
+
+    return baked
