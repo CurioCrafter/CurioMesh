@@ -104,6 +104,14 @@ def make_open_grid(name: str, size=8):
     return obj
 
 
+def make_cube(name: str):
+    bpy.ops.mesh.primitive_cube_add(size=2.0)
+    obj = bpy.context.object
+    obj.name = name
+    add_material_and_uv(obj, color=(0.9, 0.55, 0.2, 1.0))
+    return obj
+
+
 def make_bad_normals_sphere(name: str):
     obj = make_uv_sphere(name, segments=28, rings=14)
     obj.data.flip_normals()
@@ -246,6 +254,41 @@ def main():
         },
         min_quad_ratio=0.60,
         max_face_error=0.60,
+    )
+
+    triad_cube = make_cube("CurioSmoke_TriadCube")
+    run_remesh_case(
+        "triad_cube_new",
+        triad_cube,
+        {
+            "engine": "TRIAD_Q_LITE",
+            "target_faces": 6,
+            "quality": "BALANCED",
+            "output_mode": "NEW",
+            "texture_mode": "PROJECT",
+            "triad_seed_count": 4,
+            "triad_flow_mode": "PATCH",
+            "triad_feature_angle": 35.0,
+        },
+        min_quad_ratio=0.85,
+        max_face_error=0.50,
+    )
+
+    triad_grid = make_open_grid("CurioSmoke_TriadGrid", size=7)
+    run_remesh_case(
+        "triad_grid_replace",
+        triad_grid,
+        {
+            "engine": "TRIAD_Q_LITE",
+            "target_faces": 49,
+            "quality": "DRAFT",
+            "output_mode": "REPLACE",
+            "texture_mode": "PROJECT",
+            "triad_seed_count": 4,
+            "triad_flow_mode": "AUTO",
+            "triad_feature_angle": 35.0,
+        },
+        min_quad_ratio=0.70,
     )
 
     module.unregister()

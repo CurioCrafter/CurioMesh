@@ -12,6 +12,21 @@ QUALITY_ITEMS = [
     ("HERO", "Hero", "Higher-quality preservation and validation"),
 ]
 
+ENGINE_ITEMS = [
+    ("QUADRIFLOW", "QuadriFlow", "Production path using Blender's built-in QuadriFlow remesher"),
+    ("TRIAD_Q_LITE", "TRIAD-Q Lite", "Experimental standalone CurioMesh quad-dominant engine"),
+    ("AUTO", "Auto", "Use the strongest available production engine"),
+]
+
+FLOW_ITEMS = [
+    ("AUTO", "Auto", "Classify the mesh and choose a TRIAD-Q mode"),
+    ("BALANCED", "Balanced", "General feature-aware pairing"),
+    ("ORGANIC", "OrganicFlow", "Prioritize smooth organic flow"),
+    ("PATCH", "PatchFlow", "Prioritize hard features and patch boundaries"),
+    ("DIRTY", "DirtyFlow", "Prefer robustness on messy inputs"),
+    ("TEXTURE", "TextureFlow", "Favor material and UV seam preservation"),
+]
+
 TEXTURE_ITEMS = [
     ("PROJECT", "Project UVs", "Transfer UVs, then use BVH projection if needed"),
     ("TRANSFER", "Transfer Only", "Use Blender data transfer only"),
@@ -28,8 +43,13 @@ OUTPUT_ITEMS = [
 def config_from_owner(owner: object) -> RemeshConfig:
     return RemeshConfig(
         target_faces=int(owner.target_faces),
+        engine=str(owner.engine),
         quality=str(owner.quality),
         seed=int(owner.seed),
+        triad_seed_count=int(owner.triad_seed_count),
+        triad_feature_angle=float(owner.triad_feature_angle),
+        triad_force_quads=bool(owner.triad_force_quads),
+        triad_flow_mode=str(owner.triad_flow_mode),
         preserve_sharp=bool(owner.preserve_sharp),
         preserve_boundary=bool(owner.preserve_boundary),
         preserve_seams=bool(owner.preserve_seams),
@@ -78,8 +98,13 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     target_faces: bpy.props.IntProperty(name="Target Faces", default=8000, min=4, soft_max=250000)
+    engine: bpy.props.EnumProperty(name="Engine", items=ENGINE_ITEMS, default="QUADRIFLOW")
     quality: bpy.props.EnumProperty(name="Quality", items=QUALITY_ITEMS, default="BALANCED")
     seed: bpy.props.IntProperty(name="Seed", default=0, min=0, soft_max=100000)
+    triad_seed_count: bpy.props.IntProperty(name="TRIAD-Q Seeds", default=6, min=1, max=32)
+    triad_feature_angle: bpy.props.FloatProperty(name="TRIAD-Q Feature Angle", default=35.0, min=0.0, max=180.0)
+    triad_force_quads: bpy.props.BoolProperty(name="TRIAD-Q Pure Quads", default=False)
+    triad_flow_mode: bpy.props.EnumProperty(name="TRIAD-Q Flow", items=FLOW_ITEMS, default="AUTO")
     preserve_sharp: bpy.props.BoolProperty(name="Preserve Sharp", default=True)
     preserve_boundary: bpy.props.BoolProperty(name="Preserve Boundary", default=True)
     preserve_seams: bpy.props.BoolProperty(name="Treat UV Seams As Sharp", default=True)

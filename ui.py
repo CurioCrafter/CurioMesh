@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import bpy
 
-from .operators import OUTPUT_ITEMS, QUALITY_ITEMS, TEXTURE_ITEMS
+from .operators import ENGINE_ITEMS, FLOW_ITEMS, OUTPUT_ITEMS, QUALITY_ITEMS, TEXTURE_ITEMS
 
 
 class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     target_faces: bpy.props.IntProperty(name="Target Faces", default=8000, min=4, soft_max=250000)
+    engine: bpy.props.EnumProperty(name="Engine", items=ENGINE_ITEMS, default="QUADRIFLOW")
     quality: bpy.props.EnumProperty(name="Quality", items=QUALITY_ITEMS, default="BALANCED")
     seed: bpy.props.IntProperty(name="Seed", default=0, min=0, soft_max=100000)
+    triad_seed_count: bpy.props.IntProperty(name="TRIAD-Q Seeds", default=6, min=1, max=32)
+    triad_feature_angle: bpy.props.FloatProperty(name="TRIAD-Q Feature Angle", default=35.0, min=0.0, max=180.0)
+    triad_force_quads: bpy.props.BoolProperty(name="TRIAD-Q Pure Quads", default=False)
+    triad_flow_mode: bpy.props.EnumProperty(name="TRIAD-Q Flow", items=FLOW_ITEMS, default="AUTO")
     preserve_sharp: bpy.props.BoolProperty(name="Preserve Sharp", default=True)
     preserve_boundary: bpy.props.BoolProperty(name="Preserve Boundary", default=True)
     preserve_seams: bpy.props.BoolProperty(name="Treat UV Seams As Sharp", default=True)
@@ -64,6 +69,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
 
         main = layout.column(align=True)
         main.prop(settings, "target_faces")
+        main.prop(settings, "engine")
         main.prop(settings, "quality")
         row = main.row(align=True)
         row.operator("curiomesh.apply_preset", text="Draft").preset = "DRAFT"
@@ -88,6 +94,14 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         pipeline.prop(settings, "output_mode")
         pipeline.prop(settings, "seed")
 
+        if settings.engine == "TRIAD_Q_LITE":
+            triad = layout.box()
+            triad.label(text="TRIAD-Q Lite")
+            triad.prop(settings, "triad_flow_mode")
+            triad.prop(settings, "triad_seed_count")
+            triad.prop(settings, "triad_feature_angle")
+            triad.prop(settings, "triad_force_quads")
+
         textures = layout.box()
         textures.label(text="Materials And UVs")
         textures.prop(settings, "texture_mode")
@@ -104,8 +118,13 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
 
         op = layout.operator("curiomesh.remesh", text="Remesh")
         op.target_faces = settings.target_faces
+        op.engine = settings.engine
         op.quality = settings.quality
         op.seed = settings.seed
+        op.triad_seed_count = settings.triad_seed_count
+        op.triad_feature_angle = settings.triad_feature_angle
+        op.triad_force_quads = settings.triad_force_quads
+        op.triad_flow_mode = settings.triad_flow_mode
         op.preserve_sharp = settings.preserve_sharp
         op.preserve_boundary = settings.preserve_boundary
         op.preserve_seams = settings.preserve_seams

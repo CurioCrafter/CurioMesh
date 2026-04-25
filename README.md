@@ -1,13 +1,16 @@
 # CurioMesh Quad Remesher
 
 CurioMesh is a Blender add-on for practical automatic quad retopology. Version
-0.2 replaces the old experimental native stub with a focused pipeline around
-Blender's built-in QuadriFlow remesher, plus source preservation, cleanup,
-projection, UV/material transfer, and diagnostics.
+0.3 includes the production QuadriFlow pipeline from v0.2 and adds TRIAD-Q Lite,
+an experimental standalone quad-dominant remeshing engine that can run inside or
+outside Blender.
 
 ## What It Does
 
 - Runs QuadriFlow in face-count mode with deterministic seed control.
+- Provides an experimental `TRIAD-Q Lite` engine: feature extraction, field
+  estimation, seed-swept triangle pairing, material/UV seam awareness, optional
+  pure-quad repair, and standalone OBJ input/output.
 - Keeps an evaluated source snapshot alive through transfer, projection, and
   optional baking, so `REPLACE` mode does not project from the newly remeshed
   mesh back onto itself.
@@ -45,6 +48,8 @@ CurioMesh targets Blender 4.3+ and is validated against Blender 4.5 LTS.
 ## Controls
 
 - `Target Faces`: approximate number of output quads.
+- `Engine`: `QuadriFlow` for production, `TRIAD-Q Lite` for the experimental
+  standalone CurioMesh engine, or `Auto` for the production default.
 - `Quality`: Draft, Balanced, or Hero defaults for cleanup and preservation.
 - `Preserve Sharp`, `Preserve Boundary`, `Treat UV Seams As Sharp`: feature
   preservation hints for QuadriFlow and preprocessing.
@@ -58,19 +63,42 @@ CurioMesh targets Blender 4.3+ and is validated against Blender 4.5 LTS.
   `None`.
 - `Apply Source Modifiers`: in `Replace` mode, remove original modifiers after
   baking their evaluated result into the remeshed mesh.
+- `TRIAD-Q Seeds`, `TRIAD-Q Feature Angle`, `TRIAD-Q Pure Quads`, and
+  `TRIAD-Q Flow`: experimental controls shown when the TRIAD-Q Lite engine is
+  selected.
+
+## TRIAD-Q Lite CLI
+
+TRIAD-Q Lite can run without Blender on OBJ files:
+
+```powershell
+python -m triadq input.obj output.obj --target-faces 4000 --mode balanced --seed-count 8
+```
+
+It emits a JSON report with mode classification, selected seed, quad ratio,
+target-face error, extraordinary vertex ratio, feature-edge count, aspect
+penalty, and score. The current implementation is a practical prototype: it is
+best at converting triangulated surfaces into feature-aware quad-dominant
+meshes, not at replacing QuadriFlow as a full simplification/remeshing solver.
 
 ## Development And Tests
 
 Python syntax check:
 
 ```powershell
-python -m compileall -q __init__.py bridge.py metrics.py operators.py textures.py ui.py tests
+python -m compileall -q __init__.py bridge.py metrics.py operators.py textures.py ui.py triadq tests
 ```
 
 Ruff check:
 
 ```powershell
 ruff check .
+```
+
+Standalone TRIAD-Q Lite smoke tests:
+
+```powershell
+python tests\triadq_smoke.py
 ```
 
 Headless Blender smoke tests:
@@ -88,13 +116,16 @@ tests\run_blender_tests.ps1 -InstallBlender
 
 The smoke test loads the add-on directly from this checkout, registers it,
 and runs remesh cases for a UV/material sphere, torus, open grid, and
-bad-normal repair mesh.
+bad-normal repair mesh, plus TRIAD-Q Lite cube and grid cases.
 
 ## Notes
 
 - QuadriFlow is high quality but not magic. It is useful for subdivision-ready
   meshes and sculpt-friendly retopology, but it is not a replacement for manual
   animation topology on characters.
+- TRIAD-Q Lite is intentionally marked experimental. It is the first standalone
+  CurioMesh engine path and is useful for iteration, tests, and triangulated
+  mesh conversion, while QuadriFlow remains the default production engine.
 - Voxel repair can save messy input but may erase thin or open details. Disable
   it when boundary fidelity matters more than robustness.
 - The old broken `core/` C++ prototype was removed from the shipped add-on.

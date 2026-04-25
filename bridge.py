@@ -13,13 +13,19 @@ from mathutils.bvhtree import BVHTree
 
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from .textures import bake_selected_to_active, ensure_target_uvs
+from .triadq import MeshData, RemeshOptions as TriadRemeshOptions, remesh_mesh as triad_remesh_mesh
 
 
 @dataclass(slots=True)
 class RemeshConfig:
     target_faces: int = 8000
+    engine: str = "QUADRIFLOW"
     quality: str = "BALANCED"
     seed: int = 0
+    triad_seed_count: int = 6
+    triad_feature_angle: float = 35.0
+    triad_force_quads: bool = False
+    triad_flow_mode: str = "AUTO"
     preserve_sharp: bool = True
     preserve_boundary: bool = True
     preserve_seams: bool = True
@@ -301,6 +307,95 @@ def _run_quadriflow(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     return "FINISHED" in result and len(obj.data.polygons) > 0
 
 
+def _meshdata_from_object(obj: bpy.types.Object) -> MeshData:
+    mesh = obj.data
+    vertices = [vert.co[:] for vert in mesh.vertices]
+    faces = [tuple(poly.vertices[:]) for poly in mesh.polygons]
+    materials = [str(poly.material_index) for poly in mesh.polygons]
+
+    uvs = None
+    face_uvs = None
+    if mesh.uv_layers:
+        uv_layer = mesh.uv_layers.active
+        uv_lookup: dict[tuple[float, float], int] = {}
+        uv_values: list[tuple[float, float]] = []
+        face_uvs = []
+        for poly in mesh.polygons:
+            uv_face = []
+            for loop_index in poly.loop_indices:
+                uv = uv_layer.data[loop_index].uv
+                key = (round(float(uv.x), 8), round(float(uv.y), 8))
+                uv_index = uv_lookup.get(key)
+                if uv_index is None:
+                    uv_index = len(uv_values)
+                    uv_lookup[key] = uv_index
+                    uv_values.append(key)
+                uv_face.append(uv_index)
+            face_uvs.append(tuple(uv_face))
+        if uv_values:
+            import numpy as np
+
+            uvs = np.asarray(uv_values, dtype=float)
+
+    return MeshData(
+        vertices=vertices,
+        faces=faces,
+        face_materials=materials,
+        uvs=uvs,
+        face_uvs=face_uvs,
+        name=obj.name,
+    )
+
+
+def _apply_meshdata_to_object(obj: bpy.types.Object, data: MeshData) -> None:
+    old_mesh = obj.data
+    mesh = bpy.data.meshes.new(name=f"{obj.name}_TriadQLiteMesh")
+    mesh.from_pydata(data.vertices.tolist(), [], [tuple(face) for face in data.faces])
+    mesh.update(calc_edges=True)
+    for index, material in enumerate(data.face_materials[: len(mesh.polygons)]):
+        try:
+            mesh.polygons[index].material_index = max(0, int(material))
+        except Exception:
+            mesh.polygons[index].material_index = 0
+    obj.data = mesh
+    try:
+        if old_mesh.users == 0:
+            bpy.data.meshes.remove(old_mesh)
+    except Exception:
+        pass
+
+
+def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
+    source = _meshdata_from_object(obj)
+    mode = str(config.triad_flow_mode or "AUTO").upper()
+    options = TriadRemeshOptions(
+        target_faces=max(1, int(config.target_faces)),
+        mode=mode,
+        seed_count=max(1, int(config.triad_seed_count)),
+        feature_angle_deg=float(config.triad_feature_angle),
+        force_quads=bool(config.triad_force_quads),
+        preserve_material_boundaries=True,
+        preserve_uv_seams=bool(config.preserve_seams),
+    )
+    result, report = triad_remesh_mesh(source, options)
+    if not report.success or not result.faces:
+        _log(config, f"TRIAD-Q Lite failed: {report.message}")
+        return False
+    _apply_meshdata_to_object(obj, result)
+    obj["curiomesh_triadq_mode"] = report.mode
+    obj["curiomesh_triadq_seed"] = int(report.selected_seed)
+    obj["curiomesh_triadq_score"] = float(report.score)
+    obj["curiomesh_triadq_feature_edges"] = int(report.feature_edges)
+    _log(
+        config,
+        (
+            f"TRIAD-Q Lite: mode={report.mode} seed={report.selected_seed} "
+            f"faces={report.output_faces} quad_ratio={report.quad_ratio:.3f}"
+        ),
+    )
+    return True
+
+
 def _apply_shrinkwrap(target: bpy.types.Object, source: bpy.types.Object, config: RemeshConfig) -> bool:
     _set_active_only(target)
     try:
@@ -543,7 +638,9 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
     start = time.perf_counter()
     source_snapshot: bpy.types.Object | None = None
     work_obj: bpy.types.Object | None = None
-    engine = "QUADRIFLOW"
+    engine = str(config.engine or "QUADRIFLOW").upper()
+    if engine == "AUTO":
+        engine = "QUADRIFLOW"
     uv_status = "NONE"
     materials_preserved = False
 
@@ -556,8 +653,12 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
             work_obj = _make_working_copy(source_snapshot, obj)
             _cleanup_mesh(work_obj.data, config)
 
-            ok = _run_quadriflow(work_obj, config)
-            if not ok and config.voxel_repair:
+            if engine == "TRIAD_Q_LITE":
+                ok = _run_triadq_lite(work_obj, config)
+            else:
+                ok = _run_quadriflow(work_obj, config)
+
+            if not ok and config.voxel_repair and engine == "QUADRIFLOW":
                 _log(config, "QuadriFlow failed; retrying after voxel repair")
                 _remove_object(work_obj)
                 work_obj = _make_working_copy(source_snapshot, obj)

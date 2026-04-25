@@ -3,11 +3,11 @@
 bl_info = {
     "name": "CurioMesh Quad Remesher",
     "author": "CurioCrafter",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (4, 3, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
-    "description": "Production-minded QuadriFlow remeshing with material and UV preservation",
+    "description": "QuadriFlow remeshing plus experimental TRIAD-Q Lite quad-dominant retopology",
     "doc_url": "https://github.com/CurioCrafter/CurioMesh",
 }
 
