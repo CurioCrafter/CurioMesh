@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import random
 import time
@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from .topology import quad_is_locally_valid, quad_only_closure, topology_summary
 from .types import Face, MeshData
 
 
@@ -42,6 +43,11 @@ class RemeshReport:
     feature_edges: int = 0
     feature_breaks: int = 0
     aspect_penalty: float = 0.0
+    closure_applied: bool = False
+    quad_only_verified: bool = False
+    degenerate_faces: int = 0
+    euler_characteristic: int = 0
+    defect_charge: int = 0
     score: float = 0.0
     elapsed_ms: float = 0.0
     message: str = ""
@@ -65,6 +71,11 @@ class RemeshReport:
             "feature_edges": self.feature_edges,
             "feature_breaks": self.feature_breaks,
             "aspect_penalty": self.aspect_penalty,
+            "closure_applied": self.closure_applied,
+            "quad_only_verified": self.quad_only_verified,
+            "degenerate_faces": self.degenerate_faces,
+            "euler_characteristic": self.euler_characteristic,
+            "defect_charge": self.defect_charge,
             "score": self.score,
             "elapsed_ms": self.elapsed_ms,
             "message": self.message,
@@ -88,6 +99,16 @@ class _Candidate:
     report: RemeshReport
 
 
+@dataclass(frozen=True, slots=True)
+class _PairWeights:
+    normal: float
+    field: float
+    material: float
+    aspect: float
+    diagonal: float
+    minimum_score: float
+
+
 def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[MeshData, RemeshReport]:
     start = time.perf_counter()
     options = options or RemeshOptions()
@@ -96,25 +117,39 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
         return mesh, RemeshReport(False, mode="EMPTY", message="Input mesh has no faces.")
 
     mode = _classify_mesh(tri_mesh, options)
-    best: _Candidate | None = None
+    best_mesh: MeshData | None = None
+    best_report: RemeshReport | None = None
+    candidate_reports: list[dict[str, Any]] = []
     seed_count = max(1, int(options.seed_count))
 
     for seed in range(seed_count):
         candidate = _run_candidate(tri_mesh, options, mode, seed)
         candidate.report.candidates = []
-        if best is None or candidate.report.score > best.report.score:
-            best = candidate
+        candidate_reports.append(candidate.report.to_dict())
+        candidate_is_better = (
+            best_report is None
+            or (candidate.report.success and not best_report.success)
+            or (
+                candidate.report.success == best_report.success
+                and candidate.report.score > best_report.score
+            )
+        )
+        if candidate_is_better:
+            best_mesh = candidate.mesh
+            best_report = candidate.report
 
-    assert best is not None
+    assert best_mesh is not None and best_report is not None
     elapsed = (time.perf_counter() - start) * 1000.0
-    report = best.report
+    report = best_report
     report.elapsed_ms = elapsed
-    report.candidates = [
-        _run_candidate(tri_mesh, options, mode, seed).report.to_dict()
-        for seed in range(min(seed_count, 8))
-    ]
-    report.message = "TRIAD-Q Lite remesh completed."
-    return best.mesh, report
+    report.candidates = candidate_reports[:8]
+    if report.success:
+        report.message = (
+            "TRIAD-Q PairClosure completed with a locally validated all-quad manifold."
+            if report.quad_only_verified
+            else "TRIAD-Q Lite remesh completed."
+        )
+    return best_mesh, report
 
 
 def _triangulate(mesh: MeshData) -> _TriMesh:
@@ -180,19 +215,79 @@ def _classify_mesh(mesh: _TriMesh, options: RemeshOptions) -> str:
 
 
 def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int) -> _Candidate:
+    tuned_options = _options_for_mode(options, mode)
     edge_faces = _edge_faces(mesh.faces)
     normals, areas = _face_normals(mesh.vertices, mesh.faces)
-    feature_edges = _feature_edges(mesh, options, edge_faces, normals)
-    field = _estimate_field(mesh, edge_faces, feature_edges, normals, options)
-    output_mesh, feature_breaks = _pair_triangles(mesh, options, edge_faces, feature_edges, normals, field, seed)
+    feature_edges = _feature_edges(mesh, tuned_options, edge_faces, normals)
+    field = _estimate_field(mesh, edge_faces, feature_edges, normals, tuned_options)
+    output_mesh, feature_breaks = _pair_triangles(
+        mesh,
+        edge_faces,
+        feature_edges,
+        normals,
+        field,
+        seed,
+        mode,
+    )
+    closure_applied = bool(options.force_quads)
+    closure_error = ""
+    if closure_applied:
+        try:
+            output_mesh = quad_only_closure(output_mesh, name=f"{mesh.name}_pairclosure")
+        except ValueError as exc:
+            closure_error = str(exc)
     report = _score_output(output_mesh, mesh, options, mode, seed, feature_edges, feature_breaks)
     report.input_faces = len(mesh.faces)
     report.success = bool(output_mesh.faces)
     report.feature_edges = len(feature_edges)
+    report.closure_applied = closure_applied
+    if closure_error:
+        report.success = False
+        report.message = f"PairClosure rejected the base topology: {closure_error}"
     if areas.size == 0:
         report.success = False
         report.message = "No valid face areas."
     return _Candidate(output_mesh, report)
+
+
+def _options_for_mode(options: RemeshOptions, mode: str) -> RemeshOptions:
+    key = mode.upper()
+    if key == "ORGANICFLOW":
+        return replace(
+            options,
+            smooth_field_iters=max(6, int(options.smooth_field_iters) + 3),
+            feature_angle_deg=min(175.0, float(options.feature_angle_deg) + 12.0),
+        )
+    if key == "PATCHFLOW":
+        return replace(
+            options,
+            smooth_field_iters=min(2, max(0, int(options.smooth_field_iters))),
+            feature_angle_deg=max(5.0, float(options.feature_angle_deg) - 10.0),
+        )
+    if key == "DIRTYFLOW":
+        return replace(
+            options,
+            smooth_field_iters=1,
+            feature_angle_deg=min(175.0, float(options.feature_angle_deg) + 15.0),
+        )
+    if key == "TEXTUREFLOW":
+        return replace(
+            options,
+            smooth_field_iters=max(3, int(options.smooth_field_iters)),
+            feature_angle_deg=max(5.0, float(options.feature_angle_deg) - 5.0),
+            preserve_material_boundaries=True,
+            preserve_uv_seams=True,
+        )
+    return options
+
+
+def _pair_weights(mode: str) -> _PairWeights:
+    return {
+        "ORGANICFLOW": _PairWeights(2.6, 1.35, 0.15, 0.70, 0.25, -10.0),
+        "PATCHFLOW": _PairWeights(2.1, 0.70, 0.35, 2.00, 0.05, -10.0),
+        "DIRTYFLOW": _PairWeights(3.0, 0.35, 0.10, 1.35, 0.60, -3.0),
+        "TEXTUREFLOW": _PairWeights(2.2, 0.80, 0.80, 0.95, 0.35, -10.0),
+    }.get(mode.upper(), _PairWeights(2.2, 0.90, 0.15, 0.90, 0.35, -10.0))
 
 
 def _edge_faces(faces: list[tuple[int, int, int]]) -> dict[tuple[int, int], list[int]]:
@@ -281,6 +376,46 @@ def _uv_seam_edges(mesh: _TriMesh, edge_faces: dict[tuple[int, int], list[int]])
     return seams
 
 
+def _paired_face_uvs(
+    mesh: _TriMesh,
+    face_a: int,
+    face_b: int,
+    quad: tuple[int, ...],
+) -> Face | None:
+    if mesh.uvs is None or mesh.face_uvs is None:
+        return None
+
+    maps: list[dict[int, int]] = []
+    for face_index in (face_a, face_b):
+        face = mesh.faces[face_index]
+        uv_face = mesh.face_uvs[face_index]
+        if len(uv_face) != len(face):
+            return None
+        maps.append(dict(zip(face, uv_face, strict=True)))
+
+    quad_uvs: list[int] = []
+    for vertex in quad:
+        values = [mapping[vertex] for mapping in maps if vertex in mapping]
+        if not values or any(value < 0 or value >= len(mesh.uvs) for value in values):
+            return None
+        if any(value != values[0] for value in values[1:]):
+            return None
+        quad_uvs.append(values[0])
+    return tuple(quad_uvs)
+
+
+def _source_face_uvs(mesh: _TriMesh, face_index: int) -> Face | None:
+    if mesh.uvs is None or mesh.face_uvs is None:
+        return None
+    face = mesh.faces[face_index]
+    uv_face = mesh.face_uvs[face_index]
+    if len(uv_face) != len(face):
+        return None
+    if any(value < 0 or value >= len(mesh.uvs) for value in uv_face):
+        return None
+    return tuple(uv_face)
+
+
 def _estimate_field(
     mesh: _TriMesh,
     edge_faces: dict[tuple[int, int], list[int]],
@@ -348,13 +483,14 @@ def _safe_normalize(vec: np.ndarray, *, fallback: np.ndarray) -> np.ndarray:
 
 def _pair_triangles(
     mesh: _TriMesh,
-    options: RemeshOptions,
     edge_faces: dict[tuple[int, int], list[int]],
     feature_edges: set[tuple[int, int]],
     normals: np.ndarray,
     field: np.ndarray,
     seed: int,
+    mode: str,
 ) -> tuple[MeshData, int]:
+    weights = _pair_weights(mode)
     candidates: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)
     feature_breaks = 0
     for edge, linked_faces in edge_faces.items():
@@ -366,7 +502,9 @@ def _pair_triangles(
         quad = _quad_from_pair(mesh.faces[a], mesh.faces[b], edge)
         if quad is None:
             continue
-        score = _pair_score(mesh, quad, edge, a, b, normals, field)
+        if not quad_is_locally_valid(mesh.vertices, quad):
+            continue
+        score = _pair_score(mesh, quad, edge, a, b, normals, field, weights)
         candidates[a].append((score, b, quad))
         candidates[b].append((score, a, quad))
 
@@ -375,13 +513,14 @@ def _pair_triangles(
     used: set[int] = set()
     output_faces: list[Face] = []
     output_materials: list[str] = []
+    output_face_uvs: list[Face] | None = [] if mesh.uvs is not None and mesh.face_uvs is not None else None
     for face_index in order:
         if face_index in used:
             continue
         options_for_face = sorted(candidates.get(face_index, []), key=lambda item: item[0], reverse=True)
         selected = None
         for score, other, quad in options_for_face:
-            if other not in used and score > -10.0:
+            if other not in used and score > weights.minimum_score:
                 selected = (other, quad)
                 break
         if selected is None:
@@ -391,22 +530,32 @@ def _pair_triangles(
         used.add(other)
         output_faces.append(tuple(quad))
         output_materials.append(_majority_material(mesh.face_materials[face_index], mesh.face_materials[other]))
+        if output_face_uvs is not None:
+            paired_uvs = _paired_face_uvs(mesh, face_index, other, quad)
+            if paired_uvs is None:
+                output_face_uvs = None
+            else:
+                output_face_uvs.append(paired_uvs)
 
     vertices = mesh.vertices.tolist()
     for face_index, tri in enumerate(mesh.faces):
         if face_index in used:
             continue
-        if options.force_quads:
-            quad, vertices = _split_triangle_to_quad(tri, np.asarray(vertices, dtype=np.float64))
-            output_faces.append(tuple(quad))
-        else:
-            output_faces.append(tuple(tri))
+        output_faces.append(tuple(tri))
         output_materials.append(mesh.face_materials[face_index])
+        if output_face_uvs is not None:
+            source_uvs = _source_face_uvs(mesh, face_index)
+            if source_uvs is None:
+                output_face_uvs = None
+            else:
+                output_face_uvs.append(source_uvs)
 
     out = MeshData(
         vertices=np.asarray(vertices, dtype=np.float64),
         faces=output_faces,
         face_materials=output_materials,
+        uvs=mesh.uvs,
+        face_uvs=output_face_uvs,
         name=f"{mesh.name}_triadq",
     )
     return out, feature_breaks
@@ -422,7 +571,29 @@ def _quad_from_pair(
     opp_b = [v for v in face_b if v not in shared]
     if len(opp_a) != 1 or len(opp_b) != 1:
         return None
-    a, b = shared_edge
+
+    # The shared edge key is sorted for adjacency lookup. Recover its directed
+    # order in each face so the merged quad keeps the source winding.
+    directed_a = next(
+        (
+            (face_a[index], face_a[(index + 1) % 3])
+            for index in range(3)
+            if {face_a[index], face_a[(index + 1) % 3]} == shared
+        ),
+        None,
+    )
+    directed_b = next(
+        (
+            (face_b[index], face_b[(index + 1) % 3])
+            for index in range(3)
+            if {face_b[index], face_b[(index + 1) % 3]} == shared
+        ),
+        None,
+    )
+    if directed_a is None or directed_b != (directed_a[1], directed_a[0]):
+        return None
+
+    a, b = directed_a
     quad = (opp_a[0], a, opp_b[0], b)
     if len(set(quad)) != 4:
         return None
@@ -437,6 +608,7 @@ def _pair_score(
     face_b: int,
     normals: np.ndarray,
     field: np.ndarray,
+    weights: _PairWeights,
 ) -> float:
     normal_alignment = max(-1.0, min(1.0, float(np.dot(normals[face_a], normals[face_b]))))
     aspect = _quad_aspect(mesh.vertices, quad)
@@ -445,15 +617,37 @@ def _pair_score(
     shared_len = float(np.linalg.norm(mesh.vertices[shared_edge[1]] - mesh.vertices[shared_edge[0]]))
     perimeter = _quad_perimeter(mesh.vertices, quad)
     diagonal_penalty = shared_len / max(perimeter * 0.25, 1e-9)
-    material_bonus = 0.15 if mesh.face_materials[face_a] == mesh.face_materials[face_b] else -0.75
+    material_bonus = weights.material if mesh.face_materials[face_a] == mesh.face_materials[face_b] else -1.5
     field_score = _field_alignment(mesh.vertices, quad, field[face_a], normals[face_a])
+    jacobian = _quad_min_scaled_jacobian(mesh.vertices, quad)
     return (
-        normal_alignment * 2.2
-        + field_score * 0.9
+        normal_alignment * weights.normal
+        + field_score * weights.field
+        + jacobian * 3.0
         + material_bonus
-        - math.log(max(aspect, 1.0)) * 0.9
-        - diagonal_penalty * 0.35
+        - math.log(max(aspect, 1.0)) * weights.aspect
+        - diagonal_penalty * weights.diagonal
     )
+
+
+def _quad_min_scaled_jacobian(vertices: np.ndarray, quad: tuple[int, int, int, int]) -> float:
+    points = vertices[list(quad)]
+    normal = np.zeros(3, dtype=np.float64)
+    for index in range(4):
+        normal += np.cross(points[index], points[(index + 1) % 4])
+    normal_length = float(np.linalg.norm(normal))
+    if normal_length <= 1e-20:
+        return -1.0
+    normal /= normal_length
+    minimum = 1.0
+    for index in range(4):
+        following = points[(index + 1) % 4] - points[index]
+        previous = points[(index - 1) % 4] - points[index]
+        denominator = float(np.linalg.norm(following) * np.linalg.norm(previous))
+        if denominator <= 1e-20:
+            return -1.0
+        minimum = min(minimum, float(np.dot(np.cross(following, previous), normal)) / denominator)
+    return minimum
 
 
 def _quad_aspect(vertices: np.ndarray, quad: tuple[int, int, int, int]) -> float:
@@ -488,20 +682,6 @@ def _majority_material(a: str, b: str) -> str:
     return a if a == b else a
 
 
-def _split_triangle_to_quad(tri: tuple[int, int, int], vertices: np.ndarray) -> tuple[tuple[int, int, int, int], list[list[float]]]:
-    a, b, c = tri
-    pairs = [((a, b), c), ((b, c), a), ((c, a), b)]
-    edge, opposite = max(
-        pairs,
-        key=lambda item: float(np.linalg.norm(vertices[item[0][1]] - vertices[item[0][0]])),
-    )
-    midpoint = (vertices[edge[0]] + vertices[edge[1]]) * 0.5
-    new_vertices = vertices.tolist()
-    new_index = len(new_vertices)
-    new_vertices.append(midpoint.tolist())
-    return (opposite, edge[0], new_index, edge[1]), new_vertices
-
-
 def _score_output(
     output: MeshData,
     source: _TriMesh,
@@ -515,12 +695,11 @@ def _score_output(
     quads = sum(1 for face in output.faces if len(face) == 4)
     tris = sum(1 for face in output.faces if len(face) == 3)
     quad_ratio = quads / max(1, face_count)
-    edge_counts = _poly_edge_counts(output.faces)
-    boundary = sum(1 for count in edge_counts.values() if count == 1)
-    non_manifold = sum(1 for count in edge_counts.values() if count > 2)
-    valence = Counter(v for face in output.faces for v in face)
-    extraordinary = sum(1 for count in valence.values() if count != 4)
-    extraordinary_ratio = extraordinary / max(1, output.vertex_count)
+    summary = topology_summary(output)
+    boundary = summary.boundary_edges
+    non_manifold = summary.non_manifold_edges
+    extraordinary = summary.extraordinary_vertices
+    extraordinary_ratio = extraordinary / max(1, summary.used_vertices)
     aspect_penalty = _aspect_penalty(output)
     target_error = abs(face_count - int(options.target_faces)) / max(1.0, float(options.target_faces))
     score = (
@@ -547,6 +726,10 @@ def _score_output(
         feature_edges=len(feature_edges),
         feature_breaks=feature_breaks,
         aspect_penalty=aspect_penalty,
+        quad_only_verified=summary.all_quads,
+        degenerate_faces=summary.degenerate_faces,
+        euler_characteristic=summary.euler_characteristic,
+        defect_charge=summary.defect_charge,
         score=score,
         input_faces=len(source.faces),
     )

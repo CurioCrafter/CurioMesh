@@ -3,11 +3,11 @@
 bl_info = {
     "name": "CurioMesh Quad Remesher",
     "author": "CurioCrafter",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (4, 3, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
-    "description": "QuadriFlow remeshing plus experimental TRIAD-Q Lite quad-dominant retopology",
+    "description": "Atlas-Q scan-aware quad retopology with explicit validation",
     "doc_url": "https://github.com/CurioCrafter/CurioMesh",
 }
 
@@ -15,6 +15,7 @@ import bpy
 
 from .operators import (
     CURIOMESH_OT_apply_preset,
+    CURIOMESH_OT_analyze,
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
@@ -23,6 +24,7 @@ from .ui import CURIOMESH_PG_settings, CURIOMESH_PT_panel
 
 classes = (
     CURIOMESH_PG_settings,
+    CURIOMESH_OT_analyze,
     CURIOMESH_OT_remesh,
     CURIOMESH_OT_apply_preset,
     CURIOMESH_OT_compute_metrics,

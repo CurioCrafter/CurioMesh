@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bpy
 
+from .atlasq import analyze_object
 from .bridge import RemeshConfig, RemeshResult, run_curiomesh
 from .metrics import mesh_diagnostics
 
@@ -13,9 +14,14 @@ QUALITY_ITEMS = [
 ]
 
 ENGINE_ITEMS = [
+    (
+        "ATLAS_Q",
+        "Atlas-Q Auto (Recommended)",
+        "Analyze the scan, build a target-scale proxy, compare solver candidates, and require validated quads",
+    ),
     ("QUADRIFLOW", "QuadriFlow", "Production path using Blender's built-in QuadriFlow remesher"),
-    ("TRIAD_Q_LITE", "TRIAD-Q Lite", "Experimental standalone CurioMesh quad-dominant engine"),
-    ("AUTO", "Auto", "Use the strongest available production engine"),
+    ("TRIAD_Q_LITE", "PairClosure", "Feature-aware pairing plus conforming exact all-quad closure"),
+    ("AUTO", "Auto (v0.3 compatibility)", "Alias for Atlas-Q Auto"),
 ]
 
 FLOW_ITEMS = [
@@ -25,6 +31,24 @@ FLOW_ITEMS = [
     ("PATCH", "PatchFlow", "Prioritize hard features and patch boundaries"),
     ("DIRTY", "DirtyFlow", "Prefer robustness on messy inputs"),
     ("TEXTURE", "TextureFlow", "Favor material and UV seam preservation"),
+]
+
+ATLAS_STRATEGY_ITEMS = [
+    ("AUTO", "Auto", "Choose from measured topology, boundaries, features, scale, and texture state"),
+    ("FLOW_ENSEMBLE", "Organic / General", "Target-scale QEM proxy plus multiple QuadriFlow candidates"),
+    ("FEATURE_FLOW", "Mechanical / Feature", "Preserve persistent sharp, seam, and material boundaries"),
+    ("DIRTY_FLOW", "Dirty Closed Scan", "Permit voxel repair before field-aligned remeshing"),
+    ("OPEN_FLOW", "Open Fragment", "Preserve intentional boundary loops and avoid voxel closure"),
+    ("PAIR_CLOSURE", "Exact PairClosure", "Deterministic pure-quad fallback; robust but creates more poles"),
+]
+
+TOPOLOGY_ITEMS = [
+    (
+        "PRESERVE",
+        "Preserve",
+        "Reject changes to Euler characteristic, boundary cycles, component count, and open/closed state",
+    ),
+    ("REPAIR", "Repair", "Allow reconstruction of dirty closed scans; holes and thin sheets may change"),
 ]
 
 TEXTURE_ITEMS = [
@@ -50,6 +74,11 @@ def config_from_owner(owner: object) -> RemeshConfig:
         triad_feature_angle=float(owner.triad_feature_angle),
         triad_force_quads=bool(owner.triad_force_quads),
         triad_flow_mode=str(owner.triad_flow_mode),
+        atlas_strategy=str(owner.atlas_strategy),
+        atlas_candidate_count=int(owner.atlas_candidate_count),
+        topology_policy=str(owner.topology_policy),
+        require_quads=bool(owner.require_quads),
+        analysis_sample_faces=int(owner.analysis_sample_faces),
         preserve_sharp=bool(owner.preserve_sharp),
         preserve_boundary=bool(owner.preserve_boundary),
         preserve_seams=bool(owner.preserve_seams),
@@ -81,11 +110,30 @@ def apply_result_to_settings(settings: bpy.types.PropertyGroup, result: RemeshRe
     settings.metrics_extraordinary = int(diagnostics.extraordinary)
     settings.metrics_extraordinary_ratio = float(diagnostics.extraordinary_ratio)
     settings.metrics_non_manifold_edges = int(diagnostics.non_manifold_edges)
+    settings.metrics_non_manifold_vertices = int(diagnostics.non_manifold_vertices)
+    settings.metrics_duplicate_faces = int(diagnostics.duplicate_faces)
+    settings.metrics_invalid_quads = int(diagnostics.invalid_quads)
+    settings.metrics_components = int(diagnostics.connected_components)
+    settings.metrics_component_euler = ", ".join(str(value) for value in diagnostics.component_euler)
     settings.metrics_boundary_edges = int(diagnostics.boundary_edges)
+    settings.metrics_boundary_loops = int(diagnostics.boundary_loops)
+    settings.metrics_euler = int(diagnostics.euler_characteristic)
+    settings.metrics_degenerate = int(diagnostics.degenerate_faces)
+    settings.metrics_min_jacobian = float(diagnostics.min_scaled_jacobian)
+    settings.metrics_p95_aspect = float(diagnostics.p95_aspect_ratio)
+    settings.metrics_quad_only = bool(result.quad_only_verified)
     settings.metrics_uv_valid = bool(diagnostics.uv_valid)
     settings.metrics_materials_preserved = bool(result.materials_preserved)
     settings.metrics_elapsed_ms = float(result.elapsed_ms)
     settings.metrics_engine = str(result.engine)
+    settings.metrics_strategy = str(result.strategy)
+    settings.metrics_profile = str(result.profile)
+    settings.metrics_candidates = int(result.candidate_count)
+    settings.metrics_geometry_rms = float(result.geometry_rms)
+    settings.metrics_geometry_p95 = float(result.geometry_p95)
+    settings.metrics_geometry_max = float(result.geometry_max)
+    settings.metrics_sampling_status = str(result.sampling_status)
+    settings.metrics_topology_status = str(result.topology_status)
     settings.metrics_status = "OK" if result.success else "FAILED"
     settings.metrics_uv_status = str(result.uv_status)
     settings.metrics_message = str(result.message)
@@ -94,17 +142,27 @@ def apply_result_to_settings(settings: bpy.types.PropertyGroup, result: RemeshRe
 class CURIOMESH_OT_remesh(bpy.types.Operator):
     bl_idname = "curiomesh.remesh"
     bl_label = "CurioMesh Remesh"
-    bl_description = "Run CurioMesh's QuadriFlow retopology pipeline"
+    bl_description = "Run the Atlas-Q scan-aware quad retopology pipeline"
     bl_options = {"REGISTER", "UNDO"}
 
     target_faces: bpy.props.IntProperty(name="Target Faces", default=8000, min=4, soft_max=250000)
-    engine: bpy.props.EnumProperty(name="Engine", items=ENGINE_ITEMS, default="QUADRIFLOW")
+    engine: bpy.props.EnumProperty(name="Engine", items=ENGINE_ITEMS, default="ATLAS_Q")
     quality: bpy.props.EnumProperty(name="Quality", items=QUALITY_ITEMS, default="BALANCED")
     seed: bpy.props.IntProperty(name="Seed", default=0, min=0, soft_max=100000)
     triad_seed_count: bpy.props.IntProperty(name="TRIAD-Q Seeds", default=6, min=1, max=32)
     triad_feature_angle: bpy.props.FloatProperty(name="TRIAD-Q Feature Angle", default=35.0, min=0.0, max=180.0)
     triad_force_quads: bpy.props.BoolProperty(name="TRIAD-Q Pure Quads", default=False)
     triad_flow_mode: bpy.props.EnumProperty(name="TRIAD-Q Flow", items=FLOW_ITEMS, default="AUTO")
+    atlas_strategy: bpy.props.EnumProperty(name="Scan Strategy", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
+    atlas_candidate_count: bpy.props.IntProperty(name="Candidate Budget", default=3, min=1, max=8)
+    topology_policy: bpy.props.EnumProperty(name="Topology", items=TOPOLOGY_ITEMS, default="PRESERVE")
+    require_quads: bpy.props.BoolProperty(name="Require Locally Valid Quads", default=True)
+    analysis_sample_faces: bpy.props.IntProperty(
+        name="Analysis Sample Faces",
+        default=120000,
+        min=1000,
+        max=500000,
+    )
     preserve_sharp: bpy.props.BoolProperty(name="Preserve Sharp", default=True)
     preserve_boundary: bpy.props.BoolProperty(name="Preserve Boundary", default=True)
     preserve_seams: bpy.props.BoolProperty(name="Treat UV Seams As Sharp", default=True)
@@ -139,10 +197,7 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
 
         self.report(
             {"INFO"},
-            (
-                f"CurioMesh: {result.diagnostics.faces} faces, "
-                f"{result.diagnostics.quad_ratio:.1%} quads, UV {result.uv_status.lower()}"
-            ),
+            result.message,
         )
         return {"FINISHED"}
 
@@ -166,6 +221,7 @@ class CURIOMESH_OT_apply_preset(bpy.types.Operator):
             settings.texture_mode = "TRANSFER"
             settings.bake_fallback = False
             settings.smooth_normals = True
+            settings.atlas_candidate_count = 1
         elif preset == "HERO":
             settings.cleanup_strength = 0.35
             settings.shrinkwrap_project = True
@@ -175,6 +231,7 @@ class CURIOMESH_OT_apply_preset(bpy.types.Operator):
             settings.preserve_boundary = True
             settings.preserve_attributes = True
             settings.smooth_normals = True
+            settings.atlas_candidate_count = 5
         else:
             settings.cleanup_strength = 0.25
             settings.shrinkwrap_project = True
@@ -184,7 +241,40 @@ class CURIOMESH_OT_apply_preset(bpy.types.Operator):
             settings.preserve_boundary = True
             settings.preserve_attributes = True
             settings.smooth_normals = True
+            settings.atlas_candidate_count = 3
 
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_analyze(bpy.types.Operator):
+    bl_idname = "curiomesh.analyze"
+    bl_label = "Analyze Scan"
+    bl_description = "Inspect topology and target-scale evidence without changing the source mesh"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context: bpy.types.Context):
+        obj = context.object
+        if obj is None or obj.type != "MESH":
+            self.report({"ERROR"}, "Select a mesh object.")
+            return {"CANCELLED"}
+        settings = context.scene.curiomesh_settings
+        profile = analyze_object(
+            obj,
+            settings.target_faces,
+            feature_angle_deg=settings.triad_feature_angle,
+            max_sample_faces=settings.analysis_sample_faces,
+        )
+        settings.analysis_profile = profile.category
+        settings.analysis_strategy = profile.recommended_strategy
+        settings.analysis_faces = profile.face_count
+        settings.analysis_sampled_faces = profile.sampled_faces
+        settings.analysis_exact = profile.exact_topology
+        settings.analysis_boundary_loops = profile.boundary_loops
+        settings.analysis_non_manifold = profile.non_manifold_edges
+        settings.analysis_sharp_ratio = profile.sharp_ratio
+        settings.analysis_target_edge = profile.target_edge_length
+        settings.analysis_warning = " | ".join(profile.warnings)
+        self.report({"INFO"}, profile.summary)
         return {"FINISHED"}
 
 
@@ -210,6 +300,7 @@ class CURIOMESH_OT_compute_metrics(bpy.types.Operator):
             message="Metrics computed.",
             materials_preserved=bool(obj.data.materials),
             uv_status="VALID" if diagnostics.uv_valid else "INVALID",
+            quad_only_verified=diagnostics.quad_only,
         )
         apply_result_to_settings(settings, result)
         return {"FINISHED"}

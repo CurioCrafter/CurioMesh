@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import json
 import math
 import time
 import traceback
@@ -10,10 +11,24 @@ import bmesh
 import bpy
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
+import numpy as np
 
+from .atlasq import (
+    CandidateEvaluation,
+    CandidateSpec,
+    ScanProfile,
+    analyze_object,
+    build_candidate_specs,
+    candidate_gate_failures,
+    evaluate_candidate,
+)
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from .textures import bake_selected_to_active, ensure_target_uvs
 from .triadq import MeshData, RemeshOptions as TriadRemeshOptions, remesh_mesh as triad_remesh_mesh
+
+
+MAX_FIDELITY_REFERENCE_TRIANGLES = 450_000
+MAX_EVALUATED_SNAPSHOT_ESTIMATED_BYTES = 6 * 1024**3
 
 
 @dataclass(slots=True)
@@ -26,6 +41,11 @@ class RemeshConfig:
     triad_feature_angle: float = 35.0
     triad_force_quads: bool = False
     triad_flow_mode: str = "AUTO"
+    atlas_strategy: str = "AUTO"
+    atlas_candidate_count: int = 3
+    topology_policy: str = "PRESERVE"
+    require_quads: bool = True
+    analysis_sample_faces: int = 120000
     preserve_sharp: bool = True
     preserve_boundary: bool = True
     preserve_seams: bool = True
@@ -55,6 +75,43 @@ class RemeshResult:
     message: str = ""
     materials_preserved: bool = False
     uv_status: str = "NONE"
+    strategy: str = ""
+    profile: str = ""
+    candidate_count: int = 0
+    geometry_rms: float = 0.0
+    geometry_p95: float = 0.0
+    geometry_max: float = 0.0
+    sampling_status: str = "NOT_MEASURED"
+    fidelity_status: str = "NOT_MEASURED"
+    quad_only_verified: bool = False
+    topology_status: str = "NOT_CHECKED"
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _SurfaceReference:
+    bvh: BVHTree
+    sample_points: list[Vector]
+    diagonal: float
+    component_sampling: str = "NOT_REQUESTED"
+    fidelity_status: str = "SOURCE_FULL"
+
+
+@dataclass(slots=True)
+class _BoundedSourceEvidence:
+    sample_points: list[Vector]
+    component_sampling: str
+    diagonal: float
+    source_triangle_floor: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SurfaceError:
+    rms: float
+    p95: float
+    maximum: float
+    component_sampling: str
+    fidelity_status: str
 
 
 class _ContextSnapshot:
@@ -136,11 +193,9 @@ def _remove_object(obj: bpy.types.Object | None, *, remove_mesh: bool = True) ->
 
 
 def _object_diagonal(obj: bpy.types.Object) -> float:
-    if not getattr(obj.data, "vertices", None):
+    if not getattr(obj.data, "vertices", None) or not obj.data.vertices:
         return 1.0
-    if not obj.data.vertices:
-        return 1.0
-    points = [obj.matrix_world @ vert.co for vert in obj.data.vertices]
+    points = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
     minv = Vector((min(p.x for p in points), min(p.y for p in points), min(p.z for p in points)))
     maxv = Vector((max(p.x for p in points), max(p.y for p in points), max(p.z for p in points)))
     return max((maxv - minv).length, 1e-6)
@@ -148,25 +203,39 @@ def _object_diagonal(obj: bpy.types.Object) -> float:
 
 def _copy_material_slots(source: bpy.types.Object, target: bpy.types.Object) -> int:
     target.data.materials.clear()
-    materials: list[bpy.types.Material] = []
-
-    for slot in getattr(source, "material_slots", []):
-        if slot.material and slot.material not in materials:
-            materials.append(slot.material)
+    copied = 0
     for material in getattr(source.data, "materials", []):
-        if material and material not in materials:
-            materials.append(material)
+        try:
+            target.data.materials.append(material)
+            copied += 1
+        except Exception:
+            pass
+    return copied
 
-    for material in materials:
-        target.data.materials.append(material)
-    if materials:
-        target.active_material = materials[0]
-    return len(materials)
+
+def _estimated_mesh_copy_bytes(mesh: bpy.types.Mesh) -> int:
+    """Conservative custom-data-aware estimate for one evaluated mesh copy."""
+
+    return (
+        len(mesh.vertices) * 96
+        + len(mesh.edges) * 48
+        + len(mesh.loops) * 32
+        + len(mesh.polygons) * 96
+    )
 
 
 def _make_evaluated_snapshot(source: bpy.types.Object, config: RemeshConfig) -> bpy.types.Object:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     evaluated = source.evaluated_get(depsgraph)
+    estimated_bytes = _estimated_mesh_copy_bytes(evaluated.data)
+    if estimated_bytes > MAX_EVALUATED_SNAPSHOT_ESTIMATED_BYTES:
+        gib = estimated_bytes / float(1024**3)
+        limit_gib = MAX_EVALUATED_SNAPSHOT_ESTIMATED_BYTES / float(1024**3)
+        raise RuntimeError(
+            f"The evaluated scan needs an estimated {gib:.1f} GiB copy, above CurioMesh's "
+            f"{limit_gib:.0f} GiB safety guard. Split or pre-decimate the scan before retopology."
+        )
+    _log(config, f"Evaluated mesh copy estimate: {estimated_bytes / float(1024**2):.1f} MiB")
     try:
         mesh = bpy.data.meshes.new_from_object(
             evaluated,
@@ -261,16 +330,13 @@ def _voxel_repair(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     _set_active_only(obj)
     voxel_size = _auto_voxel_size(obj, config)
     try:
-        bpy.ops.object.voxel_remesh(voxel_size=voxel_size, adaptivity=0.0)
+        if hasattr(obj.data, "remesh_voxel_size"):
+            obj.data.remesh_voxel_size = voxel_size
+        if hasattr(obj.data, "remesh_voxel_adaptivity"):
+            obj.data.remesh_voxel_adaptivity = 0.0
+        bpy.ops.object.voxel_remesh()
         _log(config, f"Voxel repair succeeded at voxel_size={voxel_size:.5f}")
         return True
-    except TypeError:
-        try:
-            bpy.ops.object.voxel_remesh(voxel_size=voxel_size)
-            _log(config, f"Voxel repair succeeded at voxel_size={voxel_size:.5f}")
-            return True
-        except Exception:
-            traceback.print_exc()
     except Exception:
         traceback.print_exc()
     return False
@@ -357,6 +423,21 @@ def _apply_meshdata_to_object(obj: bpy.types.Object, data: MeshData) -> None:
             mesh.polygons[index].material_index = max(0, int(material))
         except Exception:
             mesh.polygons[index].material_index = 0
+    if data.uvs is not None and data.face_uvs is not None:
+        try:
+            uv_layer = mesh.uv_layers.new(name="UVMap")
+            for poly_index, poly in enumerate(mesh.polygons):
+                if poly_index >= len(data.face_uvs):
+                    break
+                uv_face = data.face_uvs[poly_index]
+                for corner, loop_index in enumerate(poly.loop_indices):
+                    if corner >= len(uv_face):
+                        continue
+                    uv_index = uv_face[corner]
+                    if 0 <= uv_index < len(data.uvs):
+                        uv_layer.data[loop_index].uv = data.uvs[uv_index][:2]
+        except Exception:
+            traceback.print_exc()
     obj.data = mesh
     try:
         if old_mesh.users == 0:
@@ -396,6 +477,78 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     return True
 
 
+def _apply_decimate_proxy(
+    obj: bpy.types.Object,
+    target_faces: int,
+    config: RemeshConfig,
+    *,
+    preserve_features: bool,
+) -> bool:
+    current_faces = len(obj.data.polygons)
+    current_triangles = sum(max(1, len(poly.vertices) - 2) for poly in obj.data.polygons)
+    target = max(4, int(target_faces))
+    if current_triangles <= target:
+        return False
+    _set_active_only(obj)
+    modifier = obj.modifiers.new("CurioMesh target-scale QEM proxy", "DECIMATE")
+    modifier.decimate_type = "COLLAPSE"
+    modifier.ratio = max(0.00001, min(1.0, target / max(1.0, float(current_triangles))))
+    try:
+        modifier.use_collapse_triangulate = True
+    except Exception:
+        pass
+    if preserve_features:
+        try:
+            modifier.delimit = {"SHARP", "SEAM", "MATERIAL"}
+        except Exception:
+            pass
+    try:
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+        obj["curiomesh_proxy_input_faces"] = int(current_faces)
+        obj["curiomesh_proxy_faces"] = int(len(obj.data.polygons))
+        _log(config, f"Built QEM proxy: {current_faces} -> {len(obj.data.polygons)} faces")
+        return True
+    except Exception:
+        traceback.print_exc()
+        try:
+            obj.modifiers.remove(modifier)
+        except Exception:
+            pass
+        return False
+
+
+def _prepare_flow_proxy(obj: bpy.types.Object, config: RemeshConfig) -> None:
+    factor, cap = {
+        "DRAFT": (6, 150_000),
+        "BALANCED": (12, 400_000),
+        "HERO": (20, 400_000),
+    }.get(config.quality, (12, 400_000))
+    budget = min(cap, max(2_000, int(config.target_faces) * factor))
+    _apply_decimate_proxy(obj, budget, config, preserve_features=config.preserve_sharp or config.preserve_seams)
+
+
+def _prepare_pair_closure_proxy(obj: bpy.types.Object, config: RemeshConfig) -> None:
+    closure_upper_bound = sum(len(poly.vertices) for poly in obj.data.polygons)
+    if closure_upper_bound <= max(4, int(config.target_faces)) * 1.10:
+        return
+    # With pairing fraction p, face-corner closure emits approximately
+    # N_base * (3 - p) quads. p=0.8 is a conservative first estimate.
+    base_target = max(4, int(round(max(4, config.target_faces) / 2.2)))
+    _apply_decimate_proxy(obj, base_target, config, preserve_features=True)
+
+
+def _clone_candidate(base: bpy.types.Object, index: int) -> bpy.types.Object:
+    mesh = base.data.copy()
+    mesh.name = f"{base.data.name}_AtlasCandidate{index}"
+    candidate = bpy.data.objects.new(f"{base.name}_AtlasCandidate{index}", mesh)
+    candidate.matrix_world = base.matrix_world.copy()
+    _link_object_like(base, candidate)
+    _copy_material_slots(base, candidate)
+    for key in base.keys():
+        candidate[key] = base[key]
+    return candidate
+
+
 def _apply_shrinkwrap(target: bpy.types.Object, source: bpy.types.Object, config: RemeshConfig) -> bool:
     _set_active_only(target)
     try:
@@ -424,9 +577,585 @@ def _build_source_bvh(source: bpy.types.Object) -> tuple[BVHTree, list[tuple[int
     return BVHTree.FromPolygons(verts_world, triangles, all_triangles=True), triangles, polygon_indices
 
 
-def _map_material_indices(source: bpy.types.Object, target: bpy.types.Object) -> bool:
+def _distance_bvh(obj: bpy.types.Object) -> BVHTree:
+    # All surface-error queries are in world space. Blender's FromObject BVH
+    # stores object-local coordinates, so using it here silently corrupts
+    # scores for translated, rotated, or scaled objects.
+    return _build_source_bvh(obj)[0]
+
+
+def _bounded_triangle_count(obj: bpy.types.Object, limit: int) -> tuple[int, bool]:
+    """Count tessellated faces without allocating a loop-triangle collection.
+
+    The returned count stops immediately after ``limit``. This makes the
+    fidelity-reference decision proportional to the cap instead of the full
+    scan size and, importantly, avoids materializing Python triangle tuples.
+    """
+
+    cap = max(1, int(limit))
+    count = 0
+    for polygon in obj.data.polygons:
+        count += max(1, len(polygon.vertices) - 2)
+        if count > cap:
+            return count, True
+    return count, False
+
+
+def _bounded_source_sample_points(
+    obj: bpy.types.Object,
+    limit: int,
+) -> tuple[list[Vector], str]:
+    """Sample a huge source in bounded memory without loop triangulation.
+
+    Face-center stride samples retain source-to-candidate fidelity evidence,
+    while a small world-space grid keeps broad spatial coverage. This is not an
+    exhaustive component proof, so the status deliberately says ``BOUNDED``.
+    """
+
+    face_count = len(obj.data.polygons)
+    budget = max(0, int(limit))
+    if face_count == 0 or budget == 0:
+        return [], "BOUNDED_SOURCE_EMPTY"
+
+    world_bounds = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    minimum = Vector(tuple(min(point[axis] for point in world_bounds) for axis in range(3)))
+    maximum = Vector(tuple(max(point[axis] for point in world_bounds) for axis in range(3)))
+    span = maximum - minimum
+    grid_resolution = max(2, min(8, int(round(budget ** (1.0 / 3.0)))))
+    grid_budget = min(budget // 4, grid_resolution**3)
+    stride_budget = max(1, budget - grid_budget)
+    stride = max(1, math.ceil(face_count / stride_budget))
+    matrix = obj.matrix_world
+    grid_points: dict[tuple[int, int, int], Vector] = {}
+    stride_points: list[Vector] = []
+
+    for index, polygon in enumerate(obj.data.polygons):
+        center = matrix @ polygon.center
+        if len(grid_points) < grid_budget:
+            cell = tuple(
+                min(
+                    grid_resolution - 1,
+                    max(0, int(((center[axis] - minimum[axis]) / max(span[axis], 1e-20)) * grid_resolution)),
+                )
+                for axis in range(3)
+            )
+            grid_points.setdefault(cell, center)
+        if index % stride == stride // 2 and len(stride_points) < stride_budget:
+            stride_points.append(center)
+
+    points = (list(grid_points.values()) + stride_points)[:budget]
+    return points, f"BOUNDED_SOURCE_FACES_{len(points)}_OF_{face_count}"
+
+
+def _capture_bounded_source_evidence(
+    source: bpy.types.Object,
+    sample_limit: int,
+    source_triangle_floor: int,
+) -> _BoundedSourceEvidence:
+    points, component_sampling = _bounded_source_sample_points(source, sample_limit)
+    return _BoundedSourceEvidence(
+        sample_points=points,
+        component_sampling=component_sampling,
+        diagonal=_object_diagonal(source),
+        source_triangle_floor=max(1, int(source_triangle_floor)),
+    )
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = max(0.0, min(1.0, fraction)) * (len(ordered) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _component_sample_points(
+    obj: bpy.types.Object,
+    limit: int,
+    *,
+    max_vertices: int = 2_000_000,
+    max_edges: int = 6_000_000,
+) -> tuple[list[Vector], str]:
+    """Return representatives biased toward small connected components.
+
+    NumPy-backed union-find avoids Python adjacency sets on scan-scale meshes.
+    Above the explicit memory guard, spatial and area strata remain active and
+    the returned status records that component coverage was not exhaustive.
+    """
+
+    mesh = obj.data
+    vertex_count = len(mesh.vertices)
+    edge_count = len(mesh.edges)
+    if limit <= 0 or vertex_count == 0 or edge_count == 0:
+        return [], "NO_SURFACE_COMPONENTS"
+    if vertex_count > max_vertices or edge_count > max_edges:
+        return [], f"SKIPPED_LIMIT_{vertex_count}_VERTICES_{edge_count}_EDGES"
+
+    dtype = np.int32 if vertex_count < np.iinfo(np.int32).max else np.int64
+    parents = np.arange(vertex_count, dtype=dtype)
+    sizes = np.ones(vertex_count, dtype=np.int32)
+    edge_vertices = np.empty(edge_count * 2, dtype=dtype)
+    mesh.edges.foreach_get("vertices", edge_vertices)
+
+    def root(raw: int) -> int:
+        current = int(raw)
+        while int(parents[current]) != current:
+            parents[current] = parents[int(parents[current])]
+            current = int(parents[current])
+        return current
+
+    for raw_a, raw_b in edge_vertices.reshape((-1, 2)):
+        a = root(int(raw_a))
+        b = root(int(raw_b))
+        if a == b:
+            continue
+        if sizes[a] < sizes[b]:
+            a, b = b, a
+        parents[b] = a
+        sizes[a] += sizes[b]
+
+    while True:
+        compressed = parents[parents]
+        if np.array_equal(compressed, parents):
+            break
+        parents = compressed
+    roots, first_indices, counts = np.unique(parents, return_index=True, return_counts=True)
+    del roots, edge_vertices
+    surface_mask = counts >= 2
+    first_indices = first_indices[surface_mask]
+    counts = counts[surface_mask]
+    component_count = len(first_indices)
+    if component_count == 0:
+        return [], "NO_SURFACE_COMPONENTS"
+
+    if component_count > limit:
+        # The area strata already favor large islands. Spend the component
+        # quota on the small pieces most likely to vanish during QEM collapse.
+        selected = np.argsort(counts, kind="stable")[:limit]
+        first_indices = first_indices[selected]
+        status = f"CAPPED_{len(first_indices)}_OF_{component_count}"
+    else:
+        status = f"ALL_{component_count}"
+    matrix = obj.matrix_world
+    return [matrix @ mesh.vertices[int(index)].co for index in first_indices], status
+
+
+def _radical_inverse(index: int, base: int) -> float:
+    value = 0.0
+    denominator = 1.0
+    current = max(1, int(index))
+    while current:
+        current, digit = divmod(current, base)
+        denominator *= base
+        value += digit / denominator
+    return value
+
+
+def _triangle_point(a: Vector, b: Vector, c: Vector, index: int) -> Vector:
+    root_u = math.sqrt(_radical_inverse(index + 1, 2))
+    v = _radical_inverse(index + 1, 3)
+    return (1.0 - root_u) * a + root_u * (1.0 - v) * b + root_u * v * c
+
+
+def _stratified_surface_points(
+    obj: bpy.types.Object,
+    limit: int,
+    *,
+    include_components: bool,
+) -> tuple[list[Vector], str]:
+    mesh = obj.data
+    if limit <= 0 or not mesh.polygons:
+        return [], "EMPTY"
+    mesh.calc_loop_triangles()
+    if not mesh.loop_triangles:
+        return [], "EMPTY"
+
+    component_points: list[Vector] = []
+    component_status = "NOT_REQUESTED"
+    if include_components:
+        component_points, component_status = _component_sample_points(
+            obj,
+            min(1024, max(1, limit // 4)),
+        )
+
+    world_bounds = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    minimum = Vector(
+        (
+            min(point.x for point in world_bounds),
+            min(point.y for point in world_bounds),
+            min(point.z for point in world_bounds),
+        )
+    )
+    maximum = Vector(
+        (
+            max(point.x for point in world_bounds),
+            max(point.y for point in world_bounds),
+            max(point.z for point in world_bounds),
+        )
+    )
+    span = maximum - minimum
+    grid_resolution = 8
+    grid_points: dict[tuple[int, int, int], Vector] = {}
+    total_area = 0.0
+    matrix = obj.matrix_world
+    for triangle in mesh.loop_triangles:
+        a, b, c = (matrix @ mesh.vertices[index].co for index in triangle.vertices)
+        area = 0.5 * (b - a).cross(c - a).length
+        if not math.isfinite(area) or area <= 0.0:
+            continue
+        total_area += area
+        center = (a + b + c) / 3.0
+        cell = tuple(
+            min(
+                grid_resolution - 1,
+                max(0, int(((center[axis] - minimum[axis]) / max(span[axis], 1e-20)) * grid_resolution)),
+            )
+            for axis in range(3)
+        )
+        grid_points.setdefault(cell, center)
+
+    points = component_points + list(grid_points.values())
+    if len(points) >= limit:
+        return points[:limit], component_status
+    area_budget = limit - len(points)
+    if total_area <= 0.0:
+        return points, component_status
+
+    interval = total_area / max(1, area_budget)
+    threshold = interval * 0.5
+    cumulative = 0.0
+    sample_index = 0
+    for triangle in mesh.loop_triangles:
+        a, b, c = (matrix @ mesh.vertices[index].co for index in triangle.vertices)
+        area = 0.5 * (b - a).cross(c - a).length
+        if not math.isfinite(area) or area <= 0.0:
+            continue
+        upper = cumulative + area
+        while threshold <= upper and sample_index < area_budget:
+            points.append(_triangle_point(a, b, c, sample_index))
+            sample_index += 1
+            threshold += interval
+        cumulative = upper
+        if sample_index >= area_budget:
+            break
+    return points[:limit], component_status
+
+
+def _make_surface_reference(
+    source: bpy.types.Object,
+    sample_limit: int = 5000,
+    *,
+    reference_proxy: bpy.types.Object | None = None,
+    max_reference_triangles: int = MAX_FIDELITY_REFERENCE_TRIANGLES,
+    bounded_source_evidence: _BoundedSourceEvidence | None = None,
+) -> _SurfaceReference:
+    cap = max(1, int(max_reference_triangles))
+    if bounded_source_evidence is None:
+        source_triangles, source_exceeds_cap = _bounded_triangle_count(source, cap)
+    else:
+        source_triangles = bounded_source_evidence.source_triangle_floor
+        source_exceeds_cap = True
+    reference_object = source
+
+    if source_exceeds_cap:
+        if reference_proxy is None:
+            raise RuntimeError(
+                "The source exceeds the bounded fidelity-reference budget and no reduced proxy was supplied."
+            )
+        proxy_triangles, proxy_exceeds_cap = _bounded_triangle_count(reference_proxy, cap)
+        if proxy_exceeds_cap:
+            raise RuntimeError(
+                f"The fidelity proxy exceeds the {cap:,}-triangle memory budget; lower the target face count."
+            )
+        reference_object = reference_proxy
+        if bounded_source_evidence is None:
+            points, component_status = _bounded_source_sample_points(source, sample_limit)
+            diagonal = _object_diagonal(source)
+        else:
+            points = bounded_source_evidence.sample_points
+            component_status = bounded_source_evidence.component_sampling
+            diagonal = bounded_source_evidence.diagonal
+        fidelity_status = (
+            f"BOUNDED_PROXY_BVH_{proxy_triangles}_TRIS_SOURCE_GE_{source_triangles}_TRIS"
+        )
+    else:
+        points, component_status = _stratified_surface_points(
+            source,
+            sample_limit,
+            include_components=True,
+        )
+        fidelity_status = f"SOURCE_FULL_BVH_{source_triangles}_TRIS"
+        diagonal = _object_diagonal(source)
+
+    return _SurfaceReference(
+        bvh=_distance_bvh(reference_object),
+        sample_points=points,
+        diagonal=diagonal,
+        component_sampling=component_status,
+        fidelity_status=fidelity_status,
+    )
+
+
+def _sampled_surface_error_stats(
+    source: bpy.types.Object,
+    target: bpy.types.Object,
+    *,
+    sample_limit: int = 5000,
+    reference: _SurfaceReference | None = None,
+) -> _SurfaceError:
+    if not target.data.polygons or (reference is None and not source.data.polygons):
+        return _SurfaceError(float("inf"), float("inf"), float("inf"), "EMPTY", "EMPTY")
+    if reference is None:
+        reference = _make_surface_reference(source, sample_limit)
+    target_bvh = _distance_bvh(target)
+    distances: list[float] = []
+    target_points, _component_status = _stratified_surface_points(
+        target,
+        sample_limit,
+        include_components=False,
+    )
+    for point in target_points:
+        hit = reference.bvh.find_nearest(point)
+        if hit is not None and hit[3] is not None and math.isfinite(hit[3]):
+            distances.append(float(hit[3]))
+    for point in reference.sample_points:
+        hit = target_bvh.find_nearest(point)
+        if hit is not None and hit[3] is not None and math.isfinite(hit[3]):
+            distances.append(float(hit[3]))
+    if not distances:
+        return _SurfaceError(
+            float("inf"),
+            float("inf"),
+            float("inf"),
+            reference.component_sampling,
+            reference.fidelity_status,
+        )
+    rms = math.sqrt(sum(distance * distance for distance in distances) / len(distances)) / reference.diagonal
+    p95 = _percentile(distances, 0.95) / reference.diagonal
+    maximum = max(distances) / reference.diagonal
+    return _SurfaceError(
+        rms,
+        p95,
+        maximum,
+        reference.component_sampling,
+        reference.fidelity_status,
+    )
+
+
+def _sampled_surface_error(
+    source: bpy.types.Object,
+    target: bpy.types.Object,
+    *,
+    sample_limit: int = 5000,
+    reference: _SurfaceReference | None = None,
+) -> tuple[float, float]:
+    """Compatibility wrapper returning RMS and p95 normalized error."""
+
+    stats = _sampled_surface_error_stats(
+        source,
+        target,
+        sample_limit=sample_limit,
+        reference=reference,
+    )
+    return stats.rms, stats.p95
+
+
+def _run_atlas_candidate(
+    candidate: bpy.types.Object,
+    source: bpy.types.Object,
+    config: RemeshConfig,
+    profile: ScanProfile,
+    spec: CandidateSpec,
+    reference: _SurfaceReference,
+) -> CandidateEvaluation:
+    started = time.perf_counter()
+    candidate_config = replace(
+        config,
+        seed=spec.seed,
+        preserve_sharp=config.preserve_sharp and spec.preserve_sharp,
+        preserve_boundary=config.preserve_boundary and spec.preserve_boundary,
+        triad_force_quads=True if spec.pair_closure else config.triad_force_quads,
+    )
+    if spec.pair_closure:
+        _prepare_pair_closure_proxy(candidate, candidate_config)
+        ok = _run_triadq_lite(candidate, candidate_config)
+    else:
+        if spec.repair and candidate_config.voxel_repair:
+            ok = _voxel_repair(candidate, candidate_config)
+        else:
+            ok = True
+        if ok:
+            ok = _run_quadriflow(candidate, candidate_config)
+
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if not ok:
+        return CandidateEvaluation(
+            strategy=spec.strategy,
+            label=spec.label,
+            valid=False,
+            score=-1.0,
+            reason="solver failed",
+            faces=0,
+            quad_ratio=0.0,
+            target_error=1.0,
+            geometry_rms=float("inf"),
+            geometry_p95=float("inf"),
+            geometry_max=float("inf"),
+            min_scaled_jacobian=0.0,
+            p95_aspect_ratio=0.0,
+            extraordinary_ratio=1.0,
+            elapsed_ms=elapsed_ms,
+        )
+
+    diagnostics = mesh_diagnostics(candidate, config.target_faces)
+    geometry = _sampled_surface_error_stats(source, candidate, reference=reference)
+    return evaluate_candidate(
+        spec,
+        diagnostics,
+        target_faces=config.target_faces,
+        geometry_rms=geometry.rms,
+        geometry_p95=geometry.p95,
+        geometry_max=geometry.maximum,
+        target_edge_normalized=max(profile.target_edge_length / profile.diagonal, 1e-9),
+        require_quads=config.require_quads,
+        topology_policy=config.topology_policy,
+        profile=profile,
+        quality=config.quality,
+        elapsed_ms=elapsed_ms,
+    )
+
+
+def _run_atlasq(
+    base_obj: bpy.types.Object,
+    source: bpy.types.Object,
+    config: RemeshConfig,
+    profile: ScanProfile,
+    reference: _SurfaceReference | None = None,
+) -> tuple[bpy.types.Object | None, CandidateEvaluation | None, list[CandidateEvaluation]]:
+    _prepare_flow_proxy(base_obj, config)
+    pristine_mesh = base_obj.data.copy()
+    if reference is None:
+        reference = _make_surface_reference(
+            source,
+            5000,
+            reference_proxy=base_obj,
+        )
+    specs = build_candidate_specs(
+        profile,
+        strategy=config.atlas_strategy,
+        quality=config.quality,
+        seed=config.seed,
+        candidate_count=config.atlas_candidate_count,
+        topology_policy=config.topology_policy,
+        voxel_repair=config.voxel_repair,
+    )
+    evaluations: list[CandidateEvaluation] = []
+    candidate_objects: list[tuple[bpy.types.Object, CandidateEvaluation]] = []
+
+    def run_spec(spec: CandidateSpec, index: int) -> None:
+        candidate = base_obj if index == 0 else _clone_candidate(base_obj, index)
+        if index > 0:
+            replacement = pristine_mesh.copy()
+            old_mesh = candidate.data
+            candidate.data = replacement
+            if old_mesh.users == 0:
+                bpy.data.meshes.remove(old_mesh)
+        try:
+            evaluation = _run_atlas_candidate(candidate, source, config, profile, spec, reference)
+        except Exception as exc:
+            traceback.print_exc()
+            evaluation = CandidateEvaluation(
+                strategy=spec.strategy,
+                label=spec.label,
+                valid=False,
+                score=-1.0,
+                reason=f"candidate exception: {type(exc).__name__}: {exc}"[:240],
+                faces=0,
+                quad_ratio=0.0,
+                target_error=1.0,
+                geometry_rms=float("inf"),
+                geometry_p95=float("inf"),
+                geometry_max=float("inf"),
+                min_scaled_jacobian=0.0,
+                p95_aspect_ratio=0.0,
+                extraordinary_ratio=1.0,
+                elapsed_ms=0.0,
+            )
+        evaluations.append(evaluation)
+        candidate_objects.append((candidate, evaluation))
+        _log(
+            config,
+            (
+                f"Atlas-Q {evaluation.label}: valid={evaluation.valid} score={evaluation.score:.4f} "
+                f"faces={evaluation.faces} p95={evaluation.geometry_p95:.6f} reason={evaluation.reason}"
+            ),
+        )
+
+    for index, spec in enumerate(specs):
+        run_spec(spec, index)
+
+    valid = [(obj, evaluation) for obj, evaluation in candidate_objects if evaluation.valid]
+    pair_attempted = any(spec.pair_closure for spec in specs)
+    if not valid and config.require_quads and not pair_attempted:
+        fallback = CandidateSpec(
+            strategy="PAIR_CLOSURE",
+            label="PairClosure exact all-quad fallback",
+            seed=config.seed + 104729,
+            pair_closure=True,
+        )
+        run_spec(fallback, len(specs))
+        valid = [(obj, evaluation) for obj, evaluation in candidate_objects if evaluation.valid]
+
+    selected_obj = None
+    selected_evaluation = None
+    if valid:
+        selected_obj, selected_evaluation = max(valid, key=lambda item: item[1].score)
+
+    for candidate, _evaluation in candidate_objects:
+        if candidate is not selected_obj:
+            _remove_object(candidate)
+    if pristine_mesh.users == 0:
+        bpy.data.meshes.remove(pristine_mesh)
+    return selected_obj, selected_evaluation, evaluations
+
+
+def _transfer_material_indices_with_modifier(
+    source: bpy.types.Object,
+    target: bpy.types.Object,
+) -> bool:
+    _set_active_only(target)
+    modifier = target.modifiers.new("CurioMesh material transfer", "DATA_TRANSFER")
+    modifier.object = source
+    try:
+        modifier.use_poly_data = True
+        modifier.data_types_polys = {"MATERIAL_INDEX"}
+        modifier.poly_mapping = "NEAREST"
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+        return True
+    except Exception:
+        traceback.print_exc()
+        try:
+            target.modifiers.remove(modifier)
+        except Exception:
+            pass
+        return False
+
+
+def _map_material_indices(
+    source: bpy.types.Object,
+    target: bpy.types.Object,
+    *,
+    allow_python_bvh: bool = True,
+) -> bool:
     if not source.data.materials or not target.data.materials or not source.data.polygons:
         return False
+    if not allow_python_bvh:
+        return _transfer_material_indices_with_modifier(source, target)
 
     bvh, _triangles, polygon_indices = _build_source_bvh(source)
     assigned = 0
@@ -542,7 +1271,13 @@ def _project_uvs_bvh(source: bpy.types.Object, target: bpy.types.Object) -> bool
     return assigned > 0 and uv_mapping_is_valid(target)
 
 
-def _preserve_textures(source: bpy.types.Object, target: bpy.types.Object, config: RemeshConfig) -> str:
+def _preserve_textures(
+    source: bpy.types.Object,
+    target: bpy.types.Object,
+    config: RemeshConfig,
+    *,
+    allow_python_bvh: bool = True,
+) -> str:
     mode = str(config.texture_mode or "PROJECT").upper()
     if mode == "NONE":
         return "SKIPPED"
@@ -555,7 +1290,7 @@ def _preserve_textures(source: bpy.types.Object, target: bpy.types.Object, confi
 
     if mode in {"TRANSFER", "PROJECT"}:
         transferred = _transfer_uvs_with_modifier(source, target)
-    if mode == "PROJECT" and not uv_mapping_is_valid(target):
+    if mode == "PROJECT" and allow_python_bvh and not uv_mapping_is_valid(target):
         projected = _project_uvs_bvh(source, target)
     if mode == "BAKE" or (config.bake_fallback and not uv_mapping_is_valid(target)):
         try:
@@ -609,8 +1344,14 @@ def _finalize_output(
         result_mesh.name = f"{source_obj.name}_CurioMesh"
         if config.apply_source_modifiers:
             _strip_source_modifiers(source_obj)
+        old_source_mesh = source_obj.data
         source_obj.data = result_mesh
         _remove_object(work_obj)
+        if old_source_mesh.users == 0:
+            try:
+                bpy.data.meshes.remove(old_source_mesh)
+            except Exception:
+                pass
         output_obj = source_obj
         work_obj = None
     else:
@@ -632,17 +1373,85 @@ def _annotate_output(output_obj: bpy.types.Object, result: RemeshResult) -> None
     output_obj["curiomesh_face_count_error"] = round(result.diagnostics.face_count_error, 4)
     output_obj["curiomesh_uv_status"] = result.uv_status
     output_obj["curiomesh_materials_preserved"] = bool(result.materials_preserved)
+    output_obj["curiomesh_strategy"] = result.strategy
+    output_obj["curiomesh_scan_profile"] = result.profile
+    output_obj["curiomesh_candidate_count"] = int(result.candidate_count)
+    output_obj["curiomesh_geometry_rms"] = round(result.geometry_rms, 8)
+    output_obj["curiomesh_geometry_p95"] = round(result.geometry_p95, 8)
+    output_obj["curiomesh_geometry_max"] = round(result.geometry_max, 8)
+    output_obj["curiomesh_component_sampling"] = result.sampling_status
+    output_obj["curiomesh_fidelity_reference"] = result.fidelity_status
+    output_obj["curiomesh_quad_only_verified"] = bool(result.quad_only_verified)
+    output_obj["curiomesh_topology_status"] = result.topology_status
+    if result.candidates:
+        output_obj["curiomesh_candidates_json"] = json.dumps(
+            result.candidates,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+
+def _merge_proxy_topology_profile(source: ScanProfile, proxy: ScanProfile) -> ScanProfile:
+    """Route and validate from an exact reduced proxy without overstating source proof."""
+
+    if not proxy.exact_topology:
+        return source
+    return replace(
+        source,
+        category=proxy.category,
+        recommended_strategy=proxy.recommended_strategy,
+        topology_basis="PROXY_EXACT",
+        boundary_edges=proxy.boundary_edges,
+        boundary_loops=proxy.boundary_loops,
+        connected_components=proxy.connected_components,
+        component_euler=proxy.component_euler,
+        component_signature=proxy.component_signature,
+        non_manifold_edges=proxy.non_manifold_edges,
+        non_manifold_vertices=proxy.non_manifold_vertices,
+        branched_boundary_vertices=proxy.branched_boundary_vertices,
+        inconsistent_edges=proxy.inconsistent_edges,
+        duplicate_faces=proxy.duplicate_faces,
+        euler_characteristic=proxy.euler_characteristic,
+        warnings=source.warnings
+        + (
+            "Topology gates use the exact reduced proxy; full-resolution source topology remains unverified.",
+        ),
+    )
+
+
+def _topology_status(profile: ScanProfile | None, topology_policy: str) -> str:
+    if topology_policy == "REPAIR":
+        return "REPAIR_ALLOWED"
+    if profile is None:
+        return "NOT_CHECKED"
+    if profile.topology_basis == "SOURCE_EXACT":
+        return "SOURCE_EXACT_PRESERVED"
+    if profile.topology_basis == "PROXY_EXACT":
+        return "PROXY_PRESERVED_SOURCE_UNVERIFIED"
+    return "SOURCE_UNVERIFIED"
 
 
 def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
     start = time.perf_counter()
     source_snapshot: bpy.types.Object | None = None
+    source_surface: bpy.types.Object | None = None
     work_obj: bpy.types.Object | None = None
     engine = str(config.engine or "QUADRIFLOW").upper()
     if engine == "AUTO":
-        engine = "QUADRIFLOW"
+        engine = "ATLAS_Q"
     uv_status = "NONE"
     materials_preserved = False
+    profile: ScanProfile | None = None
+    selected_evaluation: CandidateEvaluation | None = None
+    candidate_evaluations: list[CandidateEvaluation] = []
+    strategy = ""
+    geometry_rms = 0.0
+    geometry_p95 = 0.0
+    geometry_max = 0.0
+    sampling_status = "NOT_MEASURED"
+    fidelity_status = "NOT_MEASURED"
+    fidelity_reference: _SurfaceReference | None = None
+    bounded_source_evidence: _BoundedSourceEvidence | None = None
 
     if obj is None or obj.type != "MESH":
         return RemeshResult(False, message="Select a mesh object.")
@@ -650,22 +1459,126 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
     with _ContextSnapshot() as context_state:
         try:
             source_snapshot = _make_evaluated_snapshot(obj, config)
-            work_obj = _make_working_copy(source_snapshot, obj)
+            source_surface = source_snapshot
+            source_triangle_probe, source_exceeds_reference_cap = _bounded_triangle_count(
+                source_snapshot,
+                MAX_FIDELITY_REFERENCE_TRIANGLES,
+            )
+            if source_exceeds_reference_cap:
+                bounded_source_evidence = _capture_bounded_source_evidence(
+                    source_snapshot,
+                    5000,
+                    source_triangle_probe,
+                )
+                if engine == "ATLAS_Q":
+                    profile = analyze_object(
+                        source_snapshot,
+                        config.target_faces,
+                        feature_angle_deg=config.triad_feature_angle,
+                        max_sample_faces=config.analysis_sample_faces,
+                    )
+                # Reuse the sole evaluated mesh as the native QEM work object.
+                # Candidate copies are created only after this object is below
+                # the reference cap, avoiding a second unreduced scan copy.
+                work_obj = source_snapshot
+                source_snapshot = None
+                source_surface = obj
+                work_obj.name = f"{obj.name}_CurioMeshWork"
+                work_obj.data.name = f"{obj.name}_CurioMeshWorkMesh"
+                work_obj.hide_select = False
+                work_obj.hide_render = False
+                work_obj.hide_set(False)
+            else:
+                work_obj = _make_working_copy(source_snapshot, obj)
+            if engine == "ATLAS_Q":
+                # Keep BMesh cleanup and Python adjacency off the full-resolution
+                # scan whenever Blender's native QEM proxy can reduce it first.
+                _prepare_flow_proxy(work_obj, config)
+            elif engine == "TRIAD_Q_LITE":
+                # PairClosure is an exact closure, not a simplifier. Reduce to
+                # its expected output scale before Python pairing/adjacency so a
+                # dense scan cannot expand by roughly three times.
+                _prepare_pair_closure_proxy(work_obj, config)
+            elif source_exceeds_reference_cap:
+                # Direct QuadriFlow remains available for compatibility, but a
+                # scan-scale input still needs a bounded fidelity reference.
+                # Reusing its native QEM proxy avoids another full mesh copy.
+                _prepare_flow_proxy(work_obj, config)
             _cleanup_mesh(work_obj.data, config)
+            fidelity_reference = _make_surface_reference(
+                source_surface,
+                5000,
+                reference_proxy=work_obj,
+                bounded_source_evidence=bounded_source_evidence,
+            )
 
-            if engine == "TRIAD_Q_LITE":
-                ok = _run_triadq_lite(work_obj, config)
+            if engine == "ATLAS_Q":
+                if profile is None:
+                    profile = analyze_object(
+                        source_surface,
+                        config.target_faces,
+                        feature_angle_deg=config.triad_feature_angle,
+                        max_sample_faces=config.analysis_sample_faces,
+                    )
+                if not profile.exact_topology:
+                    proxy_profile = analyze_object(
+                        work_obj,
+                        config.target_faces,
+                        feature_angle_deg=config.triad_feature_angle,
+                        max_exact_faces=450_000,
+                        max_sample_faces=config.analysis_sample_faces,
+                    )
+                    profile = _merge_proxy_topology_profile(profile, proxy_profile)
+                work_obj, selected_evaluation, candidate_evaluations = _run_atlasq(
+                    work_obj,
+                    source_surface,
+                    config,
+                    profile,
+                    fidelity_reference,
+                )
+                ok = work_obj is not None and selected_evaluation is not None
+                strategy = selected_evaluation.strategy if selected_evaluation is not None else "NONE"
+            elif engine == "TRIAD_Q_LITE":
+                triad_config = replace(
+                    config,
+                    triad_force_quads=bool(config.require_quads),
+                )
+                ok = _run_triadq_lite(work_obj, triad_config)
+                strategy = "PAIR_CLOSURE" if triad_config.triad_force_quads else "TRIAD_Q_LITE"
             else:
                 ok = _run_quadriflow(work_obj, config)
+                strategy = "QUADRIFLOW"
+                if ok and config.require_quads:
+                    ok = mesh_diagnostics(work_obj, config.target_faces).quad_only
 
-            if not ok and config.voxel_repair and engine == "QUADRIFLOW":
+            if (
+                not ok
+                and config.voxel_repair
+                and config.topology_policy == "REPAIR"
+                and engine == "QUADRIFLOW"
+            ):
                 _log(config, "QuadriFlow failed; retrying after voxel repair")
                 _remove_object(work_obj)
-                work_obj = _make_working_copy(source_snapshot, obj)
+                if source_snapshot is not None:
+                    work_obj = _make_working_copy(source_snapshot, obj)
+                else:
+                    work_obj = _make_evaluated_snapshot(obj, config)
+                    work_obj.name = f"{obj.name}_CurioMeshWork"
+                    work_obj.hide_select = False
+                    work_obj.hide_render = False
+                    work_obj.hide_set(False)
+                    if bounded_source_evidence is not None:
+                        # The retry snapshot is full resolution again. Keep its
+                        # Python BMesh cleanup behind the same native QEM cap as
+                        # the first scan-scale attempt.
+                        _prepare_flow_proxy(work_obj, config)
                 _cleanup_mesh(work_obj.data, config)
-                _voxel_repair(work_obj, config)
-                ok = _run_quadriflow(work_obj, config)
+                repaired = _voxel_repair(work_obj, config)
+                ok = repaired and _run_quadriflow(work_obj, config)
                 engine = "VOXEL_REPAIR_QUADRIFLOW"
+                strategy = "DIRTY_FLOW"
+                if ok and config.require_quads:
+                    ok = mesh_diagnostics(work_obj, config.target_faces).quad_only
 
             if not ok:
                 elapsed = (time.perf_counter() - start) * 1000.0
@@ -673,31 +1586,124 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     False,
                     engine=engine,
                     elapsed_ms=elapsed,
-                    message="QuadriFlow failed on this mesh.",
+                    message=(
+                        f"{engine} produced no candidate that passed the topology and quad-quality gates. "
+                        "Try Repair topology for a closed dirty scan, preserve topology for an open fragment, "
+                        "or raise the target face count."
+                    ),
+                    strategy=strategy,
+                    profile=profile.category if profile else "",
+                    candidate_count=len(candidate_evaluations),
+                    candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
                 )
 
             if config.shrinkwrap_project:
-                _apply_shrinkwrap(work_obj, source_snapshot, config)
+                _apply_shrinkwrap(work_obj, source_surface, config)
 
-            material_count = _copy_material_slots(source_snapshot, work_obj)
+            post_projection = mesh_diagnostics(work_obj, config.target_faces)
+            geometry = _sampled_surface_error_stats(
+                source_surface,
+                work_obj,
+                reference=fidelity_reference,
+            )
+            geometry_rms = geometry.rms
+            geometry_p95 = geometry.p95
+            geometry_max = geometry.maximum
+            sampling_status = geometry.component_sampling
+            fidelity_status = geometry.fidelity_status
+            post_failures: list[str] = []
+            if engine == "ATLAS_Q" and profile is not None:
+                post_failures = candidate_gate_failures(
+                    post_projection,
+                    target_faces=config.target_faces,
+                    geometry_rms=geometry_rms,
+                    geometry_p95=geometry_p95,
+                    geometry_max=geometry_max,
+                    target_edge_normalized=max(profile.target_edge_length / profile.diagonal, 1e-9),
+                    require_quads=config.require_quads,
+                    topology_policy=config.topology_policy,
+                    profile=profile,
+                    quality=config.quality,
+                )
+            elif config.require_quads and not post_projection.quad_only:
+                post_failures = ["local quad/manifold gate failed"]
+            if post_failures:
+                elapsed = (time.perf_counter() - start) * 1000.0
+                return RemeshResult(
+                    False,
+                    engine=engine,
+                    elapsed_ms=elapsed,
+                    message=(
+                        "Final projection violated the release gates: "
+                        + "; ".join(post_failures[:5])
+                    ),
+                    strategy=strategy,
+                    profile=profile.category if profile else "",
+                    candidate_count=len(candidate_evaluations),
+                    candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
+                )
+
+            material_count = _copy_material_slots(source_surface, work_obj)
             materials_preserved = material_count > 0
             if materials_preserved:
-                _map_material_indices(source_snapshot, work_obj)
+                _map_material_indices(
+                    source_surface,
+                    work_obj,
+                    allow_python_bvh=bounded_source_evidence is None,
+                )
 
-            uv_status = _preserve_textures(source_snapshot, work_obj, config)
+            uv_status = _preserve_textures(
+                source_surface,
+                work_obj,
+                config,
+                allow_python_bvh=bounded_source_evidence is None,
+            )
 
             output_obj, work_obj = _finalize_output(obj, work_obj, config)
             diagnostics = mesh_diagnostics(output_obj, config.target_faces)
             elapsed = (time.perf_counter() - start) * 1000.0
+            topology_status = _topology_status(profile, config.topology_policy)
+            topology_note = (
+                " Full-resolution source topology was not exhaustively verified."
+                if "UNVERIFIED" in topology_status
+                else ""
+            )
+            sampling_note = (
+                " Exhaustive connected-component sampling was skipped at the scan-scale memory guard."
+                if sampling_status.startswith(("SKIPPED_LIMIT", "BOUNDED_"))
+                else ""
+            )
+            fidelity_note = (
+                " Fidelity error used bounded source samples and a target-scale proxy BVH."
+                if fidelity_status.startswith("BOUNDED_PROXY_BVH_")
+                else ""
+            )
             result = RemeshResult(
                 True,
                 output_object=output_obj,
                 diagnostics=diagnostics,
                 engine=engine,
                 elapsed_ms=elapsed,
-                message="Remesh completed.",
+                message=(
+                    f"{strategy} completed: {diagnostics.faces:,} locally validated manifold quads; "
+                    f"p95 scan error {geometry_p95:.4%} of the source diagonal."
+                    f"{topology_note}{sampling_note}{fidelity_note}"
+                    if diagnostics.quad_only
+                    else f"{strategy} remesh completed."
+                ),
                 materials_preserved=materials_preserved,
                 uv_status=uv_status,
+                strategy=strategy,
+                profile=profile.category if profile else "",
+                candidate_count=max(1, len(candidate_evaluations)),
+                geometry_rms=geometry_rms,
+                geometry_p95=geometry_p95,
+                geometry_max=geometry_max,
+                sampling_status=sampling_status,
+                fidelity_status=fidelity_status,
+                quad_only_verified=diagnostics.quad_only,
+                topology_status=topology_status,
+                candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
             )
             _annotate_output(output_obj, result)
             context_state.final_active = output_obj

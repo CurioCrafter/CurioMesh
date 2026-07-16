@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "curiomesh-triadq"
+version = "0.4.0"
+description = "Standalone TRIAD-Q PairClosure engine from the CurioMesh Blender add-on"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "CurioCrafter" }]
+dependencies = ["numpy>=1.23"]
+
+[project.urls]
+Repository = "https://github.com/CurioCrafter/CurioMesh"
+
+[project.scripts]
+triadq = "triadq.__main__:main"
+
+[tool.setuptools]
+packages = ["triadq"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

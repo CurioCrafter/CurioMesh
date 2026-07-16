@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 
 .tools/
+.tmp-blender-user/
 *.blend1
 *.blend2
 *.log
