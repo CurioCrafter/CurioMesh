@@ -341,6 +341,415 @@ def topology_summary(mesh: MeshData) -> TopologySummary:
     )
 
 
+def split_non_manifold_vertex_fans(mesh: MeshData) -> tuple[MeshData, int]:
+    """Duplicate vertices whose incident faces form disconnected edge fans.
+
+    A vertex-only bow-tie is not a manifold surface even when every edge is
+    used by at most two faces.  The repair is deliberately coordinate
+    preserving: each additional fan receives a duplicate of the original
+    vertex, while face order, materials, and face-corner UV indices remain
+    unchanged.  The returned count is the number of duplicate vertices added.
+
+    This function does not attempt to repair non-manifold edges, duplicate
+    faces, or geometric degeneracy.  Callers should gate those conditions
+    separately before treating the result as a certifiable manifold.
+    """
+
+    if not mesh.faces:
+        return mesh, 0
+
+    edge_occurrences = _edge_occurrences(mesh.faces)
+    if any(len(occurrences) > 2 for occurrences in edge_occurrences.values()):
+        return mesh, 0
+
+    incident_faces: dict[int, set[int]] = defaultdict(set)
+    vertex_edge_faces: dict[int, dict[int, set[int]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
+    for face_index, face in enumerate(mesh.faces):
+        for vertex in set(face):
+            incident_faces[vertex].add(face_index)
+        for corner, vertex in enumerate(face):
+            following = face[(corner + 1) % len(face)]
+            vertex_edge_faces[vertex][following].add(face_index)
+            vertex_edge_faces[following][vertex].add(face_index)
+
+    duplicate_coordinates: list[np.ndarray] = []
+    remapped_corners: dict[tuple[int, int], int] = {}
+
+    for vertex in sorted(incident_faces):
+        local_faces = incident_faces[vertex]
+        if len(local_faces) <= 1:
+            continue
+
+        adjacency: dict[int, set[int]] = {face_index: set() for face_index in local_faces}
+        for sharing_faces in vertex_edge_faces[vertex].values():
+            linked = sorted(sharing_faces & local_faces)
+            if len(linked) < 2:
+                continue
+            anchor = linked[0]
+            for other in linked[1:]:
+                adjacency[anchor].add(other)
+                adjacency[other].add(anchor)
+
+        remaining = set(local_faces)
+        fans: list[list[int]] = []
+        while remaining:
+            seed = min(remaining)
+            remaining.remove(seed)
+            fan = [seed]
+            queue = deque([seed])
+            while queue:
+                linked = adjacency[queue.popleft()] & remaining
+                for face_index in sorted(linked):
+                    remaining.remove(face_index)
+                    queue.append(face_index)
+                    fan.append(face_index)
+            fans.append(sorted(fan))
+
+        fans.sort(key=lambda fan: fan[0])
+        for fan in fans[1:]:
+            duplicate = mesh.vertex_count + len(duplicate_coordinates)
+            duplicate_coordinates.append(np.array(mesh.vertices[vertex], dtype=np.float64, copy=True))
+            for face_index in fan:
+                remapped_corners[(face_index, vertex)] = duplicate
+
+    if not duplicate_coordinates:
+        return mesh, 0
+    output_vertices = np.vstack(
+        (mesh.vertices, np.asarray(duplicate_coordinates, dtype=np.float64))
+    )
+    output_faces = [
+        tuple(remapped_corners.get((face_index, vertex), vertex) for vertex in face)
+        for face_index, face in enumerate(mesh.faces)
+    ]
+    return (
+        mesh.copy_with(
+            vertices=output_vertices,
+            faces=output_faces,
+        ),
+        len(duplicate_coordinates),
+    )
+
+
+def _toggle_edge(edges: set[tuple[int, int]], edge: tuple[int, int]) -> None:
+    """Toggle an edge in a GF(2) edge set."""
+
+    if edge in edges:
+        edges.remove(edge)
+    else:
+        edges.add(edge)
+
+
+def _parity_path_edges(mesh: MeshData) -> set[tuple[int, int]]:
+    """Solve sparse transition parity on the quadrilateral dual graph.
+
+    Every triangle first marks its three edges. That gives each residual
+    triangle the robust six-corner template used by global corner closure,
+    while allowing already-valid quads to remain untouched. Quads incident to
+    an odd number of marked edges are then terminals of a T-join over the
+    quad-only dual, with mesh boundaries acting as exterior terminals. Paths
+    are combined by symmetric difference, so overlaps cancel exactly.
+    """
+
+    occurrences = _edge_occurrences(mesh.faces)
+    selected: set[tuple[int, int]] = {
+        tuple(sorted((face[corner], face[(corner + 1) % len(face)])))
+        for face in mesh.faces
+        if len(face) == 3
+        for corner in range(3)
+    }
+    adjacency: list[list[tuple[int, tuple[int, int]]]] = [[] for _face in mesh.faces]
+    boundary_by_face: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for edge, uses in occurrences.items():
+        if len(uses) > 2:
+            raise ValueError(f"Edge {edge} has {len(uses)} incident faces.")
+        if len(uses) == 1:
+            face_index = uses[0][0]
+            if len(mesh.faces[face_index]) == 4:
+                boundary_by_face[face_index].append(edge)
+        elif len(uses) == 2:
+            first, second = uses[0][0], uses[1][0]
+            if len(mesh.faces[first]) == 4 and len(mesh.faces[second]) == 4:
+                adjacency[first].append((second, edge))
+                adjacency[second].append((first, edge))
+
+    for linked in adjacency:
+        linked.sort(key=lambda item: (item[0], item[1]))
+    for edges in boundary_by_face.values():
+        edges.sort()
+
+    terminals = {
+        face_index
+        for face_index, face in enumerate(mesh.faces)
+        if len(face) == 4
+        and sum(
+            tuple(sorted((face[corner], face[(corner + 1) % len(face)]))) in selected
+            for corner in range(4)
+        )
+        % 2
+    }
+    while terminals:
+        start = min(terminals)
+        distances = {start: 0}
+        parents: dict[int, tuple[int, tuple[int, int]]] = {}
+        queue = deque([start])
+        while queue:
+            current = queue.popleft()
+            for linked, edge in adjacency[current]:
+                if linked in distances:
+                    continue
+                distances[linked] = distances[current] + 1
+                parents[linked] = (current, edge)
+                queue.append(linked)
+
+        # Pairing to another transition quad costs one edge per dual step.
+        # Reaching the exterior additionally costs one boundary edge. On an
+        # equal cost, prefer face-to-face pairing because it discharges two
+        # terminals.
+        candidates: list[tuple[int, int, int, tuple[int, int], int | None]] = []
+        for target in sorted(terminals - {start}):
+            if target in distances:
+                candidates.append((distances[target], 0, target, (-1, -1), target))
+        for target, boundary_edges in sorted(boundary_by_face.items()):
+            if target not in distances:
+                continue
+            for edge in boundary_edges:
+                candidates.append((distances[target] + 1, 1, target, edge, None))
+
+        if not candidates:
+            raise ValueError(
+                "Transition parity cannot be discharged through quad-only "
+                "adjacency or the mesh boundary."
+            )
+
+        _cost, _kind, target, exterior_edge, paired_terminal = min(candidates)
+        current = target
+        while current != start:
+            parent, edge = parents[current]
+            _toggle_edge(selected, edge)
+            current = parent
+        if paired_terminal is None:
+            _toggle_edge(selected, exterior_edge)
+            terminals.remove(start)
+        else:
+            terminals.remove(start)
+            terminals.remove(paired_terminal)
+
+    for face_index, face in enumerate(mesh.faces):
+        split_count = sum(
+            tuple(sorted((face[corner], face[(corner + 1) % len(face)]))) in selected
+            for corner in range(len(face))
+        )
+        if (len(face) + split_count) % 2:
+            raise ValueError(f"Parity solve failed on face {face_index}.")
+    return selected
+
+
+def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> MeshData:
+    """Convert a triangle/quad mesh with a sparse parity-path closure.
+
+    Valid unaffected quads remain one face. Odd triangle cells are connected
+    in the dual graph or routed to a boundary; only edges on those paths are
+    split. Shared geometry midpoints prevent T-junctions while face-local UV
+    interpolation preserves seams. Every local patch and the final component
+    Euler/boundary signature are validated transactionally.
+    """
+
+    if not mesh.faces:
+        raise ValueError("ParityPath closure requires at least one face.")
+    if any(len(face) not in {3, 4} for face in mesh.faces):
+        raise ValueError("ParityPath closure accepts triangle/quad meshes only.")
+
+    source_summary = topology_summary(mesh)
+    source_errors = {
+        "degenerate_faces": source_summary.degenerate_faces,
+        "invalid_quads": source_summary.invalid_quads,
+        "non_manifold_edges": source_summary.non_manifold_edges,
+        "non_manifold_vertices": source_summary.non_manifold_vertices,
+        "branched_boundary_vertices": source_summary.branched_boundary_vertices,
+        "inconsistent_edges": source_summary.inconsistent_edges,
+        "duplicate_faces": source_summary.duplicate_faces,
+    }
+    failed = {key: value for key, value in source_errors.items() if value}
+    if failed:
+        details = ", ".join(f"{key}={value}" for key, value in failed.items())
+        raise ValueError(f"ParityPath source topology is not certifiable: {details}.")
+
+    selected_edges = _parity_path_edges(mesh)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    output_vertices = vertices.tolist()
+    midpoint_indices: dict[tuple[int, int], int] = {}
+    for edge in sorted(selected_edges):
+        midpoint_indices[edge] = len(output_vertices)
+        output_vertices.append(((vertices[edge[0]] + vertices[edge[1]]) * 0.5).tolist())
+
+    output_faces: list[Face] = []
+    output_materials: list[str] = []
+    output_uvs = None if mesh.uvs is None else np.asarray(mesh.uvs, dtype=np.float64).tolist()
+    output_face_uvs: list[Face] | None = (
+        [] if output_uvs is not None and mesh.face_uvs is not None else None
+    )
+
+    def patch_is_valid(patch: list[Face]) -> bool:
+        # Validate each cell in local indexing. Rebuilding a dense array from
+        # every accumulated output vertex for every face is quadratic on large
+        # scans and provides no additional geometric information.
+        return all(
+            quad_is_locally_valid(
+                np.asarray([output_vertices[index] for index in quad], dtype=np.float64),
+                (0, 1, 2, 3),
+            )
+            for quad in patch
+        )
+
+    for face_index, face in enumerate(mesh.faces):
+        material = (
+            mesh.face_materials[face_index]
+            if face_index < len(mesh.face_materials)
+            else "default"
+        )
+        augmented: list[int] = []
+        face_uv: Face | None = None
+        augmented_uv: list[int] = []
+        if output_face_uvs is not None and output_uvs is not None and mesh.face_uvs is not None:
+            candidate_uv = mesh.face_uvs[face_index]
+            if (
+                len(candidate_uv) == len(face)
+                and mesh.uvs is not None
+                and all(0 <= uv < len(mesh.uvs) for uv in candidate_uv)
+            ):
+                face_uv = candidate_uv
+            else:
+                output_face_uvs = None
+
+        split_count = 0
+        for corner, vertex in enumerate(face):
+            following = face[(corner + 1) % len(face)]
+            edge = tuple(sorted((vertex, following)))
+            augmented.append(vertex)
+            if face_uv is not None:
+                augmented_uv.append(face_uv[corner])
+            if edge not in selected_edges:
+                continue
+            split_count += 1
+            augmented.append(midpoint_indices[edge])
+            if face_uv is not None and output_uvs is not None and mesh.uvs is not None:
+                following_uv = face_uv[(corner + 1) % len(face_uv)]
+                uv_midpoint = len(output_uvs)
+                output_uvs.append(
+                    ((mesh.uvs[face_uv[corner]] + mesh.uvs[following_uv]) * 0.5).tolist()
+                )
+                augmented_uv.append(uv_midpoint)
+
+        patch: list[Face] | None = None
+        patch_uvs: list[Face] | None = None
+        if len(face) == 4 and split_count == 0:
+            candidate_patch = [tuple(face)]
+            if patch_is_valid(candidate_patch):
+                patch = candidate_patch
+                if face_uv is not None:
+                    patch_uvs = [tuple(face_uv)]
+
+        # A six-corner transition cell can sometimes be cut directly into two
+        # valid quads. Try each opposite boundary diagonal before spending a
+        # center vertex and a third quad.
+        if patch is None and len(face) == 4 and split_count == 2:
+            for offset in range(3):
+                candidate_patch = [
+                    tuple(augmented[(offset + step) % 6] for step in range(4)),
+                    tuple(augmented[(offset + 3 + step) % 6] for step in range(4)),
+                ]
+                if not patch_is_valid(candidate_patch):
+                    continue
+                patch = candidate_patch
+                if face_uv is not None:
+                    patch_uvs = [
+                        tuple(augmented_uv[(offset + step) % 6] for step in range(4)),
+                        tuple(augmented_uv[(offset + 3 + step) % 6] for step in range(4)),
+                    ]
+                break
+
+        if patch is None:
+            if len(augmented) % 2 or len(augmented) < 4:
+                raise ValueError(
+                    f"Face {face_index} has no even transition boundary "
+                    f"(corners={len(augmented)})."
+                )
+            center = len(output_vertices)
+            output_vertices.append(np.mean(vertices[list(face)], axis=0).tolist())
+            center_uv = -1
+            if face_uv is not None and output_uvs is not None and mesh.uvs is not None:
+                center_uv = len(output_uvs)
+                output_uvs.append(np.mean(mesh.uvs[list(face_uv)], axis=0).tolist())
+
+            cell_count = len(augmented) // 2
+            for offset in (0, 1):
+                candidate_patch = [
+                    (
+                        center,
+                        augmented[(offset + 2 * cell) % len(augmented)],
+                        augmented[(offset + 2 * cell + 1) % len(augmented)],
+                        augmented[(offset + 2 * cell + 2) % len(augmented)],
+                    )
+                    for cell in range(cell_count)
+                ]
+                if not patch_is_valid(candidate_patch):
+                    continue
+                patch = candidate_patch
+                if face_uv is not None:
+                    patch_uvs = [
+                        (
+                            center_uv,
+                            augmented_uv[(offset + 2 * cell) % len(augmented_uv)],
+                            augmented_uv[(offset + 2 * cell + 1) % len(augmented_uv)],
+                            augmented_uv[(offset + 2 * cell + 2) % len(augmented_uv)],
+                        )
+                        for cell in range(cell_count)
+                    ]
+                break
+
+        if patch is None:
+            raise ValueError(
+                f"Face {face_index} has no locally valid ParityPath quad template."
+            )
+        output_faces.extend(patch)
+        output_materials.extend([material] * len(patch))
+        if output_face_uvs is not None:
+            if patch_uvs is None:
+                output_face_uvs = None
+            else:
+                output_face_uvs.extend(patch_uvs)
+
+    result = MeshData(
+        vertices=np.asarray(output_vertices, dtype=np.float64),
+        faces=output_faces,
+        face_materials=output_materials,
+        uvs=None if output_uvs is None else np.asarray(output_uvs, dtype=np.float64),
+        face_uvs=output_face_uvs,
+        name=name or f"{mesh.name}_parity_path_closure",
+    )
+    summary = topology_summary(result)
+    if not summary.all_quads:
+        raise ValueError(
+            "ParityPath closure failed validation: "
+            f"quads={summary.quads}/{summary.faces}, degenerate={summary.degenerate_faces}, "
+            f"invalid_quads={summary.invalid_quads}, non_manifold_edges={summary.non_manifold_edges}, "
+            f"non_manifold_vertices={summary.non_manifold_vertices}, "
+            f"branched_boundary_vertices={summary.branched_boundary_vertices}, "
+            f"inconsistent_edges={summary.inconsistent_edges}, duplicate_faces={summary.duplicate_faces}."
+        )
+    if not component_topology_preserved(
+        source_summary.component_signature,
+        summary.component_signature,
+    ):
+        raise ValueError(
+            "ParityPath closure changed the component Euler/boundary signature: "
+            f"{source_summary.component_signature} -> {summary.component_signature}."
+        )
+    return result
+
+
 def quad_only_closure(mesh: MeshData, *, name: str | None = None) -> MeshData:
     """Conformingly split every polygon corner into a quad.
 

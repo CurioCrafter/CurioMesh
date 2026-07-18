@@ -452,6 +452,163 @@ def run_large_retry_proxy_order_case():
     print("PASS large_retry_proxy_order: retry QEM reduction precedes BMesh cleanup")
 
 
+def run_pairclosure_skips_flow_proxy_case():
+    reset_scene()
+    bpy.ops.mesh.primitive_cube_add()
+    source = bpy.context.object
+    source.name = "CurioSmoke_PairClosureDirectProxy"
+    bridge = sys.modules["curiomesh.bridge"]
+    original_prepare = bridge._prepare_flow_proxy
+    calls = []
+
+    def fail_if_called(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("explicit PairClosure entered the flow-proxy path")
+
+    bridge._prepare_flow_proxy = fail_if_called
+    try:
+        result = bridge.run_curiomesh(
+            source,
+            bridge.RemeshConfig(
+                engine="ATLAS_Q",
+                atlas_strategy="PAIR_CLOSURE",
+                target_faces=24,
+                atlas_candidate_count=1,
+                voxel_repair=False,
+                shrinkwrap_project=False,
+                texture_mode="NONE",
+                output_mode="NEW",
+            ),
+        )
+    finally:
+        bridge._prepare_flow_proxy = original_prepare
+
+    if calls:
+        raise AssertionError("pairclosure_direct_proxy: flow preprocessing was called")
+    if not result.success or result.output_object is None:
+        raise AssertionError(f"pairclosure_direct_proxy: {result.message}")
+    print("PASS pairclosure_direct_proxy: explicit PairClosure bypassed redundant flow QEM")
+
+
+def run_pairclosure_unlock_topology_gate_case():
+    bridge = sys.modules["curiomesh.bridge"]
+
+    reset_scene()
+    bpy.ops.mesh.primitive_torus_add(major_segments=12, minor_segments=6)
+    rotated_source = bpy.context.object
+    rotated_source.name = "CurioSmoke_PairUnlockRotation"
+    triangulate = rotated_source.modifiers.new("Triangulate", "TRIANGULATE")
+    bpy.ops.object.modifier_apply(modifier=triangulate.name)
+    before = bridge.mesh_diagnostics(rotated_source, 128)
+    selected, rotated = bridge._rotate_independent_triangle_edges(rotated_source, 1001)
+    after = bridge.mesh_diagnostics(rotated_source, 128)
+    if selected <= 0 or rotated <= 0:
+        raise AssertionError("pair_unlock_gate: deterministic rotation selected no usable edges")
+    if after.component_signature != before.component_signature:
+        raise AssertionError("pair_unlock_gate: edge rotation changed the component topology signature")
+    if not bridge._proxy_topology_certifiable(after):
+        raise AssertionError("pair_unlock_gate: edge rotation introduced a topology defect")
+
+    reset_scene()
+    bpy.ops.mesh.primitive_cube_add()
+    rollback_source = bpy.context.object
+    rollback_source.name = "CurioSmoke_PairUnlockRollback"
+    triangulate = rollback_source.modifiers.new("Triangulate", "TRIANGULATE")
+    bpy.ops.object.modifier_apply(modifier=triangulate.name)
+    rollback_before = bridge.mesh_diagnostics(rollback_source, 24)
+    original_rotate = bridge._rotate_independent_triangle_edges
+    original_decimate = bridge._apply_decimate_proxy
+
+    def damage_topology(obj, _seed, *, fraction=0.18):
+        del fraction
+        bm = bridge.bmesh.new()
+        try:
+            bm.from_mesh(obj.data)
+            bm.faces.ensure_lookup_table()
+            bridge.bmesh.ops.delete(bm, geom=[bm.faces[0]], context="FACES")
+            bm.to_mesh(obj.data)
+            obj.data.update(calc_edges=True)
+        finally:
+            bm.free()
+        return 1, 1
+
+    def keep_damaged_proxy(_obj, _target, _config, *, preserve_features):
+        del preserve_features
+        return True
+
+    bridge._rotate_independent_triangle_edges = damage_topology
+    bridge._apply_decimate_proxy = keep_damaged_proxy
+    try:
+        accepted = bridge._unlock_pair_closure_proxy(
+            rollback_source,
+            4,
+            4,
+            bridge.RemeshConfig(seed=9, debug_logs=True),
+            max_rounds=1,
+        )
+    finally:
+        bridge._rotate_independent_triangle_edges = original_rotate
+        bridge._apply_decimate_proxy = original_decimate
+
+    rollback_after = bridge.mesh_diagnostics(rollback_source, 24)
+    if accepted != 0:
+        raise AssertionError("pair_unlock_gate: topology-changing round was accepted")
+    if rollback_after.component_signature != rollback_before.component_signature:
+        raise AssertionError("pair_unlock_gate: rejected round did not restore exact topology")
+    if rollback_after.faces != rollback_before.faces:
+        raise AssertionError("pair_unlock_gate: rejected round did not restore the prior mesh")
+    print("PASS pair_unlock_gate: deterministic rotations preserve topology and invalid rounds roll back")
+
+
+def run_projection_rollback_case():
+    bridge = sys.modules["curiomesh.bridge"]
+    original_projection = bridge._apply_shrinkwrap
+    cases = (
+        (True, "ROLLED_BACK_FAILED_GATES"),
+        (False, "ROLLED_BACK_APPLY_FAILED"),
+    )
+    for reports_applied, expected_status in cases:
+        reset_scene()
+        bpy.ops.mesh.primitive_cube_add()
+        source = bpy.context.object
+        source.name = f"CurioSmoke_ProjectionRollback_{expected_status}"
+
+        def collapse_projection(target, _source, _config):
+            origin = target.data.vertices[0].co.copy()
+            for vertex in target.data.vertices:
+                vertex.co = origin
+            target.data.update()
+            return reports_applied
+
+        bridge._apply_shrinkwrap = collapse_projection
+        try:
+            result = bridge.run_curiomesh(
+                source,
+                bridge.RemeshConfig(
+                    engine="TRIAD_Q_LITE",
+                    target_faces=24,
+                    triad_force_quads=True,
+                    shrinkwrap_project=True,
+                    texture_mode="NONE",
+                    output_mode="NEW",
+                ),
+            )
+        finally:
+            bridge._apply_shrinkwrap = original_projection
+
+        if not result.success or result.output_object is None:
+            raise AssertionError(f"projection_rollback: validated pre-projection mesh was lost: {result.message}")
+        if result.output_object.get("curiomesh_projection_status") != expected_status:
+            raise AssertionError(
+                f"projection_rollback: expected {expected_status}, got "
+                f"{result.output_object.get('curiomesh_projection_status')}"
+            )
+        diagnostics = bridge.mesh_diagnostics(result.output_object, 24)
+        if not diagnostics.quad_only:
+            raise AssertionError("projection_rollback: restored output no longer passes quad validation")
+    print("PASS projection_rollback: invalid and failed shrinkwrap results restored the validated candidate")
+
+
 def run_quality_gate_case():
     atlasq = sys.modules["curiomesh.atlasq"]
     metrics = sys.modules["curiomesh.metrics"]
@@ -545,6 +702,9 @@ def main():
     run_transformed_surface_error_case()
     run_bounded_fidelity_reference_case()
     run_large_retry_proxy_order_case()
+    run_pairclosure_skips_flow_proxy_case()
+    run_pairclosure_unlock_topology_gate_case()
+    run_projection_rollback_case()
     run_quality_gate_case()
     run_component_sampling_case()
     run_world_scale_metrics_case()

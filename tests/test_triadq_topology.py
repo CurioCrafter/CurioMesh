@@ -15,11 +15,187 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from triadq import MeshData, RemeshOptions, quad_only_closure, remesh_mesh, topology_summary  # noqa: E402
+from triadq import (  # noqa: E402
+    MeshData,
+    RemeshOptions,
+    parity_path_quad_closure,
+    quad_only_closure,
+    remesh_mesh,
+    topology_summary,
+)
 import triadq.engine as triad_engine  # noqa: E402
 
 
 class QuadClosureTests(unittest.TestCase):
+    @staticmethod
+    def _transition_patch(selected_sides: tuple[int, ...], *, with_uvs: bool = False) -> MeshData:
+        """Build a square quad with outward triangle residuals on chosen sides."""
+
+        vertices = [
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.5, -1.0, 0.0),
+            (2.0, 0.5, 0.0),
+            (0.5, 2.0, 0.0),
+            (-1.0, 0.5, 0.0),
+        ]
+        side_faces = {
+            0: (1, 0, 4),
+            1: (2, 1, 5),
+            2: (3, 2, 6),
+            3: (0, 3, 7),
+        }
+        faces = [(0, 1, 2, 3), *(side_faces[side] for side in selected_sides)]
+        materials = ["center", *(f"flap_{side}" for side in selected_sides)]
+        if not with_uvs:
+            return MeshData(
+                vertices=np.asarray(vertices, dtype=float),
+                faces=faces,
+                face_materials=materials,
+                name="transition_patch",
+            )
+
+        # Every face owns its UV corners. In particular, the bottom triangle
+        # deliberately disagrees with the center along their shared edge.
+        uv_values: list[tuple[float, float]] = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ]
+        face_uvs: list[tuple[int, ...]] = [(0, 1, 2, 3)]
+        for side in selected_sides:
+            start = len(uv_values)
+            base = 10.0 * (side + 1)
+            uv_values.extend(
+                [
+                    (base + 2.0, base),
+                    (base, base),
+                    (base + 1.0, base - 2.0),
+                ]
+            )
+            face_uvs.append((start, start + 1, start + 2))
+        return MeshData(
+            vertices=np.asarray(vertices, dtype=float),
+            faces=faces,
+            face_materials=materials,
+            uvs=np.asarray(uv_values, dtype=float),
+            face_uvs=face_uvs,
+            name="transition_patch_uv",
+        )
+
+    def test_parity_path_leaves_an_unaffected_quad_exactly_untouched(self) -> None:
+        source = MeshData(
+            vertices=np.asarray(
+                [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
+                dtype=float,
+            ),
+            faces=[(0, 1, 2, 3)],
+            face_materials=["untouched"],
+            uvs=np.asarray([(0, 0), (1, 0), (1, 1), (0, 1)], dtype=float),
+            face_uvs=[(0, 1, 2, 3)],
+            name="untouched_quad",
+        )
+
+        output = parity_path_quad_closure(source)
+
+        np.testing.assert_array_equal(output.vertices, source.vertices)
+        np.testing.assert_array_equal(output.uvs, source.uvs)
+        self.assertEqual(output.faces, source.faces)
+        self.assertEqual(output.face_materials, source.face_materials)
+        self.assertEqual(output.face_uvs, source.face_uvs)
+        self.assertEqual(
+            topology_summary(output).component_signature,
+            topology_summary(source).component_signature,
+        )
+
+    def test_parity_path_closes_a_triangle_residual_deterministically(self) -> None:
+        source = MeshData(
+            vertices=np.asarray([(0, 0, 0), (2, 0, 0), (0, 2, 0)], dtype=float),
+            faces=[(0, 1, 2)],
+            face_materials=["residual"],
+            uvs=np.asarray([(0, 0), (1, 0), (0, 1)], dtype=float),
+            face_uvs=[(0, 1, 2)],
+            name="triangle_residual",
+        )
+
+        first = parity_path_quad_closure(source)
+        second = parity_path_quad_closure(source)
+        summary = topology_summary(first)
+
+        self.assertTrue(summary.all_quads)
+        self.assertEqual(first.face_count, 3)
+        self.assertEqual(first.vertex_count, 7)
+        self.assertEqual(first.face_materials, ["residual"] * 3)
+        self.assertEqual(summary.component_signature, topology_summary(source).component_signature)
+        self.assertIsNotNone(first.face_uvs)
+        self.assertTrue(all(len(face_uv) == 4 for face_uv in first.face_uvs or []))
+        np.testing.assert_array_equal(first.vertices, second.vertices)
+        np.testing.assert_array_equal(first.uvs, second.uvs)
+        self.assertEqual(first.faces, second.faces)
+        self.assertEqual(first.face_uvs, second.face_uvs)
+
+    def test_parity_path_uses_three_quad_template_for_adjacent_splits(self) -> None:
+        source = self._transition_patch((0, 1))
+        output = parity_path_quad_closure(source)
+        summary = topology_summary(output)
+
+        self.assertTrue(summary.all_quads)
+        self.assertEqual(output.face_count, 9)
+        self.assertEqual(output.face_materials.count("center"), 3)
+        self.assertEqual(output.face_materials.count("flap_0"), 3)
+        self.assertEqual(output.face_materials.count("flap_1"), 3)
+        self.assertEqual(summary.component_signature, topology_summary(source).component_signature)
+
+    def test_parity_path_uses_two_quad_template_for_opposite_splits(self) -> None:
+        source = self._transition_patch((0, 2))
+        output = parity_path_quad_closure(source)
+        summary = topology_summary(output)
+
+        self.assertTrue(summary.all_quads)
+        self.assertEqual(output.face_count, 8)
+        self.assertEqual(output.face_materials.count("center"), 2)
+        self.assertEqual(output.face_materials.count("flap_0"), 3)
+        self.assertEqual(output.face_materials.count("flap_2"), 3)
+        self.assertEqual(summary.component_signature, topology_summary(source).component_signature)
+
+    def test_parity_path_k4_template_preserves_uv_seams_materials_and_topology(self) -> None:
+        source = self._transition_patch((0, 1, 2, 3), with_uvs=True)
+        first = parity_path_quad_closure(source)
+        second = parity_path_quad_closure(source)
+        summary = topology_summary(first)
+
+        self.assertTrue(summary.all_quads)
+        self.assertEqual(first.face_count, 16)
+        self.assertEqual(first.face_materials.count("center"), 4)
+        for side in range(4):
+            self.assertEqual(first.face_materials.count(f"flap_{side}"), 3)
+        self.assertEqual(summary.component_signature, topology_summary(source).component_signature)
+        self.assertIsNotNone(first.uvs)
+        self.assertIsNotNone(first.face_uvs)
+        np.testing.assert_array_equal(first.uvs[: len(source.uvs)], source.uvs)
+        self.assertTrue(all(len(face_uv) == 4 for face_uv in first.face_uvs or []))
+
+        midpoint = next(
+            index
+            for index, vertex in enumerate(first.vertices)
+            if np.allclose(vertex, np.asarray((0.5, 0.0, 0.0)))
+        )
+        seam_uvs = {
+            tuple(first.uvs[uv_index])
+            for face, face_uv in zip(first.faces, first.face_uvs or [], strict=True)
+            for vertex, uv_index in zip(face, face_uv, strict=True)
+            if vertex == midpoint
+        }
+        self.assertIn((0.5, 0.0), seam_uvs)
+        self.assertIn((11.0, 10.0), seam_uvs)
+        np.testing.assert_array_equal(first.vertices, second.vertices)
+        np.testing.assert_array_equal(first.uvs, second.uvs)
+        self.assertEqual(first.faces, second.faces)
+        self.assertEqual(first.face_uvs, second.face_uvs)
+
     def test_flow_modes_change_field_and_pairing_parameters(self) -> None:
         base = RemeshOptions(feature_angle_deg=35.0, smooth_field_iters=4)
         organic = triad_engine._options_for_mode(base, "OrganicFlow")
@@ -93,19 +269,81 @@ class QuadClosureTests(unittest.TestCase):
         self.assertEqual(len(output.face_uvs or []), len(output.faces))
         self.assertTrue(all(len(face) == 4 for face in output.face_uvs or []))
 
-    def test_engine_force_quads_uses_global_closure(self) -> None:
+    def test_engine_force_quads_uses_parity_path_closure(self) -> None:
         source = MeshData(
             vertices=np.asarray([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], dtype=float),
             faces=[(0, 1, 2), (0, 2, 3)],
             face_materials=["scan", "scan"],
             name="paired_square",
         )
-        output, report = remesh_mesh(source, RemeshOptions(target_faces=4, seed_count=2, force_quads=True))
+        output, report = remesh_mesh(source, RemeshOptions(target_faces=1, seed_count=2, force_quads=True))
         self.assertTrue(report.success)
         self.assertTrue(report.closure_applied)
+        self.assertEqual(report.closure_method, "PARITY_PATH")
         self.assertTrue(report.quad_only_verified)
         self.assertTrue(topology_summary(output).all_quads)
         self.assertEqual(report.euler_characteristic, 1)
+        self.assertIn("TRIAD-Q ParityPath completed", report.message)
+        self.assertTrue(
+            all(
+                candidate["closure_method"] == "PARITY_PATH"
+                for candidate in report.candidates
+            )
+        )
+
+    def test_engine_reports_global_target_closure_when_parity_path_rejects(self) -> None:
+        source = MeshData(
+            vertices=np.asarray(
+                [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
+                dtype=float,
+            ),
+            faces=[(0, 1, 2), (0, 2, 3)],
+            face_materials=["scan", "scan"],
+            name="forced_fallback",
+        )
+
+        with patch.object(
+            triad_engine,
+            "parity_path_quad_closure",
+            side_effect=ValueError("forced parity rejection"),
+        ):
+            output, report = remesh_mesh(
+                source,
+                RemeshOptions(target_faces=4, seed_count=1, force_quads=True),
+            )
+
+        self.assertTrue(report.success)
+        self.assertTrue(report.quad_only_verified)
+        self.assertEqual(report.closure_method, "GLOBAL_CORNER_TARGET")
+        self.assertIn("global corner target closure", report.message)
+        self.assertTrue(topology_summary(output).all_quads)
+
+    def test_engine_force_quads_normalizes_vertex_only_bow_tie(self) -> None:
+        source = MeshData(
+            vertices=np.asarray(
+                [
+                    (0, 0, 0),
+                    (1, 0, 0),
+                    (1, 1, 0),
+                    (0, 1, 0),
+                    (-1, 0, 0),
+                    (-1, -1, 0),
+                    (0, -1, 0),
+                ],
+                dtype=float,
+            ),
+            faces=[(0, 1, 2, 3), (0, 4, 5, 6)],
+            face_materials=["first", "second"],
+            name="engine_bow_tie",
+        )
+        output, report = remesh_mesh(
+            source,
+            RemeshOptions(target_faces=2, seed_count=2, force_quads=True),
+        )
+
+        self.assertTrue(report.success)
+        self.assertEqual(report.vertex_fan_splits, 1)
+        self.assertTrue(topology_summary(output).all_quads)
 
     def test_pairing_skips_concave_quad_and_closes_triangles_safely(self) -> None:
         source = MeshData(
@@ -181,18 +419,20 @@ class QuadClosureTests(unittest.TestCase):
         self.assertEqual(output.face_materials.count("paired"), 4)
         self.assertEqual(output.face_materials.count("seam_a"), 3)
         self.assertEqual(output.face_materials.count("seam_b"), 3)
+        self.assertEqual(report.closure_method, "GLOBAL_CORNER_TARGET")
+        self.assertIn("global corner target closure", report.message)
         self.assertIsNotNone(output.uvs)
         self.assertIsNotNone(output.face_uvs)
         self.assertEqual(len(output.face_uvs or []), output.face_count)
         self.assertTrue(all(len(face_uvs) == 4 for face_uvs in output.face_uvs or []))
         np.testing.assert_allclose(output.uvs[: len(source.uvs)], source.uvs)
 
-        first_corner_uvs: dict[str, set[int]] = {"paired": set(), "seam_a": set(), "seam_b": set()}
+        used_uvs: dict[str, set[int]] = {"paired": set(), "seam_a": set(), "seam_b": set()}
         for material, face_uvs in zip(output.face_materials, output.face_uvs or [], strict=True):
-            first_corner_uvs[material].add(face_uvs[0])
-        self.assertEqual(first_corner_uvs["paired"], {0, 1, 2, 3})
-        self.assertEqual(first_corner_uvs["seam_a"], {4, 5, 6})
-        self.assertEqual(first_corner_uvs["seam_b"], {7, 8, 9})
+            used_uvs[material].update(face_uvs)
+        self.assertTrue({0, 1, 2, 3}.issubset(used_uvs["paired"]))
+        self.assertTrue({4, 5, 6}.issubset(used_uvs["seam_a"]))
+        self.assertTrue({7, 8, 9}.issubset(used_uvs["seam_b"]))
 
     def test_seed_sweep_releases_non_best_candidate_meshes_and_keeps_reports(self) -> None:
         source = MeshData(
@@ -293,6 +533,7 @@ class QuadClosureTests(unittest.TestCase):
         )
         self.assertFalse(report.success)
         self.assertFalse(report.quad_only_verified)
+        self.assertEqual(report.vertex_fan_splits, 0)
         self.assertIn("rejected", report.message.lower())
 
 

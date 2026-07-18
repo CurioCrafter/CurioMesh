@@ -20,7 +20,11 @@ ENGINE_ITEMS = [
         "Analyze the scan, build a target-scale proxy, compare solver candidates, and require validated quads",
     ),
     ("QUADRIFLOW", "QuadriFlow", "Production path using Blender's built-in QuadriFlow remesher"),
-    ("TRIAD_Q_LITE", "PairClosure", "Feature-aware pairing plus conforming exact all-quad closure"),
+    (
+        "TRIAD_Q_LITE",
+        "PairClosure",
+        "Feature-aware pairing, safe vertex-fan normalization, and conforming exact all-quad closure",
+    ),
     ("AUTO", "Auto (v0.3 compatibility)", "Alias for Atlas-Q Auto"),
 ]
 
@@ -39,7 +43,11 @@ ATLAS_STRATEGY_ITEMS = [
     ("FEATURE_FLOW", "Mechanical / Feature", "Preserve persistent sharp, seam, and material boundaries"),
     ("DIRTY_FLOW", "Dirty Closed Scan", "Permit voxel repair before field-aligned remeshing"),
     ("OPEN_FLOW", "Open Fragment", "Preserve intentional boundary loops and avoid voxel closure"),
-    ("PAIR_CLOSURE", "Exact PairClosure", "Deterministic pure-quad fallback; robust but creates more poles"),
+    (
+        "PAIR_CLOSURE",
+        "Exact PairClosure",
+        "Deterministic pure-quad fallback with safe bow-tie fan splitting; robust but creates more poles",
+    ),
 ]
 
 TOPOLOGY_ITEMS = [

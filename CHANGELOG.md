@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 hardening
+
+- Normalize vertex-only bow-ties after QEM by deterministically duplicating
+  disconnected incident fans without moving geometry or changing face-corner
+  attributes; true edge-non-manifolds remain rejected.
+- Make shrinkwrap projection transactional. Failed or gate-breaking projection
+  restores the validated candidate and records the rollback reason.
+- Add adversarial topology, standalone engine, and Blender projection rollback
+  regressions grounded in multi-shell photogrammetry parts.
+
 ## 0.4.0 - 2026-07-16
 
 - Added Atlas-Q scan analysis and solver portfolio.
@@ -15,6 +25,10 @@
 - Added a 60-degree local quad-warpage ceiling and per-component Euler checks.
 - Added target-scale preprocessing to direct PairClosure and mode-specific
   field/pairing weights; unsafe concave triangle pairs now remain unpaired.
+- Added ParityPath sparse quad transitions and deterministic target-aware
+  selection against the conservative global corner closure.
+- Added a topology-gated edge-rotation/QEM unlock for irreducible low-budget
+  scan proxies; every round is transactional and signature preserving.
 - Fixed the old collinear per-triangle pure-quad workaround.
 - Fixed duplicate candidate recomputation in TRIAD-Q.
 - Fixed boundary edges being reported as non-manifold.

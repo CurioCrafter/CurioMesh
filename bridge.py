@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import json
 import math
+import random
 import time
 import traceback
 from typing import Any
@@ -24,7 +25,12 @@ from .atlasq import (
 )
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from .textures import bake_selected_to_active, ensure_target_uvs
-from .triadq import MeshData, RemeshOptions as TriadRemeshOptions, remesh_mesh as triad_remesh_mesh
+from .triadq import (
+    MeshData,
+    RemeshOptions as TriadRemeshOptions,
+    remesh_mesh as triad_remesh_mesh,
+    split_non_manifold_vertex_fans,
+)
 
 
 MAX_FIDELITY_REFERENCE_TRIANGLES = 450_000
@@ -40,6 +46,8 @@ class RemeshConfig:
     triad_seed_count: int = 6
     triad_feature_angle: float = 35.0
     triad_force_quads: bool = False
+    pair_closure_base_faces: int = 0
+    pair_closure_output_cap: int = 0
     triad_flow_mode: str = "AUTO"
     atlas_strategy: str = "AUTO"
     atlas_candidate_count: int = 3
@@ -467,11 +475,13 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     obj["curiomesh_triadq_seed"] = int(report.selected_seed)
     obj["curiomesh_triadq_score"] = float(report.score)
     obj["curiomesh_triadq_feature_edges"] = int(report.feature_edges)
+    obj["curiomesh_vertex_fan_splits"] = int(report.vertex_fan_splits)
     _log(
         config,
         (
             f"TRIAD-Q Lite: mode={report.mode} seed={report.selected_seed} "
-            f"faces={report.output_faces} quad_ratio={report.quad_ratio:.3f}"
+            f"faces={report.output_faces} quad_ratio={report.quad_ratio:.3f} "
+            f"vertex_fan_splits={report.vertex_fan_splits}"
         ),
     )
     return True
@@ -517,6 +527,231 @@ def _apply_decimate_proxy(
         return False
 
 
+def _triangle_count(obj: bpy.types.Object) -> int:
+    return sum(max(1, len(poly.vertices) - 2) for poly in obj.data.polygons)
+
+
+def _rotate_independent_triangle_edges(
+    obj: bpy.types.Object,
+    seed: int,
+    *,
+    fraction: float = 0.18,
+) -> tuple[int, int]:
+    """Rotate a deterministic independent set of interior triangle edges.
+
+    Blender's collapse decimator can stop on an irreducible triangulation even
+    when a much smaller triangulation of the same surface topology exists.
+    Edge rotations change only the diagonalization.  Keeping selected edges
+    face-disjoint makes the operation deterministic and avoids interacting
+    rotations within a round.
+    """
+
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        candidates = [
+            edge
+            for edge in bm.edges
+            if len(edge.link_faces) == 2
+            and all(len(face.verts) == 3 for face in edge.link_faces)
+        ]
+        candidates.sort(key=lambda edge: tuple(sorted(vertex.index for vertex in edge.verts)))
+        random.Random(int(seed)).shuffle(candidates)
+        used_faces: set[bmesh.types.BMFace] = set()
+        selected: list[bmesh.types.BMEdge] = []
+        limit = max(1, int(round(len(bm.faces) * max(0.01, min(0.45, fraction)))))
+        for edge in candidates:
+            if any(face in used_faces for face in edge.link_faces):
+                continue
+            selected.append(edge)
+            used_faces.update(edge.link_faces)
+            if len(selected) >= limit:
+                break
+        if not selected:
+            return 0, 0
+        result = bmesh.ops.rotate_edges(
+            bm,
+            edges=selected,
+            use_ccw=bool(int(seed) & 1),
+        )
+        rotated = len(result.get("edges", ()))
+        if rotated:
+            bm.to_mesh(obj.data)
+            obj.data.update(calc_edges=True)
+        return len(selected), rotated
+    finally:
+        bm.free()
+
+
+def _proxy_topology_certifiable(diagnostics: MeshDiagnostics) -> bool:
+    return bool(
+        diagnostics.faces > 0
+        and diagnostics.component_signature
+        and diagnostics.non_manifold_edges == 0
+        and diagnostics.non_manifold_vertices == 0
+        and diagnostics.branched_boundary_vertices == 0
+        and diagnostics.inconsistent_edges == 0
+        and diagnostics.duplicate_faces == 0
+        and diagnostics.degenerate_faces == 0
+    )
+
+
+def _proxy_topology_matches(
+    reference: MeshDiagnostics,
+    candidate: MeshDiagnostics,
+) -> bool:
+    return bool(
+        _proxy_topology_certifiable(candidate)
+        and candidate.connected_components == reference.connected_components
+        and candidate.euler_characteristic == reference.euler_characteristic
+        and candidate.component_signature == reference.component_signature
+        and candidate.ngons == 0
+    )
+
+
+def _normalize_proxy_vertex_fans(
+    obj: bpy.types.Object,
+    output_cap: int,
+    config: RemeshConfig,
+) -> int:
+    """Split coordinate-identical bow-tie fans created by QEM contractions."""
+
+    diagnostics = mesh_diagnostics(obj, output_cap)
+    if diagnostics.non_manifold_vertices <= 0:
+        return 0
+    if (
+        diagnostics.non_manifold_edges > 0
+        or diagnostics.branched_boundary_vertices > 0
+        or diagnostics.inconsistent_edges > 0
+        or diagnostics.duplicate_faces > 0
+        or diagnostics.degenerate_faces > 0
+    ):
+        return 0
+    normalized, splits = split_non_manifold_vertex_fans(_meshdata_from_object(obj))
+    if splits <= 0:
+        return 0
+    _apply_meshdata_to_object(obj, normalized)
+    obj["curiomesh_pair_unlock_vertex_fan_splits"] = int(
+        obj.get("curiomesh_pair_unlock_vertex_fan_splits", 0)
+    ) + int(splits)
+    _log(config, f"Normalized {splits} QEM-created disconnected vertex fan(s)")
+    return int(splits)
+
+
+def _unlock_pair_closure_proxy(
+    obj: bpy.types.Object,
+    base_target: int,
+    output_cap: int,
+    config: RemeshConfig,
+    *,
+    max_rounds: int = 112,
+) -> int:
+    """Unlock topology-preserving QEM reductions with gated edge rotations.
+
+    Each round is transactional.  A rotated/QEM candidate is retained only
+    when it remains a certifiable manifold with the exact same per-component
+    Euler/boundary signature.  Invalid or topology-changing rounds restore the
+    previous mesh.  The 2.8 closure estimate is conservative for the observed
+    PairClosure pairing range; final candidate gates still enforce the actual
+    quad count and topology.
+    """
+
+    cap = max(4, int(output_cap))
+    target = max(4, int(base_target))
+    _normalize_proxy_vertex_fans(obj, cap, config)
+    baseline = mesh_diagnostics(obj, cap)
+    if not _proxy_topology_certifiable(baseline):
+        _log(config, "Skipped QEM unlock because the proxy topology is not certifiable")
+        return 0
+
+    initial_triangles = _triangle_count(obj)
+    if math.ceil(initial_triangles * 2.8) <= cap:
+        return 0
+
+    accepted_rounds = 0
+    rejected_rounds = 0
+    rotated_edges = 0
+    no_reduction_rounds = 0
+    rounds = max(0, min(128, int(max_rounds)))
+    for round_index in range(1, rounds + 1):
+        before_triangles = _triangle_count(obj)
+        previous_mesh = obj.data.copy()
+        previous_mesh.name = f"{obj.data.name}_PreUnlock{round_index:03d}"
+        try:
+            _selected, rotated = _rotate_independent_triangle_edges(
+                obj,
+                int(config.seed) + 1000 + round_index,
+            )
+            if rotated <= 0:
+                if previous_mesh.users == 0:
+                    bpy.data.meshes.remove(previous_mesh)
+                break
+            _apply_decimate_proxy(
+                obj,
+                target,
+                config,
+                preserve_features=False,
+            )
+            _normalize_proxy_vertex_fans(obj, cap, config)
+            candidate = mesh_diagnostics(obj, cap)
+            candidate_triangles = _triangle_count(obj)
+            accepted = bool(
+                candidate_triangles <= before_triangles
+                and _proxy_topology_matches(baseline, candidate)
+            )
+            if accepted:
+                if previous_mesh.users == 0:
+                    bpy.data.meshes.remove(previous_mesh)
+                accepted_rounds += 1
+                rotated_edges += rotated
+                baseline = candidate
+                if candidate_triangles < before_triangles:
+                    no_reduction_rounds = 0
+                else:
+                    no_reduction_rounds += 1
+            else:
+                rejected_mesh = obj.data
+                obj.data = previous_mesh
+                if rejected_mesh.users == 0:
+                    bpy.data.meshes.remove(rejected_mesh)
+                rejected_rounds += 1
+                no_reduction_rounds += 1
+
+            if math.ceil(_triangle_count(obj) * 2.8) <= cap:
+                break
+            if no_reduction_rounds >= 12:
+                break
+        except Exception:
+            traceback.print_exc()
+            rejected_mesh = obj.data
+            obj.data = previous_mesh
+            if rejected_mesh.users == 0:
+                bpy.data.meshes.remove(rejected_mesh)
+            rejected_rounds += 1
+            break
+
+    final_triangles = _triangle_count(obj)
+    obj["curiomesh_pair_unlock_initial_triangles"] = int(initial_triangles)
+    obj["curiomesh_pair_unlock_final_triangles"] = int(final_triangles)
+    obj["curiomesh_pair_unlock_rounds"] = int(accepted_rounds)
+    obj["curiomesh_pair_unlock_rejected_rounds"] = int(rejected_rounds)
+    obj["curiomesh_pair_unlock_rotated_edges"] = int(rotated_edges)
+    obj["curiomesh_pair_unlock_output_estimate"] = int(math.ceil(final_triangles * 2.8))
+    _log(
+        config,
+        (
+            "Topology-gated QEM unlock: "
+            f"triangles={initial_triangles}->{final_triangles}, "
+            f"rounds={accepted_rounds}, rejected={rejected_rounds}, "
+            f"estimated_closure={math.ceil(final_triangles * 2.8)}/{cap}"
+        ),
+    )
+    return accepted_rounds
+
+
 def _prepare_flow_proxy(obj: bpy.types.Object, config: RemeshConfig) -> None:
     factor, cap = {
         "DRAFT": (6, 150_000),
@@ -533,8 +768,33 @@ def _prepare_pair_closure_proxy(obj: bpy.types.Object, config: RemeshConfig) -> 
         return
     # With pairing fraction p, face-corner closure emits approximately
     # N_base * (3 - p) quads. p=0.8 is a conservative first estimate.
-    base_target = max(4, int(round(max(4, config.target_faces) / 2.2)))
-    _apply_decimate_proxy(obj, base_target, config, preserve_features=True)
+    configured_base = int(config.pair_closure_base_faces)
+    base_target = (
+        max(4, configured_base)
+        if configured_base > 0
+        else max(4, int(round(max(4, config.target_faces) / 2.2)))
+    )
+    obj["curiomesh_pair_closure_base_target"] = int(base_target)
+    _apply_decimate_proxy(
+        obj,
+        base_target,
+        config,
+        preserve_features=bool(config.preserve_sharp or config.preserve_seams),
+    )
+    configured_cap = int(config.pair_closure_output_cap)
+    output_cap = (
+        max(4, configured_cap)
+        if configured_cap > 0
+        else max(4, int(math.ceil(config.target_faces * (1.75 if config.quality == "DRAFT" else 1.35))))
+    )
+    obj["curiomesh_pair_closure_output_cap"] = int(output_cap)
+    if configured_base > 0 or not (config.preserve_sharp or config.preserve_seams):
+        _unlock_pair_closure_proxy(
+            obj,
+            base_target,
+            output_cap,
+            config,
+        )
 
 
 def _clone_candidate(base: bpy.types.Object, index: int) -> bpy.types.Object:
@@ -1037,7 +1297,9 @@ def _run_atlasq(
     profile: ScanProfile,
     reference: _SurfaceReference | None = None,
 ) -> tuple[bpy.types.Object | None, CandidateEvaluation | None, list[CandidateEvaluation]]:
-    _prepare_flow_proxy(base_obj, config)
+    pair_closure_only = str(config.atlas_strategy or "AUTO").upper() == "PAIR_CLOSURE"
+    if not pair_closure_only:
+        _prepare_flow_proxy(base_obj, config)
     pristine_mesh = base_obj.data.copy()
     if reference is None:
         reference = _make_surface_reference(
@@ -1490,7 +1752,11 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 work_obj.hide_set(False)
             else:
                 work_obj = _make_working_copy(source_snapshot, obj)
-            if engine == "ATLAS_Q":
+            pair_closure_only = (
+                engine == "ATLAS_Q"
+                and str(config.atlas_strategy or "AUTO").upper() == "PAIR_CLOSURE"
+            )
+            if engine == "ATLAS_Q" and not pair_closure_only:
                 # Keep BMesh cleanup and Python adjacency off the full-resolution
                 # scan whenever Blender's native QEM proxy can reduce it first.
                 _prepare_flow_proxy(work_obj, config)
@@ -1597,36 +1863,68 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
                 )
 
+            projection_snapshot: bpy.types.Mesh | None = None
+            projection_status = "NOT_REQUESTED"
             if config.shrinkwrap_project:
-                _apply_shrinkwrap(work_obj, source_surface, config)
+                projection_snapshot = work_obj.data.copy()
+                projection_status = "APPLIED" if _apply_shrinkwrap(work_obj, source_surface, config) else "FAILED"
 
-            post_projection = mesh_diagnostics(work_obj, config.target_faces)
-            geometry = _sampled_surface_error_stats(
-                source_surface,
-                work_obj,
-                reference=fidelity_reference,
-            )
+            if projection_snapshot is not None and projection_status == "FAILED":
+                rejected_mesh = work_obj.data
+                work_obj.data = projection_snapshot
+                projection_snapshot = None
+                if rejected_mesh.users == 0:
+                    bpy.data.meshes.remove(rejected_mesh)
+                projection_status = "ROLLED_BACK_APPLY_FAILED"
+                _log(config, "Shrinkwrap projection failed to apply; restored validated candidate")
+
+            def evaluate_final_mesh() -> tuple[MeshDiagnostics, _SurfaceError, list[str]]:
+                diagnostics = mesh_diagnostics(work_obj, config.target_faces)
+                measured = _sampled_surface_error_stats(
+                    source_surface,
+                    work_obj,
+                    reference=fidelity_reference,
+                )
+                failures: list[str] = []
+                if engine == "ATLAS_Q" and profile is not None:
+                    failures = candidate_gate_failures(
+                        diagnostics,
+                        target_faces=config.target_faces,
+                        geometry_rms=measured.rms,
+                        geometry_p95=measured.p95,
+                        geometry_max=measured.maximum,
+                        target_edge_normalized=max(profile.target_edge_length / profile.diagonal, 1e-9),
+                        require_quads=config.require_quads,
+                        topology_policy=config.topology_policy,
+                        profile=profile,
+                        quality=config.quality,
+                    )
+                elif config.require_quads and not diagnostics.quad_only:
+                    failures = ["local quad/manifold gate failed"]
+                return diagnostics, measured, failures
+
+            post_projection, geometry, post_failures = evaluate_final_mesh()
+            if post_failures and projection_snapshot is not None and projection_status == "APPLIED":
+                rejected_mesh = work_obj.data
+                work_obj.data = projection_snapshot
+                projection_snapshot = None
+                if rejected_mesh.users == 0:
+                    bpy.data.meshes.remove(rejected_mesh)
+                post_projection, geometry, post_failures = evaluate_final_mesh()
+                if not post_failures:
+                    projection_status = "ROLLED_BACK_FAILED_GATES"
+                    _log(config, "Shrinkwrap projection failed release gates; restored validated candidate")
+
+            if projection_snapshot is not None:
+                if projection_snapshot.users == 0:
+                    bpy.data.meshes.remove(projection_snapshot)
+                projection_snapshot = None
+
             geometry_rms = geometry.rms
             geometry_p95 = geometry.p95
             geometry_max = geometry.maximum
             sampling_status = geometry.component_sampling
             fidelity_status = geometry.fidelity_status
-            post_failures: list[str] = []
-            if engine == "ATLAS_Q" and profile is not None:
-                post_failures = candidate_gate_failures(
-                    post_projection,
-                    target_faces=config.target_faces,
-                    geometry_rms=geometry_rms,
-                    geometry_p95=geometry_p95,
-                    geometry_max=geometry_max,
-                    target_edge_normalized=max(profile.target_edge_length / profile.diagonal, 1e-9),
-                    require_quads=config.require_quads,
-                    topology_policy=config.topology_policy,
-                    profile=profile,
-                    quality=config.quality,
-                )
-            elif config.require_quads and not post_projection.quad_only:
-                post_failures = ["local quad/manifold gate failed"]
             if post_failures:
                 elapsed = (time.perf_counter() - start) * 1000.0
                 return RemeshResult(
@@ -1642,6 +1940,8 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     candidate_count=len(candidate_evaluations),
                     candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
                 )
+
+            work_obj["curiomesh_projection_status"] = projection_status
 
             material_count = _copy_material_slots(source_surface, work_obj)
             materials_preserved = material_count > 0
@@ -1678,6 +1978,16 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 if fidelity_status.startswith("BOUNDED_PROXY_BVH_")
                 else ""
             )
+            projection_note = (
+                {
+                    "ROLLED_BACK_FAILED_GATES": (
+                        " Shrinkwrap projection was rolled back because it violated quad-quality gates."
+                    ),
+                    "ROLLED_BACK_APPLY_FAILED": (
+                        " Shrinkwrap projection could not be applied; the validated candidate was retained."
+                    ),
+                }.get(projection_status, "")
+            )
             result = RemeshResult(
                 True,
                 output_object=output_obj,
@@ -1687,7 +1997,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 message=(
                     f"{strategy} completed: {diagnostics.faces:,} locally validated manifold quads; "
                     f"p95 scan error {geometry_p95:.4%} of the source diagonal."
-                    f"{topology_note}{sampling_note}{fidelity_note}"
+                    f"{topology_note}{sampling_note}{fidelity_note}{projection_note}"
                     if diagnostics.quad_only
                     else f"{strategy} remesh completed."
                 ),

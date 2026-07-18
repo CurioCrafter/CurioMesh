@@ -9,7 +9,13 @@ from typing import Any
 
 import numpy as np
 
-from .topology import quad_is_locally_valid, quad_only_closure, topology_summary
+from .topology import (
+    parity_path_quad_closure,
+    quad_is_locally_valid,
+    quad_only_closure,
+    split_non_manifold_vertex_fans,
+    topology_summary,
+)
 from .types import Face, MeshData
 
 
@@ -44,6 +50,8 @@ class RemeshReport:
     feature_breaks: int = 0
     aspect_penalty: float = 0.0
     closure_applied: bool = False
+    closure_method: str = ""
+    vertex_fan_splits: int = 0
     quad_only_verified: bool = False
     degenerate_faces: int = 0
     euler_characteristic: int = 0
@@ -72,6 +80,8 @@ class RemeshReport:
             "feature_breaks": self.feature_breaks,
             "aspect_penalty": self.aspect_penalty,
             "closure_applied": self.closure_applied,
+            "closure_method": self.closure_method,
+            "vertex_fan_splits": self.vertex_fan_splits,
             "quad_only_verified": self.quad_only_verified,
             "degenerate_faces": self.degenerate_faces,
             "euler_characteristic": self.euler_characteristic,
@@ -112,9 +122,18 @@ class _PairWeights:
 def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[MeshData, RemeshReport]:
     start = time.perf_counter()
     options = options or RemeshOptions()
-    tri_mesh = _triangulate(mesh)
+    normalized_mesh = mesh
+    vertex_fan_splits = 0
+    if options.force_quads:
+        normalized_mesh, vertex_fan_splits = split_non_manifold_vertex_fans(mesh)
+    tri_mesh = _triangulate(normalized_mesh)
     if not tri_mesh.faces:
-        return mesh, RemeshReport(False, mode="EMPTY", message="Input mesh has no faces.")
+        return mesh, RemeshReport(
+            False,
+            mode="EMPTY",
+            vertex_fan_splits=vertex_fan_splits,
+            message="Input mesh has no faces.",
+        )
 
     mode = _classify_mesh(tri_mesh, options)
     best_mesh: MeshData | None = None
@@ -124,6 +143,7 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
 
     for seed in range(seed_count):
         candidate = _run_candidate(tri_mesh, options, mode, seed)
+        candidate.report.vertex_fan_splits = vertex_fan_splits
         candidate.report.candidates = []
         candidate_reports.append(candidate.report.to_dict())
         candidate_is_better = (
@@ -144,8 +164,12 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
     report.elapsed_ms = elapsed
     report.candidates = candidate_reports[:8]
     if report.success:
+        closure_label = {
+            "PARITY_PATH": "ParityPath",
+            "GLOBAL_CORNER_TARGET": "global corner target closure",
+        }.get(report.closure_method, "PairClosure")
         report.message = (
-            "TRIAD-Q PairClosure completed with a locally validated all-quad manifold."
+            f"TRIAD-Q {closure_label} completed with a locally validated all-quad manifold."
             if report.quad_only_verified
             else "TRIAD-Q Lite remesh completed."
         )
@@ -230,17 +254,56 @@ def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int)
         mode,
     )
     closure_applied = bool(options.force_quads)
+    closure_method = ""
     closure_error = ""
     if closure_applied:
+        parity_mesh: MeshData | None = None
+        global_mesh: MeshData | None = None
+        parity_error = ""
+        global_error = ""
         try:
-            output_mesh = quad_only_closure(output_mesh, name=f"{mesh.name}_pairclosure")
+            parity_mesh = parity_path_quad_closure(
+                output_mesh,
+                name=f"{mesh.name}_paritypath",
+            )
         except ValueError as exc:
-            closure_error = str(exc)
+            parity_error = str(exc)
+        try:
+            global_mesh = quad_only_closure(
+                output_mesh,
+                name=f"{mesh.name}_pairclosure_global",
+            )
+        except ValueError as exc:
+            global_error = str(exc)
+
+        closure_candidates = [
+            (candidate, method)
+            for candidate, method in (
+                (parity_mesh, "PARITY_PATH"),
+                (global_mesh, "GLOBAL_CORNER_TARGET"),
+            )
+            if candidate is not None
+        ]
+        if closure_candidates:
+            output_mesh, closure_method = min(
+                closure_candidates,
+                key=lambda item: (
+                    abs(item[0].face_count - int(options.target_faces)),
+                    item[0].face_count,
+                    item[1],
+                ),
+            )
+        else:
+            closure_error = (
+                f"ParityPath: {parity_error or 'no candidate'}; "
+                f"global fallback: {global_error or 'no candidate'}"
+            )
     report = _score_output(output_mesh, mesh, options, mode, seed, feature_edges, feature_breaks)
     report.input_faces = len(mesh.faces)
     report.success = bool(output_mesh.faces)
     report.feature_edges = len(feature_edges)
     report.closure_applied = closure_applied
+    report.closure_method = closure_method
     if closure_error:
         report.success = False
         report.message = f"PairClosure rejected the base topology: {closure_error}"

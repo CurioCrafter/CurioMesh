@@ -242,7 +242,10 @@ def bake_selected_to_active(
         bpy.context.view_layer.objects.active = target_obj
 
         scene.render.engine = "CYCLES"
-        scene.cycles.samples = max(16, int(scene.cycles.samples))
+        # A selected-to-active diffuse color bake has no lighting pass and does
+        # not benefit from inheriting a potentially huge production render
+        # sample count. Keep the asset pipeline deterministic and bounded.
+        scene.cycles.samples = 16
         scene.render.bake.use_selected_to_active = True
         scene.render.bake.cage_extrusion = 0.04
         scene.render.bake.margin = max(0, int(margin))

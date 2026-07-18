@@ -13,6 +13,7 @@ __pycache__/
 core_build/
 build/
 dist/
+/artifacts/
 *.pyd
 *.so
 *.dylib

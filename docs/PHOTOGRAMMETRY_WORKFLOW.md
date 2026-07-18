@@ -67,6 +67,12 @@ visible seams.
   unintended topology change against the exact source or reduced proxy.
 - `Target Error`: a large value means the requested count conflicted with the
   solver/closure. Raise the target or use a flow strategy.
+- `curiomesh_vertex_fan_splits`: the number of coordinate-preserving
+  vertex-only bow-tie splits applied after proxy reduction. A nonzero value is
+  expected on some scan fragments; edge-non-manifold input is still rejected.
+- `curiomesh_projection_status`: `ROLLED_BACK_FAILED_GATES` means shrinkwrap
+  folded or otherwise invalidated the candidate, so the validated
+  pre-projection topology was retained instead.
 
 ## If Atlas-Q Rejects Every Candidate
 

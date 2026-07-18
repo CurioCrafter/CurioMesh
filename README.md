@@ -17,8 +17,14 @@ not pass the requested topology and quad-quality gates.
   area/spatial/component-stratified source-error measurement, and hard
   validation.
 - **PairClosure** replaces the old per-triangle "pure quad" workaround. It
-  performs feature-aware triangle pairing followed by a globally conforming
-  face-corner split. Every accepted face has exactly four distinct corners.
+  performs feature-aware triangle pairing, compares a sparse ParityPath
+  transition closure with the conservative global corner closure, and selects
+  the valid result closest to the requested budget. Before closure it can
+  normalize vertex-only bow-ties by
+  duplicating disconnected incident fans without moving geometry, changing
+  face order, or changing face-corner UVs. It deliberately refuses to present
+  this as a repair for edges used by more than two faces. Every accepted face
+  has exactly four distinct corners.
 - **Topology and shape gates** reject edge and vertex non-manifolds, branched
   boundaries, duplicate faces, inconsistent winding, concave/crossed quads,
   excessive target error, poor Jacobians/aspect, and excessive symmetric RMS,
@@ -32,7 +38,10 @@ not pass the requested topology and quad-quality gates.
 
 The immutable evaluated source snapshot remains alive through remeshing,
 projection, material mapping, UV transfer, and optional baking. A failed
-candidate never replaces the selected source object.
+candidate never replaces the selected source object. Projection is
+transactional: if shrinkwrap makes an accepted candidate degenerate,
+non-manifold, topologically different, or too inaccurate, CurioMesh restores
+the validated pre-projection mesh and records the rollback on the output.
 
 ## Solver Portfolio
 
@@ -108,16 +117,36 @@ Jacobian, aspect ratio, target-count error, pole ratio, and quad ratio. Topology
 violations are rejection conditions rather than small score penalties.
 
 PairClosure starts with feature-aware triangle pairing. It then processes every
-base face `f = (v0 ... vk-1)` using a globally shared edge midpoint `mi` and a
-face center `cf`:
+residual triangle with shared edge midpoints. ParityPath keeps unaffected valid
+quads unchanged and solves odd quad transitions as a T-join on the quad-only
+face-dual graph. Affected faces use locally validated two-, three-, or
+four-quad templates with shared geometric midpoints and face-local UVs.
+
+The conservative target closure processes every base face
+`f = (v0 ... vk-1)` using a globally shared edge midpoint `mi` and a face
+center `cf`:
 
 ```text
 qi = (vi, mi, cf, m(i-1)).
 ```
 
-This produces `Fout = 3T + 4Q`, is conforming across shared edges, preserves
-Euler characteristic when the base is manifold, and guarantees four-corner
-faces. It also preserves face-local UV seams.
+This produces `Fglobal = 3T + 4Q`. ParityPath instead has
+`Fparity = 3T + Q0 + 2Q2d + 3Q2c + 4Q4`, where the `Q` terms classify
+unaffected, direct two-split, center-filled two-split, and four-split quads.
+Both paths are conforming, preserve Euler characteristic when the base is
+manifold, guarantee four-corner faces, and preserve face-local UV seams.
+
+If Blender's collapse decimator stalls above a closure budget, PairClosure can
+rotate a deterministic face-independent set of interior triangle diagonals and
+retry QEM. Every round is transactional: it is retained only when manifold,
+degeneracy, component, Euler, and per-component boundary-signature gates remain
+exact. The final quad count and source-error gates still decide acceptance.
+
+For a vertex-only bow-tie, incident faces around vertex `v` are partitioned by
+edge adjacency into fans `F0 ... Fk`. `F0` keeps `v`; each later fan receives a
+coincident duplicate `v_i`. This is an exact combinatorial normalization:
+coordinates, faces, materials, and corner UV indices are unchanged. True
+edge-non-manifolds remain rejected.
 
 For a closed all-quad manifold, poles are mathematically necessary:
 
@@ -184,6 +213,7 @@ Implemented now:
 - Target-scale native QEM proxy construction.
 - Multi-candidate QuadriFlow, feature-flow, open-flow, and dirty-flow routing.
 - Exact conforming PairClosure.
+- Sparse ParityPath transitions plus topology-gated edge-rotation/QEM unlock.
 - Area-, spatial-, and component-stratified symmetric distance scoring with
   RMS, p95, and maximum-error gates.
 - Immutable-source projection, UV/material transfer, and baking.
@@ -223,6 +253,11 @@ CurioMesh's implementation and roadmap are grounded in primary sources:
   for target-scale proxy simplification.
 - [Quasi-structured quad meshing with midpoint subdivision](https://arxiv.org/abs/2103.04652)
   for the robust all-quad closure pattern.
+- [Blossom-Quad](https://orbi.uliege.be/handle/2268/113152) for graph matching
+  formulations of indirect quadrangulation.
+- [Practical Quad Mesh Simplification](https://vcg-legacy.isti.cnr.it/Publications/2010/TPCPP10/Tarini%20Pietroni%20Cignoni%20Panozzo%20Puppo%20-%20Practical%20Quad%20Semplification%20-%20EG%202010.pdf)
+  and [Quadrilateral Mesh Simplification](https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Daniels08.pdf)
+  for topology-preserving local connectivity operations and quad LOD design.
 
 CurioMesh is MIT licensed. No GPL QuadWild/BiMDF source is copied or vendored.
 

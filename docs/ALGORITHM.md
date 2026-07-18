@@ -67,6 +67,16 @@ or standalone conversion. Proxy budgets are:
 Sharp, seam, and material delimiters are requested where Blender exposes them.
 The source reference is never decimated.
 
+On explicitly budgeted PairClosure runs, Blender QEM can stall on an
+irreducible triangulation even though a smaller triangulation of the same
+surface exists. Atlas-Q then rotates a deterministic face-independent set of
+interior triangle diagonals and retries QEM for a bounded number of rounds.
+Each round snapshots the mesh and is committed only when it does not increase
+triangle count and preserves all manifold/degeneracy gates plus the exact
+sorted per-component `(Euler, boundary cycles)` signature. Otherwise it is
+rolled back. The closure estimate used to stop early is heuristic; the actual
+quad count and fidelity gates remain authoritative.
+
 ### 4. Solver candidates
 
 Flow candidates run Blender's QuadriFlow with deterministic seeds separated by
@@ -88,10 +98,58 @@ weight profiles. A proposed pair must itself be a finite, convex, non-crossed
 quad with no more than 60 degrees of triangle-normal divergence across either
 diagonal; unsafe pairs remain triangles for exact closure.
 
-### 5. Conforming exact quad closure
+When PairClosure is explicitly requested, Atlas-Q bypasses the larger
+flow-candidate proxy and builds only this closure-sized QEM proxy. Avoiding two
+serial decimation passes matters for sub-1,000-quad assets: it reduces topology
+drift and makes the requested final budget correspond to the closure model.
+For an explicitly low-poly fallback, callers may also release sharp/UV seam
+delimiters on the closure proxy. Exact topology, local quad validity, and
+surface-error gates still decide acceptance; the relaxed candidate cannot
+silently remove a handle, boundary cycle, or component.
 
-For every base polygon `f=(v0,...,vk-1)`, construct one globally shared
-geometric midpoint for each undirected edge, one face center, and
+Batch controllers can set an explicit closure-base budget after observing a
+failed candidate's expansion ratio. If a base request `B0` produced `Q0` quads
+for desired output `Qt`, the next deterministic estimate is proportional to
+`B1 = B0 Qt / Q0`, with a small safety margin. The final target remains `Qt`;
+only proxy construction changes, and all topology/fidelity gates are rerun.
+
+Immediately after the QEM proxy and before triangle pairing, PairClosure checks
+the local fan of every used vertex. If the incident faces split into `k > 1`
+groups when adjacency is restricted to edges containing that vertex, each fan
+after the first receives an exact coordinate duplicate. This removes
+vertex-only bow-ties even when those fans connect elsewhere in the same global
+component. Face order, material IDs, and corner UV indices do not change. The
+normalizer is deterministic and refuses inputs containing an edge incident to
+more than two faces; that defect needs a different, explicit repair policy.
+
+### 5. ParityPath and conservative exact closure
+
+After feature-aware pairing, ParityPath marks all three edges of every residual
+triangle. A neighboring quad incident to an odd number of marked edges becomes
+a terminal in the quad-only dual graph. Deterministic shortest paths pair those
+terminals or route them to a mesh boundary; path edges are combined by
+symmetric difference. This is the parity equation
+
+```text
+sum(edge splits around face) = face arity  (mod 2).
+```
+
+Unchanged quads remain one face. Two-split quad cells use a validated direct
+two-quad partition when possible or a three-quad center template; four-split
+cells use four quads. Residual triangles use the robust three-quad midpoint and
+center template. Every local template is checked for finite, convex,
+non-crossed geometry before it is committed, and the complete component
+signature is checked again afterward.
+
+For transition classes `Q0`, `Q2d`, `Q2c`, and `Q4`, the sparse count is
+
+```text
+Fparity = 3T + Q0 + 2 Q2d + 3 Q2c + 4 Q4.
+```
+
+Atlas-Q also constructs the conservative global candidate. For every base
+polygon `f=(v0,...,vk-1)`, construct one globally shared geometric midpoint
+for each undirected edge, one face center, and
 
 ```text
 qi = (vi, midpoint(vi,v(i+1)), center(f), midpoint(v(i-1),vi)).
@@ -102,11 +160,15 @@ result conforming. Shared geometric edges receive one midpoint. UV midpoints
 remain face-local so seams survive. Material IDs are repeated per generated
 corner quad.
 
-For `T` unpaired triangles and `Q` paired quads:
+For `T` unpaired triangles and `Q` paired quads, that candidate has:
 
 ```text
-Fout = 3T + 4Q.
+Fglobal = 3T + 4Q.
 ```
+
+The engine returns the valid closure whose face count is closest to the target,
+using the lower count as the deterministic tie-breaker. ParityPath is therefore
+an optimization, not a replacement for the proven conservative construction.
 
 If the base is a valid consistently wound manifold, the operation preserves its
 Euler characteristic and manifoldness. Acceptance additionally checks vertex
@@ -175,7 +237,11 @@ Current hard thresholds are:
 | Hero | 25% | 0.25 | 0.75 | 2.00 | 0.05 | 6 |
 
 Validation runs before and after projection. Shrinkwrap succeeding does not
-override a failed quality gate. “Locally valid” is not an embedded-surface
+override a failed quality gate. The accepted candidate mesh is snapshotted
+before projection; if projection violates a gate, CurioMesh restores that mesh
+and records `curiomesh_projection_status=ROLLED_BACK_FAILED_GATES`. If applying
+the modifier itself fails, it records `ROLLED_BACK_APPLY_FAILED`. A rollback is
+preferred over silently shipping folded or degenerate quads. “Locally valid” is not an embedded-surface
 self-intersection certificate; visual/intersection inspection is still
 required for a shipping asset.
 
@@ -241,3 +307,6 @@ represented as implemented by the current Python add-on.
 - [Garland-Heckbert QEM](https://www.cs.princeton.edu/courses/archive/fall03/cs526/papers/garland97.pdf)
 - [Quasi-structured quad meshing](https://arxiv.org/abs/2103.04652)
 - [SLIM locally injective maps](https://igl.ethz.ch/projects/slim/SLIM2017.pdf)
+- [Blossom-Quad](https://orbi.uliege.be/handle/2268/113152)
+- [Practical Quad Mesh Simplification](https://vcg-legacy.isti.cnr.it/Publications/2010/TPCPP10/Tarini%20Pietroni%20Cignoni%20Panozzo%20Puppo%20-%20Practical%20Quad%20Semplification%20-%20EG%202010.pdf)
+- [Quadrilateral Mesh Simplification](https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Daniels08.pdf)
