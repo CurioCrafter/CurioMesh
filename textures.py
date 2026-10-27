@@ -58,6 +58,11 @@ def assign_image_to_material(obj: bpy.types.Object, image: bpy.types.Image, labe
     if not mesh.materials:
         mesh.materials.append(bpy.data.materials.new(name=f"{obj.name}_Material"))
 
+    # Baking must not mutate a material shared by the immutable source object.
+    for index, material in enumerate(list(mesh.materials)):
+        if material is not None and material.users > 1:
+            mesh.materials[index] = material.copy()
+
     for material in mesh.materials:
         if material is None:
             continue
@@ -72,6 +77,121 @@ def assign_image_to_material(obj: bpy.types.Object, image: bpy.types.Image, labe
         nodes.active = tex
 
 
+def connect_baked_image(obj: bpy.types.Object, image: bpy.types.Image, label: str) -> None:
+    if label != "CurioMesh_BaseColor":
+        return
+    for material in obj.data.materials:
+        if material is None or not material.use_nodes:
+            continue
+        nodes = material.node_tree.nodes
+        tex = next(
+            (
+                node
+                for node in nodes
+                if node.type == "TEX_IMAGE" and node.label == label and node.image == image
+            ),
+            None,
+        )
+        principled = nodes.get("Principled BSDF")
+        if tex is None or principled is None or "Base Color" not in principled.inputs:
+            continue
+        color_input = principled.inputs["Base Color"]
+        for link in list(color_input.links):
+            material.node_tree.links.remove(link)
+        material.node_tree.links.new(tex.outputs["Color"], color_input)
+
+
+def _bake_jobs(maps: Iterable[str]) -> list[tuple[str, str, bool]]:
+    jobs: list[tuple[str, str, bool]] = []
+    for map_name in maps:
+        pass_name = str(map_name).upper()
+        if pass_name == "COLOR":
+            jobs.append(("DIFFUSE", "CurioMesh_BaseColor", True))
+        elif pass_name in {"ROUGHNESS", "METALLIC", "NORMAL", "EMIT"}:
+            jobs.append((pass_name, f"CurioMesh_{pass_name.title()}", False))
+    return jobs
+
+
+def _execute_bake(bake_type: str) -> set[str]:
+    return bpy.ops.object.bake(type=bake_type)
+
+
+def _snapshot_bake_settings(scene: bpy.types.Scene) -> list[tuple[object, str, object]]:
+    bake = scene.render.bake
+    return [
+        (scene.render, "engine", scene.render.engine),
+        (scene.cycles, "samples", scene.cycles.samples),
+        (bake, "use_selected_to_active", bake.use_selected_to_active),
+        (bake, "cage_extrusion", bake.cage_extrusion),
+        (bake, "margin", bake.margin),
+        (bake, "use_pass_direct", bake.use_pass_direct),
+        (bake, "use_pass_indirect", bake.use_pass_indirect),
+        (bake, "use_pass_color", bake.use_pass_color),
+    ]
+
+
+def _restore_properties(snapshot: list[tuple[object, str, object]]) -> None:
+    for owner, name, value in snapshot:
+        setattr(owner, name, value)
+
+
+def _make_target_materials_private(
+    target_obj: bpy.types.Object,
+    created_materials: list[bpy.types.Material],
+) -> list[bpy.types.Material | None]:
+    """Isolate all bake node edits so a failed bake can be rolled back exactly."""
+
+    mesh = target_obj.data
+    original_materials = list(mesh.materials)
+    if not original_materials:
+        material = bpy.data.materials.new(name=f"{target_obj.name}_Material")
+        created_materials.append(material)
+        mesh.materials.append(material)
+        return original_materials
+
+    for index, material in enumerate(original_materials):
+        if material is None:
+            private_material = bpy.data.materials.new(name=f"{target_obj.name}_Material_{index + 1}")
+        else:
+            private_material = material.copy()
+        created_materials.append(private_material)
+        mesh.materials[index] = private_material
+    return original_materials
+
+
+def _rollback_bake_data(
+    target_obj: bpy.types.Object,
+    original_materials: list[bpy.types.Material | None],
+    created_materials: list[bpy.types.Material],
+    created_images: list[bpy.types.Image],
+) -> list[str]:
+    errors: list[str] = []
+    mesh = target_obj.data
+
+    try:
+        for index, material in enumerate(original_materials):
+            mesh.materials[index] = material
+        while len(mesh.materials) > len(original_materials):
+            mesh.materials.pop(index=len(mesh.materials) - 1)
+    except Exception as exc:
+        errors.append(f"material slots: {exc}")
+
+    for material in reversed(created_materials):
+        try:
+            if bpy.data.materials.get(material.name) is material:
+                bpy.data.materials.remove(material, do_unlink=True)
+        except Exception as exc:
+            errors.append(f"material {getattr(material, 'name', '<removed>')}: {exc}")
+
+    for image in reversed(created_images):
+        try:
+            if bpy.data.images.get(image.name) is image:
+                bpy.data.images.remove(image, do_unlink=True)
+        except Exception as exc:
+            errors.append(f"image {getattr(image, 'name', '<removed>')}: {exc}")
+    return errors
+
+
 def bake_selected_to_active(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
@@ -81,13 +201,20 @@ def bake_selected_to_active(
     margin: int = 8,
     uv_method: str = "SMART",
 ) -> list[bpy.types.Image]:
+    jobs = _bake_jobs(maps)
+    if not jobs:
+        return []
+
     ensure_target_uvs(target_obj, uv_method)
     baked: list[bpy.types.Image] = []
+    created_images: list[bpy.types.Image] = []
+    created_materials: list[bpy.types.Material] = []
+    original_materials: list[bpy.types.Material | None] = list(target_obj.data.materials)
 
     previous_active = bpy.context.view_layer.objects.active
     previous_selection = list(bpy.context.selected_objects)
     scene = bpy.context.scene
-    previous_engine = scene.render.engine
+    bake_settings = _snapshot_bake_settings(scene)
     visibility_state = {}
 
     try:
@@ -115,35 +242,46 @@ def bake_selected_to_active(
         bpy.context.view_layer.objects.active = target_obj
 
         scene.render.engine = "CYCLES"
-        scene.cycles.samples = max(16, int(scene.cycles.samples))
+        # A selected-to-active diffuse color bake has no lighting pass and does
+        # not benefit from inheriting a potentially huge production render
+        # sample count. Keep the asset pipeline deterministic and bounded.
+        scene.cycles.samples = 16
         scene.render.bake.use_selected_to_active = True
         scene.render.bake.cage_extrusion = 0.04
         scene.render.bake.margin = max(0, int(margin))
+        _make_target_materials_private(target_obj, created_materials)
 
-        for map_name in maps:
-            pass_name = str(map_name).upper()
-            if pass_name == "COLOR":
-                bake_type = "DIFFUSE"
-                label = "CurioMesh_BaseColor"
+        for bake_type, label, is_color in jobs:
+            if is_color:
                 scene.render.bake.use_pass_direct = False
                 scene.render.bake.use_pass_indirect = False
                 scene.render.bake.use_pass_color = True
-            elif pass_name in {"ROUGHNESS", "METALLIC", "NORMAL", "EMIT"}:
-                bake_type = pass_name
-                label = f"CurioMesh_{pass_name.title()}"
-            else:
-                continue
 
             image = create_bake_image(f"{target_obj.name}_{label}", int(resolution))
+            created_images.append(image)
             assign_image_to_material(target_obj, image, label)
-            bpy.ops.object.bake(type=bake_type)
+            result = _execute_bake(bake_type)
+            if "FINISHED" not in result:
+                raise RuntimeError(f"{bake_type} bake did not finish: {sorted(result)}")
+            connect_baked_image(target_obj, image, label)
             try:
                 image.pack()
             except Exception:
                 pass
             baked.append(image)
+    except Exception as bake_error:
+        cleanup_errors = _rollback_bake_data(
+            target_obj,
+            original_materials,
+            created_materials,
+            created_images,
+        )
+        if cleanup_errors:
+            details = "; ".join(cleanup_errors)
+            raise RuntimeError(f"Bake failed and rollback was incomplete ({details})") from bake_error
+        raise
     finally:
-        scene.render.engine = previous_engine
+        _restore_properties(bake_settings)
         for obj in (source_obj, target_obj):
             state = visibility_state.get(obj.name)
             if state is None or obj.name not in bpy.data.objects:
