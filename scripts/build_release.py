@@ -11,9 +11,12 @@ PACKAGE_NAME = "curiomesh"
 ROOT_FILES = {
     "__init__.py",
     "atlasq.py",
+    "batch.py",
     "bridge.py",
+    "live.py",
     "metrics.py",
     "operators.py",
+    "overlay.py",
     "textures.py",
     "ui.py",
     "blender_manifest.toml",

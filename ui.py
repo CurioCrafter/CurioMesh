@@ -11,21 +11,35 @@ from .operators import (
     TEXTURE_ITEMS,
     TOPOLOGY_ITEMS,
 )
+from . import live, overlay
+from .batch import CURIOMESH_PG_batch_item
+
+
+def _live_update(self, context):
+    live.on_setting_changed(self)
+
+
+def _live_toggle_update(self, context):
+    live.on_live_toggled(self, context)
+
+
+def _redraw_update(self, context):
+    overlay.tag_redraw()
 
 
 class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
-    target_faces: bpy.props.IntProperty(name="Target Faces", default=8000, min=4, soft_max=250000)
+    target_faces: bpy.props.IntProperty(name="Target Faces", default=8000, min=4, soft_max=250000, update=_live_update)
     engine: bpy.props.EnumProperty(name="Engine", items=ENGINE_ITEMS, default="ATLAS_Q")
     quality: bpy.props.EnumProperty(name="Quality", items=QUALITY_ITEMS, default="BALANCED")
     seed: bpy.props.IntProperty(name="Seed", default=0, min=0, soft_max=100000)
-    triad_seed_count: bpy.props.IntProperty(name="TRIAD-Q Seeds", default=6, min=1, max=32)
-    triad_feature_angle: bpy.props.FloatProperty(name="TRIAD-Q Feature Angle", default=35.0, min=0.0, max=180.0)
+    triad_seed_count: bpy.props.IntProperty(name="TRIAD-Q Seeds", default=6, min=1, max=32, update=_live_update)
+    triad_feature_angle: bpy.props.FloatProperty(name="TRIAD-Q Feature Angle", default=35.0, min=0.0, max=180.0, update=_live_update)
     triad_force_quads: bpy.props.BoolProperty(name="TRIAD-Q Pure Quads", default=False)
-    triad_flow_mode: bpy.props.EnumProperty(name="TRIAD-Q Flow", items=FLOW_ITEMS, default="AUTO")
+    triad_flow_mode: bpy.props.EnumProperty(name="TRIAD-Q Flow", items=FLOW_ITEMS, default="AUTO", update=_live_update)
     atlas_strategy: bpy.props.EnumProperty(name="Scan Strategy", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
     atlas_candidate_count: bpy.props.IntProperty(name="Candidate Budget", default=3, min=1, max=8)
     topology_policy: bpy.props.EnumProperty(name="Topology", items=TOPOLOGY_ITEMS, default="PRESERVE")
-    require_quads: bpy.props.BoolProperty(name="Require Locally Valid Quads", default=True)
+    require_quads: bpy.props.BoolProperty(name="Require Locally Valid Quads", default=True, update=_live_update)
     analysis_sample_faces: bpy.props.IntProperty(
         name="Analysis Sample Faces",
         default=120000,
@@ -49,6 +63,26 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     apply_source_modifiers: bpy.props.BoolProperty(name="Apply Source Modifiers", default=True)
     keep_debug_objects: bpy.props.BoolProperty(name="Keep Debug Objects", default=False)
     debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", default=False)
+
+    hud_enabled: bpy.props.BoolProperty(
+        name="HUD", description="Show the CurioMesh dashboard in the 3D viewport", default=True, update=_redraw_update
+    )
+    heatmap_enabled: bpy.props.BoolProperty(
+        name="Heatmap",
+        description="Highlight triangles, n-gons and poles on the active mesh",
+        default=False,
+        update=_redraw_update,
+    )
+    live_enabled: bpy.props.BoolProperty(
+        name="Live",
+        description="Keep a PairClosure preview beside the source that updates as you change settings",
+        default=False,
+        update=_live_toggle_update,
+    )
+    batch_results: bpy.props.CollectionProperty(type=CURIOMESH_PG_batch_item)
+    batch_index: bpy.props.IntProperty(default=0)
+    batch_status: bpy.props.StringProperty(default="")
+    batch_report_path: bpy.props.StringProperty(default="")
 
     metrics_faces: bpy.props.IntProperty(name="Faces", default=0)
     metrics_quads: bpy.props.IntProperty(name="Quads", default=0)
@@ -99,138 +133,265 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     analysis_warning: bpy.props.StringProperty(name="Warning", default="")
 
 
+def _fill_remesh_operator(op, settings) -> None:
+    """Copy every shared setting onto the remesh operator (names match by design)."""
+    for prop in op.bl_rna.properties:
+        if prop.identifier != "rna_type" and prop.identifier in settings.bl_rna.properties:
+            setattr(op, prop.identifier, getattr(settings, prop.identifier))
+
+
+class _SubPanel:
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CurioMesh"
+    bl_parent_id = "CURIOMESH_PT_panel"
+    bl_options = {"DEFAULT_CLOSED"}
+
+
 class CURIOMESH_PT_panel(bpy.types.Panel):
-    bl_label = "CurioMesh"
+    bl_label = "CurioMesh Quick Start"
     bl_idname = "CURIOMESH_PT_panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "CurioMesh"
 
-    @classmethod
-    def poll(cls, context: bpy.types.Context):
-        obj = context.object
-        return obj is not None and obj.type == "MESH"
+    def draw_header(self, context: bpy.types.Context):
+        self.layout.label(icon="MOD_REMESH")
 
     def draw(self, context: bpy.types.Context):
         layout = self.layout
         settings = context.scene.curiomesh_settings
+        obj = context.object
+        has_mesh = obj is not None and obj.type == "MESH"
 
-        main = layout.column(align=True)
-        main.prop(settings, "target_faces")
-        main.prop(settings, "engine")
-        main.prop(settings, "quality")
-        row = main.row(align=True)
-        row.operator("curiomesh.apply_preset", text="Draft").preset = "DRAFT"
-        row.operator("curiomesh.apply_preset", text="Balanced").preset = "BALANCED"
-        row.operator("curiomesh.apply_preset", text="Hero").preset = "HERO"
+        if not has_mesh:
+            layout.label(text="Select a mesh to start", icon="INFO")
 
-        scan = layout.box()
-        scan.label(text="1. Scan Intelligence")
-        scan.operator("curiomesh.analyze", text="Analyze Without Changing Mesh", icon="VIEWZOOM")
+        # Step 1: the one big button.
+        big = layout.column(align=True)
+        big.enabled = has_mesh
+        big.scale_y = 2.0
+        _fill_remesh_operator(big.operator("curiomesh.remesh", text="Remesh", icon="MOD_REMESH"), settings)
+
+        # Step 2: how good?
+        layout.label(text="Quality")
+        presets = layout.row(align=True)
+        presets.scale_y = 1.4
+        for key, label, icon in (
+            ("DRAFT", "Draft", "SORTTIME"),
+            ("BALANCED", "Balanced", "SHADING_SOLID"),
+            ("HERO", "Hero", "SOLO_ON"),
+        ):
+            op = presets.operator("curiomesh.apply_preset", text=label, icon=icon, depress=settings.quality == key)
+            op.preset = key
+
+        # Step 3: how many faces?
+        layout.prop(settings, "target_faces")
+        layout.prop(settings, "engine", text="")
+
+        # Live helpers.
+        layout.label(text="See it")
+        toggles = layout.row(align=True)
+        toggles.scale_y = 1.2
+        toggles.prop(settings, "hud_enabled", text="HUD", icon="OVERLAY", toggle=True)
+        toggles.operator(
+            "curiomesh.toggle_heatmap", text="Heatmap", icon="SHADING_RENDERED", depress=settings.heatmap_enabled
+        )
+        live_row = toggles.row(align=True)
+        live_row.alert = settings.live_enabled and live.status().startswith(("Live off", "Live error"))
+        live_row.prop(settings, "live_enabled", text="Live", icon="PLAY", toggle=True)
+
+        if settings.heatmap_enabled:
+            legend = layout.column(align=True)
+            legend.label(text="Red: triangles   Purple: n-gons")
+            legend.label(text="Blue: 3-poles   Orange: 5+ poles")
+        if settings.live_enabled:
+            box = layout.box()
+            box.label(text=live.status() or "Live: waiting for a change...", icon="TIME")
+            if has_mesh and len(obj.data.polygons) > live.LIVE_FACE_CAP and obj.name != overlay.PREVIEW_NAME:
+                box.label(text=f"Live needs <= {live.LIVE_FACE_CAP:,} faces", icon="ERROR")
+        else:
+            layout.label(text=f"Live: meshes up to {live.LIVE_FACE_CAP:,} faces")
+
+
+class CURIOMESH_PT_scan(_SubPanel, bpy.types.Panel):
+    bl_label = "Scan"
+    bl_idname = "CURIOMESH_PT_scan"
+
+    def draw_header(self, context):
+        self.layout.label(icon="VIEWZOOM")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.curiomesh_settings
+        layout.operator("curiomesh.analyze", text="Analyze Without Changing Mesh", icon="VIEWZOOM")
         if settings.analysis_faces:
-            scan.label(text=f"{settings.analysis_profile}: {settings.analysis_faces:,} input faces")
-            scan.label(text=f"Recommended: {settings.analysis_strategy}")
+            layout.label(text=f"{settings.analysis_profile}: {settings.analysis_faces:,} input faces")
+            layout.label(text=f"Recommended: {settings.analysis_strategy}")
             qualifier = "exact topology" if settings.analysis_exact else f"sampled {settings.analysis_sampled_faces:,} faces"
-            scan.label(text=qualifier)
+            layout.label(text=qualifier)
             if settings.analysis_warning:
-                scan.label(text=settings.analysis_warning[:100], icon="ERROR")
+                layout.label(text=settings.analysis_warning[:100], icon="ERROR")
 
-        if settings.engine in {"ATLAS_Q", "AUTO"}:
-            atlas = layout.box()
-            atlas.label(text="2. Atlas-Q Solver Portfolio")
-            atlas.prop(settings, "atlas_strategy")
-            atlas.prop(settings, "topology_policy")
-            atlas.prop(settings, "require_quads")
-            atlas.prop(settings, "atlas_candidate_count")
-            atlas.prop(settings, "triad_feature_angle", text="Feature Angle")
-            if settings.topology_policy == "REPAIR":
-                atlas.label(text="Repair may close holes or erase thin sheets.", icon="ERROR")
-            if settings.atlas_strategy == "PAIR_CLOSURE":
-                atlas.label(text="Exact quads; expect more poles and a looser face target.")
-            else:
-                atlas.label(text="Candidates are scored by error, Jacobian, aspect, count, and poles.")
 
-        preserve = layout.box()
-        preserve.label(text="Shape Preservation")
-        preserve.prop(settings, "preserve_sharp")
-        preserve.prop(settings, "preserve_boundary")
-        preserve.prop(settings, "preserve_seams")
-        preserve.prop(settings, "use_symmetry")
-        preserve.prop(settings, "smooth_normals")
+class CURIOMESH_PT_atlas(_SubPanel, bpy.types.Panel):
+    bl_label = "Atlas-Q Solver"
+    bl_idname = "CURIOMESH_PT_atlas"
 
-        pipeline = layout.box()
-        pipeline.label(text="Pipeline")
-        pipeline.prop(settings, "cleanup_strength")
-        pipeline.prop(settings, "voxel_repair")
-        pipeline.prop(settings, "shrinkwrap_project")
-        pipeline.prop(settings, "preserve_attributes")
-        pipeline.prop(settings, "apply_source_modifiers")
-        pipeline.prop(settings, "output_mode")
-        pipeline.prop(settings, "seed")
+    @classmethod
+    def poll(cls, context):
+        return context.scene.curiomesh_settings.engine in {"ATLAS_Q", "AUTO"}
 
-        if settings.engine == "TRIAD_Q_LITE":
-            triad = layout.box()
-            triad.label(text="PairClosure Standalone")
-            triad.prop(settings, "triad_flow_mode")
-            triad.prop(settings, "triad_seed_count")
-            triad.prop(settings, "triad_feature_angle")
-            triad.prop(settings, "require_quads")
-            if not settings.require_quads:
-                triad.label(text="Debug mode may retain triangles.", icon="ERROR")
-            rescued = context.object.get("curiomesh_triadq_rescued_pairs")
-            if rescued is not None:
-                triad.label(text=f"Rescued pairs: {rescued}", icon="CHECKMARK")
+    def draw_header(self, context):
+        self.layout.label(icon="MOD_MESHDEFORM")
 
-        textures = layout.box()
-        textures.label(text="Materials And UVs")
-        textures.prop(settings, "texture_mode")
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.curiomesh_settings
+        layout.prop(settings, "atlas_strategy")
+        layout.prop(settings, "topology_policy")
+        layout.prop(settings, "require_quads")
+        layout.prop(settings, "atlas_candidate_count")
+        layout.prop(settings, "triad_feature_angle", text="Feature Angle")
+        if settings.topology_policy == "REPAIR":
+            layout.label(text="Repair may close holes or erase thin sheets.", icon="ERROR")
+        if settings.atlas_strategy == "PAIR_CLOSURE":
+            layout.label(text="Exact quads; expect more poles and a looser face target.")
+        else:
+            layout.label(text="Candidates are scored by error, Jacobian, aspect, count, and poles.")
+
+
+class CURIOMESH_PT_shape(_SubPanel, bpy.types.Panel):
+    bl_label = "Shape"
+    bl_idname = "CURIOMESH_PT_shape"
+
+    def draw_header(self, context):
+        self.layout.label(icon="MOD_SMOOTH")
+
+    def draw(self, context):
+        settings = context.scene.curiomesh_settings
+        for name in ("preserve_sharp", "preserve_boundary", "preserve_seams", "use_symmetry", "smooth_normals"):
+            self.layout.prop(settings, name)
+
+
+class CURIOMESH_PT_pipeline(_SubPanel, bpy.types.Panel):
+    bl_label = "Pipeline"
+    bl_idname = "CURIOMESH_PT_pipeline"
+
+    def draw_header(self, context):
+        self.layout.label(icon="SETTINGS")
+
+    def draw(self, context):
+        settings = context.scene.curiomesh_settings
+        for name in (
+            "cleanup_strength",
+            "voxel_repair",
+            "shrinkwrap_project",
+            "preserve_attributes",
+            "apply_source_modifiers",
+            "output_mode",
+            "seed",
+        ):
+            self.layout.prop(settings, name)
+
+
+class CURIOMESH_PT_pairclosure(_SubPanel, bpy.types.Panel):
+    bl_label = "PairClosure"
+    bl_idname = "CURIOMESH_PT_pairclosure"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.curiomesh_settings.engine == "TRIAD_Q_LITE"
+
+    def draw_header(self, context):
+        self.layout.label(icon="MESH_GRID")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.curiomesh_settings
+        layout.prop(settings, "triad_flow_mode")
+        layout.prop(settings, "triad_seed_count")
+        layout.prop(settings, "triad_feature_angle")
+        layout.prop(settings, "require_quads")
+        if not settings.require_quads:
+            layout.label(text="Debug mode may retain triangles.", icon="ERROR")
+        rescued = context.object.get("curiomesh_triadq_rescued_pairs") if context.object else None
+        if rescued is not None:
+            layout.label(text=f"Rescued pairs: {rescued}", icon="CHECKMARK")
+
+
+class CURIOMESH_PT_materials(_SubPanel, bpy.types.Panel):
+    bl_label = "Materials & UVs"
+    bl_idname = "CURIOMESH_PT_materials"
+
+    def draw_header(self, context):
+        self.layout.label(icon="MATERIAL")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.curiomesh_settings
+        layout.prop(settings, "texture_mode")
         if settings.texture_mode == "BAKE" or settings.bake_fallback:
-            row = textures.row(align=True)
+            row = layout.row(align=True)
             row.prop(settings, "bake_resolution")
             row.prop(settings, "bake_margin")
-        textures.prop(settings, "bake_fallback")
+        layout.prop(settings, "bake_fallback")
 
-        debug = layout.box()
-        debug.label(text="Debug")
-        debug.prop(settings, "debug_logs")
-        debug.prop(settings, "keep_debug_objects")
 
-        op = layout.operator("curiomesh.remesh", text="Remesh")
-        op.target_faces = settings.target_faces
-        op.engine = settings.engine
-        op.quality = settings.quality
-        op.seed = settings.seed
-        op.triad_seed_count = settings.triad_seed_count
-        op.triad_feature_angle = settings.triad_feature_angle
-        op.triad_force_quads = settings.triad_force_quads
-        op.triad_flow_mode = settings.triad_flow_mode
-        op.atlas_strategy = settings.atlas_strategy
-        op.atlas_candidate_count = settings.atlas_candidate_count
-        op.topology_policy = settings.topology_policy
-        op.require_quads = settings.require_quads
-        op.analysis_sample_faces = settings.analysis_sample_faces
-        op.preserve_sharp = settings.preserve_sharp
-        op.preserve_boundary = settings.preserve_boundary
-        op.preserve_seams = settings.preserve_seams
-        op.use_symmetry = settings.use_symmetry
-        op.preserve_attributes = settings.preserve_attributes
-        op.smooth_normals = settings.smooth_normals
-        op.cleanup_strength = settings.cleanup_strength
-        op.voxel_repair = settings.voxel_repair
-        op.shrinkwrap_project = settings.shrinkwrap_project
-        op.texture_mode = settings.texture_mode
-        op.bake_fallback = settings.bake_fallback
-        op.bake_resolution = settings.bake_resolution
-        op.bake_margin = settings.bake_margin
-        op.output_mode = settings.output_mode
-        op.apply_source_modifiers = settings.apply_source_modifiers
-        op.keep_debug_objects = settings.keep_debug_objects
-        op.debug_logs = settings.debug_logs
+class CURIOMESH_UL_batch(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.alert = not item.ok
+        row.label(text=item.name, icon="CHECKMARK" if item.ok else "ERROR")
+        if item.ok:
+            row.label(text=f"{item.quad_ratio * 100:.0f}% Q  {item.faces:,}f")
+        else:
+            row.label(text=item.error[:24] or "failed")
 
-        metrics = layout.box()
-        metrics.label(text="Diagnostics")
-        metrics.operator("curiomesh.compute_metrics", text="Compute Current Mesh")
-        col = metrics.column(align=True)
+
+class CURIOMESH_PT_batch(_SubPanel, bpy.types.Panel):
+    bl_label = "Batch"
+    bl_idname = "CURIOMESH_PT_batch"
+
+    def draw_header(self, context):
+        self.layout.label(icon="OUTLINER_COLLECTION")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.curiomesh_settings
+        count = len([o for o in context.selected_objects if o.type == "MESH"])
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("curiomesh.batch_remesh", text=f"Remesh {count} Selected", icon="OUTLINER_COLLECTION")
+        if settings.batch_status:
+            layout.label(text=settings.batch_status)
+        if settings.batch_results:
+            layout.template_list(
+                "CURIOMESH_UL_batch", "", settings, "batch_results", settings, "batch_index", rows=3
+            )
+            if 0 <= settings.batch_index < len(settings.batch_results):
+                item = settings.batch_results[settings.batch_index]
+                col = layout.column(align=True)
+                col.label(text=f"{item.name} -> {item.output or '-'}")
+                col.label(text=f"Tris {item.tris}   Poles {item.poles}   {item.ms / 1000.0:.1f} s")
+                if item.error:
+                    col.label(text=item.error[:60], icon="ERROR")
+            if settings.batch_report_path:
+                layout.label(text=settings.batch_report_path[-48:], icon="FILE_TEXT")
+
+
+class CURIOMESH_PT_diagnostics(_SubPanel, bpy.types.Panel):
+    bl_label = "Diagnostics"
+    bl_idname = "CURIOMESH_PT_diagnostics"
+
+    def draw_header(self, context):
+        self.layout.label(icon="GRAPH")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.curiomesh_settings
+        layout.operator("curiomesh.compute_metrics", text="Compute Current Mesh", icon="FILE_REFRESH")
+        col = layout.column(align=True)
         col.prop(settings, "metrics_status")
         col.prop(settings, "metrics_engine")
         col.prop(settings, "metrics_strategy")
@@ -238,31 +399,62 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         topology_row = col.row()
         topology_row.alert = "UNVERIFIED" in settings.metrics_topology_status
         topology_row.prop(settings, "metrics_topology_status")
-        col.prop(settings, "metrics_candidates")
-        col.prop(settings, "metrics_faces")
-        col.prop(settings, "metrics_quad_ratio")
-        col.prop(settings, "metrics_quad_only")
-        col.prop(settings, "metrics_face_error")
-        col.prop(settings, "metrics_geometry_rms")
-        col.prop(settings, "metrics_geometry_p95")
-        col.prop(settings, "metrics_geometry_max")
-        col.prop(settings, "metrics_sampling_status")
-        col.prop(settings, "metrics_min_jacobian")
-        col.prop(settings, "metrics_p95_aspect")
-        col.prop(settings, "metrics_extraordinary")
-        col.prop(settings, "metrics_non_manifold_edges")
-        col.prop(settings, "metrics_non_manifold_vertices")
-        col.prop(settings, "metrics_duplicate_faces")
-        col.prop(settings, "metrics_invalid_quads")
-        col.prop(settings, "metrics_components")
-        col.prop(settings, "metrics_component_euler")
-        col.prop(settings, "metrics_boundary_edges")
-        col.prop(settings, "metrics_boundary_loops")
-        col.prop(settings, "metrics_euler")
-        col.prop(settings, "metrics_degenerate")
-        col.prop(settings, "metrics_uv_valid")
-        col.prop(settings, "metrics_materials_preserved")
-        col.prop(settings, "metrics_uv_status")
-        col.prop(settings, "metrics_elapsed_ms")
+        for name in (
+            "metrics_candidates",
+            "metrics_faces",
+            "metrics_quad_ratio",
+            "metrics_quad_only",
+            "metrics_face_error",
+            "metrics_geometry_rms",
+            "metrics_geometry_p95",
+            "metrics_geometry_max",
+            "metrics_sampling_status",
+            "metrics_min_jacobian",
+            "metrics_p95_aspect",
+            "metrics_extraordinary",
+            "metrics_non_manifold_edges",
+            "metrics_non_manifold_vertices",
+            "metrics_duplicate_faces",
+            "metrics_invalid_quads",
+            "metrics_components",
+            "metrics_component_euler",
+            "metrics_boundary_edges",
+            "metrics_boundary_loops",
+            "metrics_euler",
+            "metrics_degenerate",
+            "metrics_uv_valid",
+            "metrics_materials_preserved",
+            "metrics_uv_status",
+            "metrics_elapsed_ms",
+        ):
+            col.prop(settings, name)
         if settings.metrics_message:
             col.label(text=settings.metrics_message[:80])
+
+
+class CURIOMESH_PT_debug(_SubPanel, bpy.types.Panel):
+    bl_label = "Debug"
+    bl_idname = "CURIOMESH_PT_debug"
+
+    def draw_header(self, context):
+        self.layout.label(icon="CONSOLE")
+
+    def draw(self, context):
+        settings = context.scene.curiomesh_settings
+        self.layout.prop(settings, "debug_logs")
+        self.layout.prop(settings, "keep_debug_objects")
+
+
+PANEL_CLASSES = (
+    CURIOMESH_PT_panel,
+    CURIOMESH_PT_scan,
+    CURIOMESH_PT_atlas,
+    CURIOMESH_PT_shape,
+    CURIOMESH_PT_pipeline,
+    CURIOMESH_PT_pairclosure,
+    CURIOMESH_PT_materials,
+    CURIOMESH_UL_batch,
+    CURIOMESH_PT_batch,
+    CURIOMESH_PT_diagnostics,
+    CURIOMESH_PT_debug,
+)

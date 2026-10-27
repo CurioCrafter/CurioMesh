@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field, replace
+from collections import defaultdict, deque
+from dataclasses import astuple, dataclass, field, replace
 import math
 import random
 import time
@@ -11,8 +11,8 @@ import numpy as np
 
 from .topology import (
     parity_path_quad_closure,
-    quad_is_locally_valid,
     quad_only_closure,
+    quads_locally_valid,
     split_non_manifold_vertex_fans,
     topology_summary,
 )
@@ -103,6 +103,9 @@ class _TriMesh:
     face_uvs: list[tuple[int, int, int]] | None
     uvs: np.ndarray | None
     name: str
+    # Per-mesh invariants (adjacency, features, field, pair scores) shared by
+    # every seed of one remesh call.
+    cache: dict[Any, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -220,18 +223,19 @@ def _classify_mesh(mesh: _TriMesh, options: RemeshOptions) -> str:
         }
         return aliases.get(requested, requested)
 
-    edge_faces = _edge_faces(mesh.faces)
-    boundary = sum(1 for faces in edge_faces.values() if len(faces) == 1)
-    non_manifold = sum(1 for faces in edge_faces.values() if len(faces) > 2)
-    material_edges = _material_boundary_edges(mesh, edge_faces)
-    sharp_edges = _sharp_edges(mesh, edge_faces, options.feature_angle_deg)
+    adj = _adjacency(mesh)
+    edge_count = max(1, len(adj.edges))
+    boundary = int(np.count_nonzero(adj.counts == 1))
+    non_manifold = int(np.count_nonzero(adj.counts > 2))
+    material_edges = _material_edge_mask(adj)
+    sharp_edges = _sharp_edge_mask(adj, options.feature_angle_deg)
     face_count = max(1, len(mesh.faces))
-    sharp_ratio = len(sharp_edges | material_edges) / max(1, len(edge_faces))
-    boundary_ratio = boundary / max(1, len(edge_faces))
+    sharp_ratio = int(np.count_nonzero(sharp_edges | material_edges)) / edge_count
+    boundary_ratio = boundary / edge_count
 
-    if non_manifold > 0 and non_manifold / max(1, len(edge_faces)) > 0.01:
+    if non_manifold > 0 and non_manifold / edge_count > 0.01:
         return "DirtyFlow"
-    if mesh.face_uvs is not None and len(material_edges) > 0:
+    if mesh.face_uvs is not None and bool(material_edges.any()):
         return "TextureFlow"
     if sharp_ratio > 0.08 or boundary_ratio > 0.18:
         return "PatchFlow"
@@ -241,20 +245,8 @@ def _classify_mesh(mesh: _TriMesh, options: RemeshOptions) -> str:
 
 
 def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int) -> _Candidate:
-    tuned_options = _options_for_mode(options, mode)
-    edge_faces = _edge_faces(mesh.faces)
-    normals, areas = _face_normals(mesh.vertices, mesh.faces)
-    feature_edges = _feature_edges(mesh, tuned_options, edge_faces, normals)
-    field = _estimate_field(mesh, edge_faces, feature_edges, normals, tuned_options)
-    output_mesh, feature_breaks, rescued_pairs = _pair_triangles(
-        mesh,
-        edge_faces,
-        feature_edges,
-        normals,
-        field,
-        seed,
-        mode,
-    )
+    prep = _pairing_prep(mesh, _options_for_mode(options, mode), mode)
+    output_mesh, feature_breaks, rescued_pairs = _pair_triangles(mesh, prep, seed)
     closure_applied = bool(options.force_quads)
     closure_method = ""
     closure_error = ""
@@ -300,17 +292,17 @@ def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int)
                 f"ParityPath: {parity_error or 'no candidate'}; "
                 f"global fallback: {global_error or 'no candidate'}"
             )
-    report = _score_output(output_mesh, mesh, options, mode, seed, feature_edges, feature_breaks)
+    report = _score_output(output_mesh, mesh, options, mode, seed, prep.feature_edge_count, feature_breaks)
     report.input_faces = len(mesh.faces)
     report.success = bool(output_mesh.faces)
-    report.feature_edges = len(feature_edges)
+    report.feature_edges = prep.feature_edge_count
     report.closure_applied = closure_applied
     report.closure_method = closure_method
     report.rescued_pairs = rescued_pairs
     if closure_error:
         report.success = False
         report.message = f"PairClosure rejected the base topology: {closure_error}"
-    if areas.size == 0:
+    if _adjacency(mesh).areas.size == 0:
         report.success = False
         report.message = "No valid face areas."
     return _Candidate(output_mesh, report)
@@ -356,90 +348,124 @@ def _pair_weights(mode: str) -> _PairWeights:
     }.get(mode.upper(), _PairWeights(2.2, 0.90, 0.15, 0.90, 0.35, -10.0))
 
 
-def _edge_faces(faces: list[tuple[int, int, int]]) -> dict[tuple[int, int], list[int]]:
-    edge_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for face_index, face in enumerate(faces):
-        for edge in _tri_edges(face):
-            edge_faces[edge].append(face_index)
-    return edge_faces
+@dataclass(slots=True)
+class _Adjacency:
+    """Seed-independent triangle adjacency, built once per mesh."""
+
+    faces: np.ndarray  # (F, 3) vertex ids
+    normals: np.ndarray  # (F, 3) unit normals, zero for degenerate faces
+    areas: np.ndarray  # (F,)
+    edges: np.ndarray  # (E, 2) sorted vertex pairs
+    counts: np.ndarray  # (E,) face uses per edge
+    edge_halves: np.ndarray  # (E, 2) first two half-edge ids (3 * face + corner), -1 if absent
+    face_edges: np.ndarray  # (F, 3) edge id of corner i -> i + 1
+    material_codes: np.ndarray  # (F,) integer material ids
 
 
-def _tri_edges(face: tuple[int, int, int]) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
-    a, b, c = face
-    return tuple(sorted((a, b))), tuple(sorted((b, c))), tuple(sorted((c, a)))
+@dataclass(slots=True)
+class _PairingPrep:
+    """Seed-independent pairing inputs for one (mode, options) combination."""
+
+    feature_edge_count: int
+    allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]]
+    quads_by_pair: dict[tuple[int, int], tuple[int, ...]]
 
 
-def _face_normals(vertices: np.ndarray, faces: list[tuple[int, int, int]]) -> tuple[np.ndarray, np.ndarray]:
-    normals = np.zeros((len(faces), 3), dtype=np.float64)
-    areas = np.zeros(len(faces), dtype=np.float64)
-    for index, face in enumerate(faces):
-        a, b, c = vertices[list(face)]
-        normal = np.cross(b - a, c - a)
-        length = float(np.linalg.norm(normal))
-        if length > 1e-12:
-            normals[index] = normal / length
-            areas[index] = length * 0.5
-    return normals, areas
+def _adjacency(mesh: _TriMesh) -> _Adjacency:
+    cached = mesh.cache.get("adjacency")
+    if cached is None:
+        cached = mesh.cache["adjacency"] = _build_adjacency(mesh)
+    return cached
 
 
-def _feature_edges(
-    mesh: _TriMesh,
-    options: RemeshOptions,
-    edge_faces: dict[tuple[int, int], list[int]],
-    normals: np.ndarray,
-) -> set[tuple[int, int]]:
-    features: set[tuple[int, int]] = set()
-    features.update(edge for edge, faces in edge_faces.items() if len(faces) != 2)
-    features.update(_sharp_edges(mesh, edge_faces, options.feature_angle_deg, normals=normals))
+def _build_adjacency(mesh: _TriMesh) -> _Adjacency:
+    faces = np.asarray(mesh.faces, dtype=np.int64).reshape(-1, 3)
+    normals, areas = _face_normals(mesh.vertices, faces)
+    halves = np.stack((faces, np.roll(faces, -1, axis=1)), axis=2).reshape(-1, 2)
+    edges, inverse, counts = np.unique(
+        np.sort(halves, axis=1), axis=0, return_inverse=True, return_counts=True
+    )
+    inverse = np.asarray(inverse).reshape(-1)
+    order = np.argsort(inverse, kind="stable")
+    starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+    edge_halves = np.full((len(edges), 2), -1, dtype=np.int64)
+    edge_halves[:, 0] = order[starts]
+    multi = counts >= 2
+    edge_halves[multi, 1] = order[starts[multi] + 1]
+    codes: dict[str, int] = {}
+    material_codes = np.asarray(
+        [codes.setdefault(material, len(codes)) for material in mesh.face_materials], dtype=np.int64
+    )
+    return _Adjacency(
+        faces=faces,
+        normals=normals,
+        areas=areas,
+        edges=edges,
+        counts=counts,
+        edge_halves=edge_halves,
+        face_edges=inverse.reshape(-1, 3),
+        material_codes=material_codes,
+    )
+
+
+def _edge_face_pair(adj: _Adjacency) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (interior mask, first face, second face) per edge; second == first off interior."""
+
+    interior = adj.counts == 2
+    first = adj.edge_halves[:, 0] // 3
+    second = np.where(interior, adj.edge_halves[:, 1] // 3, first)
+    return interior, first, second
+
+
+def _face_normals(vertices: np.ndarray, faces: Any) -> tuple[np.ndarray, np.ndarray]:
+    faces = np.asarray(faces, dtype=np.int64).reshape(-1, 3)
+    points = vertices[faces]
+    cross = np.cross(points[:, 1] - points[:, 0], points[:, 2] - points[:, 0])
+    length = np.linalg.norm(cross, axis=1)
+    valid = length > 1e-12
+    normals = np.zeros_like(cross)
+    normals[valid] = cross[valid] / length[valid, None]
+    return normals, np.where(valid, length * 0.5, 0.0)
+
+
+def _feature_mask(mesh: _TriMesh, adj: _Adjacency, options: RemeshOptions) -> np.ndarray:
+    features = adj.counts != 2
+    features |= _sharp_edge_mask(adj, options.feature_angle_deg)
     if options.preserve_material_boundaries:
-        features.update(_material_boundary_edges(mesh, edge_faces))
+        features |= _material_edge_mask(adj)
     if options.preserve_uv_seams and mesh.face_uvs is not None:
-        features.update(_uv_seam_edges(mesh, edge_faces))
+        features |= _uv_seam_mask(mesh, adj)
     return features
 
 
-def _sharp_edges(
-    mesh: _TriMesh,
-    edge_faces: dict[tuple[int, int], list[int]],
-    feature_angle_deg: float,
-    *,
-    normals: np.ndarray | None = None,
-) -> set[tuple[int, int]]:
-    normals = normals if normals is not None else _face_normals(mesh.vertices, mesh.faces)[0]
+def _sharp_edge_mask(adj: _Adjacency, feature_angle_deg: float) -> np.ndarray:
+    interior, first, second = _edge_face_pair(adj)
     threshold = math.cos(math.radians(max(0.0, min(180.0, feature_angle_deg))))
-    sharp = set()
-    for edge, faces in edge_faces.items():
-        if len(faces) != 2:
-            continue
-        if float(np.dot(normals[faces[0]], normals[faces[1]])) < threshold:
-            sharp.add(edge)
-    return sharp
+    dots = np.einsum("ij,ij->i", adj.normals[first], adj.normals[second])
+    return interior & (dots < threshold)
 
 
-def _material_boundary_edges(mesh: _TriMesh, edge_faces: dict[tuple[int, int], list[int]]) -> set[tuple[int, int]]:
-    out = set()
-    for edge, faces in edge_faces.items():
-        if len(faces) == 2 and mesh.face_materials[faces[0]] != mesh.face_materials[faces[1]]:
-            out.add(edge)
-    return out
+def _material_edge_mask(adj: _Adjacency) -> np.ndarray:
+    interior, first, second = _edge_face_pair(adj)
+    return interior & (adj.material_codes[first] != adj.material_codes[second])
 
 
-def _uv_seam_edges(mesh: _TriMesh, edge_faces: dict[tuple[int, int], list[int]]) -> set[tuple[int, int]]:
+def _uv_seam_mask(mesh: _TriMesh, adj: _Adjacency) -> np.ndarray:
     if mesh.face_uvs is None:
-        return set()
-    seams = set()
-    for edge, faces in edge_faces.items():
-        if len(faces) != 2:
-            continue
-        stamps = []
-        for face_index in faces:
-            face = mesh.faces[face_index]
-            uv_face = mesh.face_uvs[face_index]
-            uv_by_vertex = {face[i]: uv_face[i] for i in range(3)}
-            stamps.append(tuple(uv_by_vertex.get(v, -1) for v in edge))
-        if stamps[0] != stamps[1]:
-            seams.add(edge)
-    return seams
+        return np.zeros(len(adj.edges), dtype=bool)
+    interior, _first, _second = _edge_face_pair(adj)
+    face_uvs = np.asarray(mesh.face_uvs, dtype=np.int64).reshape(-1, 3)
+    vertex_from = adj.faces.reshape(-1)
+    vertex_to = np.roll(adj.faces, -1, axis=1).reshape(-1)
+    uv_from = face_uvs.reshape(-1)
+    uv_to = np.roll(face_uvs, -1, axis=1).reshape(-1)
+    # UV stamp of each half-edge, listed in sorted-vertex order.
+    ascending = vertex_from <= vertex_to
+    stamps = np.stack(
+        (np.where(ascending, uv_from, uv_to), np.where(ascending, uv_to, uv_from)), axis=1
+    )
+    halves = np.where(interior[:, None], adj.edge_halves, 0)
+    return interior & np.any(stamps[halves[:, 0]] != stamps[halves[:, 1]], axis=1)
 
 
 def _paired_face_uvs(
@@ -482,124 +508,219 @@ def _source_face_uvs(mesh: _TriMesh, face_index: int) -> Face | None:
     return tuple(uv_face)
 
 
+def _unit_rows(vectors: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    """Normalize rows; rows shorter than 1e-12 take the (unit) fallback rows."""
+
+    length = np.linalg.norm(vectors, axis=-1, keepdims=True)
+    safe = length > 1e-12
+    return np.where(safe, vectors / np.where(safe, length, 1.0), fallback)
+
+
 def _estimate_field(
     mesh: _TriMesh,
-    edge_faces: dict[tuple[int, int], list[int]],
-    feature_edges: set[tuple[int, int]],
-    normals: np.ndarray,
-    options: RemeshOptions,
+    adj: _Adjacency,
+    feature_mask: np.ndarray,
+    smooth_iters: int,
 ) -> np.ndarray:
-    field = np.zeros((len(mesh.faces), 3), dtype=np.float64)
-    for face_index, face in enumerate(mesh.faces):
-        field[face_index] = _initial_face_direction(mesh.vertices, face, feature_edges, normals[face_index])
+    """Smooth a 4-RoSy cross field and return one representative direction per face.
 
-    neighbors = [[] for _ in mesh.faces]
-    for edge, faces in edge_faces.items():
-        if len(faces) == 2 and edge not in feature_edges:
-            neighbors[faces[0]].append(faces[1])
-            neighbors[faces[1]].append(faces[0])
+    Each face gets a tangent frame (e1 along its first side, e2 = n x e1). A
+    cross at angle theta is stored as the complex number exp(4i theta), so its
+    four equivalent directions share one value. Neighbors are averaged across
+    non-feature interior edges after parallel transport: a value in face j is
+    rotated by exp(4i (alpha_i - alpha_j)), alpha_* being the shared edge's
+    angle in each frame, which unfolds the two faces about that edge. Faces
+    touching a feature edge are pinned to their longest feature edge; free
+    faces start from a weak longest-edge guess that propagated values override.
+    """
 
-    for _ in range(max(0, int(options.smooth_field_iters))):
-        next_field = field.copy()
-        for face_index, linked in enumerate(neighbors):
-            if not linked:
-                continue
-            acc = field[face_index].copy() * 2.0
-            normal = normals[face_index]
-            for other in linked:
-                projected = _project_to_plane(field[other], normal)
-                if np.linalg.norm(projected) < 1e-12:
-                    continue
-                if np.dot(projected, field[face_index]) < 0:
-                    projected = -projected
-                acc += projected
-            next_field[face_index] = _safe_normalize(_project_to_plane(acc, normal), fallback=field[face_index])
-        field = next_field
-    return field
+    faces = adj.faces
+    normals = adj.normals
+    face_count = len(faces)
+    points = mesh.vertices[faces]
+    sides = np.roll(points, -1, axis=1) - points  # side c runs corner c -> c + 1
+    x_axis = np.broadcast_to(np.array([1.0, 0.0, 0.0]), (face_count, 3))
+    e1 = sides[:, 0] - normals * np.einsum("ij,ij->i", sides[:, 0], normals)[:, None]
+    e1 = _unit_rows(e1, x_axis)
+    e2 = np.cross(normals, e1)
+    side_angle = np.arctan2(
+        np.einsum("fcj,fj->fc", sides, e2), np.einsum("fcj,fj->fc", sides, e1)
+    )
+    lengths = np.linalg.norm(sides, axis=2)
+    is_feature = feature_mask[adj.face_edges]
+    priority = lengths + is_feature * (float(lengths.max(initial=0.0)) + 1.0)
+    pick = np.argmax(priority, axis=1)
+    initial = np.exp(4j * side_angle[np.arange(face_count), pick])
+    pinned = is_feature.any(axis=1)
+    cross = np.where(pinned, initial, 0.05 * initial)
+
+    link = (adj.counts == 2) & ~feature_mask
+    half_a, half_b = adj.edge_halves[link].T
+    face_a, corner_a = np.divmod(half_a, 3)
+    face_b, corner_b = np.divmod(half_b, 3)
+    # Rotation carrying a cross value from face_b's frame into face_a's frame.
+    transport = np.exp(4j * (side_angle[face_a, corner_a] - side_angle[face_b, corner_b]))
+    degree = 1.0 + np.bincount(face_a, minlength=face_count) + np.bincount(face_b, minlength=face_count)
+
+    # ponytail: fixed-count Jacobi diffusion; switch to a sparse linear solve if
+    # very large scans need the field converged across hundreds of rings.
+    for _ in range(24 * max(0, int(smooth_iters))):
+        into_a = cross[face_b] * transport
+        into_b = cross[face_a] * np.conj(transport)
+        real = np.bincount(face_a, weights=into_a.real, minlength=face_count) + np.bincount(
+            face_b, weights=into_b.real, minlength=face_count
+        )
+        imag = np.bincount(face_a, weights=into_a.imag, minlength=face_count) + np.bincount(
+            face_b, weights=into_b.imag, minlength=face_count
+        )
+        cross = np.where(pinned, cross, (cross + real + 1j * imag) / degree)
+
+    cross = np.where(np.abs(cross) > 1e-12, cross, initial)
+    theta = np.angle(cross) / 4.0
+    return np.cos(theta)[:, None] * e1 + np.sin(theta)[:, None] * e2
 
 
-def _initial_face_direction(
-    vertices: np.ndarray,
-    face: tuple[int, int, int],
-    feature_edges: set[tuple[int, int]],
-    normal: np.ndarray,
-) -> np.ndarray:
-    edges = [(face[i], face[(i + 1) % 3]) for i in range(3)]
-    scored = []
-    for edge in edges:
-        vec = vertices[edge[1]] - vertices[edge[0]]
-        length = float(np.linalg.norm(vec))
-        is_feature = tuple(sorted(edge)) in feature_edges
-        scored.append((1 if is_feature else 0, length, vec))
-    _feature, _length, vec = max(scored, key=lambda item: (item[0], item[1]))
-    return _safe_normalize(_project_to_plane(vec, normal), fallback=np.array([1.0, 0.0, 0.0]))
-
-
-def _project_to_plane(vec: np.ndarray, normal: np.ndarray) -> np.ndarray:
-    return vec - normal * float(np.dot(vec, normal))
-
-
-def _safe_normalize(vec: np.ndarray, *, fallback: np.ndarray) -> np.ndarray:
-    length = float(np.linalg.norm(vec))
-    if length <= 1e-12:
-        fallback_length = float(np.linalg.norm(fallback))
-        return fallback / fallback_length if fallback_length > 1e-12 else np.array([1.0, 0.0, 0.0])
-    return vec / length
-
-
-def _pair_triangles(
-    mesh: _TriMesh,
-    edge_faces: dict[tuple[int, int], list[int]],
-    feature_edges: set[tuple[int, int]],
-    normals: np.ndarray,
-    field: np.ndarray,
-    seed: int,
-    mode: str,
-) -> tuple[MeshData, int]:
+def _pairing_prep(mesh: _TriMesh, options: RemeshOptions, mode: str) -> _PairingPrep:
+    key = ("pairing", mode, astuple(options))
+    cached = mesh.cache.get(key)
+    if cached is not None:
+        return cached
+    adj = _adjacency(mesh)
     weights = _pair_weights(mode)
-    candidates: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)
-    feature_breaks = 0
-    for edge, linked_faces in edge_faces.items():
-        if len(linked_faces) != 2:
-            continue
-        if edge in feature_edges:
-            continue
-        a, b = linked_faces
-        quad = _quad_from_pair(mesh.faces[a], mesh.faces[b], edge)
-        if quad is None:
-            continue
-        if not quad_is_locally_valid(mesh.vertices, quad):
-            continue
-        score = _pair_score(mesh, quad, edge, a, b, normals, field, weights)
-        candidates[a].append((score, b, quad))
-        candidates[b].append((score, a, quad))
+    feature_mask = _feature_mask(mesh, adj, options)
+    cross_field = _estimate_field(mesh, adj, feature_mask, options.smooth_field_iters)
+    face_a, face_b, quads, scores = _pair_candidates(mesh, adj, feature_mask, cross_field, weights)
 
+    allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)
+    quads_by_pair: dict[tuple[int, int], tuple[int, ...]] = {}
+    for a, b, quad, score in zip(face_a.tolist(), face_b.tolist(), quads.tolist(), scores.tolist()):
+        if not score > weights.minimum_score:
+            continue
+        quad = tuple(quad)
+        allowed[a].append((score, b, quad))
+        allowed[b].append((score, a, quad))
+        quads_by_pair[(a, b)] = quad
+        quads_by_pair[(b, a)] = quad
+    for linked in allowed.values():
+        linked.sort(key=lambda item: item[0], reverse=True)
+    prep = _PairingPrep(int(np.count_nonzero(feature_mask)), dict(allowed), quads_by_pair)
+    mesh.cache[key] = prep
+    return prep
+
+
+def _pair_candidates(
+    mesh: _TriMesh,
+    adj: _Adjacency,
+    feature_mask: np.ndarray,
+    cross_field: np.ndarray,
+    weights: _PairWeights,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return (face_a, face_b, quad, score) for every locally valid pair."""
+
+    link = (adj.counts == 2) & ~feature_mask
+    half_a, half_b = adj.edge_halves[link].T
+    face_a, corner_a = np.divmod(half_a, 3)
+    face_b, corner_b = np.divmod(half_b, 3)
+    faces = adj.faces
+    x = faces[face_a, corner_a]
+    y = faces[face_a, (corner_a + 1) % 3]
+    # The shared edge must run opposite ways in the two faces (consistent winding).
+    keep = (face_a != face_b) & (faces[face_b, corner_b] == y) & (faces[face_b, (corner_b + 1) % 3] == x)
+    quads = np.stack((faces[face_a, (corner_a + 2) % 3], x, faces[face_b, (corner_b + 2) % 3], y), axis=1)
+    ordered = np.sort(quads, axis=1)
+    keep &= np.all(ordered[:, 1:] != ordered[:, :-1], axis=1)
+    face_a, face_b, quads = face_a[keep], face_b[keep], quads[keep]
+    valid = quads_locally_valid(mesh.vertices, quads) if len(quads) else np.zeros(0, dtype=bool)
+    face_a, face_b, quads = face_a[valid], face_b[valid], quads[valid]
+    scores = _pair_scores(mesh.vertices, adj, face_a, face_b, quads, cross_field, weights)
+    return face_a, face_b, quads, scores
+
+
+def _pair_scores(
+    vertices: np.ndarray,
+    adj: _Adjacency,
+    face_a: np.ndarray,
+    face_b: np.ndarray,
+    quads: np.ndarray,
+    cross_field: np.ndarray,
+    weights: _PairWeights,
+) -> np.ndarray:
+    if not len(quads):
+        return np.zeros(0, dtype=np.float64)
+    points = vertices[quads]
+    sides = np.roll(points, -1, axis=1) - points
+    lengths = np.linalg.norm(sides, axis=2)
+    with np.errstate(all="ignore"):
+        aspect = lengths.max(axis=1) / np.maximum(lengths.min(axis=1), 1e-12)
+        normal_alignment = np.clip(
+            np.einsum("ij,ij->i", adj.normals[face_a], adj.normals[face_b]), -1.0, 1.0
+        )
+        # quad = (opp_a, x, opp_b, y): the shared diagonal runs corner 1 -> 3.
+        shared_len = np.linalg.norm(points[:, 3] - points[:, 1], axis=1)
+        diagonal_penalty = shared_len / np.maximum(lengths.sum(axis=1) * 0.25, 1e-9)
+        material_bonus = np.where(
+            adj.material_codes[face_a] == adj.material_codes[face_b], weights.material, -1.5
+        )
+        field_score = _cross_alignment(sides, cross_field[face_a], adj.normals[face_a])
+        jacobian = _min_scaled_jacobians(points)
+        score = (
+            normal_alignment * weights.normal
+            + field_score * weights.field
+            + jacobian * 3.0
+            + material_bonus
+            - np.log(np.maximum(aspect, 1.0)) * weights.aspect
+            - diagonal_penalty * weights.diagonal
+        )
+    return np.where(np.isfinite(aspect) & (aspect > 0.0), score, -100.0)
+
+
+def _cross_alignment(sides: np.ndarray, direction: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    """Mean alignment of each quad side with the nearest of the four cross directions."""
+
+    count = len(sides)
+    tangent = direction - normal * np.einsum("ij,ij->i", direction, normal)[:, None]
+    tangent = _unit_rows(tangent, np.broadcast_to(np.array([1.0, 0.0, 0.0]), (count, 3)))
+    bitangent = _unit_rows(
+        np.cross(normal, tangent), np.broadcast_to(np.array([0.0, 1.0, 0.0]), (count, 3))
+    )
+    unit_sides = _unit_rows(sides, np.broadcast_to(tangent[:, None, :], sides.shape))
+    along = np.abs(np.einsum("mkj,mj->mk", unit_sides, tangent))
+    across = np.abs(np.einsum("mkj,mj->mk", unit_sides, bitangent))
+    return np.maximum(along, across).mean(axis=1)
+
+
+def _min_scaled_jacobians(points: np.ndarray) -> np.ndarray:
+    following_points = np.roll(points, -1, axis=1)
+    normal = np.cross(points, following_points).sum(axis=1)
+    normal_length = np.linalg.norm(normal, axis=1)
+    normal = normal / np.where(normal_length > 1e-20, normal_length, 1.0)[:, None]
+    following = following_points - points
+    previous = np.roll(points, 1, axis=1) - points
+    denominator = np.linalg.norm(following, axis=2) * np.linalg.norm(previous, axis=2)
+    corners = np.einsum("mkj,mj->mk", np.cross(following, previous), normal) / np.where(
+        denominator > 1e-20, denominator, 1.0
+    )
+    minimum = np.minimum(corners.min(axis=1), 1.0)
+    degenerate = (normal_length <= 1e-20) | np.any(denominator <= 1e-20, axis=1)
+    return np.where(degenerate, -1.0, minimum)
+
+
+def _pair_triangles(mesh: _TriMesh, prep: _PairingPrep, seed: int) -> tuple[MeshData, int, int]:
+    allowed = prep.allowed
+    feature_breaks = 0
     order = list(range(len(mesh.faces)))
     random.Random(seed).shuffle(order)
-    allowed = {
-        face_index: sorted(
-            ((score, other, quad) for score, other, quad in linked if score > weights.minimum_score),
-            key=lambda item: item[0],
-            reverse=True,
-        )
-        for face_index, linked in candidates.items()
-    }
     mate: dict[int, int] = {}
     for face_index in order:
         if face_index in mate:
             continue
-        for _score, other, _quad in allowed.get(face_index, []):
+        for _score, other, _quad in allowed.get(face_index, ()):
             if other not in mate:
                 mate[face_index] = other
                 mate[other] = face_index
                 break
     rescued_pairs = _augment_matching(mate, allowed, order)
 
-    quads_by_pair = {
-        (face_index, other): quad
-        for face_index, linked in allowed.items()
-        for _score, other, quad in linked
-    }
     used: set[int] = set()
     output_faces: list[Face] = []
     output_materials: list[str] = []
@@ -608,7 +729,7 @@ def _pair_triangles(
         if face_index in used or face_index not in mate:
             continue
         other = mate[face_index]
-        quad = quads_by_pair[(face_index, other)]
+        quad = prep.quads_by_pair[(face_index, other)]
         used.add(face_index)
         used.add(other)
         output_faces.append(tuple(quad))
@@ -620,7 +741,6 @@ def _pair_triangles(
             else:
                 output_face_uvs.append(paired_uvs)
 
-    vertices = mesh.vertices.tolist()
     for face_index, tri in enumerate(mesh.faces):
         if face_index in used:
             continue
@@ -634,7 +754,7 @@ def _pair_triangles(
                 output_face_uvs.append(source_uvs)
 
     out = MeshData(
-        vertices=np.asarray(vertices, dtype=np.float64),
+        vertices=mesh.vertices.copy(),
         faces=output_faces,
         face_materials=output_materials,
         uvs=mesh.uvs,
@@ -648,171 +768,118 @@ def _augment_matching(
     mate: dict[int, int],
     allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]],
     order: list[int],
-    max_visit: int = 4096,
 ) -> int:
-    """Grow a greedy triangle matching along alternating paths.
+    """Grow `mate` in place to a maximum-cardinality matching (Edmonds' blossoms).
 
-    Each stranded triangle searches the dual graph for a chain
-    free -> matched pair -> ... -> free and flips it, turning two leftover
-    triangles into one more quad. Every face enters the search tree once, so
-    any path found is simple and the flip is a valid matching. Without blossom
-    contraction some odd-cycle paths are missed, which only costs optimality.
+    The greedy start keeps high-score pairs; each free root, in seed order,
+    then runs one alternating-tree search that contracts odd cycles
+    (blossoms) so paths through them are not missed. A root without an
+    augmenting path stays unmatchable after later augmentations, and its whole
+    search tree can be frozen (Edmonds), so every root is searched once.
+    Returns the number of augmentations, i.e. extra pairs beyond the start.
     """
-    # ponytail: no blossoms and a per-root visit cap; switch to Edmonds' blossom
-    # matching if residual triangles still dominate closure cost on big scans.
+
+    adjacency = {face: [item[1] for item in linked] for face, linked in allowed.items()}
+    frozen: set[int] = set()
     rescued = 0
     for root in order:
-        if root in mate or not allowed.get(root):
+        if root in mate or root in frozen or not adjacency.get(root):
             continue
-        parent: dict[int, int] = {root: -1}
-        frontier = [root]
-        end = -1
-        while frontier and end < 0 and len(parent) < max_visit:
-            next_frontier: list[int] = []
-            for even in frontier:
-                for _score, odd, _quad in allowed.get(even, []):
-                    if odd in parent:
-                        continue
-                    parent[odd] = even
-                    partner = mate.get(odd)
-                    if partner is None:
-                        end = odd
-                        break
-                    if partner in parent:
-                        continue
-                    parent[partner] = odd
-                    next_frontier.append(partner)
-                if end >= 0:
-                    break
-            frontier = next_frontier
+        end, parent, tree = _blossom_search(root, mate, adjacency, frozen)
         if end < 0:
+            frozen.update(tree)
             continue
-        odd = end
-        while odd != -1:
-            even = parent[odd]
-            next_odd = parent[even]
-            mate[odd] = even
-            mate[even] = odd
-            odd = next_odd
+        vertex = end
+        while vertex != -1:
+            previous = parent[vertex]
+            following = mate.get(previous, -1)
+            mate[vertex] = previous
+            mate[previous] = vertex
+            vertex = following
         rescued += 1
     return rescued
 
 
-def _quad_from_pair(
-    face_a: tuple[int, int, int],
-    face_b: tuple[int, int, int],
-    shared_edge: tuple[int, int],
-) -> tuple[int, int, int, int] | None:
-    shared = set(shared_edge)
-    opp_a = [v for v in face_a if v not in shared]
-    opp_b = [v for v in face_b if v not in shared]
-    if len(opp_a) != 1 or len(opp_b) != 1:
-        return None
+def _blossom_search(
+    root: int,
+    mate: dict[int, int],
+    adjacency: dict[int, list[int]],
+    frozen: set[int],
+) -> tuple[int, dict[int, int], set[int]]:
+    """One BFS of Edmonds' algorithm from `root`.
 
-    # The shared edge key is sorted for adjacency lookup. Recover its directed
-    # order in each face so the merged quad keeps the source winding.
-    directed_a = next(
-        (
-            (face_a[index], face_a[(index + 1) % 3])
-            for index in range(3)
-            if {face_a[index], face_a[(index + 1) % 3]} == shared
-        ),
-        None,
-    )
-    directed_b = next(
-        (
-            (face_b[index], face_b[(index + 1) % 3])
-            for index in range(3)
-            if {face_b[index], face_b[(index + 1) % 3]} == shared
-        ),
-        None,
-    )
-    if directed_a is None or directed_b != (directed_a[1], directed_a[0]):
-        return None
+    Returns (free end or -1, parent links for the augmenting walk, tree
+    vertices). Contracted blossoms live in a union-find whose root is the
+    blossom base, so a contraction costs only the cycle length.
+    """
 
-    a, b = directed_a
-    quad = (opp_a[0], a, opp_b[0], b)
-    if len(set(quad)) != 4:
-        return None
-    return quad
+    base: dict[int, int] = {}
+    parent: dict[int, int] = {}
+    even = {root}
 
+    def find(vertex: int) -> int:
+        top = vertex
+        while top in base:
+            top = base[top]
+        while vertex != top:
+            following = base[vertex]
+            base[vertex] = top
+            vertex = following
+        return top
 
-def _pair_score(
-    mesh: _TriMesh,
-    quad: tuple[int, int, int, int],
-    shared_edge: tuple[int, int],
-    face_a: int,
-    face_b: int,
-    normals: np.ndarray,
-    field: np.ndarray,
-    weights: _PairWeights,
-) -> float:
-    normal_alignment = max(-1.0, min(1.0, float(np.dot(normals[face_a], normals[face_b]))))
-    aspect = _quad_aspect(mesh.vertices, quad)
-    if not math.isfinite(aspect) or aspect <= 0.0:
-        return -100.0
-    shared_len = float(np.linalg.norm(mesh.vertices[shared_edge[1]] - mesh.vertices[shared_edge[0]]))
-    perimeter = _quad_perimeter(mesh.vertices, quad)
-    diagonal_penalty = shared_len / max(perimeter * 0.25, 1e-9)
-    material_bonus = weights.material if mesh.face_materials[face_a] == mesh.face_materials[face_b] else -1.5
-    field_score = _field_alignment(mesh.vertices, quad, field[face_a], normals[face_a])
-    jacobian = _quad_min_scaled_jacobian(mesh.vertices, quad)
-    return (
-        normal_alignment * weights.normal
-        + field_score * weights.field
-        + jacobian * 3.0
-        + material_bonus
-        - math.log(max(aspect, 1.0)) * weights.aspect
-        - diagonal_penalty * weights.diagonal
-    )
+    def common_base(first: int, second: int) -> int:
+        seen: set[int] = set()
+        while True:
+            first = find(first)
+            seen.add(first)
+            partner = mate.get(first)
+            if partner is None:
+                break
+            first = parent[partner]
+        while True:
+            second = find(second)
+            if second in seen:
+                return second
+            second = parent[mate[second]]
 
+    def mark_path(vertex: int, stop: int, child: int, marked: set[int], odd: list[int]) -> None:
+        while find(vertex) != stop:
+            partner = mate[vertex]
+            marked.add(find(vertex))
+            marked.add(find(partner))
+            parent[vertex] = child
+            child = partner
+            odd.append(partner)
+            vertex = parent[partner]
 
-def _quad_min_scaled_jacobian(vertices: np.ndarray, quad: tuple[int, int, int, int]) -> float:
-    points = vertices[list(quad)]
-    normal = np.zeros(3, dtype=np.float64)
-    for index in range(4):
-        normal += np.cross(points[index], points[(index + 1) % 4])
-    normal_length = float(np.linalg.norm(normal))
-    if normal_length <= 1e-20:
-        return -1.0
-    normal /= normal_length
-    minimum = 1.0
-    for index in range(4):
-        following = points[(index + 1) % 4] - points[index]
-        previous = points[(index - 1) % 4] - points[index]
-        denominator = float(np.linalg.norm(following) * np.linalg.norm(previous))
-        if denominator <= 1e-20:
-            return -1.0
-        minimum = min(minimum, float(np.dot(np.cross(following, previous), normal)) / denominator)
-    return minimum
-
-
-def _quad_aspect(vertices: np.ndarray, quad: tuple[int, int, int, int]) -> float:
-    lengths = []
-    for i in range(4):
-        a = vertices[quad[i]]
-        b = vertices[quad[(i + 1) % 4]]
-        lengths.append(float(np.linalg.norm(b - a)))
-    min_len = max(min(lengths), 1e-12)
-    return max(lengths) / min_len
-
-
-def _quad_perimeter(vertices: np.ndarray, quad: tuple[int, int, int, int]) -> float:
-    return sum(
-        float(np.linalg.norm(vertices[quad[(i + 1) % 4]] - vertices[quad[i]]))
-        for i in range(4)
-    )
-
-
-def _field_alignment(vertices: np.ndarray, quad: tuple[int, int, int, int], direction: np.ndarray, normal: np.ndarray) -> float:
-    tangent = _safe_normalize(_project_to_plane(direction, normal), fallback=np.array([1.0, 0.0, 0.0]))
-    bitangent = _safe_normalize(np.cross(normal, tangent), fallback=np.array([0.0, 1.0, 0.0]))
-    score = 0.0
-    for i in range(4):
-        edge_vec = vertices[quad[(i + 1) % 4]] - vertices[quad[i]]
-        edge_vec = _safe_normalize(edge_vec, fallback=tangent)
-        score += max(abs(float(np.dot(edge_vec, tangent))), abs(float(np.dot(edge_vec, bitangent))))
-    return score / 4.0
+    queue = deque([root])
+    while queue:
+        vertex = queue.popleft()
+        for other in adjacency.get(vertex, ()):
+            if other in frozen or mate.get(vertex) == other or find(vertex) == find(other):
+                continue
+            partner = mate.get(other)
+            if other == root or (partner is not None and partner in parent):
+                # Both ends are even: an odd cycle. Contract it onto its base.
+                blossom_base = common_base(vertex, other)
+                marked: set[int] = set()
+                odd: list[int] = []
+                mark_path(vertex, blossom_base, other, marked, odd)
+                mark_path(other, blossom_base, vertex, marked, odd)
+                for member in marked:
+                    if member != blossom_base:
+                        base[member] = blossom_base
+                for member in odd:
+                    if member not in even:
+                        even.add(member)
+                        queue.append(member)
+            elif other not in parent:
+                parent[other] = vertex
+                if partner is None:
+                    return other, parent, even | set(parent)
+                even.add(partner)
+                queue.append(partner)
+    return -1, parent, even | set(parent)
 
 
 def _majority_material(a: str, b: str) -> str:
@@ -825,7 +892,7 @@ def _score_output(
     options: RemeshOptions,
     mode: str,
     seed: int,
-    feature_edges: set[tuple[int, int]],
+    feature_edge_count: int,
     feature_breaks: int,
 ) -> RemeshReport:
     face_count = len(output.faces)
@@ -860,7 +927,7 @@ def _score_output(
         extraordinary_ratio=extraordinary_ratio,
         boundary_edges=boundary,
         non_manifold_edges=non_manifold,
-        feature_edges=len(feature_edges),
+        feature_edges=feature_edge_count,
         feature_breaks=feature_breaks,
         aspect_penalty=aspect_penalty,
         quad_only_verified=summary.all_quads,
@@ -872,17 +939,11 @@ def _score_output(
     )
 
 
-def _poly_edge_counts(faces: list[Face]) -> Counter[tuple[int, int]]:
-    counts: Counter[tuple[int, int]] = Counter()
-    for face in faces:
-        for i in range(len(face)):
-            counts[tuple(sorted((face[i], face[(i + 1) % len(face)])))] += 1
-    return counts
-
-
 def _aspect_penalty(mesh: MeshData) -> float:
-    penalties = []
-    for face in mesh.faces:
-        if len(face) == 4:
-            penalties.append(max(0.0, math.log(max(_quad_aspect(mesh.vertices, face), 1.0))))
-    return float(np.mean(penalties)) if penalties else 0.0
+    quads = [face for face in mesh.faces if len(face) == 4]
+    if not quads:
+        return 0.0
+    points = mesh.vertices[np.asarray(quads, dtype=np.int64)]
+    lengths = np.linalg.norm(np.roll(points, -1, axis=1) - points, axis=2)
+    aspect = lengths.max(axis=1) / np.maximum(lengths.min(axis=1), 1e-12)
+    return float(np.mean(np.log(np.maximum(aspect, 1.0))))

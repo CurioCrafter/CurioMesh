@@ -174,82 +174,123 @@ def _non_manifold_vertex_count(
     return non_manifold
 
 
-def _face_area(vertices: np.ndarray, face: Face) -> float:
-    if len(face) < 3 or len(set(face)) != len(face):
-        return 0.0
-    origin = vertices[face[0]]
-    area_vector = np.zeros(3, dtype=np.float64)
-    for index in range(1, len(face) - 1):
-        area_vector += np.cross(vertices[face[index]] - origin, vertices[face[index + 1]] - origin)
-    return 0.5 * float(np.linalg.norm(area_vector))
+def _face_areas(vertices: np.ndarray, faces: list[Face]) -> np.ndarray:
+    """Fan areas for every face; faces with a repeated vertex get zero."""
+
+    areas = np.zeros(len(faces), dtype=np.float64)
+    by_length: dict[int, list[int]] = defaultdict(list)
+    for face_index, face in enumerate(faces):
+        if len(face) >= 3:
+            by_length[len(face)].append(face_index)
+    for length, indices in by_length.items():
+        index_array = np.asarray([faces[i] for i in indices], dtype=np.int64)
+        points = vertices[index_array]
+        relative = points[:, 1:] - points[:, :1]
+        area_vector = np.cross(relative[:, :-1], relative[:, 1:]).sum(axis=1)
+        local = 0.5 * np.linalg.norm(area_vector, axis=1)
+        ordered = np.sort(index_array, axis=1)
+        local[np.any(ordered[:, 1:] == ordered[:, :-1], axis=1)] = 0.0
+        areas[indices] = local
+    return areas
 
 
-def _segments_cross(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray, epsilon: float) -> bool:
-    def orientation(p: np.ndarray, q: np.ndarray, r: np.ndarray) -> float:
-        return float((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]))
+def _segments_cross(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray, epsilon: np.ndarray) -> np.ndarray:
+    """Proper 2D segment crossing for row-stacked points (M, 2)."""
+
+    def orientation(p: np.ndarray, q: np.ndarray, r: np.ndarray) -> np.ndarray:
+        return (q[:, 0] - p[:, 0]) * (r[:, 1] - p[:, 1]) - (q[:, 1] - p[:, 1]) * (r[:, 0] - p[:, 0])
 
     first = orientation(a, b, c)
     second = orientation(a, b, d)
     third = orientation(c, d, a)
     fourth = orientation(c, d, b)
     return (
-        ((first > epsilon and second < -epsilon) or (first < -epsilon and second > epsilon))
-        and ((third > epsilon and fourth < -epsilon) or (third < -epsilon and fourth > epsilon))
+        (((first > epsilon) & (second < -epsilon)) | ((first < -epsilon) & (second > epsilon)))
+        & (((third > epsilon) & (fourth < -epsilon)) | ((third < -epsilon) & (fourth > epsilon)))
     )
 
 
+_PROJECTION_KEEP = np.asarray([[1, 2], [0, 2], [0, 1]], dtype=np.int64)
+
+
+def _quad_points_valid(points: np.ndarray, epsilon: float | np.ndarray) -> np.ndarray:
+    """Vectorized finite, convex, non-crossed, low-warp test for (M, 4, 3) quads.
+
+    `epsilon` is a scalar or one tolerance per quad.
+    """
+
+    count = len(points)
+    if count == 0:
+        return np.zeros(0, dtype=bool)
+    epsilon = np.broadcast_to(np.asarray(epsilon, dtype=np.float64), (count,))
+    valid = np.all(np.isfinite(points), axis=(1, 2))
+    with np.errstate(all="ignore"):
+        following_points = np.roll(points, -1, axis=1)
+        normal = np.cross(points, following_points).sum(axis=1)
+        normal_length = np.linalg.norm(normal, axis=1)
+        valid &= normal_length > epsilon
+        normal = normal / np.where(normal_length > 0.0, normal_length, 1.0)[:, None]
+
+        warp_cosine = math.cos(math.radians(MAX_QUAD_WARP_DEGREES))
+
+        def triangle_normal(first: int, second: int, third: int) -> tuple[np.ndarray, np.ndarray]:
+            candidate = np.cross(points[:, second] - points[:, first], points[:, third] - points[:, first])
+            length = np.linalg.norm(candidate, axis=1)
+            return candidate / np.where(length > 0.0, length, 1.0)[:, None], length > epsilon
+
+        for first_triangle, second_triangle in (
+            ((0, 1, 2), (0, 2, 3)),
+            ((1, 2, 3), (1, 3, 0)),
+        ):
+            first_normal, first_ok = triangle_normal(*first_triangle)
+            second_normal, second_ok = triangle_normal(*second_triangle)
+            valid &= first_ok & second_ok
+            valid &= ~(np.einsum("ij,ij->i", first_normal, second_normal) < warp_cosine)
+
+        following = following_points - points
+        previous = np.roll(points, 1, axis=1) - points
+        denominator = np.linalg.norm(following, axis=2) * np.linalg.norm(previous, axis=2)
+        valid &= np.all(denominator > epsilon[:, None], axis=1)
+        scaled_jacobian = np.einsum("mkj,mj->mk", np.cross(following, previous), normal) / np.where(
+            denominator > 0.0, denominator, 1.0
+        )
+        valid &= np.all(np.isfinite(scaled_jacobian) & (scaled_jacobian > 1e-8), axis=1)
+
+        axis = np.argmax(np.abs(np.nan_to_num(normal)), axis=1)
+        keep = np.broadcast_to(_PROJECTION_KEEP[axis][:, None, :], (count, 4, 2))
+        projected = np.take_along_axis(points, keep, axis=2)
+        valid &= ~_segments_cross(projected[:, 0], projected[:, 1], projected[:, 2], projected[:, 3], epsilon)
+        valid &= ~_segments_cross(projected[:, 1], projected[:, 2], projected[:, 3], projected[:, 0], epsilon)
+    return valid
+
+
+def _quads_valid(vertices: np.ndarray, quads: np.ndarray, epsilon: float) -> np.ndarray:
+    quads = np.asarray(quads, dtype=np.int64).reshape(-1, 4)
+    ordered = np.sort(quads, axis=1)
+    distinct = np.all(ordered[:, 1:] != ordered[:, :-1], axis=1)
+    return distinct & _quad_points_valid(vertices[quads], epsilon)
+
+
 def _quad_is_locally_valid(vertices: np.ndarray, face: Face, epsilon: float) -> bool:
-    if len(face) != 4 or len(set(face)) != 4:
+    if len(face) != 4:
         return False
-    points = vertices[list(face)]
-    if not np.all(np.isfinite(points)):
-        return False
+    return bool(_quads_valid(vertices, np.asarray([face]), epsilon)[0])
 
-    normal = np.zeros(3, dtype=np.float64)
-    for index in range(4):
-        current = points[index]
-        following = points[(index + 1) % 4]
-        normal += np.cross(current, following)
-    normal_length = float(np.linalg.norm(normal))
-    if normal_length <= epsilon:
-        return False
-    normal /= normal_length
 
-    def triangle_normal(first: int, second: int, third: int) -> np.ndarray | None:
-        candidate = np.cross(points[second] - points[first], points[third] - points[first])
-        length = float(np.linalg.norm(candidate))
-        return None if length <= epsilon else candidate / length
+def _span_epsilon(coordinates: np.ndarray) -> float:
+    if not len(coordinates):
+        return 1e-20
+    span = np.ptp(coordinates, axis=0)
+    return max(float(np.dot(span, span)) * 1e-14, 1e-20)
 
-    warp_cosine = math.cos(math.radians(MAX_QUAD_WARP_DEGREES))
-    for first_triangle, second_triangle in (
-        ((0, 1, 2), (0, 2, 3)),
-        ((1, 2, 3), (1, 3, 0)),
-    ):
-        first_normal = triangle_normal(*first_triangle)
-        second_normal = triangle_normal(*second_triangle)
-        if first_normal is None or second_normal is None:
-            return False
-        if float(np.dot(first_normal, second_normal)) < warp_cosine:
-            return False
 
-    for index in range(4):
-        current = points[index]
-        following = points[(index + 1) % 4] - current
-        previous = points[(index - 1) % 4] - current
-        denominator = float(np.linalg.norm(following) * np.linalg.norm(previous))
-        if denominator <= epsilon:
-            return False
-        scaled_jacobian = float(np.dot(np.cross(following, previous), normal)) / denominator
-        if not math.isfinite(scaled_jacobian) or scaled_jacobian <= 1e-8:
-            return False
+def quads_locally_valid(vertices: np.ndarray, quads: np.ndarray) -> np.ndarray:
+    """Batch form of `quad_is_locally_valid` for an (M, 4) index array."""
 
-    projection_axis = int(np.argmax(np.abs(normal)))
-    projected = np.delete(points, projection_axis, axis=1)
-    if _segments_cross(projected[0], projected[1], projected[2], projected[3], epsilon):
-        return False
-    if _segments_cross(projected[1], projected[2], projected[3], projected[0], epsilon):
-        return False
-    return True
+    coordinates = np.asarray(vertices, dtype=np.float64)
+    if not len(coordinates):
+        return np.zeros(len(quads), dtype=bool)
+    return _quads_valid(coordinates, quads, _span_epsilon(coordinates))
 
 
 def quad_is_locally_valid(vertices: np.ndarray, face: Face) -> bool:
@@ -258,9 +299,7 @@ def quad_is_locally_valid(vertices: np.ndarray, face: Face) -> bool:
     coordinates = np.asarray(vertices, dtype=np.float64)
     if not len(coordinates):
         return False
-    span = np.ptp(coordinates, axis=0)
-    epsilon = max(float(np.dot(span, span)) * 1e-14, 1e-20)
-    return _quad_is_locally_valid(coordinates, face, epsilon)
+    return _quad_is_locally_valid(coordinates, face, _span_epsilon(coordinates))
 
 
 def topology_summary(mesh: MeshData) -> TopologySummary:
@@ -293,17 +332,15 @@ def topology_summary(mesh: MeshData) -> TopologySummary:
             extraordinary += 1
         defect_charge += ideal - valence
 
-    if len(mesh.vertices):
-        span = np.ptp(np.asarray(mesh.vertices, dtype=np.float64), axis=0)
-        area_epsilon = max(float(np.dot(span, span)) * 1e-14, 1e-20)
-    else:
-        area_epsilon = 1e-20
-    degenerate = sum(1 for face in mesh.faces if _face_area(mesh.vertices, face) <= area_epsilon)
-    quads = sum(1 for face in mesh.faces if len(face) == 4)
-    invalid_quads = sum(
-        1
-        for face in mesh.faces
-        if len(face) == 4 and not _quad_is_locally_valid(mesh.vertices, face, area_epsilon)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    area_epsilon = _span_epsilon(vertices)
+    degenerate = int(np.count_nonzero(_face_areas(vertices, mesh.faces) <= area_epsilon))
+    quad_faces = [face for face in mesh.faces if len(face) == 4]
+    quads = len(quad_faces)
+    invalid_quads = (
+        int(np.count_nonzero(~_quads_valid(vertices, np.asarray(quad_faces), area_epsilon)))
+        if quad_faces
+        else 0
     )
     component_signature = _component_topology_signatures(mesh.faces, edge_occurrences)
     component_euler = tuple(signature[0] for signature in component_signature)
@@ -494,14 +531,25 @@ def _parity_path_edges(mesh: MeshData) -> set[tuple[int, int]]:
         distances = {start: 0}
         parents: dict[int, tuple[int, tuple[int, int]]] = {}
         queue = deque([start])
+        # Every candidate costs at least its BFS distance, so once the queue
+        # reaches the best known cost no cheaper (or tie-breaking) target
+        # remains undiscovered and the search can stop.
+        best_cost = 1 if start in boundary_by_face else math.inf
         while queue:
             current = queue.popleft()
+            if distances[current] >= best_cost:
+                break
             for linked, edge in adjacency[current]:
                 if linked in distances:
                     continue
-                distances[linked] = distances[current] + 1
+                distance = distances[current] + 1
+                distances[linked] = distance
                 parents[linked] = (current, edge)
                 queue.append(linked)
+                if linked in terminals:
+                    best_cost = min(best_cost, distance)
+                elif linked in boundary_by_face:
+                    best_cost = min(best_cost, distance + 1)
 
         # Pairing to another transition quad costs one edge per dual step.
         # Reaching the exterior additionally costs one boundary edge. On an
@@ -544,6 +592,77 @@ def _parity_path_edges(mesh: MeshData) -> set[tuple[int, int]]:
         if (len(face) + split_count) % 2:
             raise ValueError(f"Parity solve failed on face {face_index}.")
     return selected
+
+
+def _parity_template_validity(
+    mesh: MeshData,
+    vertices: np.ndarray,
+    base_coordinates: np.ndarray,
+    selected_edges: set[tuple[int, int]],
+    midpoint_indices: dict[tuple[int, int], int],
+) -> list[list[bool]]:
+    """Validate every ParityPath template candidate of every face in one batch.
+
+    Per face, candidates are listed in the order `parity_path_quad_closure`
+    tries them: the untouched quad, the three two-quad diagonal cuts, then the
+    two center fans. Each cell is checked with a tolerance from its own four
+    corners, as `quad_is_locally_valid` does on a local coordinate array.
+    """
+
+    center_offset = len(base_coordinates)
+    centers = [vertices[list(face)].mean(axis=0) for face in mesh.faces]
+    quads: list[tuple[int, int, int, int]] = []
+    patch_sizes: list[int] = []
+    per_face: list[int] = []
+    for face_index, face in enumerate(mesh.faces):
+        augmented: list[int] = []
+        for corner, vertex in enumerate(face):
+            augmented.append(vertex)
+            edge = tuple(sorted((vertex, face[(corner + 1) % len(face)])))
+            if edge in selected_edges:
+                augmented.append(midpoint_indices[edge])
+        split_count = len(augmented) - len(face)
+        patches: list[list[tuple[int, int, int, int]]] = []
+        if len(face) == 4 and split_count == 0:
+            patches.append([tuple(face)])
+        if len(face) == 4 and split_count == 2:
+            for offset in range(3):
+                patches.append([
+                    tuple(augmented[(offset + step) % 6] for step in range(4)),
+                    tuple(augmented[(offset + 3 + step) % 6] for step in range(4)),
+                ])
+        if len(augmented) % 2 == 0 and len(augmented) >= 4:
+            center = center_offset + face_index
+            for offset in (0, 1):
+                patches.append([
+                    (
+                        center,
+                        augmented[(offset + 2 * cell) % len(augmented)],
+                        augmented[(offset + 2 * cell + 1) % len(augmented)],
+                        augmented[(offset + 2 * cell + 2) % len(augmented)],
+                    )
+                    for cell in range(len(augmented) // 2)
+                ])
+        per_face.append(len(patches))
+        for patch in patches:
+            quads.extend(patch)
+            patch_sizes.append(len(patch))
+
+    if not quads:
+        return [[] for _face in mesh.faces]
+    coordinates = np.vstack((base_coordinates, np.asarray(centers, dtype=np.float64)))
+    points = coordinates[np.asarray(quads, dtype=np.int64)]
+    span = np.ptp(points, axis=1)
+    epsilon = np.maximum(np.einsum("ij,ij->i", span, span) * 1e-14, 1e-20)
+    quad_ok = _quad_points_valid(points, epsilon)
+    starts = np.concatenate(([0], np.cumsum(patch_sizes)[:-1]))
+    patch_ok = np.logical_and.reduceat(quad_ok, starts).tolist()
+    results: list[list[bool]] = []
+    cursor = 0
+    for count in per_face:
+        results.append(patch_ok[cursor : cursor + count])
+        cursor += count
+    return results
 
 
 def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> MeshData:
@@ -591,19 +710,13 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
         [] if output_uvs is not None and mesh.face_uvs is not None else None
     )
 
-    def patch_is_valid(patch: list[Face]) -> bool:
-        # Validate each cell in local indexing. Rebuilding a dense array from
-        # every accumulated output vertex for every face is quadratic on large
-        # scans and provides no additional geometric information.
-        return all(
-            quad_is_locally_valid(
-                np.asarray([output_vertices[index] for index in quad], dtype=np.float64),
-                (0, 1, 2, 3),
-            )
-            for quad in patch
-        )
+    template_results = _parity_template_validity(
+        mesh, vertices, np.asarray(output_vertices, dtype=np.float64), selected_edges, midpoint_indices
+    )
 
     for face_index, face in enumerate(mesh.faces):
+        # Results arrive in the same order the templates are tried below.
+        patch_is_valid = iter(template_results[face_index]).__next__
         material = (
             mesh.face_materials[face_index]
             if face_index < len(mesh.face_materials)
@@ -646,7 +759,7 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
         patch_uvs: list[Face] | None = None
         if len(face) == 4 and split_count == 0:
             candidate_patch = [tuple(face)]
-            if patch_is_valid(candidate_patch):
+            if patch_is_valid():
                 patch = candidate_patch
                 if face_uv is not None:
                     patch_uvs = [tuple(face_uv)]
@@ -660,7 +773,7 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
                     tuple(augmented[(offset + step) % 6] for step in range(4)),
                     tuple(augmented[(offset + 3 + step) % 6] for step in range(4)),
                 ]
-                if not patch_is_valid(candidate_patch):
+                if not patch_is_valid():
                     continue
                 patch = candidate_patch
                 if face_uv is not None:
@@ -694,7 +807,7 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
                     )
                     for cell in range(cell_count)
                 ]
-                if not patch_is_valid(candidate_patch):
+                if not patch_is_valid():
                     continue
                 patch = candidate_patch
                 if face_uv is not None:

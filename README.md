@@ -1,11 +1,89 @@
 # CurioMesh Atlas-Q Quad Retopology
 
-CurioMesh 0.4 is a Blender 4.3+ add-on for turning dense meshes and
+CurioMesh 0.5 is a Blender 4.3+ add-on for turning dense meshes and
 photogrammetry scans into lower-density, validated quad retopology. Atlas-Q is
 not presented as a universal miracle solver. It is a scan-aware controller that
 builds a target-scale proxy, chooses an appropriate solver path, compares
 multiple candidates against the preserved source, and rejects results that do
 not pass the requested topology and quad-quality gates.
+
+## What's New In 0.5
+
+![CurioMesh Quick Start panel, HUD and heatmap in Blender 4.5](docs/images/panel_quickstart.png)
+
+### Get going in three clicks
+
+Open `3D View > N-panel > CurioMesh`. The **Quick Start** panel holds
+everything you need for a first result:
+
+1. Pick a quality: **Draft**, **Balanced** or **Hero**.
+2. Set **Target Faces** and the engine.
+3. Press the big **Remesh** button.
+
+The **See it** row turns on the three live views below. Advanced settings live
+in collapsed sub-panels (Scan, Shape, Pipeline, PairClosure, Materials & UVs,
+Batch, Diagnostics, Debug), so they stay out of the way until you need them.
+Every earlier setting is still there.
+
+### HUD dashboard
+
+![HUD dashboard and triangle/pole heatmap on a remeshed Suzanne](docs/images/hud_heatmap.png)
+
+A dark card in the corner of the viewport shows the active mesh at a glance:
+quad percentage with a green/amber/red bar, faces against your target, leftover
+triangles, poles, the engine and run time. The last line tells you the next
+step, for example `146 triangles left - enable Require Quads`. It updates as
+you edit or select meshes.
+
+### Triangle and pole heatmap
+
+One click on **Heatmap** colours problems right on the mesh, without touching
+its materials: leftover triangles red, n-gons purple, 3-poles blue and 5+
+poles orange. It follows edits live and skips meshes over 300,000 faces.
+
+### Live preview
+
+Turn on **Live** and CurioMesh re-runs the PairClosure engine into a preview
+object beside the source about 0.4 s after you change target faces, feature
+angle, seeds, flow mode or Require Quads, or edit the source. It works on
+sources up to 20,000 faces; turning Live off removes the preview.
+
+### Batch remesh
+
+Select any number of meshes and press **Batch Remesh Selected** in the Batch
+sub-panel. CurioMesh runs them one by one with the current settings, shows
+progress in the HUD (Esc cancels), keeps going past failures, lists the results
+in the panel and writes one `curiomesh_batch_<time>.json` report next to the
+`.blend`.
+
+### A faster, smarter PairClosure engine
+
+- **About 100x faster.** Adjacency, feature detection, pair scoring and quad
+  validation are vectorized with NumPy, and per-mesh work is computed once
+  instead of once per seed. On a 7k-triangle noisy sphere (3 seeds) a
+  quad-dominant run drops from 111 s to about 1 s, and an all-quad run from
+  212 s to about 7.4 s.
+- **Maximum pairing.** Triangle pairing starts from the best-scoring greedy
+  pairs, then runs Edmonds' blossom matching over the valid pairs, so the most
+  triangles possible end up in quads. Stranded triangles cost three quads each
+  in closure, so this keeps all-quad output closer to the target.
+- **Cross field.** Pairs now follow a 4-way cross field that is smoothed
+  across the surface and pinned to sharp edges, boundaries, material borders
+  and UV seams, so quads line up with the shape's features.
+
+![Leftover triangles in red: greedy pairing alone vs maximum pairing](docs/images/rescue_before_after.png)
+
+On this triangulated Suzanne (3,936 triangles, half-count target) the extra
+pairing pass cuts leftover triangles from 202 to 146 (28 rescued pairs). The
+count is shown in the PairClosure sub-panel and stored on the output as
+`curiomesh_triadq_rescued_pairs`.
+
+All screenshots come from Blender 4.5.1 LTS and can be regenerated with:
+
+```powershell
+blender -b --factory-startup --python-expr "import bpy; bpy.ops.wm.save_as_mainfile(filepath='empty.blend')"
+blender --factory-startup --window-geometry 0 0 1920 1080 empty.blend --python scripts/capture_readme_screenshots.py
+```
 
 ## What Changed In 0.4
 
@@ -42,34 +120,6 @@ candidate never replaces the selected source object. Projection is
 transactional: if shrinkwrap makes an accepted candidate degenerate,
 non-manifold, topologically different, or too inaccurate, CurioMesh restores
 the validated pre-projection mesh and records the rollback on the output.
-
-## Rescue Pairing
-
-TRIAD-Q pairs neighbouring triangles into quads greedily. Greedy order strands
-triangles whose only neighbours were already taken, and every stranded triangle
-costs three extra quads in PairClosure. Rescue pairing walks alternating paths
-in the triangle adjacency graph (free triangle -> taken pair -> ... -> free
-triangle) and flips them, so two stranded triangles become one more quad. Every
-re-pair still passes the same local quad-validity and score checks.
-
-![Before and after rescue pairing: leftover triangles shown in red](docs/images/rescue_before_after.png)
-
-On this triangulated Suzanne (3,936 triangles, half-count target) leftover
-triangles drop from 198 to 146 with 26 rescued pairs.
-
-On a 7k-triangle noisy sphere with a 3,600-face target, leftover triangles drop
-from 166 to 72 and pure-quad output from 4,666 to 3,995 faces. The count of
-re-paired triangles is shown in the PairClosure panel and stored on the output
-as `curiomesh_triadq_rescued_pairs`.
-
-![CurioMesh panel showing the rescued pair count](docs/images/panel_triadq.png)
-
-Regenerate both screenshots with:
-
-```powershell
-blender -b --factory-startup --python-expr "import bpy; bpy.ops.wm.save_as_mainfile(filepath='empty.blend')"
-blender --factory-startup --window-geometry 0 0 1920 1080 empty.blend --python scripts/capture_readme_screenshots.py
-```
 
 ## Solver Portfolio
 
@@ -112,7 +162,7 @@ CurioMesh targets Blender 4.3+ and the test runner prefers Blender 4.5 LTS.
    source error, minimum scaled Jacobian, p95 aspect ratio, boundary loops, and
    silhouette.
 8. Keep UV projection or bake base color. Bake normal/displacement detail in a
-   dedicated external baking step; CurioMesh 0.4 does not expose those maps.
+   dedicated external baking step; CurioMesh does not expose those maps.
    A low-poly mesh cannot encode scan-frequency detail in geometry alone.
 
 For multi-million-face scans, Atlas-Q samples the full source, then performs

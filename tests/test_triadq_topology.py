@@ -549,6 +549,91 @@ class QuadClosureTests(unittest.TestCase):
         self.assertEqual(rescued, 1)
         self.assertEqual(mate, {0: 1, 1: 0, 2: 3, 3: 2})
 
+    @staticmethod
+    def _allowed_from_edges(edges: list[tuple[int, int]]) -> dict[int, list[tuple[float, int, tuple]]]:
+        allowed: dict[int, list[tuple[float, int, tuple]]] = {}
+        for a, b in edges:
+            allowed.setdefault(a, []).append((1.0, b, ()))
+            allowed.setdefault(b, []).append((1.0, a, ()))
+        return allowed
+
+    def test_blossom_matching_finds_path_through_odd_cycles(self) -> None:
+        # Two 5-cycles (blossoms) based at free faces 0 and 9, bridged 1-8.
+        # The only augmenting path, 0-4=3-2=1-8=7-6=5-9, walks each cycle the
+        # long way round; a search without blossom contraction misses it.
+        edges = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 0), (9, 8), (8, 7), (7, 6), (6, 5), (5, 9), (1, 8)]
+        mate = {1: 2, 2: 1, 3: 4, 4: 3, 8: 7, 7: 8, 6: 5, 5: 6}
+        rescued = triad_engine._augment_matching(mate, self._allowed_from_edges(edges), list(range(10)))
+        self.assertEqual(rescued, 1)
+        self.assertEqual(len(mate), 10)
+        for a, b in mate.items():
+            self.assertEqual(mate[b], a)
+            self.assertIn(tuple(sorted((a, b))), {tuple(sorted(edge)) for edge in edges})
+
+    def test_blossom_matching_is_maximum_on_random_graphs(self) -> None:
+        def brute_force(vertices: list[int], edges: set[tuple[int, int]]) -> int:
+            if not vertices:
+                return 0
+            first, rest = vertices[0], vertices[1:]
+            best = brute_force(rest, edges)
+            for other in rest:
+                if tuple(sorted((first, other))) in edges:
+                    best = max(best, 1 + brute_force([v for v in rest if v != other], edges))
+            return best
+
+        rng = np.random.default_rng(7)
+        for _trial in range(60):
+            count = int(rng.integers(4, 11))
+            edges = {
+                (a, b) for a in range(count) for b in range(a + 1, count) if rng.random() < 0.3
+            }
+            mate: dict[int, int] = {}
+            for a, b in sorted(edges, key=lambda _edge: rng.random()):
+                if a not in mate and b not in mate:
+                    mate[a] = b
+                    mate[b] = a
+            start = len(mate) // 2
+            order = [int(v) for v in rng.permutation(count)]
+            rescued = triad_engine._augment_matching(mate, self._allowed_from_edges(sorted(edges)), order)
+            self.assertEqual(len(mate) // 2, brute_force(list(range(count)), edges))
+            self.assertEqual(rescued, len(mate) // 2 - start)
+            for a, b in mate.items():
+                self.assertEqual(mate[b], a)
+                self.assertIn(tuple(sorted((a, b))), edges)
+
+    def test_cross_field_aligns_with_straight_feature_line(self) -> None:
+        # Flat grid rotated 30 degrees with random cell diagonals; a material
+        # boundary along one grid row is the only constraint. Longest-edge
+        # initial guesses sit 45 degrees off the line in 4-RoSy terms.
+        size = 16
+        angle = np.radians(30.0)
+        axis_u = np.array([np.cos(angle), np.sin(angle), 0.0])
+        axis_v = np.array([-np.sin(angle), np.cos(angle), 0.0])
+        vertices = np.asarray(
+            [i * axis_u + j * axis_v for j in range(size + 1) for i in range(size + 1)]
+        )
+        rng = np.random.default_rng(3)
+        faces: list[tuple[int, int, int]] = []
+        materials: list[str] = []
+        for j in range(size):
+            for i in range(size):
+                a = j * (size + 1) + i
+                b, c, d = a + 1, a + size + 2, a + size + 1
+                cell = [(a, b, c), (a, c, d)] if rng.random() < 0.5 else [(a, b, d), (b, c, d)]
+                faces.extend(cell)
+                materials.extend(["top" if j >= size // 2 else "bottom"] * 2)
+        tri = triad_engine._triangulate(
+            MeshData(vertices=vertices, faces=faces, face_materials=materials)
+        )
+        adj = triad_engine._adjacency(tri)
+        line = triad_engine._material_edge_mask(adj)
+        self.assertEqual(int(line.sum()), size)
+        directions = triad_engine._estimate_field(tri, adj, line, smooth_iters=4)
+        cosines = np.clip(directions @ axis_u, -1.0, 1.0)
+        offsets = np.degrees(np.arccos(np.abs(cosines)))
+        offsets = np.minimum(offsets, 90.0 - offsets)  # any of the four cross directions
+        self.assertLess(float(offsets.max()), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

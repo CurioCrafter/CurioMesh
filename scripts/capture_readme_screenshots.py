@@ -4,7 +4,8 @@
       --python scripts/capture_readme_screenshots.py
 
 Builds a triangulated Suzanne, runs TRIAD-Q with the rescue pass disabled and
-enabled, paints leftover triangles red, then saves docs/images/*.png and quits.
+enabled, paints leftover triangles red, shows the HUD and heatmap, then saves
+docs/images/*.png and quits.
 """
 
 from __future__ import annotations
@@ -106,6 +107,8 @@ settings.require_quads = False
 settings.target_faces = len(source.data.polygons) // 2
 settings.triad_seed_count = 2
 settings.triad_flow_mode = "ORGANIC"
+settings.hud_enabled = False
+settings.heatmap_enabled = False
 
 window = bpy.context.window_manager.windows[0]
 view = next(area for area in window.screen.areas if area.type == "VIEW_3D")
@@ -136,6 +139,26 @@ def capture_viewport():
     OUT.mkdir(parents=True, exist_ok=True)
     with bpy.context.temp_override(window=window, area=view):
         bpy.ops.screen.screenshot_area(filepath=str(OUT / "rescue_before_after.png"))
+    # Second shot: HUD and heatmap on the rescued result alone.
+    for obj in bpy.context.scene.objects:
+        obj.hide_set(obj is not after)
+    space.shading.color_type = "OBJECT"
+    bpy.ops.object.select_all(action="DESELECT")
+    after.select_set(True)
+    bpy.context.view_layer.objects.active = after
+    with bpy.context.temp_override(window=window, area=view, region=window_region):
+        bpy.ops.view3d.view_selected()
+    after.select_set(False)
+    settings.hud_enabled = True
+    bpy.ops.curiomesh.toggle_heatmap()
+    bpy.app.timers.register(capture_hud, first_interval=1.0)
+
+
+def capture_hud():
+    with bpy.context.temp_override(window=window, area=view):
+        bpy.ops.screen.screenshot_area(filepath=str(OUT / "hud_heatmap.png"))
+    for obj in bpy.context.scene.objects:
+        obj.hide_set(False)
     after.select_set(True)
     space.show_region_ui = True
     bpy.app.timers.register(open_panel, first_interval=0.5)
@@ -143,15 +166,17 @@ def capture_viewport():
 
 def open_panel():
     ui_region.active_panel_category = "CurioMesh"
+    # A scroll forces the sidebar to redraw on the new tab.
     with bpy.context.temp_override(window=window, area=view, region=ui_region):
-        for _ in range(14):
-            bpy.ops.view2d.scroll_down()
+        bpy.ops.view2d.scroll_up()
+    with bpy.context.temp_override(window=window, area=view, region=window_region):
+        bpy.ops.view3d.view_all()
     bpy.app.timers.register(capture_panel, first_interval=1.0)
 
 
 def capture_panel():
     with bpy.context.temp_override(window=window):
-        bpy.ops.screen.screenshot(filepath=str(OUT / "panel_triadq.png"))
+        bpy.ops.screen.screenshot(filepath=str(OUT / "panel_quickstart.png"))
     bpy.ops.wm.quit_blender()
 
 

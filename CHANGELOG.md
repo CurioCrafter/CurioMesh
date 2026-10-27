@@ -1,11 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-10-27
 
-- Rescue pairing: augmenting paths re-pair triangles stranded by greedy
-  TRIAD-Q pairing. Leftover triangles 166 -> 72 on a 7k-triangle sphere.
-- Show the rescued pair count in the PairClosure panel.
-- Add `scripts/capture_readme_screenshots.py` for README screenshots.
+- Quick Start panel with a big Remesh button, quality buttons and HUD /
+  Heatmap / Live toggles; advanced settings moved to collapsed sub-panels.
+- Viewport HUD dashboard: quad ratio bar, faces vs target, triangles, poles,
+  engine, time and a next-step hint.
+- Non-destructive triangle / n-gon / pole heatmap drawn with the GPU module.
+- Live preview re-runs PairClosure into a preview object on setting or source
+  changes (sources up to 20,000 faces).
+- Batch remesh of all selected meshes with progress, cancel and a JSON report.
+- TRIAD-Q engine vectorized with NumPy and per-mesh caching: about 100x faster
+  quad-dominant and 29x faster all-quad on a 7k-triangle sphere.
+- Maximum-cardinality triangle pairing (Edmonds' blossom) on top of the
+  score-greedy start; `rescued_pairs` reports the augmentations.
+- 4-RoSy cross field with frame transport, pinned to feature edges, drives
+  pair alignment.
+- README screenshots captured by `scripts/capture_readme_screenshots.py`.
 
 ## 0.4.0 hardening
 

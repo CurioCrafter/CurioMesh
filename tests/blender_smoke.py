@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import traceback
@@ -696,6 +697,102 @@ def run_world_scale_metrics_case():
     print("PASS world_scale_metrics: non-uniform scale uses world-space area, diagonal, and quad quality")
 
 
+def run_ui_features_case(module):
+    from curiomesh import batch, live, overlay
+
+    reset_scene()
+    settings = bpy.context.scene.curiomesh_settings
+
+    # Toggles must not raise.
+    cube = make_cube("CurioSmoke_UiCube")
+    reset_selection(cube)
+    for name in ("hud_enabled", "heatmap_enabled"):
+        setattr(settings, name, True)
+        setattr(settings, name, False)
+    if "FINISHED" not in bpy.ops.curiomesh.toggle_heatmap() or not settings.heatmap_enabled:
+        raise AssertionError("ui: toggle_heatmap did not enable the heatmap")
+    bpy.ops.curiomesh.toggle_heatmap()
+
+    # Stats, heatmap arrays and hints on a mesh with a triangle and an n-gon.
+    stats = overlay.get_stats(cube)
+    if (stats.faces, stats.quads, stats.tris, stats.poles) != (6, 6, 0, 8):
+        raise AssertionError(f"ui: cube stats {stats}")
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.quads_convert_to_tris()
+    bpy.ops.object.mode_set(mode="OBJECT")
+    overlay.invalidate()
+    stats = overlay.get_stats(cube)
+    if stats.tris != 12 or stats.quads != 0:
+        raise AssertionError(f"ui: triangulated cube stats {stats}")
+    tri_pos, tri_col, pt_pos, pt_col = overlay.build_heat_arrays(cube, stats)
+    if len(tri_pos) != 36 or len(tri_col) != 36 or len(pt_pos) != len(pt_col):
+        raise AssertionError("ui: heatmap arrays have wrong sizes")
+    hint = overlay.next_step_hint(cube, stats, settings)
+    if "Remesh" not in hint:
+        raise AssertionError(f"ui: unexpected hint {hint!r}")
+    if overlay.next_step_hint(None, None, settings) != "Select a mesh":
+        raise AssertionError("ui: no-object hint")
+    model = overlay.hud_model(bpy.context)
+    if model["tris"] != 12 or model["target"] != settings.target_faces:
+        raise AssertionError(f"ui: hud model {model}")
+
+    # Batch on two cubes (QuadriFlow keeps this fast).
+    reset_scene()
+    first, second = make_cube("CurioSmoke_BatchA"), make_cube("CurioSmoke_BatchB")
+    bpy.ops.object.select_all(action="DESELECT")
+    first.select_set(True)
+    second.select_set(True)
+    bpy.context.view_layer.objects.active = second
+    settings.engine = "QUADRIFLOW"
+    settings.target_faces = 96
+    settings.texture_mode = "NONE"
+    if "FINISHED" not in bpy.ops.curiomesh.batch_remesh():
+        raise AssertionError("batch: operator did not finish")
+    if len(settings.batch_results) != 2 or not all(item.ok for item in settings.batch_results):
+        raise AssertionError(f"batch: results {[(i.name, i.ok, i.error) for i in settings.batch_results]}")
+    report = Path(settings.batch_report_path)
+    if not report.is_file() or len(json.loads(report.read_text(encoding="utf-8"))["objects"]) != 2:
+        raise AssertionError("batch: JSON report missing or incomplete")
+    report.unlink()
+    bad = batch.report_row("Ghost", None, 1.0, "boom")
+    if bad["success"] or bad["error"] != "boom":
+        raise AssertionError("batch: failure row")
+
+    # Live preview: cap message and a real preview on a small mesh.
+    reset_scene()
+    source = make_uv_sphere("CurioSmoke_LiveSrc", segments=16, rings=8)
+    reset_selection(source)
+    settings.live_enabled = True
+    if not live.run_preview(bpy.context):
+        raise AssertionError(f"live: preview failed: {live.status()}")
+    preview = bpy.data.objects.get(overlay.PREVIEW_NAME)
+    if preview is None or bpy.context.object is not source:
+        raise AssertionError("live: preview missing or selection not restored")
+    live.run_preview(bpy.context)
+    if len([o for o in bpy.data.objects if o.name.startswith(overlay.PREVIEW_NAME)]) != 1:
+        raise AssertionError("live: preview object was not reused")
+    original_cap = live.LIVE_FACE_CAP
+    live.LIVE_FACE_CAP = 10
+    try:
+        if live.run_preview(bpy.context) or "Live off" not in live.status():
+            raise AssertionError("live: cap was not enforced")
+    finally:
+        live.LIVE_FACE_CAP = original_cap
+    settings.live_enabled = False
+    if bpy.data.objects.get(overlay.PREVIEW_NAME) is not None:
+        raise AssertionError("live: preview was not removed")
+
+    # Register / unregister / register leaves no stale handlers or timers.
+    module.unregister()
+    if overlay._draw_handles or overlay._on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+        raise AssertionError("ui: unregister left handlers behind")
+    module.register()
+    if bpy.app.timers.is_registered(live._tick):
+        raise AssertionError("ui: live timer survived re-register")
+    print("PASS ui_features")
+
+
 def main():
     module = load_addon()
     reset_scene()
@@ -959,6 +1056,7 @@ def main():
         require_quad_only=True,
     )
 
+    run_ui_features_case(module)
     module.unregister()
     print("CurioMesh Blender smoke tests passed.")
 

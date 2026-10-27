@@ -92,11 +92,29 @@ decimates toward a base triangle budget
 Nbase ~= Nq / (3 - p),  p = 0.8 initially,
 ```
 
-then performs feature-aware greedy triangle pairing. Organic, Patch, Dirty,
+then performs feature-aware triangle pairing. Organic, Patch, Dirty,
 and Texture modes use different field-smoothing, feature-angle, and pairing
 weight profiles. A proposed pair must itself be a finite, convex, non-crossed
 quad with no more than 60 degrees of triangle-normal divergence across either
 diagonal; unsafe pairs remain triangles for exact closure.
+
+Pair scoring is guided by a per-face 4-RoSy cross field. Each triangle has a
+tangent frame; its cross is stored as `exp(4i theta)` so the four equivalent
+directions share one value. Feature edges (boundary, non-manifold, sharp,
+material, UV seam) are hard constraints: faces touching one are pinned to
+their longest feature edge. Free faces start from a weak longest-edge guess
+and are smoothed by Jacobi averaging across non-feature edges with parallel
+transport `exp(4i (alpha_i - alpha_j))`, where `alpha` is the shared edge's
+angle in each face frame. A pair's field term is the mean alignment of its
+four sides with the nearest of the four cross directions.
+
+Pairing starts from a score-greedy matching (faces visited in seed order,
+each taking its best still-free partner), then grows it to a
+maximum-cardinality matching over the allowed pair graph with Edmonds'
+blossom algorithm, so augmenting paths through odd dual cycles are found.
+`rescued_pairs` reports the augmentations beyond the greedy start. Adjacency,
+features, the field, and pair scores are computed once per mesh and shared
+by all seeds; only the visit order, matching, and closure run per seed.
 
 When PairClosure is explicitly requested, Atlas-Q bypasses the larger
 flow-candidate proxy and builds only this closure-sized QEM proxy. Avoiding two
@@ -271,7 +289,9 @@ Regression tests exercise both disk and sphere-topology examples.
 The strongest longer-term path is a global patch solver:
 
 1. robust multi-scale normal/curvature confidence,
-2. confidence-weighted 4-RoSy field,
+2. confidence weighting and a global (non-Jacobi) solve for the 4-RoSy field
+   (the standalone engine ships a feature-pinned, diffused 4-RoSy field; see
+   Solver candidates),
 3. singularity simplification at target scale,
 4. feature/separatrix patch layout,
 5. integer arc quantization with parity and no T-junctions,
