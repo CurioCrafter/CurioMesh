@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Rescue pairing: augmenting paths re-pair triangles stranded by greedy
+  TRIAD-Q pairing. Leftover triangles 166 -> 72 on a 7k-triangle sphere.
+- Show the rescued pair count in the PairClosure panel.
+- Add `scripts/capture_readme_screenshots.py` for README screenshots.
+
 ## 0.4.0 hardening
 
 - Normalize vertex-only bow-ties after QEM by deterministically duplicating

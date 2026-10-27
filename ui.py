@@ -177,6 +177,9 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
             triad.prop(settings, "require_quads")
             if not settings.require_quads:
                 triad.label(text="Debug mode may retain triangles.", icon="ERROR")
+            rescued = context.object.get("curiomesh_triadq_rescued_pairs")
+            if rescued is not None:
+                triad.label(text=f"Rescued pairs: {rescued}", icon="CHECKMARK")
 
         textures = layout.box()
         textures.label(text="Materials And UVs")

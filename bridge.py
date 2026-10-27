@@ -476,12 +476,14 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     obj["curiomesh_triadq_score"] = float(report.score)
     obj["curiomesh_triadq_feature_edges"] = int(report.feature_edges)
     obj["curiomesh_vertex_fan_splits"] = int(report.vertex_fan_splits)
+    obj["curiomesh_triadq_rescued_pairs"] = int(report.rescued_pairs)
     _log(
         config,
         (
             f"TRIAD-Q Lite: mode={report.mode} seed={report.selected_seed} "
             f"faces={report.output_faces} quad_ratio={report.quad_ratio:.3f} "
-            f"vertex_fan_splits={report.vertex_fan_splits}"
+            f"vertex_fan_splits={report.vertex_fan_splits} "
+            f"rescued_pairs={report.rescued_pairs}"
         ),
     )
     return True

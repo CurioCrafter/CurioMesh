@@ -43,6 +43,34 @@ transactional: if shrinkwrap makes an accepted candidate degenerate,
 non-manifold, topologically different, or too inaccurate, CurioMesh restores
 the validated pre-projection mesh and records the rollback on the output.
 
+## Rescue Pairing
+
+TRIAD-Q pairs neighbouring triangles into quads greedily. Greedy order strands
+triangles whose only neighbours were already taken, and every stranded triangle
+costs three extra quads in PairClosure. Rescue pairing walks alternating paths
+in the triangle adjacency graph (free triangle -> taken pair -> ... -> free
+triangle) and flips them, so two stranded triangles become one more quad. Every
+re-pair still passes the same local quad-validity and score checks.
+
+![Before and after rescue pairing: leftover triangles shown in red](docs/images/rescue_before_after.png)
+
+On this triangulated Suzanne (3,936 triangles, half-count target) leftover
+triangles drop from 198 to 146 with 26 rescued pairs.
+
+On a 7k-triangle noisy sphere with a 3,600-face target, leftover triangles drop
+from 166 to 72 and pure-quad output from 4,666 to 3,995 faces. The count of
+re-paired triangles is shown in the PairClosure panel and stored on the output
+as `curiomesh_triadq_rescued_pairs`.
+
+![CurioMesh panel showing the rescued pair count](docs/images/panel_triadq.png)
+
+Regenerate both screenshots with:
+
+```powershell
+blender -b --factory-startup --python-expr "import bpy; bpy.ops.wm.save_as_mainfile(filepath='empty.blend')"
+blender --factory-startup --window-geometry 0 0 1920 1080 empty.blend --python scripts/capture_readme_screenshots.py
+```
+
 ## Solver Portfolio
 
 | Strategy | Use it for | Implementation and expectation |
