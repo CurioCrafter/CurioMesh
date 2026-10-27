@@ -52,6 +52,7 @@ class RemeshReport:
     closure_applied: bool = False
     closure_method: str = ""
     vertex_fan_splits: int = 0
+    rescued_pairs: int = 0
     quad_only_verified: bool = False
     degenerate_faces: int = 0
     euler_characteristic: int = 0
@@ -82,6 +83,7 @@ class RemeshReport:
             "closure_applied": self.closure_applied,
             "closure_method": self.closure_method,
             "vertex_fan_splits": self.vertex_fan_splits,
+            "rescued_pairs": self.rescued_pairs,
             "quad_only_verified": self.quad_only_verified,
             "degenerate_faces": self.degenerate_faces,
             "euler_characteristic": self.euler_characteristic,
@@ -244,7 +246,7 @@ def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int)
     normals, areas = _face_normals(mesh.vertices, mesh.faces)
     feature_edges = _feature_edges(mesh, tuned_options, edge_faces, normals)
     field = _estimate_field(mesh, edge_faces, feature_edges, normals, tuned_options)
-    output_mesh, feature_breaks = _pair_triangles(
+    output_mesh, feature_breaks, rescued_pairs = _pair_triangles(
         mesh,
         edge_faces,
         feature_edges,
@@ -304,6 +306,7 @@ def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int)
     report.feature_edges = len(feature_edges)
     report.closure_applied = closure_applied
     report.closure_method = closure_method
+    report.rescued_pairs = rescued_pairs
     if closure_error:
         report.success = False
         report.message = f"PairClosure rejected the base topology: {closure_error}"
@@ -573,22 +576,39 @@ def _pair_triangles(
 
     order = list(range(len(mesh.faces)))
     random.Random(seed).shuffle(order)
+    allowed = {
+        face_index: sorted(
+            ((score, other, quad) for score, other, quad in linked if score > weights.minimum_score),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        for face_index, linked in candidates.items()
+    }
+    mate: dict[int, int] = {}
+    for face_index in order:
+        if face_index in mate:
+            continue
+        for _score, other, _quad in allowed.get(face_index, []):
+            if other not in mate:
+                mate[face_index] = other
+                mate[other] = face_index
+                break
+    rescued_pairs = _augment_matching(mate, allowed, order)
+
+    quads_by_pair = {
+        (face_index, other): quad
+        for face_index, linked in allowed.items()
+        for _score, other, quad in linked
+    }
     used: set[int] = set()
     output_faces: list[Face] = []
     output_materials: list[str] = []
     output_face_uvs: list[Face] | None = [] if mesh.uvs is not None and mesh.face_uvs is not None else None
     for face_index in order:
-        if face_index in used:
+        if face_index in used or face_index not in mate:
             continue
-        options_for_face = sorted(candidates.get(face_index, []), key=lambda item: item[0], reverse=True)
-        selected = None
-        for score, other, quad in options_for_face:
-            if other not in used and score > weights.minimum_score:
-                selected = (other, quad)
-                break
-        if selected is None:
-            continue
-        other, quad = selected
+        other = mate[face_index]
+        quad = quads_by_pair[(face_index, other)]
         used.add(face_index)
         used.add(other)
         output_faces.append(tuple(quad))
@@ -621,7 +641,61 @@ def _pair_triangles(
         face_uvs=output_face_uvs,
         name=f"{mesh.name}_triadq",
     )
-    return out, feature_breaks
+    return out, feature_breaks, rescued_pairs
+
+
+def _augment_matching(
+    mate: dict[int, int],
+    allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]],
+    order: list[int],
+    max_visit: int = 4096,
+) -> int:
+    """Grow a greedy triangle matching along alternating paths.
+
+    Each stranded triangle searches the dual graph for a chain
+    free -> matched pair -> ... -> free and flips it, turning two leftover
+    triangles into one more quad. Every face enters the search tree once, so
+    any path found is simple and the flip is a valid matching. Without blossom
+    contraction some odd-cycle paths are missed, which only costs optimality.
+    """
+    # ponytail: no blossoms and a per-root visit cap; switch to Edmonds' blossom
+    # matching if residual triangles still dominate closure cost on big scans.
+    rescued = 0
+    for root in order:
+        if root in mate or not allowed.get(root):
+            continue
+        parent: dict[int, int] = {root: -1}
+        frontier = [root]
+        end = -1
+        while frontier and end < 0 and len(parent) < max_visit:
+            next_frontier: list[int] = []
+            for even in frontier:
+                for _score, odd, _quad in allowed.get(even, []):
+                    if odd in parent:
+                        continue
+                    parent[odd] = even
+                    partner = mate.get(odd)
+                    if partner is None:
+                        end = odd
+                        break
+                    if partner in parent:
+                        continue
+                    parent[partner] = odd
+                    next_frontier.append(partner)
+                if end >= 0:
+                    break
+            frontier = next_frontier
+        if end < 0:
+            continue
+        odd = end
+        while odd != -1:
+            even = parent[odd]
+            next_odd = parent[even]
+            mate[odd] = even
+            mate[even] = odd
+            odd = next_odd
+        rescued += 1
+    return rescued
 
 
 def _quad_from_pair(

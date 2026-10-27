@@ -536,6 +536,19 @@ class QuadClosureTests(unittest.TestCase):
         self.assertEqual(report.vertex_fan_splits, 0)
         self.assertIn("rejected", report.message.lower())
 
+    def test_augmenting_path_rescues_greedy_strand(self) -> None:
+        # Dual chain 0-1-2-3: greedy took the middle pair and stranded both ends.
+        allowed = {
+            0: [(1.0, 1, ())],
+            1: [(1.0, 0, ()), (1.0, 2, ())],
+            2: [(1.0, 1, ()), (1.0, 3, ())],
+            3: [(1.0, 2, ())],
+        }
+        mate = {1: 2, 2: 1}
+        rescued = triad_engine._augment_matching(mate, allowed, [0, 1, 2, 3])
+        self.assertEqual(rescued, 1)
+        self.assertEqual(mate, {0: 1, 1: 0, 2: 3, 3: 2})
+
 
 if __name__ == "__main__":
     unittest.main()
