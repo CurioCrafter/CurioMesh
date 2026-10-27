@@ -1,15 +1,39 @@
-# CurioMesh Atlas-Q Quad Retopology
+# CurioMesh: Free Quad Retopology and Remeshing for Blender
 
-CurioMesh 0.5 is a Blender 4.3+ add-on for turning dense meshes and
-photogrammetry scans into lower-density, validated quad retopology. Atlas-Q is
-not presented as a universal miracle solver. It is a scan-aware controller that
-builds a target-scale proxy, chooses an appropriate solver path, compares
-multiple candidates against the preserved source, and rejects results that do
-not pass the requested topology and quad-quality gates.
+[![Latest release](https://img.shields.io/github/v/release/CurioCrafter/CurioMesh?label=release)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
+[![Blender 4.3+](https://img.shields.io/badge/Blender-4.3%2B-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/CurioCrafter/CurioMesh?style=flat)](https://github.com/CurioCrafter/CurioMesh/stargazers)
+[![Discussions](https://img.shields.io/github/discussions/CurioCrafter/CurioMesh)](https://github.com/CurioCrafter/CurioMesh/discussions)
+
+**Turn dense meshes and photogrammetry scans into clean quad topology without
+leaving Blender. Free and open source.** CurioMesh picks a solver for your mesh,
+compares several candidates against the original, and only keeps results that
+pass topology and quad-quality checks. UVs and materials come along.
+
+![CurioMesh Quick Start panel, HUD dashboard and heatmap in Blender 4.5](docs/images/panel_quickstart.png)
+
+**[Download the latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest)** ·
+**[Ask, share results or suggest ideas in Discussions](https://github.com/CurioCrafter/CurioMesh/discussions)** ·
+If CurioMesh saves you time, a star helps other Blender artists find it.
+
+## Why 0.5 Is Better
+
+| | 0.4 | 0.5 |
+|---|---|---|
+| Getting started | One long settings panel | Quick Start panel: a first result in three clicks |
+| Seeing problems | Numbers in the Diagnostics list | Viewport dashboard plus triangle/pole heatmap |
+| Tuning | Re-run by hand | Live preview about 0.4 s after each change (up to 20k faces) |
+| Many objects | One at a time | Batch remesh with progress and a JSON report |
+| PairClosure speed, 7k triangles | 111 s quad-dominant, 212 s all-quad | About 1 s and 7.4 s |
+| Triangle pairing | Greedy | Greedy start plus Edmonds' blossom maximum matching |
+| Edge flow | Simple direction smoothing | 4-way cross field pinned to sharp edges, seams and borders |
+
+CurioMesh is a scan-aware controller, not a universal miracle solver: it builds
+a target-scale proxy, chooses a solver path, and rejects results that fail the
+requested topology and quad-quality gates instead of shipping them.
 
 ## What's New In 0.5
-
-![CurioMesh Quick Start panel, HUD and heatmap in Blender 4.5](docs/images/panel_quickstart.png)
 
 ### Get going in three clicks
 
@@ -139,13 +163,16 @@ self-intersection proof.
 
 ## Installation
 
-1. Download a release archive or clone this repository.
-2. In Blender, use `Edit > Preferences > Add-ons > Install from Disk`.
-3. Select the CurioMesh add-on or extension zip and enable **CurioMesh Quad
-   Remesher**.
+1. Download `curiomesh-0.5.0-addon.zip` from the
+   [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest).
+2. In Blender, open `Edit > Preferences > Add-ons`, choose
+   `Install from Disk` from the menu in the top right, and pick the zip.
+   (Prefer extensions? Use `curiomesh-0.5.0-extension.zip` with
+   `Get Extensions > Install from Disk`.)
+3. Enable **CurioMesh Quad Remesher**.
 4. Select a mesh and open `3D View > N-panel > CurioMesh`.
 
-CurioMesh targets Blender 4.3+ and the test runner prefers Blender 4.5 LTS.
+CurioMesh supports Blender 4.3 and newer and is tested on Blender 4.5 LTS.
 
 ## Recommended Photogrammetry Workflow
 
@@ -353,6 +380,17 @@ python scripts\build_release.py
 The release builder creates a legacy add-on zip and a Blender extension-layout
 zip in `dist/`, then validates every archive entry. Generated caches and build
 artifacts are excluded from Git.
+
+## Community
+
+- **Questions and help:** [Q&A](https://github.com/CurioCrafter/CurioMesh/discussions/categories/q-a)
+- **Show your retopology:** [Show and tell](https://github.com/CurioCrafter/CurioMesh/discussions/categories/show-and-tell),
+  before/after screenshots and the settings you used help everyone.
+- **Ideas and feature requests:** [Ideas](https://github.com/CurioCrafter/CurioMesh/discussions/categories/ideas)
+- **Bugs:** [open an issue](https://github.com/CurioCrafter/CurioMesh/issues/new) with your Blender version,
+  CurioMesh settings and, if you can share it, the mesh or a small `.blend`.
+
+Pull requests are welcome. Run the tests listed above before opening one.
 
 ## License
 
