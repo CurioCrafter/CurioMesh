@@ -40,8 +40,8 @@ class ReleasePackageTests(unittest.TestCase):
             legacy, extension = build_archives(ROOT, Path(temporary))
             self.assertTrue(legacy.is_file())
             self.assertTrue(extension.is_file())
-            self.assertEqual(legacy.name, f"{package_id}-{version}-addon.zip")
-            self.assertEqual(extension.name, f"{package_id}-{version}-extension.zip")
+            self.assertEqual(legacy.name, f"{package_id}-{version}-blender-3.6-plus-addon.zip")
+            self.assertEqual(extension.name, f"{package_id}-{version}-blender-4.2-plus-extension.zip")
             with zipfile.ZipFile(legacy) as archive:
                 self.assertIn("curiomesh/__init__.py", archive.namelist())
                 self.assertIn("curiomesh/triadq/topology.py", archive.namelist())

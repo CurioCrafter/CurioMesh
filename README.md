@@ -1,7 +1,7 @@
 # CurioMesh: Free Quad Retopology and Remeshing for Blender
 
 [![Latest release](https://img.shields.io/github/v/release/CurioCrafter/CurioMesh?label=release)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
-[![Blender 4.3+](https://img.shields.io/badge/Blender-4.3%2B-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
+[![Blender 3.6+](https://img.shields.io/badge/Blender-3.6%2B-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/CurioCrafter/CurioMesh?style=flat)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 [![Discussions](https://img.shields.io/github/discussions/CurioCrafter/CurioMesh)](https://github.com/CurioCrafter/CurioMesh/discussions)
@@ -70,7 +70,7 @@ poles orange. It follows edits live and skips meshes over 300,000 faces.
 Turn on **Live** and CurioMesh re-runs the PairClosure engine into a preview
 object beside the source about 0.4 s after you change target faces, feature
 angle, seeds, flow mode or Require Quads, or edit the source. It works on
-sources up to 20,000 faces; turning Live off removes the preview.
+sources up to 8,000 faces; turning Live off removes the preview.
 
 ### Batch remesh
 
@@ -163,16 +163,21 @@ self-intersection proof.
 
 ## Installation
 
-1. Download `curiomesh-0.5.0-addon.zip` from the
-   [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest).
-2. In Blender, open `Edit > Preferences > Add-ons`, choose
-   `Install from Disk` from the menu in the top right, and pick the zip.
-   (Prefer extensions? Use `curiomesh-0.5.0-extension.zip` with
-   `Get Extensions > Install from Disk`.)
-3. Enable **CurioMesh Quad Remesher**.
-4. Select a mesh and open `3D View > N-panel > CurioMesh`.
+1. Pick the zip for your Blender version from the
+   [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest):
 
-CurioMesh supports Blender 4.3 and newer and is tested on Blender 4.5 LTS.
+   | Blender | Download | Install with |
+   | --- | --- | --- |
+   | 4.2 LTS and newer (4.2, 4.5 LTS, 5.0, 5.1, 5.2) | `curiomesh-0.5.1-blender-4.2-plus-extension.zip` | `Get Extensions > Install from Disk` (the add-on zip below also works) |
+   | 3.6 LTS to 4.1 | `curiomesh-0.5.1-blender-3.6-plus-addon.zip` | `Edit > Preferences > Add-ons > Install...` (`Install from Disk` on 4.2+) |
+   | 3.5 and older (including 3.0) | not supported | |
+
+2. Install the zip as shown in the table, then enable **CurioMesh Quad Remesher**.
+3. Select a mesh and open `3D View > N-panel > CurioMesh`.
+
+CurioMesh is tested on Blender 3.6 LTS, 4.2 LTS, 4.5 LTS, 5.0, 5.1 and 5.2.
+The viewport HUD and heatmap are GPU-module drawings; if a build cannot draw
+them the rest of the add-on keeps working.
 
 ## Recommended Photogrammetry Workflow
 
@@ -377,8 +382,8 @@ tests\run_blender_tests.ps1
 python scripts\build_release.py
 ```
 
-The release builder creates a legacy add-on zip and a Blender extension-layout
-zip in `dist/`, then validates every archive entry. Generated caches and build
+The release builder creates a legacy add-on zip (`...-blender-3.6-plus-addon.zip`) and a
+Blender extension-layout zip (`...-blender-4.2-plus-extension.zip`) in `dist/`, then validates every archive entry. Generated caches and build
 artifacts are excluded from Git.
 
 ## Community

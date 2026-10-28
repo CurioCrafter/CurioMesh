@@ -16,12 +16,14 @@ import numpy as np
 
 from .atlasq import (
     CandidateEvaluation,
+    LARGE_SOURCE_FACES,
     CandidateSpec,
     ScanProfile,
     analyze_object,
     build_candidate_specs,
     candidate_gate_failures,
     evaluate_candidate,
+    split_soft_failures,
 )
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from .textures import bake_selected_to_active, ensure_target_uvs
@@ -35,6 +37,18 @@ from .triadq import (
 
 MAX_FIDELITY_REFERENCE_TRIANGLES = 450_000
 MAX_EVALUATED_SNAPSHOT_ESTIMATED_BYTES = 6 * 1024**3
+# Above this many source faces the Data Transfer modifier takes tens of minutes; use the Python BVH projection.
+UV_MODIFIER_MAX_FACES = 300_000
+
+_solver_errors: list[str] = []
+
+
+def _take_solver_error() -> str:
+    """Why the last solver call failed ('' if it did not say); clears the note."""
+
+    message = "; ".join(_solver_errors)
+    _solver_errors.clear()
+    return message
 
 
 @dataclass(slots=True)
@@ -367,18 +381,26 @@ def _run_quadriflow(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     _set_active_only(obj)
     kwargs = _quadriflow_kwargs(config)
     try:
-        result = bpy.ops.object.quadriflow_remesh(**kwargs)
-    except TypeError:
-        minimal = {
-            "mode": "FACES",
-            "target_faces": max(1, int(config.target_faces)),
-            "seed": max(0, int(config.seed)),
-        }
-        result = bpy.ops.object.quadriflow_remesh(**minimal)
-    except Exception:
+        try:
+            result = bpy.ops.object.quadriflow_remesh(**kwargs)
+        except TypeError:
+            minimal = {
+                "mode": "FACES",
+                "target_faces": max(1, int(config.target_faces)),
+                "seed": max(0, int(config.seed)),
+            }
+            result = bpy.ops.object.quadriflow_remesh(**minimal)
+    except Exception as exc:
         traceback.print_exc()
+        _solver_errors.append(f"QuadriFlow error: {exc}"[:200])
         return False
-    return "FINISHED" in result and len(obj.data.polygons) > 0
+    if "FINISHED" not in result:
+        _solver_errors.append(f"QuadriFlow returned {sorted(result)}")
+        return False
+    if not len(obj.data.polygons):
+        _solver_errors.append("QuadriFlow produced an empty mesh")
+        return False
+    return True
 
 
 def _meshdata_from_object(obj: bpy.types.Object) -> MeshData:
@@ -469,6 +491,7 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     result, report = triad_remesh_mesh(source, options)
     if not report.success or not result.faces:
         _log(config, f"TRIAD-Q Lite failed: {report.message}")
+        _solver_errors.append(f"TRIAD-Q Lite: {report.message}"[:300])
         return False
     _apply_meshdata_to_object(obj, result)
     obj["curiomesh_triadq_mode"] = report.mode
@@ -1243,6 +1266,7 @@ def _run_atlas_candidate(
         preserve_boundary=config.preserve_boundary and spec.preserve_boundary,
         triad_force_quads=True if spec.pair_closure else config.triad_force_quads,
     )
+    _take_solver_error()
     if spec.pair_closure:
         _prepare_pair_closure_proxy(candidate, candidate_config)
         ok = _run_triadq_lite(candidate, candidate_config)
@@ -1261,7 +1285,7 @@ def _run_atlas_candidate(
             label=spec.label,
             valid=False,
             score=-1.0,
-            reason="solver failed",
+            reason=f"solver failed: {_take_solver_error() or 'no reason reported'}",
             faces=0,
             quad_ratio=0.0,
             target_error=1.0,
@@ -1299,16 +1323,6 @@ def _run_atlasq(
     profile: ScanProfile,
     reference: _SurfaceReference | None = None,
 ) -> tuple[bpy.types.Object | None, CandidateEvaluation | None, list[CandidateEvaluation]]:
-    pair_closure_only = str(config.atlas_strategy or "AUTO").upper() == "PAIR_CLOSURE"
-    if not pair_closure_only:
-        _prepare_flow_proxy(base_obj, config)
-    pristine_mesh = base_obj.data.copy()
-    if reference is None:
-        reference = _make_surface_reference(
-            source,
-            5000,
-            reference_proxy=base_obj,
-        )
     specs = build_candidate_specs(
         profile,
         strategy=config.atlas_strategy,
@@ -1318,6 +1332,15 @@ def _run_atlasq(
         topology_policy=config.topology_policy,
         voxel_repair=config.voxel_repair,
     )
+    if not all(spec.pair_closure for spec in specs):
+        _prepare_flow_proxy(base_obj, config)
+    pristine_mesh = base_obj.data.copy()
+    if reference is None:
+        reference = _make_surface_reference(
+            source,
+            5000,
+            reference_proxy=base_obj,
+        )
     evaluations: list[CandidateEvaluation] = []
     candidate_objects: list[tuple[bpy.types.Object, CandidateEvaluation]] = []
 
@@ -1552,10 +1575,12 @@ def _preserve_textures(
     projected = False
     baked = False
 
-    if mode in {"TRANSFER", "PROJECT"}:
+    huge_source = len(source.data.polygons) > UV_MODIFIER_MAX_FACES
+    if mode in {"TRANSFER", "PROJECT"} and not huge_source:
         transferred = _transfer_uvs_with_modifier(source, target)
-    if mode == "PROJECT" and allow_python_bvh and not uv_mapping_is_valid(target):
-        projected = _project_uvs_bvh(source, target)
+    if mode in {"TRANSFER", "PROJECT"} and (huge_source or (mode == "PROJECT" and allow_python_bvh)):
+        if not uv_mapping_is_valid(target):
+            projected = _project_uvs_bvh(source, target)
     if mode == "BAKE" or (config.bake_fallback and not uv_mapping_is_valid(target)):
         try:
             ensure_target_uvs(target)
@@ -1670,6 +1695,7 @@ def _merge_proxy_topology_profile(source: ScanProfile, proxy: ScanProfile) -> Sc
         connected_components=proxy.connected_components,
         component_euler=proxy.component_euler,
         component_signature=proxy.component_signature,
+        component_detail=proxy.component_detail,
         non_manifold_edges=proxy.non_manifold_edges,
         non_manifold_vertices=proxy.non_manifold_vertices,
         branched_boundary_vertices=proxy.branched_boundary_vertices,
@@ -1754,15 +1780,19 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 work_obj.hide_set(False)
             else:
                 work_obj = _make_working_copy(source_snapshot, obj)
-            pair_closure_only = (
+            atlas_strategy = str(config.atlas_strategy or "AUTO").upper()
+            pair_closure_only = engine == "ATLAS_Q" and atlas_strategy == "PAIR_CLOSURE"
+            # Atlas-Q sends huge sources straight to PairClosure, so skip the flow-sized proxy for them.
+            large_pair_first = (
                 engine == "ATLAS_Q"
-                and str(config.atlas_strategy or "AUTO").upper() == "PAIR_CLOSURE"
+                and atlas_strategy == "AUTO"
+                and len(obj.data.polygons) > LARGE_SOURCE_FACES
             )
-            if engine == "ATLAS_Q" and not pair_closure_only:
+            if engine == "ATLAS_Q" and not pair_closure_only and not large_pair_first:
                 # Keep BMesh cleanup and Python adjacency off the full-resolution
                 # scan whenever Blender's native QEM proxy can reduce it first.
                 _prepare_flow_proxy(work_obj, config)
-            elif engine == "TRIAD_Q_LITE":
+            elif engine == "TRIAD_Q_LITE" or large_pair_first:
                 # PairClosure is an exact closure, not a simplifier. Reduce to
                 # its expected output scale before Python pairing/adjacency so a
                 # dense scan cannot expand by roughly three times.
@@ -1807,6 +1837,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 ok = work_obj is not None and selected_evaluation is not None
                 strategy = selected_evaluation.strategy if selected_evaluation is not None else "NONE"
             elif engine == "TRIAD_Q_LITE":
+                _take_solver_error()
                 triad_config = replace(
                     config,
                     triad_force_quads=bool(config.require_quads),
@@ -1850,12 +1881,18 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
 
             if not ok:
                 elapsed = (time.perf_counter() - start) * 1000.0
+                if candidate_evaluations:
+                    # The candidate with the fewest rejection reasons is the closest miss.
+                    closest = min(candidate_evaluations, key=lambda item: item.reason.count(";"))
+                    why = f" Closest candidate ({closest.label}): {closest.reason[:400]}."
+                else:
+                    why = f" {_take_solver_error()}." if _solver_errors else ""
                 return RemeshResult(
                     False,
                     engine=engine,
                     elapsed_ms=elapsed,
                     message=(
-                        f"{engine} produced no candidate that passed the topology and quad-quality gates. "
+                        f"{engine} produced no candidate that passed the topology and quad-quality gates.{why} "
                         "Try Repair topology for a closed dirty scan, preserve topology for an open fragment, "
                         "or raise the target face count."
                     ),
@@ -1901,6 +1938,8 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                         profile=profile,
                         quality=config.quality,
                     )
+                    if strategy == "PAIR_CLOSURE" and selected_evaluation is not None and selected_evaluation.warnings:
+                        failures = split_soft_failures(failures)[0]
                 elif config.require_quads and not diagnostics.quad_only:
                     failures = ["local quad/manifold gate failed"]
                 return diagnostics, measured, failures
@@ -1990,6 +2029,11 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     ),
                 }.get(projection_status, "")
             )
+            warning_note = (
+                f" Warning: {selected_evaluation.warnings}."
+                if selected_evaluation is not None and selected_evaluation.warnings
+                else ""
+            )
             result = RemeshResult(
                 True,
                 output_object=output_obj,
@@ -1999,7 +2043,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 message=(
                     f"{strategy} completed: {diagnostics.faces:,} locally validated manifold quads; "
                     f"p95 scan error {geometry_p95:.4%} of the source diagonal."
-                    f"{topology_note}{sampling_note}{fidelity_note}{projection_note}"
+                    f"{warning_note}{topology_note}{sampling_note}{fidelity_note}{projection_note}"
                     if diagnostics.quad_only
                     else f"{strategy} remesh completed."
                 ),

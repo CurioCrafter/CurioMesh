@@ -24,6 +24,7 @@ class TopologySummary:
     connected_components: int = 0
     component_euler: tuple[int, ...] = ()
     component_signature: tuple[tuple[int, int], ...] = ()
+    component_detail: tuple[tuple[int, int, int], ...] = ()
     non_manifold_edges: int = 0
     non_manifold_vertices: int = 0
     branched_boundary_vertices: int = 0
@@ -85,7 +86,9 @@ def _canonical_face(face: Face) -> Face:
 def _component_topology_signatures(
     faces: list[Face],
     edge_occurrences: dict[tuple[int, int], list[tuple[int, int, int]]],
-) -> tuple[tuple[int, int], ...]:
+) -> tuple[tuple[int, int, int], ...]:
+    """Sorted (euler, boundary cycles, face count) per connected component."""
+
     face_count = len(faces)
     if face_count == 0:
         return ()
@@ -95,7 +98,7 @@ def _component_topology_signatures(
         for face_index in face_indices:
             adjacency[face_index].update(face_indices - {face_index})
     remaining = set(range(face_count))
-    signatures: list[tuple[int, int]] = []
+    signatures: list[tuple[int, int, int]] = []
     while remaining:
         seed = remaining.pop()
         component_faces = {seed}
@@ -120,7 +123,7 @@ def _component_topology_signatures(
         ]
         boundary_cycles, _branched_vertices = _boundary_components(boundary_edges)
         euler_characteristic = len(vertices) - len(edges) + len(component_faces)
-        signatures.append((euler_characteristic, boundary_cycles))
+        signatures.append((euler_characteristic, boundary_cycles, len(component_faces)))
     return tuple(sorted(signatures))
 
 
@@ -342,7 +345,8 @@ def topology_summary(mesh: MeshData) -> TopologySummary:
         if quad_faces
         else 0
     )
-    component_signature = _component_topology_signatures(mesh.faces, edge_occurrences)
+    component_detail = _component_topology_signatures(mesh.faces, edge_occurrences)
+    component_signature = tuple(sorted((item[0], item[1]) for item in component_detail))
     component_euler = tuple(signature[0] for signature in component_signature)
     return TopologySummary(
         used_vertices=len(used_vertices),
@@ -354,6 +358,7 @@ def topology_summary(mesh: MeshData) -> TopologySummary:
         connected_components=len(component_euler),
         component_euler=component_euler,
         component_signature=component_signature,
+        component_detail=component_detail,
         non_manifold_edges=non_manifold_edges,
         non_manifold_vertices=non_manifold_vertices,
         branched_boundary_vertices=branched_boundary_vertices,

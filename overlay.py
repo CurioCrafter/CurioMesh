@@ -179,6 +179,8 @@ def next_step_hint(obj, stats: MeshStats | None, settings) -> str:
     target = int(settings.target_faces) if settings is not None else 0
     if target and abs(stats.faces - target) / target > 0.25:
         return "Face count is off target - adjust Target Faces"
+    if stats.faces >= 100 and stats.poles > 0.3 * stats.faces:
+        return "Many poles - try Hero quality or a lower target"
     return "Looks clean - ready to export"
 
 
@@ -292,6 +294,9 @@ def _draw_heatmap() -> None:
         gpu.state.point_size_set(7.0 * _ui_scale())
         try:
             for obj in targets:
+                # Cheap size check first: stats on a huge mesh cost seconds per draw.
+                if len(obj.data.polygons) > HEATMAP_MAX_FACES:
+                    continue
                 entry = _entry(obj)
                 if entry is None or entry.stats.faces > HEATMAP_MAX_FACES:
                     continue
@@ -359,9 +364,14 @@ def hud_model(context) -> dict:
     if settings is not None:
         model["target"] = int(settings.target_faces)
         model["batch"] = settings.batch_status
-    stats = get_stats(obj) if obj is not None and obj.type == "MESH" else None
-    if obj is not None and obj.type == "MESH":
+    is_mesh = obj is not None and obj.type == "MESH"
+    too_big = is_mesh and len(obj.data.polygons) > HEATMAP_MAX_FACES
+    stats = get_stats(obj) if is_mesh and not too_big else None
+    if is_mesh:
         model["name"] = obj.name
+    if too_big:
+        model.update(faces=len(obj.data.polygons), hint=f"Over {HEATMAP_MAX_FACES:,} faces - live stats off")
+        return model
     if stats is not None and stats.faces:
         model.update(ratio=stats.quad_ratio, faces=stats.faces, tris=stats.tris, poles=stats.poles)
     elif obj is not None and "curiomesh_quad_ratio" in obj.keys():

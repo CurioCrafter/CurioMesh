@@ -26,7 +26,7 @@ ROOT_FILES = {
 }
 
 
-def _bl_info_version(source: str, *, origin: str) -> str:
+def _bl_info(source: str, *, origin: str) -> dict:
     tree = ast.parse(source, filename=origin)
     for statement in tree.body:
         if not isinstance(statement, ast.Assign):
@@ -37,8 +37,22 @@ def _bl_info_version(source: str, *, origin: str) -> str:
         version = bl_info.get("version") if isinstance(bl_info, dict) else None
         if not isinstance(version, tuple) or not version or not all(isinstance(part, int) for part in version):
             raise ValueError(f"{origin}: bl_info.version must be a non-empty integer tuple")
-        return ".".join(str(part) for part in version)
+        return bl_info
     raise ValueError(f"{origin}: bl_info assignment was not found")
+
+
+def _bl_info_version(source: str, *, origin: str) -> str:
+    return ".".join(str(part) for part in _bl_info(source, origin=origin)["version"])
+
+
+def _major_minor(version: str | tuple) -> str:
+    parts = version.split(".") if isinstance(version, str) else [str(p) for p in version]
+    return ".".join(parts[:2])
+
+
+def asset_name(package_id: str, version: str, minimum: str, layout: str) -> str:
+    """layout is 'addon' (legacy zip) or 'extension'; minimum is the lowest Blender major.minor."""
+    return f"{package_id}-{version}-blender-{minimum}-plus-{layout}.zip"
 
 
 def _validated_metadata(manifest_source: str, init_source: str, *, origin: str) -> tuple[str, str]:
@@ -129,15 +143,28 @@ def verify_archive(path: Path, *, prefix: str) -> None:
     if prefix and any(not entry.startswith(required_prefix) for entry in entries):
         raise ValueError(f"Legacy archive entries must all be rooted at {required_prefix!r}")
     layout = "addon" if prefix else "extension"
-    expected_name = f"{package_id}-{version}-{layout}.zip"
+    manifest = tomllib.loads(
+        zipfile.ZipFile(path).read(f"{required_prefix}blender_manifest.toml").decode("utf-8")
+    )
+    init_source = zipfile.ZipFile(path).read(f"{required_prefix}__init__.py").decode("utf-8")
+    minimum = (
+        _major_minor(manifest["blender_version_min"])
+        if layout == "extension"
+        else _major_minor(_bl_info(init_source, origin=str(path))["blender"])
+    )
+    expected_name = asset_name(package_id, version, minimum, layout)
     if path.name != expected_name:
         raise ValueError(f"Archive filename must be {expected_name!r}, got {path.name!r}")
 
 
 def build_archives(root: Path, output_dir: Path) -> tuple[Path, Path]:
     package_name, version = release_metadata(root)
-    legacy = output_dir / f"{package_name}-{version}-addon.zip"
-    extension = output_dir / f"{package_name}-{version}-extension.zip"
+    manifest = tomllib.loads((root / "blender_manifest.toml").read_text(encoding="utf-8"))
+    legacy_min = _major_minor(_bl_info((root / "__init__.py").read_text(encoding="utf-8"), origin=str(root))["blender"])
+    legacy = output_dir / asset_name(package_name, version, legacy_min, "addon")
+    extension = output_dir / asset_name(
+        package_name, version, _major_minor(manifest["blender_version_min"]), "extension"
+    )
     _write_archive(root, legacy, prefix=package_name)
     _write_archive(root, extension, prefix="")
     return legacy, extension

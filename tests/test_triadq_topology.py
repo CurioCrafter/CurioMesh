@@ -635,5 +635,14 @@ class QuadClosureTests(unittest.TestCase):
         self.assertLess(float(offsets.max()), 1.0)
 
 
+class ComponentDetailTests(unittest.TestCase):
+    def test_component_detail_counts_faces_per_shell(self):
+        vertices = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [5, 0, 0], [6, 0, 0], [5, 1, 0]], float)
+        summary = topology_summary(MeshData(vertices=vertices, faces=[(0, 1, 2, 3), (4, 5, 6)]))
+        self.assertEqual(summary.component_detail, ((1, 1, 1), (1, 1, 1)))
+        self.assertEqual(summary.component_signature, ((1, 1), (1, 1)))
+        self.assertEqual(summary.connected_components, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

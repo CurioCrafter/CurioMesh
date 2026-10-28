@@ -30,6 +30,7 @@ class MeshDiagnostics:
     connected_components: int = 0
     component_euler: tuple[int, ...] = ()
     component_signature: tuple[tuple[int, int], ...] = ()
+    component_detail: tuple[tuple[int, int, int], ...] = ()
     euler_characteristic: int = 0
     degenerate_faces: int = 0
     invalid_quads: int = 0
@@ -191,6 +192,7 @@ def mesh_diagnostics(obj: bpy.types.Object, target_faces: int = 0) -> MeshDiagno
         connected_components=topology.connected_components,
         component_euler=topology.component_euler,
         component_signature=topology.component_signature,
+        component_detail=topology.component_detail,
         euler_characteristic=topology.euler_characteristic,
         degenerate_faces=degenerate,
         invalid_quads=topology.invalid_quads,

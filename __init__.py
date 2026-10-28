@@ -3,8 +3,8 @@
 bl_info = {
     "name": "CurioMesh Quad Remesher",
     "author": "CurioCrafter",
-    "version": (0, 5, 0),
-    "blender": (4, 3, 0),
+    "version": (0, 5, 1),
+    "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
     "description": "Atlas-Q scan-aware quad retopology with explicit validation",

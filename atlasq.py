@@ -39,6 +39,7 @@ class ScanProfile:
     diagonal: float
     texture_critical: bool
     warnings: tuple[str, ...]
+    component_detail: tuple[tuple[int, int, int], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -83,6 +84,7 @@ class CandidateEvaluation:
     p95_aspect_ratio: float
     extraordinary_ratio: float
     elapsed_ms: float
+    warnings: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -100,13 +102,37 @@ class QualityGates:
     max_error_edge_units: float
     min_p05_scaled_jacobian: float
     max_p95_aspect_ratio: float
+    max_bad_quad_fraction: float = 0.0
+
+
+# Sources above this many faces skip the slow QuadriFlow ensemble and go PairClosure first.
+LARGE_SOURCE_FACES = 200_000
+# Components smaller than this fraction of the faces cannot survive a ~7% target; the PRESERVE gate ignores them.
+TINY_COMPONENT_FRACTION = 0.002
 
 
 def quality_gates(quality: str) -> QualityGates:
     return {
-        "DRAFT": QualityGates(0.75, 0.60, 1.50, 4.00, 0.01, 12.0),
-        "HERO": QualityGates(0.25, 0.25, 0.75, 2.00, 0.05, 6.0),
-    }.get(str(quality).upper(), QualityGates(0.35, 0.40, 1.00, 3.00, 0.03, 8.0))
+        "DRAFT": QualityGates(0.75, 0.60, 1.50, 4.00, 0.01, 12.0, 0.05),
+        "HERO": QualityGates(0.25, 0.25, 0.75, 2.00, 0.05, 6.0, 0.005),
+    }.get(str(quality).upper(), QualityGates(0.35, 0.40, 1.00, 3.00, 0.03, 8.0, 0.03))
+
+
+def significant_components(detail: tuple[tuple[int, int, int], ...]) -> tuple[tuple[int, int], ...]:
+    """(euler, boundary) of the components holding at least TINY_COMPONENT_FRACTION of the faces."""
+
+    floor = TINY_COMPONENT_FRACTION * sum(item[2] for item in detail)
+    return tuple((euler, loops) for euler, loops, faces in detail if faces >= floor)
+
+
+def pair_closure_first_reason(profile: ScanProfile, topology_policy: str) -> str:
+    """Why QuadriFlow should not run first on this source ('' when it can)."""
+
+    if profile.face_count > LARGE_SOURCE_FACES:
+        return f"{profile.face_count:,} source faces: QuadriFlow ensemble is too slow"
+    if topology_policy == "PRESERVE" and (profile.category == "DIRTY_SCAN" or profile.connected_components > 1):
+        return "dirty or multi-shell source cannot be voxel-repaired under Preserve topology"
+    return ""
 
 
 def candidate_gate_failures(
@@ -123,13 +149,16 @@ def candidate_gate_failures(
     quality: str,
 ) -> list[str]:
     failures: list[str] = []
+    gates = quality_gates(quality)
+    bad_quads = diagnostics.degenerate_faces + diagnostics.invalid_quads
+    bad_tolerated = 0 < bad_quads <= gates.max_bad_quad_fraction * diagnostics.faces
     if diagnostics.faces <= 0:
         failures.append("empty output")
-    if require_quads and not diagnostics.quad_only:
+    if require_quads and not diagnostics.quad_only and not (bad_tolerated and diagnostics.quads == diagnostics.faces):
         failures.append("local quad/manifold gate failed")
     for count, label in (
-        (diagnostics.degenerate_faces, "degenerate faces"),
-        (diagnostics.invalid_quads, "invalid quads"),
+        (0 if bad_tolerated else diagnostics.degenerate_faces, "degenerate faces"),
+        (0 if bad_tolerated else diagnostics.invalid_quads, "invalid quads"),
         (diagnostics.non_manifold_edges, "non-manifold edges"),
         (diagnostics.non_manifold_vertices, "non-manifold vertices"),
         (diagnostics.branched_boundary_vertices, "branched boundary vertices"),
@@ -138,12 +167,11 @@ def candidate_gate_failures(
     ):
         if count:
             failures.append(f"{count} {label}")
-    if diagnostics.quads and diagnostics.min_scaled_jacobian <= 0.0:
+    if diagnostics.quads and diagnostics.min_scaled_jacobian <= 0.0 and not bad_tolerated:
         failures.append("inverted, crossed, or concave quad")
     if not (math.isfinite(geometry_rms) and math.isfinite(geometry_p95) and math.isfinite(geometry_max)):
         failures.append("surface-error measurement failed")
 
-    gates = quality_gates(quality)
     target_error = abs(diagnostics.faces - target_faces) / max(1, target_faces)
     edge_scale = max(target_edge_normalized, 1e-9)
     rms_edge_units = geometry_rms / edge_scale
@@ -185,18 +213,32 @@ def candidate_gate_failures(
             or profile.duplicate_faces > 0
         ):
             failures.append("source topology is not a certifiable manifold; choose Repair topology")
-        if profile.euler_characteristic is not None and diagnostics.euler_characteristic != profile.euler_characteristic:
-            failures.append("Euler characteristic changed")
-        if diagnostics.boundary_loops != profile.boundary_loops:
-            failures.append("boundary-loop count changed")
-        if diagnostics.connected_components != profile.connected_components:
-            failures.append("connected-component count changed")
-        if diagnostics.component_euler != profile.component_euler:
-            failures.append("per-component Euler characteristics changed")
-        if not component_topology_preserved(profile.component_signature, diagnostics.component_signature):
-            failures.append("per-component Euler/boundary signatures changed")
-        if (diagnostics.boundary_edges == 0) != (profile.boundary_edges == 0):
-            failures.append("open/closed topology changed")
+        if profile.component_detail and diagnostics.component_detail:
+            # Tiny shells (< 0.2% of the faces) vanish at a low target, so compare only the significant ones.
+            source_shells = significant_components(profile.component_detail)
+            output_shells = significant_components(diagnostics.component_detail)
+            if len(output_shells) != len(source_shells):
+                failures.append(f"significant shell count changed ({len(source_shells)} -> {len(output_shells)})")
+            elif not component_topology_preserved(source_shells, output_shells):
+                failures.append("per-component Euler/boundary signatures changed")
+            if any(loops for _, loops in output_shells) != any(loops for _, loops in source_shells):
+                failures.append("open/closed topology changed")
+        else:
+            if (
+                profile.euler_characteristic is not None
+                and diagnostics.euler_characteristic != profile.euler_characteristic
+            ):
+                failures.append("Euler characteristic changed")
+            if diagnostics.boundary_loops != profile.boundary_loops:
+                failures.append("boundary-loop count changed")
+            if diagnostics.connected_components != profile.connected_components:
+                failures.append("connected-component count changed")
+            if diagnostics.component_euler != profile.component_euler:
+                failures.append("per-component Euler characteristics changed")
+            if not component_topology_preserved(profile.component_signature, diagnostics.component_signature):
+                failures.append("per-component Euler/boundary signatures changed")
+            if (diagnostics.boundary_edges == 0) != (profile.boundary_edges == 0):
+                failures.append("open/closed topology changed")
     return failures
 
 
@@ -236,7 +278,7 @@ def analyze_object(
     target_faces: int,
     *,
     feature_angle_deg: float = 35.0,
-    max_exact_faces: int = 500_000,
+    max_exact_faces: int = 75_000,
     max_sample_faces: int = 120_000,
 ) -> ScanProfile:
     mesh = obj.data
@@ -390,6 +432,7 @@ def analyze_object(
         diagonal=max(diagonal, 1e-12),
         texture_critical=texture_critical,
         warnings=tuple(warnings),
+        component_detail=exact_diagnostics.component_detail if exact_diagnostics is not None else (),
     )
 
 
@@ -411,8 +454,9 @@ def build_candidate_specs(
     elif quality == "HERO":
         count = max(count, 5)
 
-    if selected == "PAIR_CLOSURE":
-        return [CandidateSpec("PAIR_CLOSURE", "PairClosure exact all-quad fallback", seed, pair_closure=True)]
+    pair_spec = CandidateSpec("PAIR_CLOSURE", "PairClosure exact all-quad fallback", seed, pair_closure=True)
+    if selected == "PAIR_CLOSURE" or (requested == "AUTO" and pair_closure_first_reason(profile, topology_policy)):
+        return [pair_spec]
 
     repair_allowed = voxel_repair and topology_policy == "REPAIR" and selected == "DIRTY_FLOW"
     preserve_sharp = selected in {"FEATURE_FLOW", "OPEN_FLOW"} or profile.category == "HARD_SURFACE"
@@ -431,7 +475,30 @@ def build_candidate_specs(
                 preserve_boundary=preserve_boundary,
             )
         )
+    if profile.connected_components > 1 and profile.boundary_edges > 0:
+        # QuadriFlow can hang for minutes on multi-shell meshes with open boundaries; only a voxel-repaired
+        # candidate sees a single closed shell.
+        specs = [spec for spec in specs if spec.repair] or [pair_spec]
     return specs
+
+
+# Gate failures a PairClosure result may carry as warnings when nothing else passes: it quad-closes any
+# triangulation, so aspect ratio and shell bookkeeping are its known weak spots, not signs of a broken mesh.
+_SOFT_FAILURE_PREFIXES = (
+    "p95 aspect",
+    "Euler characteristic changed",
+    "boundary-loop count changed",
+    "connected-component count changed",
+    "per-component",
+    "significant shell count changed",
+    "open/closed topology changed",
+    "source topology is not a certifiable manifold",
+)
+
+
+def split_soft_failures(failures: list[str]) -> tuple[list[str], list[str]]:
+    hard = [item for item in failures if not item.startswith(_SOFT_FAILURE_PREFIXES)]
+    return hard, [item for item in failures if item.startswith(_SOFT_FAILURE_PREFIXES)]
 
 
 def evaluate_candidate(
@@ -462,6 +529,12 @@ def evaluate_candidate(
         quality=quality,
     )
 
+    warnings = ""
+    if spec.pair_closure and failures:
+        hard, soft = split_soft_failures(failures)
+        if not hard:
+            failures, warnings = [], "; ".join(soft)
+
     edge_units = geometry_p95 / max(target_edge_normalized, 1e-9)
     geometry_quality = math.exp(-edge_units / 0.35) if math.isfinite(edge_units) else 0.0
     jacobian_quality = max(0.0, min(1.0, diagnostics.p05_scaled_jacobian))
@@ -480,9 +553,11 @@ def evaluate_candidate(
         strategy=spec.strategy,
         label=spec.label,
         valid=not failures,
-        score=score if not failures else -1.0,
+        score=(score * (0.5 if warnings else 1.0)) if not failures else -1.0,
         reason=(
-            "accepted against exact reduced proxy; full source topology remains unverified"
+            f"accepted with warnings: {warnings}"
+            if warnings
+            else "accepted against exact reduced proxy; full source topology remains unverified"
             if not failures and topology_policy == "PRESERVE" and profile.topology_basis == "PROXY_EXACT"
             else ("accepted" if not failures else "; ".join(failures))
         ),
@@ -496,4 +571,5 @@ def evaluate_candidate(
         p95_aspect_ratio=diagnostics.p95_aspect_ratio,
         extraordinary_ratio=diagnostics.extraordinary_ratio,
         elapsed_ms=elapsed_ms,
+        warnings=warnings,
     )

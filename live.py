@@ -12,7 +12,7 @@ from . import overlay
 from .bridge import run_curiomesh
 from .operators import config_from_owner
 
-LIVE_FACE_CAP = 20_000
+LIVE_FACE_CAP = 8_000
 DEBOUNCE_SECONDS = 0.4
 
 state = {"source": "", "sig": None, "message": "", "faces": 0, "ms": 0.0}

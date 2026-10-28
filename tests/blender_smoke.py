@@ -654,6 +654,88 @@ def run_quality_gate_case():
     print("PASS quality_gate: finite but excessive geometry error is rejected")
 
 
+def run_atlas_pragmatic_gates_case():
+    atlasq = sys.modules["curiomesh.atlasq"]
+    metrics = sys.modules["curiomesh.metrics"]
+
+    def diag(**overrides):
+        values = dict(
+            faces=1000,
+            quads=1000,
+            quad_ratio=1.0,
+            min_scaled_jacobian=0.8,
+            p05_scaled_jacobian=0.7,
+            p95_aspect_ratio=1.4,
+            quad_only=True,
+            connected_components=1,
+        )
+        values.update(overrides)
+        return metrics.MeshDiagnostics(**values)
+
+    def profile(**overrides):
+        values = dict(
+            category="OPEN_SURFACE", recommended_strategy="OPEN_FLOW", face_count=6000, vertex_count=3000,
+            sampled_faces=6000, exact_topology=True, topology_basis="SOURCE_EXACT", boundary_edges=40,
+            boundary_loops=2, connected_components=2, component_euler=(1, 1), component_signature=((1, 1), (1, 1)),
+            non_manifold_edges=0, non_manifold_vertices=0, branched_boundary_vertices=0, inconsistent_edges=0,
+            duplicate_faces=0, euler_characteristic=2, degenerate_ratio=0.0, sharp_ratio=0.0, triangle_ratio=1.0,
+            target_edge_length=0.05, diagonal=1.0, texture_critical=False, warnings=(),
+            component_detail=((1, 1, 5990), (1, 1, 10)),
+        )
+        values.update(overrides)
+        return atlasq.ScanProfile(**values)
+
+    def gate(diagnostics, policy="REPAIR", source=None):
+        return atlasq.candidate_gate_failures(
+            diagnostics, target_faces=1000, geometry_rms=0.0, geometry_p95=0.0, geometry_max=0.0,
+            target_edge_normalized=0.05, require_quads=True, topology_policy=policy, profile=source,
+            quality="BALANCED",
+        )
+
+    if gate(diag(invalid_quads=20, quad_only=False, min_scaled_jacobian=-0.2)):
+        raise AssertionError("atlas_gates: 2% invalid quads should be tolerated")
+    if not any("invalid quads" in item for item in gate(diag(invalid_quads=50, quad_only=False))):
+        raise AssertionError("atlas_gates: 5% invalid quads must still fail")
+    kept = diag(faces=1000, component_detail=((1, 1, 990), (1, 1, 1)), component_signature=((1, 1), (1, 1)))
+    if any("shell" in item or "per-component" in item for item in gate(kept, "PRESERVE", profile())):
+        raise AssertionError("atlas_gates: a vanished tiny shell must not fail PRESERVE")
+    lost = diag(faces=1000, component_detail=((1, 0, 990), (1, 1, 1)), component_signature=((1, 0), (1, 1)))
+    if not gate(lost, "PRESERVE", profile()):
+        raise AssertionError("atlas_gates: a changed significant shell must fail PRESERVE")
+
+    dirty = profile(category="DIRTY_SCAN", recommended_strategy="DIRTY_FLOW")
+    for policy, expected in (("PRESERVE", ["PAIR_CLOSURE"]), ("REPAIR", ["DIRTY_FLOW"])):
+        specs = atlasq.build_candidate_specs(
+            dirty, strategy="AUTO", quality="BALANCED", seed=0, candidate_count=3, topology_policy=policy,
+        )
+        if specs[0].strategy != expected[0]:
+            raise AssertionError(f"atlas_gates: {policy} dirty scan routed to {specs[0].strategy}")
+    huge = profile(face_count=300_000, connected_components=1, boundary_edges=0, recommended_strategy="FLOW_ENSEMBLE")
+    if not atlasq.build_candidate_specs(
+        huge, strategy="AUTO", quality="BALANCED", seed=0, candidate_count=3, topology_policy="REPAIR",
+    )[0].pair_closure:
+        raise AssertionError("atlas_gates: a >200k-face source must go PairClosure first")
+    shells = profile(connected_components=5, boundary_edges=9)
+    specs = atlasq.build_candidate_specs(
+        shells, strategy="FLOW_ENSEMBLE", quality="BALANCED", seed=0, candidate_count=3, topology_policy="REPAIR",
+    )
+    if [spec.pair_closure for spec in specs] != [True]:
+        raise AssertionError("atlas_gates: multi-shell open mesh must not run QuadriFlow")
+
+    pair = atlasq.CandidateSpec("PAIR_CLOSURE", "pair", 0, pair_closure=True)
+    flow = atlasq.CandidateSpec("FLOW_ENSEMBLE", "flow", 0)
+    wide = diag(p95_aspect_ratio=10.0)
+    for spec, valid in ((pair, True), (flow, False)):
+        evaluation = atlasq.evaluate_candidate(
+            spec, wide, target_faces=1000, geometry_rms=0.0, geometry_p95=0.0, geometry_max=0.0,
+            target_edge_normalized=0.05, require_quads=True, topology_policy="REPAIR", profile=profile(),
+            quality="BALANCED", elapsed_ms=0.0,
+        )
+        if evaluation.valid != valid or bool(evaluation.warnings) != valid:
+            raise AssertionError(f"atlas_gates: {spec.label} aspect handling wrong: {evaluation.reason}")
+    print("PASS atlas_gates: bad-quad tolerance, tiny shells, pair-first routing, soft fallback")
+
+
 def run_component_sampling_case():
     source_mesh = bpy.data.meshes.new("CurioSmoke_ComponentSourceMesh")
     main_vertices = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
@@ -803,6 +885,7 @@ def main():
     run_pairclosure_unlock_topology_gate_case()
     run_projection_rollback_case()
     run_quality_gate_case()
+    run_atlas_pragmatic_gates_case()
     run_component_sampling_case()
     run_world_scale_metrics_case()
     reset_scene()
@@ -878,7 +961,8 @@ def main():
     bake_source = make_uv_sphere("CurioSmoke_Bake", segments=20, rings=10)
     source_material = bake_source.data.materials[0]
     scene = bpy.context.scene
-    scene.render.engine = "BLENDER_EEVEE_NEXT"
+    engines = scene.render.bl_rna.properties["engine"].enum_items.keys()
+    scene.render.engine = "BLENDER_EEVEE_NEXT" if "BLENDER_EEVEE_NEXT" in engines else "BLENDER_EEVEE"
     scene.cycles.samples = 7
     scene.render.bake.use_selected_to_active = False
     scene.render.bake.cage_extrusion = 0.123

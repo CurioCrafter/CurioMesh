@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.1 - 2026-10-27
+
+- Wider Blender support: the legacy add-on now installs and passes the test
+  suites on Blender 3.6 LTS and newer; the extension package needs 4.2 LTS or
+  newer. Verified on 3.6, 4.2, 4.5, 5.0, 5.1 and 5.2. Blender 3.0 and older
+  are not supported.
+- Release assets are named by Blender range:
+  `curiomesh-<ver>-blender-3.6-plus-addon.zip` and
+  `curiomesh-<ver>-blender-4.2-plus-extension.zip`.
+- Tests no longer assume Python 3.11 (`tomllib`) or a specific EEVEE engine id.
+- Tested on 13 real meshes (244 to 1.9M faces: scans, game assets, FBX/OBJ/GLB).
+- Atlas-Q Auto now succeeds on real game assets that it used to reject
+  (multi-shell, slightly dirty meshes): a few bad quads (3% on Balanced) and
+  tiny loose shells no longer fail the gates, and a PairClosure result with
+  only soft issues (high aspect, merged shells) is returned with a warning.
+- Failures now say why: the message names the closest candidate and its reasons.
+- Dirty or multi-shell meshes under Preserve topology, and sources over 200,000
+  faces, go PairClosure-first. QuadriFlow is skipped on multi-shell meshes with
+  open boundaries, where it could hang for minutes.
+- UVs on sources over 300,000 faces are projected with a BVH instead of the
+  Data Transfer modifier, which could stall for tens of minutes.
+- Analyze uses the fast sampled path above 75,000 faces.
+- Heatmap and HUD skip stats on meshes over 300,000 faces instead of slowing
+  every redraw; the HUD hint now flags results with many poles.
+- Live preview is limited to sources up to 8,000 faces so Blender stays responsive.
+
 ## 0.5.0 - 2026-10-27
 
 - Quick Start panel with a big Remesh button, quality buttons and HUD /

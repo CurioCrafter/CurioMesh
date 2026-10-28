@@ -7,11 +7,20 @@ import importlib
 import os
 from pathlib import Path, PurePosixPath
 import sys
-import tomllib
+import re
 import traceback
 import zipfile
 
 import bpy
+
+
+def _toml_loads(text: str) -> dict:
+    """Flat manifest reader: Blender 3.6 bundles Python 3.10 (no tomllib)."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return dict(re.findall(r'^(\w+)\s*=\s*"([^"]*)"', text, re.M))
+    return tomllib.loads(text)
 
 
 def arguments_after_separator() -> argparse.Namespace:
@@ -56,7 +65,7 @@ def validate_archive(archive: Path, layout: str) -> tuple[str, str]:
         missing = required - set(entries)
         if missing:
             raise AssertionError(f"{archive}: missing entries: {sorted(missing)}")
-        manifest = tomllib.loads(package.read(f"{prefix}blender_manifest.toml").decode("utf-8"))
+        manifest = _toml_loads(package.read(f"{prefix}blender_manifest.toml").decode("utf-8"))
         init_source = package.read(f"{prefix}__init__.py").decode("utf-8")
 
     package_id = manifest.get("id")
@@ -69,9 +78,9 @@ def validate_archive(archive: Path, layout: str) -> tuple[str, str]:
     if info_version != version:
         raise AssertionError(f"{archive}: manifest version {version!r} != bl_info version {info_version!r}")
     archive_kind = "addon" if layout == "legacy" else "extension"
-    expected_name = f"{package_id}-{version}-{archive_kind}.zip"
-    if archive.name != expected_name:
-        raise AssertionError(f"{archive}: expected filename {expected_name!r}")
+    name_pattern = rf"{package_id}-{re.escape(version)}-blender-\d+\.\d+-plus-{archive_kind}\.zip"
+    if not re.fullmatch(name_pattern, archive.name):
+        raise AssertionError(f"{archive}: expected filename matching {name_pattern!r}")
     return package_id, version
 
 
@@ -153,7 +162,7 @@ def assert_installed_runtime(
     manifest_path = installed_root / "blender_manifest.toml"
     if not manifest_path.is_file():
         raise AssertionError(f"Installed package is missing its manifest: {manifest_path}")
-    installed_manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    installed_manifest = _toml_loads(manifest_path.read_text(encoding="utf-8"))
     if installed_manifest.get("id") != package_id or installed_manifest.get("version") != version:
         raise AssertionError(
             f"Installed manifest identity/version mismatch: "
