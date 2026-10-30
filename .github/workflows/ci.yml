@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install numpy ruff
-      - run: ruff check .
+      - run: ruff check . --select E4,E7,E9,F
       - name: Unit tests (pure Python; test_turbo skips without a native build)
         run: python -m unittest discover -s tests -p "test_*.py" -v
 
