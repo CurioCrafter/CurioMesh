@@ -30,6 +30,7 @@ from .atlasq import (
 )
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from .textures import bake_selected_to_active, ensure_target_uvs
+from .triadq.flatquad import FlatQuadOptions, flatten_regions, pair_and_close
 from .triadq import (
     MeshData,
     RemeshOptions as TriadRemeshOptions,
@@ -67,6 +68,7 @@ class RemeshConfig:
     pair_closure_output_cap: int = 0
     triad_flow_mode: str = "AUTO"
     triad_field_mode: str = "SMOOTH"
+    flat_tolerance: float = 0.1  # percent of the bounding-box diagonal
     atlas_strategy: str = "AUTO"
     atlas_candidate_count: int = 3
     topology_policy: str = "PRESERVE"
@@ -514,6 +516,32 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
             f"rescued_pairs={report.rescued_pairs}"
         ),
     )
+    return True
+
+
+def _run_flat_quads(obj: bpy.types.Object, config: RemeshConfig) -> bool:
+    """Flat regions become huge quads; only the detail left over is reduced towards the target."""
+
+    source = _meshdata_from_object(obj)
+    options = FlatQuadOptions(tolerance=max(0.0, float(config.flat_tolerance)) / 100.0, seed_count=max(1, int(config.triad_seed_count)))
+    coarse, flat = flatten_regions(MeshData(source.vertices, source.faces, source.face_materials, name=source.name), options)
+    _apply_meshdata_to_object(obj, coarse)
+    obj["curiomesh_flat_regions"] = int(flat.regions)
+    obj["curiomesh_flat_faces_in"] = int(flat.flat_faces_in)
+    obj["curiomesh_flat_faces_out"] = int(flat.flat_faces_out)
+    _log(config, f"Flat Quads: {flat.message}; {flat.detail_faces} detail faces kept")
+
+    _prepare_pair_closure_proxy(obj, config)  # a cap, not a goal: already below it, nothing happens
+    result, report = pair_and_close(
+        _meshdata_from_object(obj),
+        seed_count=options.seed_count,
+        force_quads=bool(config.require_quads),
+        field_mode=str(config.triad_field_mode or "SMOOTH").upper(),
+    )
+    if not result.faces:
+        _solver_errors.append(f"Flat Quads: {report.message}"[:300])
+        return False
+    _apply_meshdata_to_object(obj, result)
     return True
 
 
@@ -1793,7 +1821,9 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 and atlas_strategy == "AUTO"
                 and len(obj.data.polygons) > LARGE_SOURCE_FACES
             )
-            if engine == "ATLAS_Q" and not pair_closure_only and not large_pair_first:
+            if engine == "FLAT_QUADS":
+                pass  # needs the exact source: a QEM proxy would hide the flat regions
+            elif engine == "ATLAS_Q" and not pair_closure_only and not large_pair_first:
                 # Keep BMesh cleanup and Python adjacency off the full-resolution
                 # scan whenever Blender's native QEM proxy can reduce it first.
                 _prepare_flow_proxy(work_obj, config)
@@ -1841,6 +1871,10 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 )
                 ok = work_obj is not None and selected_evaluation is not None
                 strategy = selected_evaluation.strategy if selected_evaluation is not None else "NONE"
+            elif engine == "FLAT_QUADS":
+                _take_solver_error()
+                ok = _run_flat_quads(work_obj, config)
+                strategy = "FLAT_QUADS"
             elif engine == "TRIAD_Q_LITE":
                 _take_solver_error()
                 triad_config = replace(
@@ -1945,7 +1979,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     )
                     if strategy == "PAIR_CLOSURE" and selected_evaluation is not None and selected_evaluation.warnings:
                         failures = split_soft_failures(failures)[0]
-                elif config.require_quads and not diagnostics.quad_only:
+                elif config.require_quads and not diagnostics.quad_only and engine != "FLAT_QUADS":
                     failures = ["local quad/manifold gate failed"]
                 return diagnostics, measured, failures
 

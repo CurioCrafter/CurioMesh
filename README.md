@@ -35,6 +35,50 @@ or holes to fix by hand.
 percentage, leftover triangles and poles, and tells you the next step. One click
 paints leftover triangles, n-gons and poles right on the mesh.
 
+## Flat Quads: Huge Quads On Flat Areas, Density Only Where It's Needed
+
+Pick **Flat Quads** as the Method. Instead of giving a whole mesh one density,
+it finds the flattest areas, turns each into as few quads as its outline allows,
+and grades density back up only next to real detail. It works best on ships,
+decks, hard-surface panels and architecture.
+
+![A test deck with two hatches and jagged damage: 52,576 faces become 2,752 all-quad faces, with big quads on the flat deck and dense quads only around the damage](docs/images/flat_quads_deck.png)
+
+A generated test deck: **52,576 faces become 2,752 quads.** Both hatches stay
+open, and the faces go to the damage. A plain flat plate becomes **one quad**,
+and a subdivided box of 9,600 faces becomes **six**.
+
+![A scanned wreck fragment: Flat Quads at 10,078 faces next to PairClosure at 10,558 faces](docs/images/flat_quads_fragment.png)
+
+On a real 200,000-face scan with no truly flat areas it still helps, because it
+closes the mesh with far fewer stray triangles. Compared with PairClosure:
+
+| 200,000-face wreck fragment | Faces | Surface error (95th percentile) | Poles | Time |
+|---|---:|---:|---:|---:|
+| PairClosure | 10,558 | 0.129% | 2,901 | 13.5 s |
+| **Flat Quads** | **10,078** | **0.092%** | **2,312** | 106 s |
+
+How it works:
+
+1. **Grow flat regions**, largest faces first, and merge neighbours whose shared
+   plane still fits every vertex, so scan noise can't break up a plate.
+2. **Simplify each border once**, so the two regions sharing it always agree and
+   no gaps can open.
+3. **Rebuild each region from its outline**, keeping holes. A border next to kept
+   detail stays dense, and density falls off with distance from it.
+4. **Pair and close.** Every valid pair is accepted, because a leftover triangle
+   costs three or more quads. Each loose piece closes on its own, so one bad
+   fragment can't make the rest of the mesh pay.
+
+**Flatness** sets how far a surface may bump away from flat, as a percent of the
+mesh size. The face target is a limit for what's left after the flat areas: a flat
+plate stays one quad whatever the target is. On very dirty scans the result can
+land above the target.
+
+It also opens non-manifold edges, flipped normals and bow-ties into borders
+without moving any geometry, so dirty meshes close to all quads. A 391,675-face
+wreck hull that failed in Atlas-Q and PairClosure now finishes all quads.
+
 ## On Real Scans
 
 These are 200,000-face shipwreck scans from a real game project, reduced to
@@ -228,10 +272,16 @@ add-on keeps working.
 - In the Regions panel, regions must be disk-shaped. Rings, regions around an
   open hole and handles are skipped with a message. Guided Retopo's Points Only
   cuts them into pieces instead.
-- Very large, dirty scans can still fail. A 391,000-face wreck hull with 107
-  non-manifold edges failed in both Atlas-Q and PairClosure, with **Topology:
-  Repair** on or off, and a cage over its middle redid only 72 faces. Clean up
-  the non-manifold geometry first. CurioMesh says why when it declines.
+- Very large, dirty scans can still fail in Atlas-Q and PairClosure. A
+  391,000-face wreck hull with 107 non-manifold edges failed in both, with
+  **Topology: Repair** on or off, and a cage over its middle redid only 72 faces.
+  Use **Flat Quads** for these. It finished that hull as 32,078 all-quad faces in
+  about 4.5 minutes, but that is 1.6x the 19,584 target, and a scan that noisy has
+  few truly flat areas, so fine detail is lost at that size.
+- Flat Quads pays off on genuinely flat surfaces. Reduced hard to a low target, an
+  already low-poly prop still loses small details such as straps and rivets. Keep
+  the target higher on those. Long, thin faces can also appear across a big flat
+  area where closure has to route through it.
 - Atlas-Q can run for a long time on some large scans: one 200,000-face rock
   was still going after 15 minutes, while PairClosure finished it in 78 s.
 - Live preview runs on meshes up to 8,000 faces so Blender stays responsive.

@@ -37,6 +37,8 @@ class RemeshOptions:
     # "SMOOTH": diffused 4-RoSy field (_estimate_field). "CURVATURE": Ginzburg-Landau
     # relaxation pulled towards principal curvature directions (field.estimate_field_gl).
     field_mode: str = "SMOOTH"
+    # Accept every locally valid pair, however poorly it scores: a leftover triangle costs 3+ quads at closure.
+    max_pairing: bool = False
 
 
 @dataclass(slots=True)
@@ -613,7 +615,7 @@ def _pairing_prep(mesh: _TriMesh, options: RemeshOptions, mode: str) -> _Pairing
     allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)
     quads_by_pair: dict[tuple[int, int], tuple[int, ...]] = {}
     for a, b, quad, score in zip(face_a.tolist(), face_b.tolist(), quads.tolist(), scores.tolist()):
-        if not score > weights.minimum_score:
+        if not options.max_pairing and not score > weights.minimum_score:
             continue
         quad = tuple(quad)
         allowed[a].append((score, b, quad))

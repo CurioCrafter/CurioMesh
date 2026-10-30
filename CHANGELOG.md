@@ -2,6 +2,15 @@
 
 ## 0.7.0 - 2026-10-30
 
+- **Flat Quads** (new Method). Flat areas become as few quads as their outlines
+  allow and density grades up only next to detail: a flat plate becomes one quad,
+  a subdivided box six. Includes a **Flatness** setting. The target limits what's
+  left after the flat areas, and very dirty scans can land above it.
+- Flat Quads opens non-manifold edges, flipped normals and bow-ties into borders
+  without moving geometry, and closes each loose piece on its own, so dirty meshes
+  finish all quads. A 391,675-face hull that failed in the other engines now
+  finishes.
+- Delaunay flips no longer create zero-area slivers along straight borders.
 - **Guided Retopo** (new Guided panel). Click Detail, Loop, Sharp or Calm
   importance points on a mesh, see their reach and the combined outline as a
   live cage, and watch an adaptive quad preview that snaps to the surface update

@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
+from .flatquad import FlatQuadOptions, FlatQuadReport, flat_quad_remesh
 from .io import read_obj, write_obj
 from .topology import (
     TopologySummary,
@@ -15,6 +16,9 @@ from .topology import (
 from .types import MeshData
 
 __all__ = [
+    "FlatQuadOptions",
+    "FlatQuadReport",
+    "flat_quad_remesh",
     "MeshData",
     "RemeshOptions",
     "RemeshReport",
