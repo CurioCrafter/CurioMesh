@@ -85,7 +85,7 @@ How the region tools work:
 - On jagged borders a **Border Ring** of quads runs along the seam, and an
   untangling pass reshapes any bent quad with the seam held still. On a whale
   region this cut bent or caved-in quads from about 5% to 0.5%, and on a noisy
-  porthole scan from about 31% to 2.8%.
+  scan from about 31% to 2.8%.
 - **Flow: Follow Curvature** (Advanced) lines quads up with the surface's main
   bending directions as well as its sharp edges. The same option is in the
   PairClosure settings for whole-mesh runs.
@@ -157,13 +157,16 @@ add-on keeps working.
 ## Known Limits
 
 - Region patches are always all quads with an exact seam. On noisy scans a few
-  quads next to the seam can still come out bent (about 3% on our porthole
+  quads next to the seam can still come out bent (about 3% in our noisy scan
   test); a slightly larger cage or a bigger Quad Size usually helps.
 - Regions must be disk-shaped. Rings, regions around an open hole and handles
   are skipped with a message.
-- Very large, dirty photogrammetry scans (500k+ faces with non-manifold
-  geometry) need **Topology: Repair** or the PairClosure engine. Atlas-Q tells
-  you this when it declines.
+- Very large, dirty scans can still fail in Atlas-Q and PairClosure, with
+  **Topology: Repair** on or off. Use **Flat Quads** for these. It can land well
+  above the target on them, and a scan that noisy has few truly flat areas, so fine
+  detail is lost.
+- Atlas-Q can run for a long time on some large scans, where PairClosure is much
+  faster.
 - Live preview runs on meshes up to 8,000 faces so Blender stays responsive.
 
 ## What's Planned
