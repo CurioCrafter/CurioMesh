@@ -56,6 +56,51 @@ right side shows the other way to work: a box cage redid only the middle, 9,490
 faces down to 1,711 quads in 8.4 s, and the rest of the scan was left as it was
 with no new holes.
 
+## New in 0.7: Guided Retopo
+
+![Detail, Loop and Calm points on Suzanne with their reach and outline, and the adaptive quad preview beside it](docs/images/guided_points.png)
+
+Tell CurioMesh where shape matters and watch the quads follow. Open the
+**Guided** panel in the CurioMesh tab:
+
+1. **Choose a preset and place points.** Pick Character, Hard-Surface Prop,
+   Scan or Game LOD, press **Place Points** and click the mesh. Scroll sets the
+   radius, Shift+scroll the strength, keys 1-4 the type, Ctrl+click removes a
+   point, Enter or Esc finishes. **Auto-suggest** places points at high
+   curvature, hard edges and small holes for you.
+2. **Watch the live preview.** Each point's reach and the combined outline are
+   drawn on the mesh, and a preview beside it updates as you edit. **Whole
+   Mesh** remeshes everything with the points changing the quad size; **Points
+   Only** rebuilds just the inside of the point spheres and leaves the rest
+   exactly as it is.
+3. **Lock, redraw, apply.** Lock faces you like, rebuild a selected strip with
+   **Redraw Strip**, and follow **Next spot** to the weakest area. Nothing
+   changes until you press **Apply**, which writes a new `_Retopo` object or
+   replaces your mesh (Undo restores it).
+
+| Point | What it asks for |
+|---|---|
+| Detail | More, smaller quads around the point |
+| Loop | Edge loops that ring around the point: eyes, mouths, elbows |
+| Sharp | Smaller quads and hard edges kept |
+| Calm | Fewer, bigger quads; also cuts a hole in a Points Only region |
+
+Points can also be sphere Empties you move and scale like any object. Good to
+know:
+
+- Whole Mesh results are all quads by default. **Pure Quads** in Advanced turns
+  that off for a faster preview of big meshes; a few triangles then stay.
+- UV layers and materials carry over from your mesh in both modes. A quad
+  crossing a UV seam takes its UVs from one side, so it does not stretch across
+  the atlas.
+- A Points Only region that wraps a limb or surrounds an open hole is cut into
+  pieces that are each rebuilt, so the whole ring gets new quads. The cut stays
+  as a line of kept edges between the pieces.
+- Points Only keeps your mesh's edges on the region's border, so a very dense
+  mesh gets a dense band of quads along that border.
+- A preview that takes more than 4 seconds stops updating by itself until you
+  press **Update**, so Blender stays usable on big meshes.
+
 ## New in 0.6
 
 | | 0.5 | 0.6 |
@@ -180,8 +225,9 @@ add-on keeps working.
 - Region patches are always all quads with an exact seam. On noisy scans a few
   quads next to the seam can still come out bent (about 3% on our porthole
   test); a slightly larger cage or a bigger Quad Size usually helps.
-- Regions must be disk-shaped. Rings, regions around an open hole and handles
-  are skipped with a message.
+- In the Regions panel, regions must be disk-shaped. Rings, regions around an
+  open hole and handles are skipped with a message. Guided Retopo's Points Only
+  cuts them into pieces instead.
 - Very large, dirty scans can still fail. A 391,000-face wreck hull with 107
   non-manifold edges failed in both Atlas-Q and PairClosure, with **Topology:
   Repair** on or off, and a cage over its middle redid only 72 faces. Clean up
@@ -192,11 +238,6 @@ add-on keeps working.
 
 ## What's Planned
 
-- **Guided Retopo.** Click points on the mesh where shape matters most (eyes,
-  joints, sharp edges), see a live cage around them, and watch an adaptive
-  preview put more and better-aligned quads there. Lock what you like, redraw
-  strips by hand, and follow hints to the next weak spot. Presets for
-  characters, hard-surface props, scans and game LODs.
 - **GPU compute** through Blender's own GPU module for the parallel parts
   (inside tests, field smoothing, surface fitting), on NVIDIA, AMD, Intel and
   Apple graphics.

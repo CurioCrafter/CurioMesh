@@ -437,9 +437,65 @@ def fix_parity(vertices, faces, face_ids, incidence: _Incidence, claimed=frozens
     return None, f"odd seam ({len(loop)} edges) and no odd-sided face nearby can fix it"
 
 
-def prepare_regions(vertices, faces, mask, *, min_island: int = 4, max_hole: int = 4, smooth: int = 2):
+def _is_disk(faces, face_ids) -> bool:
+    loops, pinched = boundary_loops(faces, face_ids)
+    return not pinched and len(loops) == 1 and _euler(faces, face_ids) == 1
+
+
+def _cut_in_two(vertices, faces, face_ids: np.ndarray, adjacency) -> list[np.ndarray]:
+    """Split a face set with a plane through its middle, on the axis that leaves the fewest non-disk pieces."""
+
+    centers = np.asarray([vertices[list(faces[int(f)])].mean(axis=0) for f in face_ids])
+    centers -= centers.mean(axis=0)
+    selected = np.zeros(len(faces), dtype=bool)
+    best, best_score = [], None
+    for axis in np.linalg.svd(centers, full_matrices=False)[2]:
+        along = centers @ axis
+        side = along < np.median(along)
+        if side.all() or not side.any():
+            continue
+        pieces = []
+        for part in (face_ids[side], face_ids[~side]):
+            selected[:] = False
+            selected[part] = True
+            pieces += mask_components(faces, selected, adjacency)
+        score = (sum(not _is_disk(faces, piece) for piece in pieces), len(pieces))
+        if best_score is None or score < best_score:
+            best, best_score = pieces, score
+        if score == (0, 2):
+            break
+    return best
+
+
+def _disk_pieces(vertices, faces, face_ids, incidence, adjacency, claimed: set[int], min_island: int, depth: int = 6):
+    """Face set -> disks with even seams, cutting a ring, an open hole or a handle into pieces when needed.
+
+    The pieces share the cut as seam, so the result stays joined. Returns (pieces, message of the first failure).
+    """
+
+    disk, message = make_disk(faces, face_ids, incidence, frozenset(claimed))
+    if disk is not None:
+        disk, message = fix_parity(vertices, faces, disk, incidence, frozenset(claimed))
+    if disk is not None:
+        return [disk], ""
+    if depth == 0 or len(face_ids) < 2 * min_island:
+        return [], message
+    parts = _cut_in_two(vertices, faces, np.asarray(face_ids, dtype=np.int64), adjacency)
+    done: list[np.ndarray] = []
+    failed = "" if parts else message
+    for k, part in enumerate(parts):
+        others = set(claimed).union(*(p.tolist() for p in parts[k + 1 :]), *(d.tolist() for d in done))
+        found, why = _disk_pieces(vertices, faces, part, incidence, adjacency, others, min_island, depth - 1)
+        done += found
+        failed = failed or why
+    return done, failed
+
+
+def prepare_regions(vertices, faces, mask, *, min_island: int = 4, max_hole: int = 4, smooth: int = 2, split_rings: bool = False, frozen=None):
     """Clean a face mask into disjoint disk components with even seams.
 
+    `split_rings` cuts regions that are not disks (around a limb or an open hole) into pieces instead of skipping
+    them. Faces in the `frozen` mask are never taken, however the mask is cleaned or grown.
     Returns (components, warnings): each component is a sorted face-id array.
     """
 
@@ -449,20 +505,27 @@ def prepare_regions(vertices, faces, mask, *, min_island: int = 4, max_hole: int
     if smooth:
         mates = triangle_mates(vertices, faces)
         mask = clean_mask(faces, smooth_mask(faces, mask, smooth, adjacency, mates), min_island, max_hole, adjacency)
-    incidence = _Incidence(faces)
     claimed: set[int] = set()
+    if frozen is not None:
+        mask = mask & ~frozen
+        claimed.update(np.flatnonzero(frozen).tolist())
+    incidence = _Incidence(faces)
     components: list[np.ndarray] = []
     warnings: list[str] = []
     for index, component in enumerate(mask_components(faces, mask, adjacency)):
         others = claimed | (set(np.flatnonzero(mask).tolist()) - set(component.tolist()))
-        disk, message = make_disk(faces, component, incidence, frozenset(others))
-        if disk is not None:
-            disk, message = fix_parity(vertices, faces, disk, incidence, frozenset(others))
-        if disk is None:
+        if split_rings:
+            pieces, message = _disk_pieces(vertices, faces, component, incidence, adjacency, others, min_island)
+        else:
+            disk, message = make_disk(faces, component, incidence, frozenset(others))
+            if disk is not None:
+                disk, message = fix_parity(vertices, faces, disk, incidence, frozenset(others))
+            pieces = [] if disk is None else [disk]
+        if not pieces:
             warnings.append(f"Region {index + 1} ({len(component)} faces) skipped: {message}")
-            continue
-        claimed.update(disk.tolist())
-        components.append(disk)
+        for piece in pieces:
+            claimed.update(piece.tolist())
+            components.append(piece)
     return components, warnings
 
 
