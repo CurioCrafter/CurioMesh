@@ -35,6 +35,27 @@ or holes to fix by hand.
 percentage, leftover triangles and poles, and tells you the next step. One click
 paints leftover triangles, n-gons and poles right on the mesh.
 
+## On Real Scans
+
+These are 200,000-face shipwreck scans from a real game project, reduced to
+about 5% of their faces in Blender 5.2 with the Turbo core on. Each image is a
+close-up of the same spot on every mesh, with the wireframe showing.
+
+![A scanned wreck fragment: the 200,000-face source next to Atlas-Q and PairClosure results of about 10,600 all-quad faces](docs/images/wreck_fragment.png)
+
+**A scanned wreck fragment.** The ribs, the collar and the small dents all
+survive at 5% of the faces. Every result is all quads. Atlas-Q took 48.5 s,
+with a warning about some stretched quads, and PairClosure took 13.5 s. Both
+stay within about 0.15% of the mesh's size from the original (95th percentile).
+
+![A scanned rock wall: the 200,000-face source, a 10,548-quad PairClosure result, and a region remesh that redoes only the middle of the wall](docs/images/wreck_rock_wall.png)
+
+**A scanned rock wall.** PairClosure rebuilt the whole wall as 10,548 quads in
+78 s. At this face count the big ledges stay and the fine cracks smooth out. The
+right side shows the other way to work: a box cage redid only the middle, 9,490
+faces down to 1,711 quads in 8.4 s, and the rest of the scan was left as it was
+with no new holes.
+
 ## New in 0.6
 
 | | 0.5 | 0.6 |
@@ -161,9 +182,12 @@ add-on keeps working.
   test); a slightly larger cage or a bigger Quad Size usually helps.
 - Regions must be disk-shaped. Rings, regions around an open hole and handles
   are skipped with a message.
-- Very large, dirty photogrammetry scans (500k+ faces with non-manifold
-  geometry) need **Topology: Repair** or the PairClosure engine. Atlas-Q tells
-  you this when it declines.
+- Very large, dirty scans can still fail. A 391,000-face wreck hull with 107
+  non-manifold edges failed in both Atlas-Q and PairClosure, with **Topology:
+  Repair** on or off, and a cage over its middle redid only 72 faces. Clean up
+  the non-manifold geometry first. CurioMesh says why when it declines.
+- Atlas-Q can run for a long time on some large scans: one 200,000-face rock
+  was still going after 15 minutes, while PairClosure finished it in 78 s.
 - Live preview runs on meshes up to 8,000 faces so Blender stays responsive.
 
 ## What's Planned
