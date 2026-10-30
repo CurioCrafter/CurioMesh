@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0 - 2026-10-30
+
+- **Guided Retopo** (new Guided panel). Click Detail, Loop, Sharp or Calm
+  importance points on a mesh, see their reach and the combined outline as a
+  live cage, and watch an adaptive quad preview that snaps to the surface update
+  as you edit. Presets for characters, hard-surface props, scans and game LODs,
+  Auto-suggest, lock faces, Redraw Strip, a Next spot hint, and sphere Empties
+  as points.
+- **Whole Mesh** remeshes everything with the points changing the quad size,
+  all quads by default (Pure Quads in Advanced). **Points Only** rebuilds only
+  the inside of the point spheres on a fixed seam.
+- UV layers and materials carry over in both modes, including across UV seams
+  and for materials linked to the object.
+- Points Only regions that wrap a limb or surround an open hole are cut into
+  disk-shaped pieces and all of them are rebuilt.
+
 ## 0.6.0 - 2026-10-29
 
 - **Licence: CurioMesh is now GPL-3.0-or-later** (previously MIT, up to 0.5.1).

@@ -40,6 +40,60 @@ def box_mask(vertices, faces, hx=0.5, hy=0.4):
     return (np.abs(c[:, 0]) < hx) & (np.abs(c[:, 1]) < hy)
 
 
+class RingTests(unittest.TestCase):
+    def _tube(self, around=24, along=8):
+        vertices = [(np.cos(2 * np.pi * i / around), np.sin(2 * np.pi * i / around), 3.0 * j / along) for j in range(along + 1) for i in range(around)]
+        faces = []
+        for j in range(along):
+            for i in range(around):
+                a, b = j * around + i, j * around + (i + 1) % around
+                faces.append((a, b, b + around, a + around))
+        return np.array(vertices), faces
+
+    @staticmethod
+    def _open_edges(faces):
+        counts = {}
+        for face in faces:
+            for k in range(len(face)):
+                key = tuple(sorted((face[k], face[(k + 1) % len(face)])))
+                counts[key] = counts.get(key, 0) + 1
+        return sum(1 for v in counts.values() if v == 1)
+
+    def _fill(self, vertices, faces, components):
+        self.assertGreaterEqual(len(components), 2)
+        results = [patch.remesh_region(vertices, faces, c, target_length=0.3) for c in components]
+        self.assertTrue(all(r.ok for r in results), [r.message for r in results])
+        return patch.apply_patches(vertices, faces, results)[1]
+
+    def test_ring_around_a_limb_is_cut_into_disks(self):
+        vertices, faces = self._tube()
+        c = centroids(vertices, faces)
+        mask = (c[:, 2] > 0.9) & (c[:, 2] < 2.1)  # a whole band of the tube: two seam loops
+        self.assertEqual(len(patch.prepare_regions(vertices, faces, mask, smooth=0)[0]), 0)
+        components, warnings = patch.prepare_regions(vertices, faces, mask, smooth=0, split_rings=True)
+        self.assertEqual(warnings, [])
+        self.assertEqual(sum(len(p) for p in components), int(mask.sum()))
+        self.assertEqual(self._open_edges(self._fill(vertices, faces, components)), self._open_edges(faces))
+
+    def test_region_around_an_open_hole_is_cut_into_disks(self):
+        vertices, faces = grid(20)
+        c = centroids(vertices, faces)
+        kept = [f for f, near in zip(faces, np.linalg.norm(c, axis=1) < 0.25) if not near]
+        mask = np.linalg.norm(centroids(vertices, kept), axis=1) < 0.7
+        components, warnings = patch.prepare_regions(vertices, kept, mask, smooth=0, split_rings=True)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self._open_edges(self._fill(vertices, kept, components)), self._open_edges(kept))
+
+    def test_frozen_faces_are_never_taken(self):
+        vertices, faces = grid(20)
+        distance = np.linalg.norm(centroids(vertices, faces), axis=1)
+        frozen = distance < 0.2  # an island in the middle: the free part is a ring
+        components, warnings = patch.prepare_regions(vertices, faces, distance < 0.7, smooth=2, split_rings=True, frozen=frozen)
+        self.assertEqual(warnings, [])
+        self.assertGreaterEqual(len(components), 2)
+        self.assertFalse(frozen[np.concatenate(components)].any())
+
+
 class MaskTests(unittest.TestCase):
     def test_clean_mask_drops_islands_and_fills_holes(self):
         vertices, faces = grid(10)

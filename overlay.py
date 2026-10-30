@@ -45,6 +45,7 @@ PREF_DEFAULTS = {
     "show_diagnostics": True,
     "show_debug": True,
     "show_regions": True,
+    "show_guided": True,
     "hud_default": True,
     "hud_corner": "BOTTOM_LEFT",
     "hud_offset_x": 70,
@@ -59,6 +60,12 @@ PREF_DEFAULTS = {
     "region_tint": REGION_TINT,
     "region_seam_color": SEAM_COLOR,
     "region_seam_width": 3.0,
+    "guided_detail_color": (1.0, 0.55, 0.1, 1.0),
+    "guided_loop_color": (0.1, 0.85, 0.75, 1.0),
+    "guided_sharp_color": (0.95, 0.25, 0.65, 1.0),
+    "guided_calm_color": (0.35, 0.55, 1.0, 1.0),
+    "guided_outline_color": (1.0, 0.95, 0.4, 1.0),
+    "guided_lock_color": (0.3, 0.5, 1.0, 0.4),
 }
 _DEFAULT_PREFS = SimpleNamespace(**PREF_DEFAULTS)
 _prefs_override = None  # tests may point this at any object with the PREF_DEFAULTS attributes

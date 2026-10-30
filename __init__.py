@@ -6,7 +6,7 @@
 bl_info = {
     "name": "CurioMesh Quad Remesher",
     "author": "CurioCrafter",
-    "version": (0, 6, 0),
+    "version": (0, 7, 0),
     "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
@@ -22,7 +22,7 @@ from .operators import (
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
-from . import batch, live, overlay, region
+from . import batch, guided, live, overlay, region
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
 D = overlay.PREF_DEFAULTS
@@ -61,6 +61,7 @@ SUBPANEL_TOGGLES = (
     ("show_diagnostics", "Diagnostics"),
     ("show_debug", "Debug"),
     ("show_regions", "Regions"),
+    ("show_guided", "Guided"),
 )
 
 
@@ -94,6 +95,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     show_diagnostics: bpy.props.BoolProperty(name="Diagnostics", description="Show the measurements panel", default=True)
     show_debug: bpy.props.BoolProperty(name="Debug", description="Show the debug panel", default=True)
     show_regions: bpy.props.BoolProperty(name="Regions", description="Show the Regions panel", default=True)
+    show_guided: bpy.props.BoolProperty(name="Guided", description="Show the Guided Retopo panel", default=True)
 
     hud_default: bpy.props.BoolProperty(
         name="HUD On in New Scenes",
@@ -167,6 +169,13 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         update=_redraw,
     )
 
+    guided_detail_color: _color("guided_detail_color", "Detail Point", "Colour of Detail points and their reach")
+    guided_loop_color: _color("guided_loop_color", "Loop Point", "Colour of Loop points and their reach")
+    guided_sharp_color: _color("guided_sharp_color", "Sharp Point", "Colour of Sharp points and their reach")
+    guided_calm_color: _color("guided_calm_color", "Calm Point", "Colour of Calm points and their reach")
+    guided_outline_color: _color("guided_outline_color", "Region Outline", "Colour of the combined outline of all point spheres on the surface")
+    guided_lock_color: _color("guided_lock_color", "Locked Faces", "Tint of faces you locked on the guided preview")
+
     def draw(self, context):
         layout = self.layout.split(factor=0.72).column()  # keep the form readable on wide windows
         layout.use_property_split = True
@@ -212,6 +221,12 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         col.prop(self, "region_seam_color")
         col.prop(self, "region_seam_width")
 
+        box = layout.box()
+        box.label(text="Guided Points", icon="PIVOT_ACTIVE")
+        col = box.column()
+        for name in ("guided_detail_color", "guided_loop_color", "guided_sharp_color", "guided_calm_color", "guided_outline_color", "guided_lock_color"):
+            col.prop(self, name)
+
         layout.operator("curiomesh.reset_preferences", icon="LOOP_BACK")
 
 
@@ -255,10 +270,12 @@ def register():
     overlay.register()
     live.register()
     region.register()
+    guided.register()
     apply_category()
 
 
 def unregister():
+    guided.unregister()
     region.unregister()
     live.unregister()
     overlay.unregister()

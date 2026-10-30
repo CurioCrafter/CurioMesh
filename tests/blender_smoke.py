@@ -1211,6 +1211,168 @@ def _region_faces(obj, mask_fn):
     return [p.index for p in obj.data.polygons if mask_fn(p.center)]
 
 
+def run_guided_case(module):
+    import numpy as np
+    from curiomesh import guided
+
+    reset_scene()
+    gs = bpy.context.scene.curiomesh_guided
+    bpy.context.scene.cursor.location = (0.0, 0.0, 0.0)
+    sphere = make_uv_sphere("CurioSmoke_Guided", segments=40, rings=20)
+    reset_selection(sphere)
+    gs.base_faces = 400
+    gs.fit_iterations = 1
+    # two UV islands (x < 0 and x > 0, the second moved by 10) and two materials
+    sphere.data.materials.clear()
+    while len(sphere.data.uv_layers):
+        sphere.data.uv_layers.remove(sphere.data.uv_layers[0])
+    for name in ("CurioSmoke_GuidedA", "CurioSmoke_GuidedB"):
+        sphere.data.materials.append(bpy.data.materials.new(name))
+    layer = sphere.data.uv_layers.new(name="SmokeUV")
+    for poly in sphere.data.polygons:
+        poly.material_index = int(poly.center.x > 0)
+        for li in poly.loop_indices:
+            v = sphere.data.vertices[sphere.data.loops[li].vertex_index].co
+            layer.data[li].uv = (v.x + (10.0 if poly.center.x > 0 else 0.0), v.z)
+
+    def mean_edges(res, centre, radius):
+        co, faces = res["co"], res["faces"]
+        inside, outside = [], []
+        for f in faces:
+            for k in range(len(f)):
+                a, b = co[f[k]], co[f[(k + 1) % len(f)]]
+                (inside if np.linalg.norm((a + b) / 2 - centre) < radius else outside).append(np.linalg.norm(a - b))
+        return float(np.mean(inside)), float(np.mean(outside))
+
+    # points: operator, empty, auto-suggest
+    bpy.ops.curiomesh.guided_add_point(kind="DETAIL", radius=0.45, location=(0.0, 0.0, 1.0))
+    bpy.ops.curiomesh.guided_add_point(kind="CALM", radius=0.4, location=(0.0, 0.0, -1.0))
+    if len(sphere.curiomesh_points) != 2 or sphere.curiomesh_points[0].kind != "DETAIL":
+        raise AssertionError("guided: points were not stored on the object")
+    bpy.context.scene.cursor.location = (1.0, 0.0, 0.0)
+    bpy.ops.curiomesh.guided_add_empty()
+    if len(guided.gather(sphere, gs)) != 3:
+        raise AssertionError("guided: tagged empty was not picked up as a point")
+    bpy.data.objects.remove(bpy.data.objects["CM_Point"], do_unlink=True)
+
+    # whole mesh
+    gs.scope = "WHOLE"
+    if not guided.run_update(bpy.context, force=True):
+        raise AssertionError(f"guided: whole-mesh update failed: {guided.status()}")
+    res = guided.state["res"]
+    sizes = [len(f) for f in res["faces"]]
+    if bpy.data.objects.get(guided.PREVIEW_NAME) is None or sizes.count(4) != len(sizes):
+        raise AssertionError(f"guided: whole-mesh preview missing or not all quads ({sizes.count(4)}/{len(sizes)})")
+    preview = bpy.data.objects[guided.PREVIEW_NAME]
+    uv_out = preview.data.uv_layers.get("SmokeUV")
+    if uv_out is None or len(preview.data.materials) != 2:
+        raise AssertionError("guided: whole-mesh preview lost its UV layer or material slots")
+    for poly in preview.data.polygons:
+        if (poly.material_index == 1) != (poly.center.x > 0) and abs(poly.center.x) > 0.15:
+            raise AssertionError(f"guided: wrong material near x={poly.center.x:.2f}")
+        us = [uv_out.data[li].uv.x for li in poly.loop_indices]
+        if max(us) - min(us) > 1.5:
+            raise AssertionError("guided: a face stretches across two UV islands")
+        for li in poly.loop_indices:
+            co_, uv_ = preview.data.vertices[preview.data.loops[li].vertex_index].co, uv_out.data[li].uv
+            if abs(co_.x) < 0.4:  # a quad across the UV seam clamps its far corner to its own island
+                continue
+            if abs(uv_.y - co_.z) > 0.1 or abs((uv_.x - 10.0 if uv_.x > 5.0 else uv_.x) - co_.x) > 0.1:
+                raise AssertionError(f"guided: UV {tuple(uv_)} does not match the source at {tuple(co_)}")
+    inside, outside = mean_edges(res, np.array([0.0, 0.0, 1.0]), 0.4)
+    if inside > 0.8 * outside:
+        raise AssertionError(f"guided: Detail point did not make smaller quads ({inside:.3f} vs {outside:.3f})")
+    print(f"PASS guided whole: {len(sizes)} faces, edge inside {inside:.3f} vs outside {outside:.3f}")
+
+    # points only: the seam stays, the mesh stays closed
+    gs.scope = "POINTS"
+    if not guided.run_update(bpy.context, force=True):
+        raise AssertionError(f"guided: points-only update failed: {guided.status()}")
+    res = guided.state["res"]
+    edge_count = {}
+    for f in res["faces"]:
+        for k in range(len(f)):
+            key = tuple(sorted((f[k], f[(k + 1) % len(f)])))
+            edge_count[key] = edge_count.get(key, 0) + 1
+    if any(c != 2 for c in edge_count.values()):
+        raise AssertionError("guided: points-only result is not a closed manifold (seam broken)")
+    if res["new"].sum() == 0 or res["new"].all():
+        raise AssertionError("guided: points-only should change part of the mesh")
+    print(f"PASS guided points-only: {int(res['new'].sum())} new of {len(res['faces'])} faces, seam closed")
+
+    # points only around a limb: the region is a ring with two seam loops, and all of it is rebuilt
+    bpy.ops.mesh.primitive_cylinder_add(vertices=48, depth=4.0, radius=0.5)
+    limb = bpy.context.object
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.subdivide(number_cuts=3)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    guided.add_point(limb, (0.5, 0.0, 0.0), (1.0, 0.0, 0.0), "DETAIL", 1.15, 1.0)
+    gs.base_faces = 300
+    if not guided.run_update(bpy.context, force=True):
+        raise AssertionError(f"guided: ring region update failed: {guided.status()}")
+    res = guided.state["res"]
+    if "skipped" in guided.status() or not res["new"].any() or res["removed"] is None:
+        raise AssertionError(f"guided: ring region was skipped: {guided.status()}")
+    wrap = np.arctan2(*(res["co"][np.concatenate([list(f) for f, n in zip(res["faces"], res["new"]) if n])][:, :2].T))
+    if wrap.max() - wrap.min() < 5.5:
+        raise AssertionError("guided: only part of the ring around the limb was rebuilt")
+    edge_count = {}
+    for f in res["faces"]:
+        for k in range(len(f)):
+            key = tuple(sorted((f[k], f[(k + 1) % len(f)])))
+            edge_count[key] = edge_count.get(key, 0) + 1
+    if any(c != 2 for c in edge_count.values()):
+        raise AssertionError("guided: ring region result is not closed")
+    print(f"PASS guided ring: {int(res['new'].sum())} new faces all the way around the limb")
+    bpy.data.objects.remove(limb, do_unlink=True)
+    guided.remove_preview()
+    gs.base_faces = 400
+    reset_selection(sphere)
+    if not guided.run_update(bpy.context, force=True):
+        raise AssertionError(f"guided: points-only update failed after the ring case: {guided.status()}")
+
+    # lock: select some preview faces, update keeps them
+    def _same_faces(keys, res):
+        now = np.asarray([res["co"][list(f)].mean(axis=0) for f, lk in zip(res["faces"], res["locked"]) if lk])
+        return len(now) == len(keys) and all(np.linalg.norm(now - k, axis=1).min() < 1e-4 for k in keys)
+
+    preview = bpy.data.objects[guided.PREVIEW_NAME]
+    cent = np.asarray([p.center for p in preview.data.polygons])
+    pick = np.flatnonzero(cent[:, 0] > 0.5)
+    keys = cent[pick].copy()
+    for p in preview.data.polygons:
+        p.select = p.index in set(pick.tolist())
+    if "FINISHED" not in bpy.ops.curiomesh.guided_lock():
+        raise AssertionError(f"guided: lock failed: {guided.status()}")
+    res = guided.state["res"]
+    if not _same_faces(keys, res):
+        raise AssertionError("guided: locked faces changed in the update")
+    sphere.curiomesh_points[0].strength = 2.5
+    if not guided.run_update(bpy.context, force=True):
+        raise AssertionError(f"guided: update with locks failed: {guided.status()}")
+    res = guided.state["res"]
+    if not _same_faces(keys, res):
+        raise AssertionError("guided: locked faces moved when a point changed")
+    print(f"PASS guided lock: {len(keys)} faces frozen through an update")
+    bpy.ops.curiomesh.guided_unlock()
+
+    # auto-suggest, next spot, apply
+    sphere.curiomesh_points.clear()
+    bpy.ops.curiomesh.guided_suggest()
+    if not len(sphere.curiomesh_points):
+        raise AssertionError("guided: auto-suggest placed nothing")
+    gs.scope = "WHOLE"
+    bpy.ops.curiomesh.guided_update()
+    before = len(bpy.data.objects)
+    if "FINISHED" not in bpy.ops.curiomesh.guided_apply():
+        raise AssertionError("guided: apply failed")
+    out = bpy.data.objects.get("CurioSmoke_Guided_Retopo")
+    if out is None or len(bpy.data.objects) != before or bpy.data.objects.get(guided.PREVIEW_NAME) is not None:
+        raise AssertionError("guided: apply did not leave exactly the _Retopo object")
+    print(f"PASS guided apply: {len(out.data.polygons)} faces in {out.name}")
+
+
 def run_region_case(module):
     import numpy as np
     from curiomesh import region
@@ -1678,6 +1840,7 @@ def main():
     )
 
     run_region_case(module)
+    run_guided_case(module)
     run_ui_features_case(module)
     run_ui_prefs_case(module)
     module.unregister()
