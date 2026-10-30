@@ -3,6 +3,11 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch: # rebuild an existing tag with this branch's workflow
+    inputs:
+      tag:
+        description: Existing tag to publish, e.g. v0.7.0
+        required: true
 
 permissions:
   contents: write
@@ -95,4 +100,5 @@ jobs:
         run: python scripts/build_release.py --per-version --native-dir native-bin --output dist
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/*.zip
