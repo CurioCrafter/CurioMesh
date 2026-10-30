@@ -876,7 +876,10 @@ class _Planar:
             scale = max(abs(pa[0] - pb[0]), abs(pa[1] - pb[1]), 1e-30) ** 4
             if _incircle(pa, pb, pc, pd) <= 1e-12 * scale:
                 continue
-            if _orient(pa, pd, pc) <= 0.0 or _orient(pd, pb, pc) <= 0.0:
+            # Sine test: a nearly straight corner would flip into a zero-area sliver along it.
+            if _orient(pa, pd, pc) <= 1e-5 * math.dist(pa, pd) * math.dist(pd, pc):
+                continue
+            if _orient(pd, pb, pc) <= 1e-5 * math.dist(pd, pb) * math.dist(pd, pc):
                 continue
             first, second = users
             self._set(first, (a, d, c))

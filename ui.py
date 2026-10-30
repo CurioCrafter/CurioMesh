@@ -39,6 +39,7 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     triad_feature_angle: bpy.props.FloatProperty(name="Feature Angle", description="Edges sharper than this angle (in degrees) count as creases and are kept", default=35.0, min=0.0, max=180.0, update=_live_update)
     triad_force_quads: bpy.props.BoolProperty(name="PairClosure Pure Quads", description="Force every face to be a quad, even if shape accuracy suffers", default=False)
     triad_flow_mode: bpy.props.EnumProperty(name="PairClosure Style", description="Tune PairClosure for the kind of model: organic, hard-surface, messy scan or textured", items=FLOW_ITEMS, default="AUTO", update=_live_update)
+    flat_tolerance: bpy.props.FloatProperty(name="Flatness", description="How far a surface may bump away from flat and still become one big quad, as a percent of the mesh size. Higher gives fewer faces and less detail", default=0.1, min=0.0, soft_max=2.0, precision=3, subtype="PERCENTAGE", update=_live_update)
     triad_field_mode: bpy.props.EnumProperty(name="Flow", description="Direction the quads follow: smoothed flow, or also the surface curvature (about 1.5x slower)", items=(("SMOOTH", "Smooth", "Smoothed flow pinned to sharp edges and borders"), ("CURVATURE", "Follow Curvature", "Also line up with the main bending directions of the surface")), default="SMOOTH", update=_live_update)
     atlas_strategy: bpy.props.EnumProperty(name="Scan Type", description="Which plan Smart (Atlas-Q) follows. Auto picks one from the measured mesh", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
     atlas_candidate_count: bpy.props.IntProperty(name="Attempts", description="How many candidate results are built and compared; the best one wins. More is slower", default=3, min=1, max=8)
@@ -259,6 +260,8 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         row = col.split(factor=0.3, align=True)
         row.label(text="Method")
         row.prop(settings, "engine", text="")
+        if settings.engine == "FLAT_QUADS":
+            layout.prop(settings, "flat_tolerance")
 
         _draw_result(layout, settings, compact)
 

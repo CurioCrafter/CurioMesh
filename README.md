@@ -35,6 +35,40 @@ or holes to fix by hand.
 percentage, leftover triangles and poles, and tells you the next step. One click
 paints leftover triangles, n-gons and poles right on the mesh.
 
+## Flat Quads: Huge Quads On Flat Areas, Density Only Where It's Needed
+
+Pick **Flat Quads** as the Method. Instead of giving a whole mesh one density,
+it finds the flattest areas, turns each into as few quads as its outline allows,
+and grades density back up only next to real detail. It works best on
+hard-surface panels and architecture.
+
+![A test deck with two hatches and jagged damage: 52,576 faces become 2,752 all-quad faces, with big quads on the flat deck and dense quads only around the damage](docs/images/flat_quads_deck.png)
+
+A generated test deck: **52,576 faces become 2,752 quads.** Both hatches stay
+open, and the faces go to the damage. A plain flat plate becomes **one quad**,
+and a subdivided box of 9,600 faces becomes **six**.
+
+How it works:
+
+1. **Grow flat regions**, largest faces first, and merge neighbours whose shared
+   plane still fits every vertex, so scan noise can't break up a plate.
+2. **Simplify each border once**, so the two regions sharing it always agree and
+   no gaps can open.
+3. **Rebuild each region from its outline**, keeping holes. A border next to kept
+   detail stays dense, and density falls off with distance from it.
+4. **Pair and close.** Every valid pair is accepted, because a leftover triangle
+   costs three or more quads. Each loose piece closes on its own, so one bad
+   fragment can't make the rest of the mesh pay.
+
+**Flatness** sets how far a surface may bump away from flat, as a percent of the
+mesh size. The face target is a limit for what's left after the flat areas: a flat
+plate stays one quad whatever the target is. On very dirty scans the result can
+land above the target.
+
+It also opens non-manifold edges, flipped normals and bow-ties into borders
+without moving any geometry, so dirty meshes that fail in Atlas-Q and PairClosure
+can still finish all quads.
+
 ## New in 0.7: Guided Retopo
 
 ![Detail, Loop and Calm points on Suzanne with their reach and outline, and the adaptive quad preview beside it](docs/images/guided_points.png)
@@ -211,6 +245,10 @@ add-on keeps working.
   **Topology: Repair** on or off. Use **Flat Quads** for these. It can land well
   above the target on them, and a scan that noisy has few truly flat areas, so fine
   detail is lost.
+- Flat Quads pays off on genuinely flat surfaces. Reduced hard to a low target, an
+  already low-poly prop still loses small details such as straps and rivets. Keep
+  the target higher on those. Long, thin faces can also appear across a big flat
+  area where closure has to route through it.
 - Atlas-Q can run for a long time on some large scans, where PairClosure is much
   faster.
 - Live preview runs on meshes up to 8,000 faces so Blender stays responsive.
