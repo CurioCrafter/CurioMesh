@@ -23,11 +23,11 @@ jobs:
             manylinux: "2_28" # glibc 2.28, the floor of Blender 3.6+ on Linux
           # GitHub retired the Intel macos-13 runner image, so the Intel binary is
           # cross-compiled on Apple Silicon (built, not executed, in CI).
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
             tag: macos_x86_64
             macos_min: "10.15"
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             tag: macos_arm64
             macos_min: "11.0"
