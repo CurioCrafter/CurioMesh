@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
 from .io import read_obj, write_obj
 from .topology import (

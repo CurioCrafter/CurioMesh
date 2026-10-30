@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -63,6 +66,7 @@ class RemeshConfig:
     pair_closure_base_faces: int = 0
     pair_closure_output_cap: int = 0
     triad_flow_mode: str = "AUTO"
+    triad_field_mode: str = "SMOOTH"
     atlas_strategy: str = "AUTO"
     atlas_candidate_count: int = 3
     topology_policy: str = "PRESERVE"
@@ -487,6 +491,7 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
         force_quads=bool(config.triad_force_quads),
         preserve_material_boundaries=True,
         preserve_uv_seams=bool(config.preserve_seams),
+        field_mode=str(config.triad_field_mode or "SMOOTH").upper(),
     )
     result, report = triad_remesh_mesh(source, options)
     if not report.success or not result.faces:

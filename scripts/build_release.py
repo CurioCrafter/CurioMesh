@@ -1,24 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 import argparse
 import ast
+import re
 from pathlib import Path, PurePosixPath
 import tomllib
 import zipfile
 
 
 PACKAGE_NAME = "curiomesh"
+# Every top-level *.py module is packed automatically (see source_files).
 ROOT_FILES = {
-    "__init__.py",
-    "atlasq.py",
-    "batch.py",
-    "bridge.py",
-    "live.py",
-    "metrics.py",
-    "operators.py",
-    "overlay.py",
-    "textures.py",
-    "ui.py",
     "blender_manifest.toml",
     "LICENSE",
     "README.md",
@@ -90,7 +85,7 @@ def release_metadata(root: Path) -> tuple[str, str]:
 
 
 def source_files(root: Path) -> list[Path]:
-    files = [root / name for name in sorted(ROOT_FILES)]
+    files = sorted(root.glob("*.py")) + [root / name for name in sorted(ROOT_FILES)]
     files.extend(sorted(path for path in (root / "triadq").rglob("*.py") if path.is_file()))
     files.extend(sorted(path for path in (root / "docs").rglob("*.md") if path.is_file()))
     missing = [str(path) for path in files if not path.is_file()]
@@ -99,17 +94,92 @@ def source_files(root: Path) -> list[Path]:
     return files
 
 
-def _write_archive(root: Path, output: Path, *, prefix: str) -> None:
+# Prebuilt CurioMesh Turbo binaries: <native-dir>/<platform tag>/_curiomesh_turbo.{pyd,so}
+# are packed as _native/<platform tag>/... and picked at runtime by turbo.py.
+NATIVE_TAGS = ("win_amd64", "win_arm64", "linux_x86_64", "linux_aarch64", "macos_x86_64", "macos_arm64")
+NATIVE_SUFFIXES = (".pyd", ".so")
+
+
+def native_files(native_dir: Path | None) -> list[tuple[Path, str]]:
+    """(source, archive-relative path) for every prebuilt binary; empty without --native-dir."""
+    if native_dir is None:
+        return []
+    found = []
+    for path in sorted(native_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(native_dir)
+        if (
+            len(relative.parts) != 2
+            or relative.parts[0] not in NATIVE_TAGS
+            or not relative.name.startswith("_curiomesh_turbo")
+            or path.suffix not in NATIVE_SUFFIXES
+        ):
+            raise ValueError(f"Unexpected file in native dir (want <tag>/_curiomesh_turbo.pyd|so): {relative}")
+        found.append((path, f"_native/{relative.as_posix()}"))
+    if not found:
+        raise FileNotFoundError(f"No native binaries in {native_dir}")
+    return found
+
+
+LEGACY_SERIES = ("3.6", "4.0", "4.1")
+EXTENSION_SERIES = ("4.2", "4.3", "4.4", "4.5", "5.0", "5.1", "5.2")
+
+
+def per_version_name(package_id: str, version: str, series: str, layout: str) -> str:
+    return f"{package_id}-{version}-blender-{series}-{layout}.zip"
+
+
+def _next_series(series: str) -> str | None:
+    """Blender series after `series` in EXTENSION_SERIES (None for the last one)."""
+    i = EXTENSION_SERIES.index(series)
+    return EXTENSION_SERIES[i + 1] if i + 1 < len(EXTENSION_SERIES) else None
+
+
+def _series_overrides(root: Path, series: str, layout: str) -> dict[str, bytes]:
+    """Rewritten manifest (extension) or bl_info minimum (legacy) for one Blender series."""
+    if layout == "extension":
+        text = (root / "blender_manifest.toml").read_text(encoding="utf-8")
+        text = re.sub(r"(?m)^blender_version_(min|max)\s*=.*\n?", "", text)
+        nxt = _next_series(series)
+        limits = f'blender_version_min = "{series}.0"\n'
+        if nxt:
+            limits += f'blender_version_max = "{nxt}.0"\n'
+        return {"blender_manifest.toml": (text.rstrip("\n") + "\n" + limits).encode("utf-8")}
+    major, minor = series.split(".")
+    text = (root / "__init__.py").read_text(encoding="utf-8")
+    text, n = re.subn(r'("blender"\s*:\s*)\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)', rf"\g<1>({major}, {minor}, 0)", text, count=1)
+    if n != 1:
+        raise ValueError("bl_info 'blender' minimum not found in __init__.py")
+    return {"__init__.py": text.encode("utf-8")}
+
+
+def _write_archive(
+    root: Path,
+    output: Path,
+    *,
+    prefix: str,
+    overrides: dict[str, bytes] | None = None,
+    series: str | None = None,
+    native: list[tuple[Path, str]] | None = None,
+) -> None:
+    overrides = overrides or {}
     files = source_files(root)
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
             relative = PurePosixPath(path.relative_to(root).as_posix())
-            archive.write(path, str(PurePosixPath(prefix) / relative) if prefix else str(relative))
-    verify_archive(output, prefix=prefix)
+            arcname = str(PurePosixPath(prefix) / relative) if prefix else str(relative)
+            if str(relative) in overrides:
+                archive.writestr(arcname, overrides[str(relative)])
+            else:
+                archive.write(path, arcname)
+        for path, relative in native or ():
+            archive.write(path, f"{prefix}/{relative}" if prefix else relative)
+    verify_archive(output, prefix=prefix, series=series)
 
 
-def verify_archive(path: Path, *, prefix: str) -> None:
+def verify_archive(path: Path, *, prefix: str, series: str | None = None) -> None:
     with zipfile.ZipFile(path) as archive:
         entries = archive.namelist()
         required_prefix = f"{prefix}/" if prefix else ""
@@ -152,12 +222,23 @@ def verify_archive(path: Path, *, prefix: str) -> None:
         if layout == "extension"
         else _major_minor(_bl_info(init_source, origin=str(path))["blender"])
     )
-    expected_name = asset_name(package_id, version, minimum, layout)
+    if series is not None:
+        if minimum != series:
+            raise ValueError(f"{path}: minimum Blender {minimum} does not match series {series}")
+        expected_name = per_version_name(package_id, version, series, layout)
+        if layout == "extension":
+            if manifest["blender_version_min"] != f"{series}.0":
+                raise ValueError(f"{path}: bad blender_version_min")
+            nxt = _next_series(series)
+            if manifest.get("blender_version_max") != (f"{nxt}.0" if nxt else None):
+                raise ValueError(f"{path}: bad blender_version_max")
+    else:
+        expected_name = asset_name(package_id, version, minimum, layout)
     if path.name != expected_name:
         raise ValueError(f"Archive filename must be {expected_name!r}, got {path.name!r}")
 
 
-def build_archives(root: Path, output_dir: Path) -> tuple[Path, Path]:
+def build_archives(root: Path, output_dir: Path, native_dir: Path | None = None) -> tuple[Path, Path]:
     package_name, version = release_metadata(root)
     manifest = tomllib.loads((root / "blender_manifest.toml").read_text(encoding="utf-8"))
     legacy_min = _major_minor(_bl_info((root / "__init__.py").read_text(encoding="utf-8"), origin=str(root))["blender"])
@@ -165,18 +246,50 @@ def build_archives(root: Path, output_dir: Path) -> tuple[Path, Path]:
     extension = output_dir / asset_name(
         package_name, version, _major_minor(manifest["blender_version_min"]), "extension"
     )
-    _write_archive(root, legacy, prefix=package_name)
-    _write_archive(root, extension, prefix="")
+    native = native_files(native_dir)
+    _write_archive(root, legacy, prefix=package_name, native=native)
+    _write_archive(root, extension, prefix="", native=native)
     return legacy, extension
+
+
+def build_per_version(root: Path, output_dir: Path, native_dir: Path | None = None) -> list[Path]:
+    package_id, version = release_metadata(root)
+    native = native_files(native_dir)
+    built = []
+    for series in LEGACY_SERIES + EXTENSION_SERIES:
+        layout = "addon" if series in LEGACY_SERIES else "extension"
+        out = output_dir / per_version_name(package_id, version, series, layout)
+        _write_archive(
+            root,
+            out,
+            prefix=package_id if layout == "addon" else "",
+            overrides=_series_overrides(root, series, layout),
+            series=series,
+            native=native,
+        )
+        built.append(out)
+    return built
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build validated CurioMesh release archives.")
     parser.add_argument("--output", type=Path, default=None, help="Output directory (default: repository dist)")
+    parser.add_argument("--per-version", action="store_true", help="Also write one zip per Blender series")
+    parser.add_argument(
+        "--native-dir",
+        type=Path,
+        default=None,
+        help="Folder of prebuilt CurioMesh Turbo binaries (<platform tag>/_curiomesh_turbo.pyd|so) "
+        "packed into every zip; without it the zips stay pure Python",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     output = args.output.resolve() if args.output else root / "dist"
-    for archive in build_archives(root, output):
+    native_dir = args.native_dir.resolve() if args.native_dir else None
+    archives = list(build_archives(root, output, native_dir))
+    if args.per_version:
+        archives += build_per_version(root, output, native_dir)
+    for archive in archives:
         print(archive)
 
 

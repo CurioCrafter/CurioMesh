@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 """Live preview: debounced TRIAD-Q (PairClosure) re-run into one reusable preview object."""
 
 from __future__ import annotations
@@ -92,7 +95,7 @@ def run_preview(context) -> bool:
     settings = context.scene.curiomesh_settings
     source = _pick_source(context)
     if source is None or source.type != "MESH":
-        state["message"] = "Live: select a mesh"
+        state["message"] = "Live: select a mesh first"
         return False
     faces = len(source.data.polygons)
     if faces > LIVE_FACE_CAP:
@@ -100,7 +103,7 @@ def run_preview(context) -> bool:
         state["message"] = f"Live off for this mesh: {faces:,} faces (limit {LIVE_FACE_CAP:,})"
         return False
     if source.mode != "OBJECT":
-        state["message"] = "Live: exit Edit Mode"
+        state["message"] = "Live: switch to Object Mode"
         return False
 
     config = replace(

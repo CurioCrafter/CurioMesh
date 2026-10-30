@@ -1,149 +1,193 @@
-# CurioMesh: Free Quad Retopology and Remeshing for Blender
+# CurioMesh: Free Quad Retopology for Blender, for the Whole Mesh or Just One Part
 
 [![Latest release](https://img.shields.io/github/v/release/CurioCrafter/CurioMesh?label=release)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
-[![Blender 3.6+](https://img.shields.io/badge/Blender-3.6%2B-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
+[![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/CurioCrafter/CurioMesh?style=flat)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 [![Discussions](https://img.shields.io/github/discussions/CurioCrafter/CurioMesh)](https://github.com/CurioCrafter/CurioMesh/discussions)
 
-**Turn dense meshes and photogrammetry scans into clean quad topology without
-leaving Blender. Free and open source.** CurioMesh picks a solver for your mesh,
-compares several candidates against the original, and only keeps results that
-pass topology and quad-quality checks. UVs and materials come along.
+**Turn sculpts, scans and messy game assets into clean quads inside Blender,
+then redo only the part that still looks wrong.** Drop a box or lattice cage
+over a face, a hand or a damaged panel, preview the new quads, and apply. The
+rest of the mesh stays exactly as it was, and the new patch joins it with no
+gaps. Free, open source, and tested on every Blender release from 3.6 to 5.2.
 
-![CurioMesh Quick Start panel, HUD dashboard and heatmap in Blender 4.5](docs/images/panel_quickstart.png)
+![Regions panel: a box cage over Suzanne's brow and eyes, new quads tinted blue, the kept seam in orange](docs/images/panel_regions.png)
 
-**[Download the latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest)** ·
-**[Ask, share results or suggest ideas in Discussions](https://github.com/CurioCrafter/CurioMesh/discussions)** ·
-If CurioMesh saves you time, a star helps other Blender artists find it.
+**[Download for your Blender version](https://github.com/CurioCrafter/CurioMesh/releases/latest)** ·
+**[Ask a question or show your results](https://github.com/CurioCrafter/CurioMesh/discussions)** ·
+A star helps other Blender artists find CurioMesh.
 
-## Why 0.5 Is Better
+## What You Can Do With It
 
-| | 0.4 | 0.5 |
+**Remesh a whole object in one click.** Pick Draft, Balanced or Hero, set a
+face count and press the button. CurioMesh tries several solvers, measures each
+result against your original, and keeps the best one that passes its quad and
+topology checks. UVs and materials carry over.
+
+**Redo just the part you choose.** Select faces, use a face set or vertex
+group, or place cages. Stack cages as Union, Subtract or Intersect to carve out
+exactly the area you mean, then press Preview. Faces outside the region are not
+touched, and the seam keeps its original vertices, so there are no T-junctions
+or holes to fix by hand.
+
+**See problems before you export.** A dashboard in the viewport shows your quad
+percentage, leftover triangles and poles, and tells you the next step. One click
+paints leftover triangles, n-gons and poles right on the mesh.
+
+## New in 0.6
+
+| | 0.5 | 0.6 |
 |---|---|---|
-| Getting started | One long settings panel | Quick Start panel: a first result in three clicks |
-| Seeing problems | Numbers in the Diagnostics list | Viewport dashboard plus triangle/pole heatmap |
-| Tuning | Re-run by hand | Live preview about 0.4 s after each change (up to 20k faces) |
-| Many objects | One at a time | Batch remesh with progress and a JSON report |
-| PairClosure speed, 7k triangles | 111 s quad-dominant, 212 s all-quad | About 1 s and 7.4 s |
-| Triangle pairing | Greedy | Greedy start plus Edmonds' blossom maximum matching |
-| Edge flow | Simple direction smoothing | 4-way cross field pinned to sharp edges, seams and borders |
+| What gets remeshed | The whole object | The whole object, or any region you pick |
+| Picking a region | n/a | Edit-mode selection, face set, vertex group, box cage, lattice cage, any closed mesh as a volume |
+| Combining regions | n/a | Union, Subtract and Intersect, applied top to bottom |
+| Joining the patch back | n/a | Seam vertices are kept exactly; the patch is all quads inside |
+| Fixing holes | By hand | **Fill Loop** fills a closed hole with quads that follow the surrounding curve |
+| Snapping to the original | Shrinkwrap at the end of a run | **Fit to Surface**: relax and snap any mesh or selection back onto the source |
+| Panels | One long Quick Start list | Numbered steps, one main button per panel, a Last Result box, plain-language tooltips on every option |
+| Look and layout | Fixed | Preferences for tab name, compact mode, hidden panels, HUD corner/size/opacity and every overlay colour |
+| Speed | Python and NumPy | **Turbo core in Rust** on all CPU cores: topology checks and quad closing about 30x faster, a 50k-face all-quad remesh 4.5x faster |
+| Downloads | Two zips | A zip for each Blender version from 3.6 to 5.2, plus two all-in-one zips |
 
-CurioMesh is a scan-aware controller, not a universal miracle solver: it builds
-a target-scale proxy, chooses a solver path, and rejects results that fail the
-requested topology and quad-quality gates instead of shipping them.
+### Region retopology
 
-## What's New In 0.5
+![A box cage over the brow and eyes, preview tinted blue with the kept seam in orange](docs/images/region_cage_preview.png)
 
-### Get going in three clicks
+Open the **Regions** panel in the CurioMesh tab and work through its three
+steps:
 
-Open `3D View > N-panel > CurioMesh`. The **Quick Start** panel holds
-everything you need for a first result:
+1. **Pick the part to redo.** Selection, Face Set, Vertex Group or Cages. Add a
+   Box Cage or a Lattice Cage and move, scale or bend it like any object. A
+   lattice can follow a curved limb. Any closed mesh also works as a volume.
+2. **Choose the new quads.** *Flow* follows the shape. *Grid* lays a tidy grid
+   and is best on four-sided patches such as panels and strips. Set the quad
+   size.
+3. **Preview, then apply.** New faces show tinted blue and the kept seam in
+   orange. With Auto-Update on, the preview follows the cage as you move it.
+   Apply writes into the mesh or into a copy, and it can be undone.
 
-1. Pick a quality: **Draft**, **Balanced** or **Hero**.
-2. Set **Target Faces** and the engine.
-3. Press the big **Remesh** button.
+**Fit to Surface** relaxes and snaps vertices back onto the original surface;
+in Edit Mode it only moves your selection. **Fill Loop** turns a selected hole
+border into an all-quad patch.
 
-The **See it** row turns on the three live views below. Advanced settings live
-in collapsed sub-panels (Scan, Shape, Pipeline, PairClosure, Materials & UVs,
-Batch, Diagnostics, Debug), so they stay out of the way until you need them.
-Every earlier setting is still there.
+How the region tools work:
 
-### HUD dashboard
+- An all-quad patch needs an even number of seam edges. CurioMesh checks this
+  and grows or shrinks the region by one face when the count is odd.
+- Cages and mesh volumes use the generalized winding number (Jacobson et al.
+  2013), so the inside test still works on meshes with holes or overlaps.
+- The patch is laid out with a Tutte embedding, filled with a Coons grid for
+  four-sided regions or with the TRIAD-Q engine for everything else, and closed
+  to all quads with ParityPath while the seam vertices stay fixed.
+- Quad size blends from the seam's edge length to your target over a falloff
+  distance, so the patch does not jump in density at the border.
+- On jagged borders a **Border Ring** of quads runs along the seam, and an
+  untangling pass reshapes any bent quad with the seam held still. On a whale
+  region this cut bent or caved-in quads from about 5% to 0.5%, and on a noisy
+  porthole scan from about 31% to 2.8%.
+- **Flow: Follow Curvature** (Advanced) lines quads up with the surface's main
+  bending directions as well as its sharp edges. The same option is in the
+  PairClosure settings for whole-mesh runs.
+
+### Turbo core
+
+The slowest steps now run in native Rust code on every CPU core: topology
+checks, quad closing, ParityPath search, cross-field smoothing and the cage
+inside test. Every zip carries the Turbo core for Windows, Linux, macOS Intel
+and macOS Apple Silicon, and it gives the same results as the Python code
+(checked by tests on every release).
+
+| Step | Python | Turbo |
+|---|---|---|
+| Topology check, 500k faces | 49 s | 1.9 s |
+| Quad closing, 500k faces | 527 s | 16 s |
+| Cage inside test, 20k points | 11 s | 0.08 s |
+| Whole remesh, 50k faces, all quads, 8 seeds | 587 s | 129 s |
+
+If the Turbo core cannot load (an antivirus blocks it, or an unusual
+platform), CurioMesh falls back to Python automatically. Set the environment
+variable `CURIOMESH_TURBO=0` to force Python.
+
+### A friendlier panel you can adjust
+
+![Quick Start panel with the big Remesh button, Last Result box and heatmap legend](docs/images/panel_quickstart.png)
+
+Every setting now has a plain name and a tooltip that explains it. After each
+run the **Last result** box shows quad percentage, faces, leftovers and time,
+or tells you why a run failed. Open the gear in the Quick Start header for the
+preferences:
+
+![CurioMesh preferences: sidebar tab, compact panels, HUD placement and overlay colours](docs/images/preferences.png)
+
+### The viewport dashboard and heatmap
 
 ![HUD dashboard and triangle/pole heatmap on a remeshed Suzanne](docs/images/hud_heatmap.png)
 
-A dark card in the corner of the viewport shows the active mesh at a glance:
-quad percentage with a green/amber/red bar, faces against your target, leftover
-triangles, poles, the engine and run time. The last line tells you the next
-step, for example `146 triangles left - enable Require Quads`. It updates as
-you edit or select meshes.
-
-### Triangle and pole heatmap
-
-One click on **Heatmap** colours problems right on the mesh, without touching
-its materials: leftover triangles red, n-gons purple, 3-poles blue and 5+
-poles orange. It follows edits live and skips meshes over 300,000 faces.
-
-### Live preview
-
-Turn on **Live** and CurioMesh re-runs the PairClosure engine into a preview
-object beside the source about 0.4 s after you change target faces, feature
-angle, seeds, flow mode or Require Quads, or edit the source. It works on
-sources up to 8,000 faces; turning Live off removes the preview.
-
-### Batch remesh
-
-Select any number of meshes and press **Batch Remesh Selected** in the Batch
-sub-panel. CurioMesh runs them one by one with the current settings, shows
-progress in the HUD (Esc cancels), keeps going past failures, lists the results
-in the panel and writes one `curiomesh_batch_<time>.json` report next to the
-`.blend`.
-
-### A faster, smarter PairClosure engine
-
-- **About 100x faster.** Adjacency, feature detection, pair scoring and quad
-  validation are vectorized with NumPy, and per-mesh work is computed once
-  instead of once per seed. On a 7k-triangle noisy sphere (3 seeds) a
-  quad-dominant run drops from 111 s to about 1 s, and an all-quad run from
-  212 s to about 7.4 s.
-- **Maximum pairing.** Triangle pairing starts from the best-scoring greedy
-  pairs, then runs Edmonds' blossom matching over the valid pairs, so the most
-  triangles possible end up in quads. Stranded triangles cost three quads each
-  in closure, so this keeps all-quad output closer to the target.
-- **Cross field.** Pairs now follow a 4-way cross field that is smoothed
-  across the surface and pinned to sharp edges, boundaries, material borders
-  and UV seams, so quads line up with the shape's features.
+The HUD shows quad percentage with a 95% goal mark, faces against your target,
+leftover triangles and poles, and a status word (ALL QUADS, CLEAN, FAIR or
+NEEDS WORK), so you can read it without relying on colour. The heatmap colours
+leftover triangles, n-gons and poles on the mesh without touching its materials;
+5+ poles draw larger as well as in a different colour.
 
 ![Leftover triangles in red: greedy pairing alone vs maximum pairing](docs/images/rescue_before_after.png)
 
-On this triangulated Suzanne (3,936 triangles, half-count target) the extra
-pairing pass cuts leftover triangles from 202 to 146 (28 rescued pairs). The
-count is shown in the PairClosure sub-panel and stored on the output as
-`curiomesh_triadq_rescued_pairs`.
+Older release notes are in [CHANGELOG.md](CHANGELOG.md).
 
-All screenshots come from Blender 4.5.1 LTS and can be regenerated with:
+## Download and Install
 
-```powershell
-blender -b --factory-startup --python-expr "import bpy; bpy.ops.wm.save_as_mainfile(filepath='empty.blend')"
-blender --factory-startup --window-geometry 0 0 1920 1080 empty.blend --python scripts/capture_readme_screenshots.py
-```
+Each release has a zip for your exact Blender version, plus two all-in-one zips.
+Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest).
 
-## What Changed In 0.4
+| Your Blender | Download | Install with |
+| --- | --- | --- |
+| 5.2 LTS, 5.1, 5.0, 4.5 LTS, 4.4, 4.3, 4.2 LTS | `curiomesh-<version>-blender-<your version>-extension.zip` | `Edit > Preferences > Get Extensions > ⌄ > Install from Disk` |
+| 4.1, 4.0, 3.6 LTS | `curiomesh-<version>-blender-<your version>-addon.zip` | `Edit > Preferences > Add-ons > Install...` |
+| Not sure | `...-blender-4.2-plus-extension.zip` (4.2 and newer) or `...-blender-3.6-plus-addon.zip` (any version from 3.6) | as above |
+| 3.5 and older | not supported | |
 
-- **Scan Intelligence** classifies organic, hard-surface, open, dirty, and very
-  large inputs without changing the source object. The report explains whether
-  topology counts are exact or sampled and warns about destructive repair.
-- **Atlas-Q Auto** is the new default. It combines a QEM proxy, multi-seed
-  QuadriFlow candidates, an optional dirty-scan repair candidate,
-  area/spatial/component-stratified source-error measurement, and hard
-  validation.
-- **PairClosure** replaces the old per-triangle "pure quad" workaround. It
-  performs feature-aware triangle pairing, compares a sparse ParityPath
-  transition closure with the conservative global corner closure, and selects
-  the valid result closest to the requested budget. Before closure it can
-  normalize vertex-only bow-ties by
-  duplicating disconnected incident fans without moving geometry, changing
-  face order, or changing face-corner UVs. It deliberately refuses to present
-  this as a repair for edges used by more than two faces. Every accepted face
-  has exactly four distinct corners.
-- **Topology and shape gates** reject edge and vertex non-manifolds, branched
-  boundaries, duplicate faces, inconsistent winding, concave/crossed quads,
-  excessive target error, poor Jacobians/aspect, and excessive symmetric RMS,
-  p95, or maximum sampled source error.
-- **Large-scan proxy budgets** keep Python-side work off the full-resolution
-  scan. Blender's native collapse decimator creates a target-scale QEM proxy
-  before candidate remeshing.
-- `Replace` mode now releases the old orphaned mesh datablock. Material-slot
-  ordering is preserved, and baking makes target materials single-user before
-  editing their node trees.
+Then enable **CurioMesh Quad Remesher**, select a mesh, and open
+`3D View > N-panel > CurioMesh`.
 
-The immutable evaluated source snapshot remains alive through remeshing,
-projection, material mapping, UV transfer, and optional baking. A failed
-candidate never replaces the selected source object. Projection is
-transactional: if shrinkwrap makes an accepted candidate degenerate,
-non-manifold, topologically different, or too inaccurate, CurioMesh restores
-the validated pre-projection mesh and records the rollback on the output.
+Every release runs the full test suite and an install test on Blender 3.6 LTS,
+4.0, 4.1, 4.2 LTS, 4.3, 4.4, 4.5 LTS, 5.0, 5.1 and 5.2 LTS. The HUD and heatmap
+draw with Blender's GPU module; if a build cannot draw them, the rest of the
+add-on keeps working.
+
+## Known Limits
+
+- Region patches are always all quads with an exact seam. On noisy scans a few
+  quads next to the seam can still come out bent (about 3% on our porthole
+  test); a slightly larger cage or a bigger Quad Size usually helps.
+- Regions must be disk-shaped. Rings, regions around an open hole and handles
+  are skipped with a message.
+- Very large, dirty photogrammetry scans (500k+ faces with non-manifold
+  geometry) need **Topology: Repair** or the PairClosure engine. Atlas-Q tells
+  you this when it declines.
+- Live preview runs on meshes up to 8,000 faces so Blender stays responsive.
+
+## What's Planned
+
+- **Guided Retopo.** Click points on the mesh where shape matters most (eyes,
+  joints, sharp edges), see a live cage around them, and watch an adaptive
+  preview put more and better-aligned quads there. Lock what you like, redraw
+  strips by hand, and follow hints to the next weak spot. Presets for
+  characters, hard-surface props, scans and game LODs.
+- **GPU compute** through Blender's own GPU module for the parallel parts
+  (inside tests, field smoothing, surface fitting), on NVIDIA, AMD, Intel and
+  Apple graphics.
+- **Release builds on GitHub Actions** for every platform and Blender version.
+- A listing on extensions.blender.org.
+
+Have a use case we should cover? Tell us in
+[Ideas](https://github.com/CurioCrafter/CurioMesh/discussions/categories/ideas).
+
+## Thank You
+
+Thank you to the first 7 people who starred CurioMesh. Every star helps another
+Blender artist find a free retopology tool.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=CurioCrafter/CurioMesh&type=Date)](https://star-history.com/#CurioCrafter/CurioMesh&Date)
 
 ## Solver Portfolio
 
@@ -160,24 +204,6 @@ Atlas-Q accepts a candidate only after measured checks. `Require Locally Valid
 Quads` is enabled by default. A solver process finishing successfully is not
 enough. “Locally valid” deliberately does not claim a global face-to-face
 self-intersection proof.
-
-## Installation
-
-1. Pick the zip for your Blender version from the
-   [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest):
-
-   | Blender | Download | Install with |
-   | --- | --- | --- |
-   | 4.2 LTS and newer (4.2, 4.5 LTS, 5.0, 5.1, 5.2) | `curiomesh-0.5.1-blender-4.2-plus-extension.zip` | `Get Extensions > Install from Disk` (the add-on zip below also works) |
-   | 3.6 LTS to 4.1 | `curiomesh-0.5.1-blender-3.6-plus-addon.zip` | `Edit > Preferences > Add-ons > Install...` (`Install from Disk` on 4.2+) |
-   | 3.5 and older (including 3.0) | not supported | |
-
-2. Install the zip as shown in the table, then enable **CurioMesh Quad Remesher**.
-3. Select a mesh and open `3D View > N-panel > CurioMesh`.
-
-CurioMesh is tested on Blender 3.6 LTS, 4.2 LTS, 4.5 LTS, 5.0, 5.1 and 5.2.
-The viewport HUD and heatmap are GPU-module drawings; if a build cannot draw
-them the rest of the add-on keeps working.
 
 ## Recommended Photogrammetry Workflow
 
@@ -369,7 +395,8 @@ CurioMesh's implementation and roadmap are grounded in primary sources:
   and [Quadrilateral Mesh Simplification](https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Daniels08.pdf)
   for topology-preserving local connectivity operations and quad LOD design.
 
-CurioMesh is MIT licensed. No GPL QuadWild/BiMDF source is copied or vendored.
+CurioMesh is licensed GPL-3.0-or-later. Its solvers are its own implementations
+of the published papers above; no QuadWild/BiMDF source is copied or vendored.
 
 ## Development, Tests, And Packaging
 
@@ -382,9 +409,11 @@ tests\run_blender_tests.ps1
 python scripts\build_release.py
 ```
 
-The release builder creates a legacy add-on zip (`...-blender-3.6-plus-addon.zip`) and a
-Blender extension-layout zip (`...-blender-4.2-plus-extension.zip`) in `dist/`, then validates every archive entry. Generated caches and build
-artifacts are excluded from Git.
+`python scripts\build_release.py --per-version` also writes one zip per Blender
+version (3.6 to 5.2) next to the two all-in-one zips in `dist/`, then validates
+every archive entry. `python scripts\test_blender_matrix.py` runs the smoke and
+install tests on every Blender build it finds, one at a time, and writes a
+pass/fail table.
 
 ## Community
 
@@ -399,4 +428,10 @@ Pull requests are welcome. Run the tests listed above before opening one.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+CurioMesh is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE).
+
+Versions up to 0.5.1 were released under MIT. From 0.6.0 on, CurioMesh is
+GPL-3.0-or-later, the same family of licence Blender itself uses.

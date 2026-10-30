@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
@@ -8,6 +11,24 @@ from typing import Any
 import numpy as np
 
 from .types import Face, MeshData
+
+
+def _load_turbo():
+    """CurioMesh Turbo (native kernels) when this package lives inside the add-on, else None."""
+
+    try:
+        from .. import turbo  # the add-on package: curiomesh.turbo
+    except ImportError:
+        try:
+            import turbo  # repository checkout (tests put the repo root on sys.path)
+        except ImportError:
+            return None
+    return turbo if getattr(turbo, "MODULE_NAME", None) == "_curiomesh_turbo" else None
+
+
+# Every wrapper returns None when the native module is missing or disabled, and
+# the caller then runs its Python path, so results never depend on the binary.
+_turbo = _load_turbo()
 
 
 MAX_QUAD_WARP_DEGREES = 60.0
@@ -306,6 +327,9 @@ def quad_is_locally_valid(vertices: np.ndarray, face: Face) -> bool:
 
 
 def topology_summary(mesh: MeshData) -> TopologySummary:
+    fast = _turbo.topology_summary(mesh) if _turbo is not None else None
+    if fast is not None:
+        return fast
     edge_occurrences = _edge_occurrences(mesh.faces)
     edge_counts = Counter({edge: len(items) for edge, items in edge_occurrences.items()})
     used_vertices = {vertex for face in mesh.faces for vertex in face}
@@ -483,7 +507,9 @@ def _toggle_edge(edges: set[tuple[int, int]], edge: tuple[int, int]) -> None:
         edges.add(edge)
 
 
-def _parity_path_edges(mesh: MeshData) -> set[tuple[int, int]]:
+def _parity_path_edges(
+    mesh: MeshData, frozen: frozenset[tuple[int, int]] = frozenset()
+) -> set[tuple[int, int]]:
     """Solve sparse transition parity on the quadrilateral dual graph.
 
     Every triangle first marks its three edges. That gives each residual
@@ -492,6 +518,7 @@ def _parity_path_edges(mesh: MeshData) -> set[tuple[int, int]]:
     an odd number of marked edges are then terminals of a T-join over the
     quad-only dual, with mesh boundaries acting as exterior terminals. Paths
     are combined by symmetric difference, so overlaps cancel exactly.
+    `frozen` edges are always split and never used as exterior exits.
     """
 
     occurrences = _edge_occurrences(mesh.faces)
@@ -500,7 +527,7 @@ def _parity_path_edges(mesh: MeshData) -> set[tuple[int, int]]:
         for face in mesh.faces
         if len(face) == 3
         for corner in range(3)
-    }
+    } | set(frozen)
     adjacency: list[list[tuple[int, tuple[int, int]]]] = [[] for _face in mesh.faces]
     boundary_by_face: dict[int, list[tuple[int, int]]] = defaultdict(list)
     for edge, uses in occurrences.items():
@@ -508,7 +535,7 @@ def _parity_path_edges(mesh: MeshData) -> set[tuple[int, int]]:
             raise ValueError(f"Edge {edge} has {len(uses)} incident faces.")
         if len(uses) == 1:
             face_index = uses[0][0]
-            if len(mesh.faces[face_index]) == 4:
+            if len(mesh.faces[face_index]) == 4 and edge not in frozen:
                 boundary_by_face[face_index].append(edge)
         elif len(uses) == 2:
             first, second = uses[0][0], uses[1][0]
@@ -670,7 +697,14 @@ def _parity_template_validity(
     return results
 
 
-def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> MeshData:
+def parity_path_quad_closure(
+    mesh: MeshData,
+    *,
+    name: str | None = None,
+    frozen_midpoints: dict[tuple[int, int], int] | None = None,
+    validation_vertices: np.ndarray | None = None,
+    validation_required: bool = True,
+) -> MeshData:
     """Convert a triangle/quad mesh with a sparse parity-path closure.
 
     Valid unaffected quads remain one face. Odd triangle cells are connected
@@ -678,6 +712,15 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
     split. Shared geometry midpoints prevent T-junctions while face-local UV
     interpolation preserves seams. Every local patch and the final component
     Euler/boundary signature are validated transactionally.
+
+    `frozen_midpoints` maps sorted boundary edges to an existing vertex that
+    must become that edge's midpoint (fixed-boundary patches keep their seam).
+    `validation_vertices` (same indexing as `mesh.vertices`) adds a second
+    geometry every chosen template must also be valid in, e.g. the 3D surface
+    of a patch built in a planar domain. With `validation_required=False`
+    that second geometry only ranks templates: a face whose templates are
+    all invalid there takes its first template valid in `mesh.vertices`
+    (a later optimiser is expected to repair it) instead of failing.
     """
 
     if not mesh.faces:
@@ -700,11 +743,19 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
         details = ", ".join(f"{key}={value}" for key, value in failed.items())
         raise ValueError(f"ParityPath source topology is not certifiable: {details}.")
 
-    selected_edges = _parity_path_edges(mesh)
+    frozen_midpoints = frozen_midpoints or {}
+    selected_edges = (
+        _turbo.parity_path_edges(mesh, frozenset(frozen_midpoints)) if _turbo is not None else None
+    )
+    if selected_edges is None:  # an empty set is a valid native answer
+        selected_edges = _parity_path_edges(mesh, frozenset(frozen_midpoints))
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     output_vertices = vertices.tolist()
     midpoint_indices: dict[tuple[int, int], int] = {}
     for edge in sorted(selected_edges):
+        if edge in frozen_midpoints:
+            midpoint_indices[edge] = int(frozen_midpoints[edge])
+            continue
         midpoint_indices[edge] = len(output_vertices)
         output_vertices.append(((vertices[edge[0]] + vertices[edge[1]]) * 0.5).tolist())
 
@@ -718,6 +769,21 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
     template_results = _parity_template_validity(
         mesh, vertices, np.asarray(output_vertices, dtype=np.float64), selected_edges, midpoint_indices
     )
+    if validation_vertices is not None:
+        check = np.asarray(validation_vertices, dtype=np.float64)
+        check_base = np.zeros((len(output_vertices), 3))
+        check_base[: len(check)] = check
+        for edge, index in midpoint_indices.items():
+            if index >= len(check):
+                check_base[index] = (check[edge[0]] + check[edge[1]]) * 0.5
+        other = _parity_template_validity(mesh, check, check_base, selected_edges, midpoint_indices)
+        both = [
+            [first and second for first, second in zip(row, other_row)]
+            for row, other_row in zip(template_results, other)
+        ]
+        template_results = both if validation_required else [
+            row_both if any(row_both) else row for row_both, row in zip(both, template_results)
+        ]
 
     for face_index, face in enumerate(mesh.faces):
         # Results arrive in the same order the templates are tried below.
@@ -868,16 +934,27 @@ def parity_path_quad_closure(mesh: MeshData, *, name: str | None = None) -> Mesh
     return result
 
 
-def quad_only_closure(mesh: MeshData, *, name: str | None = None) -> MeshData:
+def quad_only_closure(
+    mesh: MeshData,
+    *,
+    name: str | None = None,
+    frozen_midpoints: dict[tuple[int, int], int] | None = None,
+) -> MeshData:
     """Conformingly split every polygon corner into a quad.
 
     Edge midpoints are shared globally, so adjacent faces receive matching
     topology. UV midpoints remain face-local, which preserves UV seams.
+    `frozen_midpoints` reuses existing vertices as the midpoints of those edges.
     """
 
+    fast = (
+        _turbo.quad_only_closure(mesh, name=name, frozen_midpoints=frozen_midpoints) if _turbo is not None else None
+    )
+    if fast is not None:
+        return fast
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     output_vertices = vertices.tolist()
-    edge_midpoints: dict[tuple[int, int], int] = {}
+    edge_midpoints: dict[tuple[int, int], int] = dict(frozen_midpoints or {})
     output_faces: list[Face] = []
     output_materials: list[str] = []
 

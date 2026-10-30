@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 import bpy
@@ -8,45 +11,45 @@ from .metrics import mesh_diagnostics
 
 
 QUALITY_ITEMS = [
-    ("DRAFT", "Draft", "Fast preview remesh with light cleanup"),
-    ("BALANCED", "Balanced", "General-purpose quality and speed"),
-    ("HERO", "Hero", "Higher-quality preservation and validation"),
+    ("DRAFT", "Draft", "Fast preview remesh with light cleanup. Halves the face target"),
+    ("BALANCED", "Balanced", "Good quality at a sensible speed. The right choice most of the time"),
+    ("HERO", "Hero", "Slowest, tries more candidates and cleans up harder. Use for final assets"),
 ]
 
 ENGINE_ITEMS = [
     (
         "ATLAS_Q",
-        "Atlas-Q Auto (Recommended)",
-        "Analyze the scan, build a target-scale proxy, compare solver candidates, and require validated quads",
+        "Smart (Atlas-Q)",
+        "Recommended. Atlas-Q measures your mesh, builds a simplified copy at the target size, tries several solvers and keeps the best result that passes the quad checks",
     ),
-    ("QUADRIFLOW", "QuadriFlow", "Production path using Blender's built-in QuadriFlow remesher"),
+    ("QUADRIFLOW", "QuadriFlow", "Blender's built-in QuadriFlow remesher. Fast and tidy on clean, closed meshes"),
     (
         "TRIAD_Q_LITE",
-        "PairClosure",
-        "Feature-aware pairing, safe vertex-fan normalization, and conforming exact all-quad closure",
+        "PairClosure (pure quads)",
+        "Pairs triangles into quads along the surface flow, then closes any leftovers so every face is a quad. Always finishes, but makes more poles",
     ),
-    ("AUTO", "Auto (v0.3 compatibility)", "Alias for Atlas-Q Auto"),
+    ("AUTO", "Auto (same as Atlas-Q)", "Older name for Smart: Atlas-Q, kept so old files still work"),
 ]
 
 FLOW_ITEMS = [
-    ("AUTO", "Auto", "Classify the mesh and choose a TRIAD-Q mode"),
-    ("BALANCED", "Balanced", "General feature-aware pairing"),
-    ("ORGANIC", "OrganicFlow", "Prioritize smooth organic flow"),
-    ("PATCH", "PatchFlow", "Prioritize hard features and patch boundaries"),
-    ("DIRTY", "DirtyFlow", "Prefer robustness on messy inputs"),
-    ("TEXTURE", "TextureFlow", "Favor material and UV seam preservation"),
+    ("AUTO", "Auto", "Look at the mesh and choose a style"),
+    ("BALANCED", "Balanced", "General purpose pairing that follows sharp features"),
+    ("ORGANIC", "Organic", "Favour smooth, flowing edge loops (characters, creatures, scans)"),
+    ("PATCH", "Hard Surface", "Favour crisp features and patch borders (machines, props)"),
+    ("DIRTY", "Messy Scan", "Favour robustness on noisy or broken input"),
+    ("TEXTURE", "Textured", "Favour keeping material and UV seam borders intact"),
 ]
 
 ATLAS_STRATEGY_ITEMS = [
-    ("AUTO", "Auto", "Choose from measured topology, boundaries, features, scale, and texture state"),
-    ("FLOW_ENSEMBLE", "Organic / General", "Target-scale QEM proxy plus multiple QuadriFlow candidates"),
-    ("FEATURE_FLOW", "Mechanical / Feature", "Preserve persistent sharp, seam, and material boundaries"),
-    ("DIRTY_FLOW", "Dirty Closed Scan", "Permit voxel repair before field-aligned remeshing"),
-    ("OPEN_FLOW", "Open Fragment", "Preserve intentional boundary loops and avoid voxel closure"),
+    ("AUTO", "Auto", "Choose from the measured topology, borders, sharp features, scale and texture state"),
+    ("FLOW_ENSEMBLE", "Organic / General", "Simplify to the target size, then compare several QuadriFlow candidates"),
+    ("FEATURE_FLOW", "Hard Surface / Features", "Keep persistent sharp edges, UV seams and material borders"),
+    ("DIRTY_FLOW", "Dirty Closed Scan", "Allow voxel repair before remeshing a leaky or noisy scan"),
+    ("OPEN_FLOW", "Open Fragment", "Keep intentional open borders and never close the mesh with voxels"),
     (
         "PAIR_CLOSURE",
-        "Exact PairClosure",
-        "Deterministic pure-quad fallback with safe bow-tie fan splitting; robust but creates more poles",
+        "PairClosure (pure quads)",
+        "Reliable all-quad fallback. Splits bow-tie corners safely, but makes more poles and a looser face count",
     ),
 ]
 
@@ -54,21 +57,21 @@ TOPOLOGY_ITEMS = [
     (
         "PRESERVE",
         "Preserve",
-        "Reject changes to Euler characteristic, boundary cycles, component count, and open/closed state",
+        "Reject any result that changes the number of holes, open borders or separate parts, or whether the mesh is closed",
     ),
-    ("REPAIR", "Repair", "Allow reconstruction of dirty closed scans; holes and thin sheets may change"),
+    ("REPAIR", "Repair", "Allow rebuilding of dirty closed scans. Small holes and thin sheets may change"),
 ]
 
 TEXTURE_ITEMS = [
-    ("PROJECT", "Project UVs", "Transfer UVs, then use BVH projection if needed"),
-    ("TRANSFER", "Transfer Only", "Use Blender data transfer only"),
-    ("BAKE", "Bake Color", "Bake base color from source to result"),
-    ("NONE", "None", "Skip UV and texture preservation"),
+    ("PROJECT", "Project UVs", "Copy UVs across, then project from the original surface where needed"),
+    ("TRANSFER", "Transfer Only", "Use Blender's data transfer only (fastest)"),
+    ("BAKE", "Bake Colour", "Bake the base colour of the source onto the result"),
+    ("NONE", "None", "Skip UVs and textures"),
 ]
 
 OUTPUT_ITEMS = [
     ("NEW", "New Object", "Create a remeshed object and keep the original"),
-    ("REPLACE", "Replace", "Replace the selected object's mesh data"),
+    ("REPLACE", "Replace", "Overwrite the selected object's mesh"),
 ]
 
 
@@ -82,6 +85,7 @@ def config_from_owner(owner: object) -> RemeshConfig:
         triad_feature_angle=float(owner.triad_feature_angle),
         triad_force_quads=bool(owner.triad_force_quads),
         triad_flow_mode=str(owner.triad_flow_mode),
+        triad_field_mode=str(getattr(owner, "triad_field_mode", "SMOOTH")),
         atlas_strategy=str(owner.atlas_strategy),
         atlas_candidate_count=int(owner.atlas_candidate_count),
         topology_policy=str(owner.topology_policy),
@@ -149,50 +153,51 @@ def apply_result_to_settings(settings: bpy.types.PropertyGroup, result: RemeshRe
 
 class CURIOMESH_OT_remesh(bpy.types.Operator):
     bl_idname = "curiomesh.remesh"
-    bl_label = "CurioMesh Remesh"
-    bl_description = "Run the Atlas-Q scan-aware quad retopology pipeline"
+    bl_label = "Remesh to Quads"
+    bl_description = "Turn the active mesh into clean quads at the target face count. Undo restores the original"
     bl_options = {"REGISTER", "UNDO"}
 
-    target_faces: bpy.props.IntProperty(name="Target Faces", default=8000, min=4, soft_max=250000)
-    engine: bpy.props.EnumProperty(name="Engine", items=ENGINE_ITEMS, default="ATLAS_Q")
-    quality: bpy.props.EnumProperty(name="Quality", items=QUALITY_ITEMS, default="BALANCED")
-    seed: bpy.props.IntProperty(name="Seed", default=0, min=0, soft_max=100000)
-    triad_seed_count: bpy.props.IntProperty(name="TRIAD-Q Seeds", default=6, min=1, max=32)
-    triad_feature_angle: bpy.props.FloatProperty(name="TRIAD-Q Feature Angle", default=35.0, min=0.0, max=180.0)
-    triad_force_quads: bpy.props.BoolProperty(name="TRIAD-Q Pure Quads", default=False)
-    triad_flow_mode: bpy.props.EnumProperty(name="TRIAD-Q Flow", items=FLOW_ITEMS, default="AUTO")
-    atlas_strategy: bpy.props.EnumProperty(name="Scan Strategy", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
-    atlas_candidate_count: bpy.props.IntProperty(name="Candidate Budget", default=3, min=1, max=8)
-    topology_policy: bpy.props.EnumProperty(name="Topology", items=TOPOLOGY_ITEMS, default="PRESERVE")
-    require_quads: bpy.props.BoolProperty(name="Require Locally Valid Quads", default=True)
+    target_faces: bpy.props.IntProperty(name="Target Faces", description="Roughly how many faces the new mesh should have (a quad counts as one face)", default=8000, min=4, soft_max=250000)
+    engine: bpy.props.EnumProperty(name="Method", description="How the new quads are built. Smart (Atlas-Q) measures the mesh, then tries several solvers and keeps the best", items=ENGINE_ITEMS, default="ATLAS_Q")
+    quality: bpy.props.EnumProperty(name="Quality", description="Draft is fast with light cleanup; Hero spends more time on cleanup and checks", items=QUALITY_ITEMS, default="BALANCED")
+    seed: bpy.props.IntProperty(name="Random Seed", description="Change this for a different but repeatable result", default=0, min=0, soft_max=100000)
+    triad_seed_count: bpy.props.IntProperty(name="PairClosure Starts", description="How many starting points PairClosure tries. More is slower and usually cleaner", default=6, min=1, max=32)
+    triad_feature_angle: bpy.props.FloatProperty(name="Feature Angle", description="Edges sharper than this angle (in degrees) count as creases and are kept", default=35.0, min=0.0, max=180.0)
+    triad_force_quads: bpy.props.BoolProperty(name="PairClosure Pure Quads", description="Force every face to be a quad, even if shape accuracy suffers", default=False)
+    triad_flow_mode: bpy.props.EnumProperty(name="PairClosure Style", description="Tune PairClosure for the kind of model: organic, hard-surface, messy scan or textured", items=FLOW_ITEMS, default="AUTO")
+    triad_field_mode: bpy.props.EnumProperty(name="Flow", description="Direction the quads follow: smoothed flow, or also the surface curvature (about 1.5x slower)", items=(("SMOOTH", "Smooth", "Smoothed flow pinned to sharp edges and borders"), ("CURVATURE", "Follow Curvature", "Also line up with the main bending directions of the surface")), default="SMOOTH")
+    atlas_strategy: bpy.props.EnumProperty(name="Scan Type", description="Which plan Smart (Atlas-Q) follows. Auto picks one from the measured mesh", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
+    atlas_candidate_count: bpy.props.IntProperty(name="Attempts", description="How many candidate results are built and compared; the best one wins. More is slower", default=3, min=1, max=8)
+    topology_policy: bpy.props.EnumProperty(name="Holes & Shells", description="Preserve keeps holes, open borders and separate parts as they are. Repair may close holes and drop thin sheets", items=TOPOLOGY_ITEMS, default="PRESERVE")
+    require_quads: bpy.props.BoolProperty(name="Pure Quads", description="Reject results that still contain triangles or badly shaped quads. Turn off to keep the best attempt even with a few triangles", default=True)
     analysis_sample_faces: bpy.props.IntProperty(
-        name="Analysis Sample Faces",
+        name="Analysis Detail", description="How many faces are sampled when scanning very large meshes. More is slower and more exact",
         default=120000,
         min=1000,
         max=500000,
     )
-    preserve_sharp: bpy.props.BoolProperty(name="Preserve Sharp", default=True)
-    preserve_boundary: bpy.props.BoolProperty(name="Preserve Boundary", default=True)
-    preserve_seams: bpy.props.BoolProperty(name="Treat UV Seams As Sharp", default=True)
-    use_symmetry: bpy.props.BoolProperty(name="Use Mesh Symmetry", default=False)
-    preserve_attributes: bpy.props.BoolProperty(name="Preserve Attributes", default=True)
-    smooth_normals: bpy.props.BoolProperty(name="Smooth Normals", default=True)
-    cleanup_strength: bpy.props.FloatProperty(name="Cleanup Strength", default=0.25, min=0.0, max=1.0)
-    voxel_repair: bpy.props.BoolProperty(name="Voxel Repair Fallback", default=True)
-    shrinkwrap_project: bpy.props.BoolProperty(name="Project Details", default=True)
-    texture_mode: bpy.props.EnumProperty(name="Texture Preservation", items=TEXTURE_ITEMS, default="PROJECT")
-    bake_fallback: bpy.props.BoolProperty(name="Bake If UVs Fail", default=False)
-    bake_resolution: bpy.props.IntProperty(name="Bake Resolution", default=2048, min=64, soft_max=8192)
-    bake_margin: bpy.props.IntProperty(name="Bake Margin", default=8, min=0, max=64)
-    output_mode: bpy.props.EnumProperty(name="Output", items=OUTPUT_ITEMS, default="NEW")
-    apply_source_modifiers: bpy.props.BoolProperty(name="Apply Source Modifiers", default=True)
-    keep_debug_objects: bpy.props.BoolProperty(name="Keep Debug Objects", default=False)
-    debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", default=False)
+    preserve_sharp: bpy.props.BoolProperty(name="Keep Sharp Edges", description="Keep marked sharp edges and hard creases as quad edge lines", default=True)
+    preserve_boundary: bpy.props.BoolProperty(name="Keep Open Borders", description="Keep the outline of open surfaces in place", default=True)
+    preserve_seams: bpy.props.BoolProperty(name="Keep UV Seams", description="Treat UV seams as edges to preserve so textures stay clean", default=True)
+    use_symmetry: bpy.props.BoolProperty(name="Mirror Symmetry", description="Use the mesh's symmetry so both halves match", default=False)
+    preserve_attributes: bpy.props.BoolProperty(name="Keep Attributes", description="Carry colours, weights and other mesh data over to the new mesh", default=True)
+    smooth_normals: bpy.props.BoolProperty(name="Smooth Shading", description="Shade the result smooth", default=True)
+    cleanup_strength: bpy.props.FloatProperty(name="Cleanup", description="How hard to tidy leftover triangles, n-gons and bad corners (0 = off, 1 = strongest)", default=0.25, min=0.0, max=1.0)
+    voxel_repair: bpy.props.BoolProperty(name="Voxel Repair Fallback", description="If the mesh is too broken to remesh, rebuild it through voxels first (can close small holes)", default=True)
+    shrinkwrap_project: bpy.props.BoolProperty(name="Snap to Original", description="Project the new vertices back onto the original surface to keep fine detail", default=True)
+    texture_mode: bpy.props.EnumProperty(name="Textures", description="How UVs and textures are carried over to the new mesh", items=TEXTURE_ITEMS, default="PROJECT")
+    bake_fallback: bpy.props.BoolProperty(name="Bake If UVs Fail", description="If UV transfer fails, bake the colour into a new texture instead", default=False)
+    bake_resolution: bpy.props.IntProperty(name="Bake Size", description="Texture size in pixels used when baking", default=2048, min=64, soft_max=8192)
+    bake_margin: bpy.props.IntProperty(name="Bake Margin", description="Pixels of padding around UV islands when baking", default=8, min=0, max=64)
+    output_mode: bpy.props.EnumProperty(name="Result", description="New Object keeps your original; Replace overwrites its mesh", items=OUTPUT_ITEMS, default="NEW")
+    apply_source_modifiers: bpy.props.BoolProperty(name="Apply Modifiers First", description="Bake the source's modifiers into the mesh before remeshing", default=True)
+    keep_debug_objects: bpy.props.BoolProperty(name="Keep Debug Objects", description="Keep the intermediate meshes the solver creates, for troubleshooting", default=False)
+    debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", description="Print step-by-step details to the system console", default=False)
 
     def execute(self, context: bpy.types.Context):
         obj = context.object
         if obj is None or obj.type != "MESH":
-            self.report({"ERROR"}, "Select a mesh object.")
+            self.report({"ERROR"}, "Select a mesh object first.")
             return {"CANCELLED"}
 
         result = run_curiomesh(obj, config_from_owner(self))
@@ -212,8 +217,17 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
 
 class CURIOMESH_OT_apply_preset(bpy.types.Operator):
     bl_idname = "curiomesh.apply_preset"
-    bl_label = "Apply CurioMesh Preset"
+    bl_label = "Quality Preset"
+    bl_description = "Pick a quality preset"
     bl_options = {"INTERNAL"}
+
+    @classmethod
+    def description(cls, context, properties):
+        return {
+            "DRAFT": "Draft: fast preview with light cleanup. Halves the face target",
+            "BALANCED": "Balanced: good quality at a sensible speed. The right choice most of the time",
+            "HERO": "Hero: slowest. Tries more candidates and cleans up harder, for final assets",
+        }.get(str(properties.preset), cls.bl_description)
 
     preset: bpy.props.EnumProperty(name="Preset", items=QUALITY_ITEMS, default="BALANCED")
 
@@ -256,14 +270,14 @@ class CURIOMESH_OT_apply_preset(bpy.types.Operator):
 
 class CURIOMESH_OT_analyze(bpy.types.Operator):
     bl_idname = "curiomesh.analyze"
-    bl_label = "Analyze Scan"
-    bl_description = "Inspect topology and target-scale evidence without changing the source mesh"
+    bl_label = "Analyze Mesh"
+    bl_description = "Check holes, sharp features and scale, and recommend a method. Does not change the mesh"
     bl_options = {"INTERNAL"}
 
     def execute(self, context: bpy.types.Context):
         obj = context.object
         if obj is None or obj.type != "MESH":
-            self.report({"ERROR"}, "Select a mesh object.")
+            self.report({"ERROR"}, "Select a mesh object first.")
             return {"CANCELLED"}
         settings = context.scene.curiomesh_settings
         profile = analyze_object(
@@ -288,13 +302,14 @@ class CURIOMESH_OT_analyze(bpy.types.Operator):
 
 class CURIOMESH_OT_compute_metrics(bpy.types.Operator):
     bl_idname = "curiomesh.compute_metrics"
-    bl_label = "Compute CurioMesh Metrics"
+    bl_label = "Measure Mesh"
+    bl_description = "Measure the active mesh (quad ratio, poles, holes, UVs) and list the results below"
     bl_options = {"INTERNAL"}
 
     def execute(self, context: bpy.types.Context):
         obj = context.object
         if obj is None or obj.type != "MESH":
-            self.report({"ERROR"}, "Select a mesh object.")
+            self.report({"ERROR"}, "Select a mesh object first.")
             return {"CANCELLED"}
 
         settings = context.scene.curiomesh_settings

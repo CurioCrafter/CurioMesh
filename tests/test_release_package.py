@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 import ast
@@ -13,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.build_release import build_archives, release_metadata  # noqa: E402
+from scripts.build_release import build_archives, build_per_version, release_metadata  # noqa: E402
 
 
 def bl_info_version(source: str) -> str:
@@ -59,6 +62,23 @@ class ReleasePackageTests(unittest.TestCase):
                 self.assertEqual(manifest["id"], package_id)
                 self.assertEqual(manifest["version"], version)
                 self.assertEqual(bl_info_version(payload["__init__.py"].decode("utf-8")), version)
+
+    def test_per_version_archives(self) -> None:
+        package_id, version = release_metadata(ROOT)
+        with tempfile.TemporaryDirectory() as temporary:
+            built = {p.name: p for p in build_per_version(ROOT, Path(temporary))}
+            self.assertEqual(len(built), 10)
+            for series in ("3.6", "4.0", "4.1"):
+                with zipfile.ZipFile(built[f"{package_id}-{version}-blender-{series}-addon.zip"]) as z:
+                    info = z.read("curiomesh/__init__.py").decode()
+                self.assertIn(f'"blender": ({series.replace(".", ", ")}, 0)', info)
+            series_list = ["4.2", "4.3", "4.4", "4.5", "5.0", "5.1", "5.2"]
+            for i, series in enumerate(series_list):
+                with zipfile.ZipFile(built[f"{package_id}-{version}-blender-{series}-extension.zip"]) as z:
+                    manifest = tomllib.loads(z.read("blender_manifest.toml").decode())
+                self.assertEqual(manifest["blender_version_min"], f"{series}.0")
+                expected_max = f"{series_list[i + 1]}.0" if i + 1 < len(series_list) else None
+                self.assertEqual(manifest.get("blender_version_max"), expected_max)
 
     def test_source_version_drift_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

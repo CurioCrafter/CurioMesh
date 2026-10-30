@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install numpy ruff
+      - run: ruff check .
+      - name: Unit tests (pure Python; test_turbo skips without a native build)
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install numpy
+      - name: Build CurioMesh Turbo
+        run: cargo build --release --manifest-path native/Cargo.toml
+      - name: Equivalence tests against the Python code
+        run: |
+          mkdir -p _native/linux_x86_64
+          cp native/target/release/lib_curiomesh_turbo.so _native/linux_x86_64/_curiomesh_turbo.abi3.so
+          python -m unittest tests.test_turbo -v

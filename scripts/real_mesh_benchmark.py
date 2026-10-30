@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 """Headless real-mesh benchmark for the CurioMesh add-on.
 
 Usage (one Blender instance, headless, no renders):

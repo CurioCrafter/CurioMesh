@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 """Independent, deterministic validation for the SlashFn Atlas-Q batch.
 
 Run this script with the same Blender release used to save the production file.

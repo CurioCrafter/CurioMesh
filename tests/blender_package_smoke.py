@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 import addon_utils
@@ -78,7 +81,7 @@ def validate_archive(archive: Path, layout: str) -> tuple[str, str]:
     if info_version != version:
         raise AssertionError(f"{archive}: manifest version {version!r} != bl_info version {info_version!r}")
     archive_kind = "addon" if layout == "legacy" else "extension"
-    name_pattern = rf"{package_id}-{re.escape(version)}-blender-\d+\.\d+-plus-{archive_kind}\.zip"
+    name_pattern = rf"{package_id}-{re.escape(version)}-blender-\d+\.\d+-(?:plus-)?{archive_kind}\.zip"
     if not re.fullmatch(name_pattern, archive.name):
         raise AssertionError(f"{archive}: expected filename matching {name_pattern!r}")
     return package_id, version

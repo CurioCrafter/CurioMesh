@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 from collections import defaultdict, deque
@@ -9,7 +12,9 @@ from typing import Any
 
 import numpy as np
 
+from .field import estimate_field_gl
 from .topology import (
+    _turbo,
     parity_path_quad_closure,
     quad_only_closure,
     quads_locally_valid,
@@ -29,6 +34,9 @@ class RemeshOptions:
     smooth_field_iters: int = 4
     preserve_material_boundaries: bool = True
     preserve_uv_seams: bool = True
+    # "SMOOTH": diffused 4-RoSy field (_estimate_field). "CURVATURE": Ginzburg-Landau
+    # relaxation pulled towards principal curvature directions (field.estimate_field_gl).
+    field_mode: str = "SMOOTH"
 
 
 @dataclass(slots=True)
@@ -564,7 +572,13 @@ def _estimate_field(
 
     # ponytail: fixed-count Jacobi diffusion; switch to a sparse linear solve if
     # very large scans need the field converged across hundreds of rings.
-    for _ in range(24 * max(0, int(smooth_iters))):
+    steps = 24 * max(0, int(smooth_iters))
+    fast = (
+        _turbo.cross_field_jacobi(cross, face_a, face_b, transport, pinned, degree, steps)
+        if _turbo is not None
+        else None
+    )
+    for _ in range(0 if fast is not None else steps):
         into_a = cross[face_b] * transport
         into_b = cross[face_a] * np.conj(transport)
         real = np.bincount(face_a, weights=into_a.real, minlength=face_count) + np.bincount(
@@ -574,6 +588,8 @@ def _estimate_field(
             face_b, weights=into_b.imag, minlength=face_count
         )
         cross = np.where(pinned, cross, (cross + real + 1j * imag) / degree)
+    if fast is not None:
+        cross = fast
 
     cross = np.where(np.abs(cross) > 1e-12, cross, initial)
     theta = np.angle(cross) / 4.0
@@ -588,7 +604,10 @@ def _pairing_prep(mesh: _TriMesh, options: RemeshOptions, mode: str) -> _Pairing
     adj = _adjacency(mesh)
     weights = _pair_weights(mode)
     feature_mask = _feature_mask(mesh, adj, options)
-    cross_field = _estimate_field(mesh, adj, feature_mask, options.smooth_field_iters)
+    if str(options.field_mode).upper() == "CURVATURE":
+        cross_field = estimate_field_gl(mesh, adj, feature_mask, options.smooth_field_iters)
+    else:
+        cross_field = _estimate_field(mesh, adj, feature_mask, options.smooth_field_iters)
     face_a, face_b, quads, scores = _pair_candidates(mesh, adj, feature_mask, cross_field, weights)
 
     allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)

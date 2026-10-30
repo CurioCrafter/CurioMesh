@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 """Batch remesh: run the normal pipeline on every selected mesh and write one report."""
 
 from __future__ import annotations

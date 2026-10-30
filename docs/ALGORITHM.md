@@ -1,8 +1,8 @@
 # Atlas-Q Algorithm And Validation Contract
 
 This document separates shipped behavior from research directions. The code is
-a clean-room CurioMesh implementation under MIT; it does not copy GPL solver
-sources.
+a clean-room CurioMesh implementation, licensed GPL-3.0-or-later; it does not
+copy other projects' solver sources.
 
 ## Problem Contract
 

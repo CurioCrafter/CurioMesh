@@ -1,0 +1,22 @@
+[package]
+name = "curiomesh-turbo"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Native acceleration core for the CurioMesh Blender add-on"
+publish = false
+
+[lib]
+name = "_curiomesh_turbo"
+crate-type = ["cdylib"]
+
+[dependencies]
+# abi3-py310: one binary per OS/arch loads in every Blender 3.6 (Python 3.10) .. 5.x (3.11+).
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310", "generate-import-lib"] }
+numpy = "0.30"
+rayon = "1.12"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "unwind"

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
 from __future__ import annotations
 
 import importlib.util
@@ -6,6 +9,7 @@ from pathlib import Path
 import sys
 import traceback
 
+import bmesh
 import bpy
 
 
@@ -875,6 +879,539 @@ def run_ui_features_case(module):
     print("PASS ui_features")
 
 
+class _MockOp:
+    def __setattr__(self, key, value):
+        object.__setattr__(self, key, value)
+
+
+class _MockLayout:
+    """Stand-in for UILayout that validates icons, property names and operator ids while a panel draws."""
+
+    ICONS = None
+
+    def __init__(self, log):
+        self._log = log
+
+    def __setattr__(self, key, value):
+        object.__setattr__(self, key, value)
+
+    def _sub(self, *args, **kwargs):
+        return _MockLayout(self._log)
+
+    row = column = box = split = grid_flow = column_flow = _sub
+
+    def _icon(self, icon):
+        if icon not in self.ICONS:
+            raise AssertionError(f"ui draw: unknown icon {icon!r}")
+
+    def label(self, text="", icon="NONE", **kwargs):
+        self._icon(icon)
+        self._log.append(("label", text))
+
+    def separator(self, *args, **kwargs):
+        pass
+
+    def prop(self, data, name, text=None, icon="NONE", **kwargs):
+        self._icon(icon)
+        if name not in data.bl_rna.properties:
+            raise AssertionError(f"ui draw: {data.bl_rna.identifier} has no property {name!r}")
+        self._log.append(("prop", name))
+
+    def prop_search(self, data, name, search_data, search_prop, **kwargs):
+        if name not in data.bl_rna.properties or search_prop not in search_data.bl_rna.properties:
+            raise AssertionError(f"ui draw: bad prop_search {name!r}")
+
+    def operator(self, idname, text="", icon="NONE", **kwargs):
+        self._icon(icon)
+        group, _, op = idname.partition(".")
+        try:
+            rna = getattr(getattr(bpy.ops, group), op).get_rna_type()
+        except Exception as exc:
+            raise AssertionError(f"ui draw: unknown operator {idname!r}") from exc
+        self._log.append(("operator", idname))
+        mock = _MockOp()
+        mock.bl_rna = rna
+        return mock
+
+    def template_list(self, listtype, list_id, data, propname, active_data, active_propname, **kwargs):
+        if propname not in data.bl_rna.properties or active_propname not in active_data.bl_rna.properties:
+            raise AssertionError(f"ui draw: bad template_list {propname!r}")
+
+
+def _draw_all_panels(label):
+    """Draw every CurioMesh panel (and its header) against the mock layout; return how many drew."""
+    from curiomesh import ui
+
+    _MockLayout.ICONS = set(bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items.keys())
+    drawn = 0
+    for cls in ui.panel_classes():
+        poll = getattr(cls, "poll", None)
+        if poll is not None and not poll(bpy.context):
+            continue
+        log: list = []
+        holder = type("Holder", (), {"layout": _MockLayout(log)})()
+        for hook in ("draw_header", "draw_header_preset", "draw"):
+            fn = getattr(cls, hook, None)
+            if fn is None or (hook != "draw" and fn is getattr(bpy.types.Panel, hook, None)):
+                continue
+            try:
+                fn(holder, bpy.context)
+            except Exception as exc:
+                raise AssertionError(f"ui draw [{label}] {cls.__name__}.{hook}: {exc!r}") from exc
+        drawn += 1
+    return drawn
+
+
+def run_ui_prefs_case(module):
+    """Preferences, tab rename, HUD placement, heatmap colours and every panel drawing in several states."""
+    from types import SimpleNamespace
+
+    from curiomesh import overlay, region, ui
+
+    reset_scene()
+    settings = bpy.context.scene.curiomesh_settings
+    region_settings = bpy.context.scene.curiomesh_region
+
+    # A real preferences entry so the AddonPreferences class and its update callbacks run.
+    addons = bpy.context.preferences.addons
+    entry = addons.get("curiomesh") or addons.new()
+    entry.module = "curiomesh"
+    prefs = overlay.get_prefs()
+    if not isinstance(prefs, bpy.types.AddonPreferences):
+        raise AssertionError("ui prefs: get_prefs did not return the add-on preferences")
+    for name, default in overlay.PREF_DEFAULTS.items():
+        value = getattr(prefs, name)
+        value = tuple(round(x, 4) for x in value) if not isinstance(value, (str, bool, int, float)) else value
+        want = tuple(round(x, 4) for x in default) if isinstance(default, tuple) else default
+        if value != want and not (isinstance(want, float) and abs(value - want) < 1e-6):
+            raise AssertionError(f"ui prefs: default of {name} is {value!r}, expected {want!r}")
+
+    # Tab rename re-registers every panel (Quick Start, its folds and Regions).
+    prefs.panel_tab = "Retopo"
+    for cls in ui.panel_classes():
+        if cls.bl_category != "Retopo" or getattr(bpy.types, cls.__name__).bl_category != "Retopo":
+            raise AssertionError(f"ui prefs: {cls.__name__} did not move to the Retopo tab")
+    prefs.panel_tab = "   "
+    if bpy.types.CURIOMESH_PT_panel.bl_category != "CurioMesh":
+        raise AssertionError("ui prefs: blank tab name should fall back to CurioMesh")
+    prefs.panel_tab = "CurioMesh"
+
+    # HUD corner math.
+    w, h = 330.0, 168.0
+    cases = {
+        "BOTTOM_LEFT": (70.0, 40.0),
+        "BOTTOM_RIGHT": (1600.0 - 70.0 - w, 40.0),
+        "TOP_LEFT": (70.0, 900.0 - 40.0 - h),
+        "TOP_RIGHT": (1600.0 - 70.0 - w, 900.0 - 40.0 - h),
+    }
+    for corner, want in cases.items():
+        got = overlay.hud_origin(corner, 1600.0, 900.0, w, h, 70.0, 40.0)
+        if got != want:
+            raise AssertionError(f"ui prefs: hud corner {corner} -> {got}, expected {want}")
+    if overlay.hud_origin("BOTTOM_RIGHT", 1600.0, 900.0, w, h, 70.0, 40.0, right_inset=300.0)[0] != 1600.0 - 300.0 - 70.0 - w:
+        raise AssertionError("ui prefs: sidebar inset ignored")
+    if overlay.hud_origin("TOP_RIGHT", 200.0, 100.0, w, h, 70.0, 40.0) != (0.0, 0.0):
+        raise AssertionError("ui prefs: HUD origin must stay inside a tiny viewport")
+    if overlay.quality_word(None) != "NO DATA" or overlay.quality_word(1.0) != "ALL QUADS" or overlay.quality_word(0.5) != "NEEDS WORK":
+        raise AssertionError("ui prefs: quality words")
+
+    # Heatmap colours come from the preferences and trigger a rebuild when they change.
+    cube = make_cube("CurioSmoke_PrefCube")
+    reset_selection(cube)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.quads_convert_to_tris()
+    bpy.ops.object.mode_set(mode="OBJECT")
+    overlay.invalidate()
+    stats = overlay.get_stats(cube)
+    prefs.heat_tri_color = (0.0, 1.0, 0.0, 0.5)
+    prefs.heat_pole5_color = (0.0, 0.0, 1.0, 1.0)
+    colors = overlay.heat_colors()
+    if colors[0] != (0.0, 1.0, 0.0, 0.5) or colors[3] != (0.0, 0.0, 1.0, 1.0):
+        raise AssertionError(f"ui prefs: heat_colors ignored the preferences: {colors}")
+    _tri_pos, tri_col, _pt_pos, pt_col = overlay.build_heat_arrays(cube, stats)
+    if tuple(tri_col[0].tolist()) != (0.0, 1.0, 0.0, 0.5):
+        raise AssertionError(f"ui prefs: heatmap triangle colour not applied: {tri_col[0]}")
+    if not any(tuple(c.tolist()) == (0.0, 0.0, 1.0, 1.0) for c in pt_col):
+        raise AssertionError("ui prefs: heatmap pole colour not applied")
+    custom = overlay.build_heat_arrays(cube, stats, colors=((1, 1, 0, 1), (1, 0, 1, 1), (0, 1, 1, 1), (1, 1, 1, 1)))
+    if tuple(custom[1][0].tolist()) != (1.0, 1.0, 0.0, 1.0):
+        raise AssertionError("ui prefs: explicit heatmap colours ignored")
+    # Overlay never raises when a preferences object is incomplete.
+    overlay._prefs_override = SimpleNamespace(**{**overlay.PREF_DEFAULTS, "heat_tri_color": "bad"})
+    try:
+        if overlay.heat_colors()[0] != overlay.TRI_COLOR:
+            raise AssertionError("ui prefs: a malformed colour should fall back to the default")
+    finally:
+        overlay._prefs_override = None
+    if any(abs(a - b) > 1e-5 for a, b in zip(region.SEAM_COLOR, overlay.pref_color(overlay.get_prefs(), "region_seam_color"))):
+        raise AssertionError("ui prefs: region seam colour default mismatch")
+
+    # HUD default applies once per scene and only ever turns the HUD off.
+    scene = bpy.context.scene
+    if "curiomesh_hud_init" in scene.keys():
+        del scene["curiomesh_hud_init"]
+    settings.hud_enabled = True
+    prefs.hud_default = False
+    overlay.apply_hud_default(scene)
+    if settings.hud_enabled:
+        raise AssertionError("ui prefs: hud_default False did not switch the HUD off")
+    settings.hud_enabled = True
+    overlay.apply_hud_default(scene)
+    if not settings.hud_enabled:
+        raise AssertionError("ui prefs: hud default applied twice")
+    prefs.hud_default = True
+
+    # Every panel draws, in several states, with no unknown icon / property / operator.
+    states = []
+    for compact in (False, True):
+        prefs.compact_mode = compact
+        # nothing selected
+        bpy.ops.object.select_all(action="DESELECT")
+        bpy.context.view_layer.objects.active = None
+        states.append(f"none/{compact}")
+        _draw_all_panels(states[-1])
+        reset_scene()
+        sphere = make_uv_sphere("CurioSmoke_DrawSphere", segments=12, rings=6)
+        reset_selection(sphere)
+        for engine in ("ATLAS_Q", "TRIAD_Q_LITE", "QUADRIFLOW"):
+            settings.engine = engine
+            settings.heatmap_enabled = True
+            settings.live_enabled = False
+            settings.metrics_status = "OK"
+            settings.metrics_message = "A fairly long message that has to wrap over several lines of the panel"
+            settings.analysis_faces = 100
+            settings.analysis_warning = "Open boundary loops | Thin sheets detected"
+            settings.batch_status = "Batch done"
+            for source in ("SELECTION", "FACE_SET", "VERTEX_GROUP", "VOLUMES"):
+                region_settings.source = source
+                states.append(f"{engine}/{source}/{compact}")
+                if _draw_all_panels(states[-1]) < 8:
+                    raise AssertionError(f"ui draw: too few panels drew in {states[-1]}")
+        settings.metrics_status = "FAILED"
+        _draw_all_panels(f"failed/{compact}")
+        settings.metrics_status = ""
+        settings.heatmap_enabled = False
+        bpy.ops.object.mode_set(mode="EDIT")
+        region_settings.source = "SELECTION"
+        _draw_all_panels(f"edit/{compact}")
+        bpy.ops.object.mode_set(mode="OBJECT")
+        region_settings.volumes.add()
+        region_settings.source = "VOLUMES"
+        _draw_all_panels(f"cages/{compact}")
+        region_settings.volumes.clear()
+    # A region preview object (previewing state) and a live preview object as the active object.
+    source = bpy.data.objects["CurioSmoke_DrawSphere"]
+    source.select_set(True)
+    ghost = bpy.data.objects.new(region.PREVIEW_NAME, bpy.data.meshes.new("CurioSmoke_GhostMesh"))
+    bpy.context.scene.collection.objects.link(ghost)
+    region.state["message"] = "Select faces first"
+    _draw_all_panels("previewing")
+    region.state["message"] = ""
+    bpy.data.objects.remove(ghost, do_unlink=True)
+    prefs.compact_mode = False
+    settings.engine = "ATLAS_Q"
+
+    # Hiding a panel in the preferences removes it from the sidebar.
+    prefs.show_debug = False
+    if bpy.types.CURIOMESH_PT_debug.poll(bpy.context):
+        raise AssertionError("ui prefs: show_debug False still polls true")
+    prefs.show_debug = True
+    prefs.show_regions = False
+    if bpy.types.CURIOMESH_PT_regions.poll(bpy.context):
+        raise AssertionError("ui prefs: show_regions False still polls true")
+    prefs.show_regions = True
+
+    # Reset restores every default.
+    prefs.hud_scale = 1.8
+    prefs.panel_tab = "Temp"
+    bpy.ops.curiomesh.reset_preferences()
+    if prefs.hud_scale != 1.0 or bpy.types.CURIOMESH_PT_panel.bl_category != "CurioMesh":
+        raise AssertionError("ui prefs: reset_preferences did not restore defaults")
+    print("PASS ui_prefs")
+
+
+def make_tri_suzanne(name: str):
+    bpy.context.scene.cursor.location = (0.0, 0.0, 0.0)
+    bpy.ops.mesh.primitive_monkey_add(size=2.0)
+    obj = bpy.context.object
+    obj.name = name
+    add_material_and_uv(obj, color=(0.8, 0.5, 0.3, 1.0))
+    for kind in ("SUBSURF", "TRIANGULATE"):
+        modifier = obj.modifiers.new(f"CurioSmoke {kind.lower()}", kind)
+        if kind == "SUBSURF":
+            modifier.levels = 1
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+    return obj
+
+
+def _face_keys(obj) -> list:
+    """Per-face key (rounded corner coordinates), in face order."""
+
+    mesh = obj.data
+    return [
+        frozenset(tuple(round(c, 5) for c in mesh.vertices[v].co) for v in poly.vertices)
+        for poly in mesh.polygons
+    ]
+
+
+def _edge_face_counts(obj):
+    import numpy as np
+
+    mesh = obj.data
+    loop_edges = np.empty(len(mesh.loops), dtype=np.int64)
+    mesh.loops.foreach_get("edge_index", loop_edges)
+    return np.bincount(loop_edges, minlength=len(mesh.edges))
+
+
+def _check_region(label, obj, before_keys, region_faces, before_counts):
+    """Untouched faces unchanged, no new open edges (no T-junctions), manifold, all quads inside.
+
+    The applied region may differ from the requested one by the seam smoothing
+    and parity fix, so "untouched" means every face the patch did not remove.
+    """
+
+    from curiomesh import region
+
+    removed = region.state["last_removed"]
+    if not removed or len(removed) > 1.5 * len(region_faces) + 60:
+        raise AssertionError(f"{label}: removed {len(removed)} faces for a {len(region_faces)}-face request")
+    gone = set(removed)
+    untouched = {key for index, key in enumerate(before_keys) if index not in gone}
+    after = set(_face_keys(obj))
+    missing = untouched - after
+    if missing:
+        raise AssertionError(f"{label}: {len(missing)} untouched faces changed")
+    new_keys = after - untouched
+    sizes = [len(k) for k in new_keys]
+    if not sizes or any(size != 4 for size in sizes):
+        raise AssertionError(f"{label}: region is not all quads ({sorted(set(sizes))})")
+    counts = _edge_face_counts(obj)
+    if int((counts == 1).sum()) != int((before_counts == 1).sum()):
+        raise AssertionError(f"{label}: open edges {int((before_counts == 1).sum())} -> {int((counts == 1).sum())}")
+    if int((counts > 2).sum()) or int((counts == 0).sum()):
+        raise AssertionError(f"{label}: non-manifold or loose edges after patch")
+    print(f"PASS region {label}: {len(new_keys)} quads replace {len(gone)} faces")
+
+
+def _select_faces(obj, ids):
+    chosen = set(ids)
+    for v in obj.data.vertices:
+        v.select = False
+    for poly in obj.data.polygons:
+        poly.select = poly.index in chosen
+        if poly.select:
+            for v in poly.vertices:
+                obj.data.vertices[v].select = True
+    for edge in obj.data.edges:
+        edge.select = all(obj.data.vertices[v].select for v in edge.vertices)
+
+
+def _region_faces(obj, mask_fn):
+    return [p.index for p in obj.data.polygons if mask_fn(p.center)]
+
+
+def run_region_case(module):
+    import numpy as np
+    from curiomesh import region
+
+    reset_scene()
+    rs = bpy.context.scene.curiomesh_region
+    rs.strategy = "FLOW"
+    rs.fit_iterations = 2
+
+    # 1. Edit-mode selection on a subdivided, triangulated Suzanne, via preview -> cancel -> preview -> apply.
+    suzanne = make_tri_suzanne("CurioSmoke_RegionSel")
+    reset_selection(suzanne)
+    region_ids = _region_faces(suzanne, lambda c: c.z > 0.35 and c.y < -0.2)
+    _select_faces(suzanne, region_ids)
+    keys, counts = _face_keys(suzanne), _edge_face_counts(suzanne)
+    bpy.ops.object.mode_set(mode="EDIT")
+    rs.source = "SELECTION"
+    if "FINISHED" not in bpy.ops.curiomesh.region_preview():
+        raise AssertionError(f"region: preview failed: {region.status()}")
+    preview = bpy.data.objects.get(region.PREVIEW_NAME)
+    if preview is None or suzanne.visible_get() or region.state["draw"] is None:
+        raise AssertionError("region: preview object, hidden source or seam overlay missing")
+    bpy.ops.curiomesh.region_cancel()
+    if bpy.data.objects.get(region.PREVIEW_NAME) is not None or not suzanne.visible_get():
+        raise AssertionError("region: cancel left the preview or kept the source hidden")
+    if set(_face_keys(suzanne)) != set(keys):
+        raise AssertionError("region: cancel changed the source")
+    reset_selection(suzanne)
+    bpy.ops.curiomesh.region_preview()
+    if "FINISHED" not in bpy.ops.curiomesh.region_apply():
+        raise AssertionError(f"region: apply failed: {region.status()}")
+    if bpy.data.objects.get(region.PREVIEW_NAME) is not None:
+        raise AssertionError("region: apply left the preview behind")
+    _check_region("selection", suzanne, keys, region_ids, counts)
+    for strategy in ("GRID",):
+        rs.strategy = strategy
+        grid_source = make_tri_suzanne(f"CurioSmoke_Region{strategy}")
+        reset_selection(grid_source)
+        ids = _region_faces(grid_source, lambda c: c.z < -0.3 and abs(c.x) < 0.5)
+        _select_faces(grid_source, ids)
+        keys, counts = _face_keys(grid_source), _edge_face_counts(grid_source)
+        if "FINISHED" not in bpy.ops.curiomesh.region_apply():
+            raise AssertionError(f"region: {strategy} apply failed: {region.status()}")
+        _check_region(strategy.lower(), grid_source, keys, ids, counts)
+    rs.strategy = "FLOW"
+
+    # 2. Box cage (into a copy) and 3. a deformed lattice cage.
+    rs.apply_mode = "COPY"
+    source = make_tri_suzanne("CurioSmoke_RegionBox")
+    reset_selection(source)
+    bpy.context.scene.cursor.location = (0.0, -0.6, 0.6)
+    bpy.ops.curiomesh.region_add_cage(kind="BOX")
+    cage = rs.volumes[-1].obj
+    if cage is None or cage.type != "EMPTY" or rs.source != "VOLUMES":
+        raise AssertionError("region: box cage was not added")
+    mask, _message = region.build_mask(bpy.context, source, rs)
+    ids = np.flatnonzero(mask).tolist()
+    keys, counts = _face_keys(source), _edge_face_counts(source)
+    reset_selection(source)
+    if "FINISHED" not in bpy.ops.curiomesh.region_apply():
+        raise AssertionError(f"region: box apply failed: {region.status()}")
+    copy = bpy.data.objects.get("CurioSmoke_RegionBox_Region")
+    if copy is None or _face_keys(source) != keys:
+        raise AssertionError("region: copy mode changed the source or made no copy")
+    _check_region("box_cage_copy", copy, keys, ids, counts)
+    rs.apply_mode = "SOURCE"
+    source.hide_set(False)
+    rs.volumes.clear()
+
+    source = make_tri_suzanne("CurioSmoke_RegionLattice")
+    reset_selection(source)
+    bpy.context.scene.cursor.location = (0.0, -0.5, -0.4)
+    bpy.ops.curiomesh.region_add_cage(kind="LATTICE")
+    lattice = rs.volumes[-1].obj
+    lattice.data.points[0].co_deform.x -= 0.3  # bend one corner: the hull is no longer a box
+    mask, _message = region.build_mask(bpy.context, source, rs)
+    ids = np.flatnonzero(mask).tolist()
+    if not ids:
+        raise AssertionError("region: lattice cage selected nothing")
+    keys, counts = _face_keys(source), _edge_face_counts(source)
+    reset_selection(source)
+    if "FINISHED" not in bpy.ops.curiomesh.region_apply():
+        raise AssertionError(f"region: lattice apply failed: {region.status()}")
+    _check_region("lattice_cage", source, keys, ids, counts)
+    rs.volumes.clear()
+
+    # 4. Two volumes: Union a big box, Subtract a box over one side (leaves an L-shaped disk).
+    source = make_tri_suzanne("CurioSmoke_RegionBool")
+    reset_selection(source)
+    bpy.context.scene.cursor.location = (0.0, -0.6, 0.5)
+    bpy.ops.curiomesh.region_add_cage(kind="BOX")
+    big = rs.volumes[-1].obj
+    big.scale = (0.45, 0.6, 0.35)
+    bpy.context.scene.cursor.location = (0.35, -0.6, 0.75)
+    bpy.ops.curiomesh.region_add_cage(kind="BOX")
+    small = rs.volumes[-1].obj
+    small.scale = (0.2, 0.6, 0.2)
+    rs.volumes[-1].operation = "SUBTRACT"
+    bpy.context.view_layer.update()
+    mask, _message = region.build_mask(bpy.context, source, rs)
+    points = np.asarray([(source.matrix_world @ p.center)[:] for p in source.data.polygons])
+    union = region.volume_mask(big, points, bpy.context.evaluated_depsgraph_get())
+    cut = region.volume_mask(small, points, bpy.context.evaluated_depsgraph_get())
+    if not np.array_equal(mask, union & ~cut) or not cut[union].any():
+        raise AssertionError(
+            f"region: Union/Subtract mask wrong: mask {int(mask.sum())} union {int(union.sum())} "
+            f"cut {int(cut.sum())} overlap {int((union & cut).sum())} diff {int((mask != (union & ~cut)).sum())}"
+        )
+    ids = np.flatnonzero(mask).tolist()
+    keys, counts = _face_keys(source), _edge_face_counts(source)
+    reset_selection(source)
+    if "FINISHED" not in bpy.ops.curiomesh.region_apply():
+        raise AssertionError(f"region: boolean apply failed: {region.status()}")
+    _check_region("union_subtract", source, keys, ids, counts)
+    rs.volumes.clear()
+
+    # 5. Live preview follows a moved cage.
+    source = make_tri_suzanne("CurioSmoke_RegionLive")
+    reset_selection(source)
+    bpy.context.scene.cursor.location = (0.0, -0.6, 0.6)
+    bpy.ops.curiomesh.region_add_cage(kind="BOX")
+    cage = rs.volumes[-1].obj
+    reset_selection(source)
+    if "FINISHED" not in bpy.ops.curiomesh.region_preview():
+        raise AssertionError(f"region: live preview failed: {region.status()}")
+    first = len(bpy.data.objects[region.PREVIEW_NAME].data.polygons)
+    cage.scale = (cage.scale[0] * 1.6, cage.scale[1], cage.scale[2] * 1.6)
+    bpy.context.view_layer.update()
+    old = region.DEBOUNCE_SECONDS
+    region.DEBOUNCE_SECONDS = 0.0
+    try:
+        region._poll()
+        region._poll()
+    finally:
+        region.DEBOUNCE_SECONDS = old
+    if len(bpy.data.objects[region.PREVIEW_NAME].data.polygons) == first:
+        raise AssertionError("region: live preview did not follow the cage")
+    print(f"PASS region live_preview: {first} -> {len(bpy.data.objects[region.PREVIEW_NAME].data.polygons)} faces")
+    bpy.ops.curiomesh.region_cancel()
+    rs.volumes.clear()
+
+    # 6. Fill Loop on a hole, then 7. Fit to Surface.
+    reset_scene()
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=13, y_subdivisions=13, size=2.0)
+    plane = bpy.context.object
+    plane.name = "CurioSmoke_FillLoop"
+    for v in plane.data.vertices:
+        v.co.z = 0.3 * (1.0 - v.co.x * v.co.x) * (1.0 - v.co.y * v.co.y)
+    open_before = int((_edge_face_counts(plane) == 1).sum())
+    hole = set(_region_faces(plane, lambda c: abs(c.x) < 0.45 and abs(c.y) < 0.3))
+    bm = bmesh.new()
+    bm.from_mesh(plane.data)
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.index in hole], context="FACES_ONLY")
+    bm.to_mesh(plane.data)
+    bm.free()
+    counts = _edge_face_counts(plane)
+    verts = plane.data.vertices
+    for poly in plane.data.polygons:
+        poly.select = False
+    for v in verts:
+        v.select = False
+    for edge in plane.data.edges:
+        inner = all(abs(verts[v].co.x) < 0.99 and abs(verts[v].co.y) < 0.99 for v in edge.vertices)
+        edge.select = bool(counts[edge.index] == 1 and inner)
+        if edge.select:
+            for v in edge.vertices:
+                verts[v].select = True
+    bpy.ops.object.mode_set(mode="EDIT")
+    if "FINISHED" not in bpy.ops.curiomesh.fill_loop():
+        raise AssertionError("region: fill loop failed")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    counts = _edge_face_counts(plane)
+    sizes = {len(p.vertices) for p in plane.data.polygons}
+    if int((counts == 1).sum()) != open_before or int((counts > 2).sum()) or sizes != {4}:
+        raise AssertionError(f"region: fill loop left holes/non-manifold/non-quads {sizes}")
+    print(f"PASS region fill_loop: {len(plane.data.polygons)} faces, open edges {open_before}")
+
+    sphere = make_uv_sphere("CurioSmoke_FitTarget", segments=24, rings=12)
+    reset_selection(sphere)
+    bpy.ops.object.duplicate()
+    noisy = bpy.context.object
+    rng = np.random.default_rng(3)
+    for v in noisy.data.vertices:
+        v.co += __import__("mathutils").Vector(rng.normal(0.0, 0.03, 3).tolist())
+    before = np.asarray([abs(v.co.length - 1.0) for v in noisy.data.vertices])
+    bpy.ops.object.select_all(action="DESELECT")
+    sphere.select_set(True)
+    noisy.select_set(True)
+    bpy.context.view_layer.objects.active = noisy
+    if "FINISHED" not in bpy.ops.curiomesh.fit_to_surface(iterations=3):
+        raise AssertionError("region: fit to surface failed")
+    after = np.asarray([abs(v.co.length - 1.0) for v in noisy.data.vertices])
+    if not after.max() < 0.02 < before.max():
+        raise AssertionError(f"region: fit did not reach the surface ({before.max():.3f} -> {after.max():.3f})")
+    print(f"PASS region fit_to_surface: max off-surface {before.max():.3f} -> {after.max():.4f}")
+
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    print("PASS region")
+
+
 def main():
     module = load_addon()
     reset_scene()
@@ -1140,7 +1677,9 @@ def main():
         require_quad_only=True,
     )
 
+    run_region_case(module)
     run_ui_features_case(module)
+    run_ui_prefs_case(module)
     module.unregister()
     print("CurioMesh Blender smoke tests passed.")
 

@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.6.0 - 2026-10-29
+
+- **Licence: CurioMesh is now GPL-3.0-or-later** (previously MIT, up to 0.5.1).
+- **Turbo core in Rust** for topology checks, quad closing, ParityPath search,
+  cross-field smoothing and cage inside tests, on all CPU cores, shipped for
+  Windows, Linux and macOS in every zip with an automatic Python fallback
+  (`CURIOMESH_TURBO=0` forces Python). Topology checks and quad closing are
+  about 30x faster; a 50k-face all-quad remesh is 4.5x faster.
+- **GitHub Actions** build the native core for every platform and attach all
+  release zips; CI runs the tests on every push.
+- **Region retopology.** Remesh only the faces you pick: an edit-mode
+  selection, a face set, a vertex group, box cages, lattice cages or any closed
+  mesh as a volume. Volumes combine with Union, Subtract and Intersect. The
+  seam keeps its original vertices, so the patch joins with no T-junctions, and
+  the inside is all quads. Preview with Auto-Update, then Apply (undoable) into
+  the mesh or a copy.
+- **Border Ring.** Jagged region borders get a ring of quads along the seam and
+  an untangling pass. Bent or caved-in seam quads dropped from about 5% to 0.5%
+  on a whale region and from about 31% to 2.8% on a noisy porthole scan;
+  region remeshing is about 5x faster.
+- **Fill Loop** fills a closed hole with an all-quad patch that follows the
+  surrounding curve. **Fit to Surface** relaxes and snaps vertices onto the
+  original surface without folding quads.
+- **Grid fill** for four-sided regions now follows the Quad Size setting.
+- **Follow Curvature flow** (new Flow option for PairClosure and regions):
+  quads also line up with the surface's main bending directions.
+- **New UI.** Numbered steps, one main button per panel, a Last Result box,
+  plain-language names and tooltips on every option, status words in the HUD
+  so it does not rely on colour alone.
+- **Preferences:** sidebar tab name, compact panels, show/hide each panel, HUD
+  corner, offset, scale and opacity, and every heatmap and region colour.
+- **A download for every Blender version:** separate zips for 3.6, 4.0, 4.1,
+  4.2, 4.3, 4.4, 4.5, 5.0, 5.1 and 5.2, plus the two all-in-one zips, all tested
+  on that Blender version. Every top-level module is now packed automatically.
+
 ## 0.5.1 - 2026-10-27
 
 - Wider Blender support: the legacy add-on now installs and passes the test
