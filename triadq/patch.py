@@ -491,7 +491,14 @@ def _disk_pieces(vertices, faces, face_ids, incidence, adjacency, claimed: set[i
     return done, failed
 
 
-def prepare_regions(vertices, faces, mask, *, min_island: int = 4, max_hole: int = 4, smooth: int = 2, split_rings: bool = False, frozen=None):
+def region_topology(vertices, faces) -> tuple:
+    """What prepare_regions needs about the whole mesh, for callers that prepare many regions of one mesh."""
+
+    vertices = np.asarray(vertices, dtype=np.float64)
+    return face_adjacency(faces), triangle_mates(vertices, faces), _Incidence(faces)
+
+
+def prepare_regions(vertices, faces, mask, *, min_island: int = 4, max_hole: int = 4, smooth: int = 2, split_rings: bool = False, frozen=None, topology=None):
     """Clean a face mask into disjoint disk components with even seams.
 
     `split_rings` cuts regions that are not disks (around a limb or an open hole) into pieces instead of skipping
@@ -500,16 +507,14 @@ def prepare_regions(vertices, faces, mask, *, min_island: int = 4, max_hole: int
     """
 
     vertices = np.asarray(vertices, dtype=np.float64)
-    adjacency = face_adjacency(faces)
+    adjacency, mates, incidence = topology or region_topology(vertices, faces)
     mask = clean_mask(faces, mask, min_island, max_hole, adjacency)
     if smooth:
-        mates = triangle_mates(vertices, faces)
         mask = clean_mask(faces, smooth_mask(faces, mask, smooth, adjacency, mates), min_island, max_hole, adjacency)
     claimed: set[int] = set()
     if frozen is not None:
         mask = mask & ~frozen
         claimed.update(np.flatnonzero(frozen).tolist())
-    incidence = _Incidence(faces)
     components: list[np.ndarray] = []
     warnings: list[str] = []
     for index, component in enumerate(mask_components(faces, mask, adjacency)):
@@ -918,7 +923,7 @@ class _Planar:
                 touched.update(range(before, len(self.t)))
                 if len(self.p) >= max_points:
                     break
-            self.flips()
+            self.flips({_key(tri[k], tri[(k + 1) % 3]) for tri in map(self.t.__getitem__, touched) for k in range(3)})
 
     def smooth(self, iterations: int = 4) -> None:
         """Laplacian smoothing of free vertices; moves that invert a triangle are undone."""
@@ -1677,6 +1682,7 @@ def remesh_region(
     max_faces: int = 20_000,
     seam_layer: str = "AUTO",
     field_mode: str = "SMOOTH",
+    cancelled=None,
 ) -> PatchResult:
     """Replace one disk-shaped face set by an all-quad patch on the same seam.
 
@@ -1735,6 +1741,8 @@ def remesh_region(
     budget = math.sqrt(max(1.0, area3 / max(target * target, 1e-30) / max_faces))
 
     def size_fn(points, factor):
+        if cancelled is not None and cancelled():
+            raise ValueError("cancelled")
         size2 = (seam_part + blend * target * factor) * ratio * budget
         t, b = locator.locate(points)
         return np.einsum("ij,ij->i", size2[tris[t]], b)

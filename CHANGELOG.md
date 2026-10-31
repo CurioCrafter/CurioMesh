@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Work Live** (Guided panel). Paint areas on your mesh or on the result, each
+  with its own density and fill style, and watch them remesh one at a time on a
+  background thread while you keep working. Scroll sets the size, Shift+scroll
+  the density, F the fill style. Only what changed is redone, and a change stops
+  work that is out of date. New **Work Areas** mode in the Remesh setting.
+- Region fills are faster: after each refinement round only the edges that
+  changed are checked for flips, not all of them.
+
 ## 0.7.0 - 2026-10-30
 
 - **Flat Quads** (new Method). Flat areas become as few quads as their outlines

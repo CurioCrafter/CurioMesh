@@ -145,6 +145,36 @@ know:
 - A preview that takes more than 4 seconds stops updating by itself until you
   press **Update**, so Blender stays usable on big meshes.
 
+### Work Live: retopo area by area, next to the algorithm
+
+![Your mesh on the left and the result on the right: a dense area, a coarse Grid area and a painted stroke](docs/images/guided_work_live.png)
+
+Press **Work Live** in the Guided panel and work over the mesh while it
+remeshes in the background. Blender stays yours between steps, and the result
+beside your mesh fills in one finished piece at a time.
+
+| Do this | Over your mesh or the result |
+|---|---|
+| Click or drag | Add an area. A drag paints one stroke |
+| Scroll | Size of the area under the mouse, or of the next one |
+| Shift+scroll | Density: up is more quads. Below the base density Detail turns into Calm |
+| F | Fill style of that area: Flow or Grid |
+| Ctrl+click | Remove the area |
+| Enter, Esc or right-click | Finish. **Apply** writes the result |
+
+- A pulsing ring shows which area the algorithm is on. The area you touched last
+  goes first.
+- Only what changed is redone: the other areas stay on screen, a change stops
+  work that is already out of date, and going back to an earlier setting is
+  instant.
+- Each area has its own density and fill style, and overlapping areas with the
+  same settings become one. Where different areas overlap, the newest wins, and
+  a line of your mesh's edges stays between them.
+- Everything outside the areas stays as it was. For a full retopo, cover the
+  mesh with areas or use Whole Mesh.
+- Very large areas still take a while to finish, but you can keep working while
+  they run. The Whole Mesh and Points Only modes work as before.
+
 ## New in 0.6
 
 | | 0.5 | 0.6 |

@@ -1357,6 +1357,29 @@ def run_guided_case(module):
     print(f"PASS guided lock: {len(keys)} faces frozen through an update")
     bpy.ops.curiomesh.guided_unlock()
 
+    # work areas: each with its own density, remeshed on the worker, only what changed is redone
+    sphere.curiomesh_points.clear()
+    gs.scope = "AREAS"
+    guided.add_point(sphere, (1.0, 0.0, 0.0), (1.0, 0.0, 0.0), "DETAIL", 0.5, 2.0)
+    guided.add_point(sphere, (-1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), "CALM", 0.5, 1.0, fill="GRID")
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    runner = guided.state["work"]["runner"]
+    res = guided.state["res"]
+    if res is None or not res["new"].any() or runner.warnings:
+        raise AssertionError(f"guided: work areas made nothing: {guided.status()}")
+    cent = np.asarray([np.mean(res["co"][list(f)], axis=0) for f, n in zip(res["faces"], res["new"]) if n])
+    dense, coarse = int((cent[:, 0] > 0).sum()), int((cent[:, 0] < 0).sum())
+    if dense < 3 * coarse or not coarse:
+        raise AssertionError(f"guided: areas did not keep their densities: {dense} vs {coarse}")
+    pieces = len(runner.cache)
+    sphere.curiomesh_points[0].strength = 1.0
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    if len(runner.cache) != pieces + 1:
+        raise AssertionError(f"guided: changing one area redid {len(runner.cache) - pieces} pieces")
+    print(f"PASS guided areas: {dense} and {coarse} new quads, one area redone on its own")
+
     # auto-suggest, next spot, apply
     sphere.curiomesh_points.clear()
     bpy.ops.curiomesh.guided_suggest()
