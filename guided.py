@@ -21,13 +21,14 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from . import overlay, region
-from .triadq import patch
+from .triadq import areas, patch
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.types import MeshData
 
 PREVIEW_NAME = "CurioMesh_GuidedPreview"
 POINT_TAG = "curiomesh_point"
 DEBOUNCE_SECONDS = 0.35
+AREA_DEBOUNCE_SECONDS = 0.12
 POLL_SECONDS = 0.2
 LIVE_QUAD_CAP = 2_500  # predicted quads above which the live preview waits for "Update"
 HARD_QUAD_CAP = 60_000
@@ -45,6 +46,7 @@ KIND_KEYS = ("DETAIL", "LOOP", "SHARP", "CALM")
 SCOPE_ITEMS = [
     ("WHOLE", "Whole Mesh", "Remesh the whole mesh; the points change the quad size across it", "MESH_DATA", 0),
     ("POINTS", "Points Only", "Remesh only inside the point spheres; the rest of the mesh stays exactly as it is", "SELECT_SET", 1),
+    ("AREAS", "Work Areas", "Each point is its own area with its own density and fill style. They are remeshed one at a time in the background, so you can keep working", "BRUSH_DATA", 2),
 ]
 APPLY_ITEMS = [
     ("NEW", "New Object", "Write the result to a new object called <name>_Retopo", "DUPLICATE", 0),
@@ -80,6 +82,7 @@ state = {
     "batches": None,
     "L0": 0.1,
     "predicted": 0,
+    "work": None,
 }
 
 
@@ -97,6 +100,7 @@ class Pt:
     nrm: np.ndarray
     r: float
     s: float
+    fill: str = "FLOW"
 
 
 def _on_point_edit(self, context):
@@ -109,6 +113,7 @@ class CURIOMESH_PG_guided_point(bpy.types.PropertyGroup):
     kind: bpy.props.EnumProperty(name="Type", description="What this point asks for", items=KIND_ITEMS, default="DETAIL", update=_on_point_edit)
     radius: bpy.props.FloatProperty(name="Radius", description="How far the point reaches (object-space units)", default=0.1, min=1e-4, soft_max=10.0, subtype="DISTANCE", update=_on_point_edit)
     strength: bpy.props.FloatProperty(name="Strength", description="How strongly the point changes the quad size: 1 = about three times smaller (or bigger for Calm) at the centre", default=1.0, min=0.1, max=4.0, update=_on_point_edit)
+    fill: bpy.props.EnumProperty(name="Fill Style", description="Pattern of the new quads in this area (Work Areas only)", items=region.STRATEGY_ITEMS, default="FLOW", update=_on_point_edit)
     auto: bpy.props.BoolProperty(name="Suggested", description="Placed by Auto-suggest (replaced when you suggest again)", default=False)
 
 
@@ -192,8 +197,8 @@ def multiplier(P: np.ndarray, pts: list[Pt], E: np.ndarray | None = None) -> np.
 
 def region_sd(P: np.ndarray, pts: list[Pt], scope: str) -> np.ndarray:
     """Signed distance of the point-sphere region: union of adding spheres minus the subtracting ones (<0 inside)."""
-    add = ("DETAIL", "LOOP") if scope == "POINTS" else ("DETAIL", "LOOP", "SHARP")
-    sub = ("CALM", "SHARP") if scope == "POINTS" else ("CALM",)
+    add = {"POINTS": ("DETAIL", "LOOP"), "AREAS": KIND_KEYS}.get(scope, ("DETAIL", "LOOP", "SHARP"))
+    sub = {"POINTS": ("CALM", "SHARP"), "AREAS": ()}.get(scope, ("CALM",))
 
     def union(kinds):
         sd = np.full(len(P), np.inf)
@@ -203,6 +208,16 @@ def region_sd(P: np.ndarray, pts: list[Pt], scope: str) -> np.ndarray:
         return sd
 
     return np.maximum(union(add), -union(sub))
+
+
+def stepped_intensity(kind: str, strength: float, up: bool, step: float = 0.25) -> tuple[str, float]:
+    """One scroll notch: up is always denser. Detail fades into Calm and back through the base density."""
+    was = -strength if kind == "CALM" else strength
+    now = was + (step if up else -step)
+    if abs(now) < 0.1 or now * was < 0:
+        now = 0.1 if up else -0.1
+    now = float(np.clip(now, -4.0, 4.0))
+    return "CALM" if now < 0 else ("DETAIL" if kind == "CALM" else kind), round(abs(now), 3)
 
 
 # --------------------------------------------------------------------------- mesh helpers
@@ -635,10 +650,15 @@ def _region_pass(base_co, base_faces, mask, pts, L0, gs, project, base_locked, b
         if not res.ok:
             warns.append(f"Region ({len(comp)} faces) skipped: {res.message}")
         results.append(res)
+    return _merge_results(base_co, base_faces, results, base_locked, base_mat), warns
+
+
+def _merge_results(base_co, base_faces, results, base_locked, base_mat):
+    """The base mesh with every finished patch put in. None when no patch worked."""
     good = [r for r in results if r.ok]
     if not good:
-        return None, warns
-    co, faces, new = region._merged_arrays({"co": base_co, "faces": base_faces, "results": results})
+        return None
+    co, faces, new = region._merged_arrays({"co": base_co, "faces": base_faces, "results": good})
     removed = np.zeros(len(base_faces), dtype=bool)
     for r in good:
         removed[r.removed_faces] = True
@@ -648,7 +668,7 @@ def _region_pass(base_co, base_faces, mask, pts, L0, gs, project, base_locked, b
     if base_mat is not None:
         extra = [base_mat[s] if 0 <= s < len(base_mat) else 0 for r in good for s in (r.face_source or [-1] * len(r.faces))]
         mat = np.concatenate((base_mat[kept], np.asarray(extra, dtype=np.int32)))
-    return {"co": co, "faces": faces, "new": new, "locked": locked, "mat": mat, "removed": removed}, warns
+    return {"co": co, "faces": faces, "new": new, "locked": locked, "mat": mat, "removed": removed}
 
 
 # --------------------------------------------------------------------------- gather / suggest / spot
@@ -656,7 +676,7 @@ def _region_pass(base_co, base_faces, mask, pts, L0, gs, project, base_locked, b
 
 def gather(obj, gs=None) -> list[Pt]:
     """Points on the object plus tagged empties."""
-    pts = [Pt(p.kind, np.asarray(p.co, float), np.asarray(p.normal, float), float(p.radius), float(p.strength)) for p in obj.curiomesh_points]
+    pts = [Pt(p.kind, np.asarray(p.co, float), np.asarray(p.normal, float), float(p.radius), float(p.strength), p.fill) for p in obj.curiomesh_points]
     inv = obj.matrix_world.inverted()
     scale = max(float(np.mean(obj.matrix_world.to_scale())), 1e-9)
     default = gs.new_kind if gs is not None else "DETAIL"
@@ -673,14 +693,15 @@ def gather(obj, gs=None) -> list[Pt]:
                 np.asarray(normal if ok else (0, 0, 1), float),
                 max(float(o.empty_display_size) * float(np.mean(o.matrix_world.to_scale())) / scale, 1e-4),
                 float(o.get("curiomesh_strength", 1.0)),
+                str(o.get("curiomesh_fill", "FLOW")),
             )
         )
     return pts
 
 
-def add_point(obj, co, normal, kind, radius, strength, auto=False):
+def add_point(obj, co, normal, kind, radius, strength, auto=False, fill="FLOW"):
     p = obj.curiomesh_points.add()
-    p.co, p.normal, p.kind, p.radius, p.strength, p.auto = tuple(co), tuple(normal), kind, radius, strength, auto
+    p.co, p.normal, p.kind, p.radius, p.strength, p.auto, p.fill = tuple(co), tuple(normal), kind, radius, strength, auto, fill
     obj.curiomesh_point_index = len(obj.curiomesh_points) - 1
     return p
 
@@ -796,7 +817,7 @@ def _signature(context, src_obj) -> tuple:
         state["lock"]["id"] if state["lock"] else 0,
     ]
     for p in src_obj.curiomesh_points:
-        parts.append((p.kind, round(p.radius, 5), round(p.strength, 4), tuple(round(x, 5) for x in p.co)))
+        parts.append((p.kind, p.fill, round(p.radius, 5), round(p.strength, 4), tuple(round(x, 5) for x in p.co)))
     for o in bpy.data.objects:
         if o.type == "EMPTY" and (o.get(POINT_TAG) is not None or o.name.startswith("CM_Point")):
             parts.append((o.name, o.parent, round(o.empty_display_size, 4), tuple(round(x, 4) for x in o.matrix_world.translation), str(o.get("curiomesh_kind", "")), o.get("curiomesh_strength", 1.0)))
@@ -813,7 +834,7 @@ def remove_preview() -> None:
     state.update(res=None, spot=None, draw=None, draw_key=None, batches=None)
 
 
-def _make_mesh(name, source, res):
+def _make_mesh(name, source, res, uvs=True):
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(res["co"].tolist(), [], res["faces"])
     mesh.update()
@@ -821,13 +842,14 @@ def _make_mesh(name, source, res):
         mesh.materials.append(m)
     if res.get("mat") is not None and len(mesh.polygons) == len(res["mat"]):
         mesh.polygons.foreach_set("material_index", np.asarray(res["mat"], dtype=np.int32))
-    _transfer_uvs(mesh, source, _source_data(source), res)
+    if uvs:
+        _transfer_uvs(mesh, source, _source_data(source), res)
     return mesh
 
 
-def _build_preview(context, source, res) -> None:
+def _build_preview(context, source, res, uvs=True) -> None:
     obj = bpy.data.objects.get(PREVIEW_NAME)
-    mesh = _make_mesh(PREVIEW_NAME + "_Mesh", source, res)
+    mesh = _make_mesh(PREVIEW_NAME + "_Mesh", source, res, uvs)
     if obj is None:
         obj = bpy.data.objects.new(PREVIEW_NAME, mesh)
         (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(obj)
@@ -844,6 +866,94 @@ def _build_preview(context, source, res) -> None:
     obj.hide_select = False
 
 
+# --------------------------------------------------------------------------- work areas
+
+
+def stop_work() -> None:
+    if state["work"] is not None:
+        state["work"]["runner"].stop()
+        state["work"] = None
+
+
+def _area_target(p: Pt, L0: float) -> float:
+    return L0 * _fac(p.kind, p.s)
+
+
+def _find_spot(res, project, L0) -> None:
+    if res is not None:
+        try:
+            spot = next_spot(res, project, L0)
+            res["spot"] = {"pos": spot[0], "text": spot[1]} if spot else None
+        except Exception:  # the hint must never break an update
+            res["spot"] = None
+
+
+def _start_areas(source, gs, pts, src, L0) -> bool:
+    """Hand the areas to the worker. Blender stays free; _collect_work picks up each finished piece."""
+    lock = state["lock"]
+    co, faces = (lock["co"], lock["faces"]) if lock else (src["co"], src["faces"])
+    frozen = lock["locked"] if lock else np.zeros(len(faces), dtype=bool)
+    mat = lock.get("mat") if lock else src["mat"]
+    key = (src["sig"], lock["id"] if lock else 0, gs.fit_iterations, L0)
+    if state["work"] is None or state["work"]["key"] != key:
+        stop_work()
+        project = region._projector(_bvh(src))
+        iterations = gs.fit_iterations
+        runner = areas.AreaRunner(
+            co, faces, frozen,
+            fit=(lambda r: region._fit_result(co, r, project, iterations)) if iterations > 0 else None,
+            merge=lambda results: _merge_results(co, faces, results, frozen, mat),
+            finish=lambda res: _find_spot(res, project, L0),
+            max_faces=region.MAX_PATCH_FACES,
+        )
+        state["work"] = {"key": key, "runner": runner, "cent": _centroids(co, faces), "seen": 0, "areas": []}
+    work = state["work"]
+    items = [areas.Area(p.co, p.r, _area_target(p, L0), p.fill) for p in pts]
+    groups = areas.group_areas(items)
+    jobs = [areas.Job(m & ~frozen, items[g[0]].target, items[g[0]].strategy, g) for g, m in zip(groups, areas.area_masks(work["cent"], items, groups)) if (m & ~frozen).any()]
+    active = source.curiomesh_point_index
+    jobs.sort(key=lambda j: (active not in j.tag, -j.tag[-1]))  # the area you just touched first, then newest first
+    work["areas"] = pts
+    state.update(L0=L0, ms=0.0, spot=None)
+    state["message"] = "Working..."
+    work["runner"].start(jobs)
+    return True
+
+
+def _collect_work(context) -> None:
+    """Show what the worker finished since the last look."""
+    work = state["work"]
+    source = state_source()
+    if work is None or source is None:
+        return
+    runner = work["runner"]
+    done, total = runner.progress
+    if runner.output_id != work["seen"]:
+        work["seen"] = runner.output_id
+        if runner.output is None:
+            remove_preview()
+        else:
+            state["res"] = runner.output
+            _build_preview(context, source, runner.output, uvs=False)  # the UVs are copied when you Apply
+        state["draw_key"] = None
+    res = state["res"]
+    made = f"{int(res['new'].sum()):,} new quads in {len(res['faces']):,} faces" if res is not None else "No quads yet"
+    if runner.busy:
+        state["message"] = f"Working on piece {min(done + 1, max(total, 1))} of {max(total, 1)}. {made}"
+    elif not work.get("settled") == runner.output_id:
+        work["settled"] = runner.output_id
+        state["message"] = made + (f" | {runner.warnings[0]}" if runner.warnings else "")
+        state["spot"] = res.get("spot") if res is not None else None
+    overlay.tag_redraw()
+
+
+def finish_work(context) -> None:
+    """Wait for the worker, for whoever needs the finished result now (Apply)."""
+    if state["work"] is not None:
+        state["work"]["runner"].wait()
+        _collect_work(context)
+
+
 def run_update(context, force: bool = False) -> bool:
     """Recompute the preview now. Returns True when a preview was produced."""
     gs = context.scene.curiomesh_guided
@@ -857,12 +967,16 @@ def run_update(context, force: bool = False) -> bool:
     pts = gather(source, gs)
     lock = state["lock"]
     if not pts and lock is None:
+        stop_work()
         remove_preview()
         state["message"] = "Place a point or press Auto-suggest"
         return False
     started = time.perf_counter()
     src = _source_data(source)
     L0 = float(np.sqrt(src["tri_area"].sum() / max(gs.base_faces, 1)))
+    if gs.scope == "AREAS":
+        return _start_areas(source, gs, pts, src, L0)
+    stop_work()
     project = region._projector(_bvh(src))
     notes = ""
     res = None
@@ -939,6 +1053,7 @@ def _start(context) -> None:
 def _stop() -> None:
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
+    stop_work()
     remove_preview()
     state.update(sig=None, message="", lock=None, hover=None)
     overlay.tag_redraw()
@@ -953,19 +1068,21 @@ def _poll():
         active = context.object
         if active is not None and active.type == "MESH" and active.name not in (PREVIEW_NAME, state["source"]) and active.mode == "OBJECT":
             state.update(source=active.name, lock=None, sig=None)
+            stop_work()
             remove_preview()
         source = state_source()
         preview = bpy.data.objects.get(PREVIEW_NAME)
         if source is None or source.mode != "OBJECT" or (preview is not None and preview.mode != "OBJECT"):
             return POLL_SECONDS
+        _collect_work(context)
         sig = _signature(context, source)
         now = time.perf_counter()
         if sig != state["sig"]:
             state.update(sig=sig, changed_at=now, dirty=True)
             overlay.tag_redraw()
-        elif state["dirty"] and now - state["changed_at"] >= DEBOUNCE_SECONDS:
+        elif state["dirty"] and now - state["changed_at"] >= (AREA_DEBOUNCE_SECONDS if gs.scope == "AREAS" else DEBOUNCE_SECONDS):
             state["dirty"] = False
-            if gs.auto_update and state["ms"] <= LIVE_SLOW_MS:
+            if gs.auto_update and (gs.scope == "AREAS" or state["ms"] <= LIVE_SLOW_MS):
                 run_update(context)
             elif gs.auto_update:
                 state["message"] = f"The last update took {state['ms'] / 1000.0:.0f} s: press Update"
@@ -1059,6 +1176,8 @@ def _draw_data(source, gs):
             data["spheres"][kind] = np.concatenate([_world(m, _SPHERE * p.r + p.co) for p in mine]).astype(np.float32)
             rings = [_world(m, _ring(p.co, p.nrm, p.r)) for p in mine]
             rings += [_world(m, _ring(p.co, p.nrm, 0.5 * p.r)) for p in mine if p.kind == "LOOP"]
+            if gs.scope == "AREAS" and preview is not None:  # the same areas on the result, side by side
+                rings += [_world(preview.matrix_world, _ring(p.co, p.nrm, p.r)) for p in mine]
             data["rings"][kind] = np.concatenate(rings).astype(np.float32)
             data["dots"][kind] = _world(m, [p.co for p in mine]).astype(np.float32)
     if pts and gs.show_cage:
@@ -1134,6 +1253,23 @@ def _draw() -> None:
             gpu.state.line_width_set(2.5)
             shader.uniform_float("color", colors[hv["kind"]])
             batch("LINES", _world(source.matrix_world, _ring(hv["co"], hv["nrm"], hv["r"])).astype(np.float32)).draw(shader)
+            preview = bpy.data.objects.get(PREVIEW_NAME)
+            if preview is not None:
+                batch("LINES", _world(preview.matrix_world, _ring(hv["co"], hv["nrm"], hv["r"])).astype(np.float32)).draw(shader)
+        work = state["work"]
+        running = work["runner"].current if work is not None and work["runner"].busy else None
+        if running:  # the area the algorithm is on right now: a pulsing ring on both meshes
+            pulse = 0.55 + 0.45 * float(np.sin(time.perf_counter() * 6.0))
+            gpu.state.depth_test_set("ALWAYS")
+            gpu.state.line_width_set(4.0)
+            shader.uniform_float("color", (*spot_color[:3], pulse))
+            preview = bpy.data.objects.get(PREVIEW_NAME)
+            for i in running:
+                if i < len(work["areas"]):
+                    p = work["areas"][i]
+                    for owner in (source, preview):
+                        if owner is not None:
+                            batch("LINES", _world(owner.matrix_world, _ring(p.co, p.nrm, p.r)).astype(np.float32)).draw(shader)
         if b["lock"] is not None:
             gpu.state.depth_test_set("LESS_EQUAL")
             shader.uniform_float("color", lock_color)
@@ -1166,13 +1302,7 @@ def surface_hit(obj, origin: Vector, direction: Vector):
     return (np.asarray(loc, float), np.asarray(normal, float)) if ok else None
 
 
-class CURIOMESH_OT_guided_place(bpy.types.Operator):
-    bl_idname = "curiomesh.guided_place"
-    bl_label = "Place Points"
-    bl_description = (
-        "Click the surface to add a point. Ctrl+click removes one, scroll sets the radius, Shift+scroll the strength, "
-        "keys 1-4 pick Detail / Loop / Sharp / Calm, Enter or Esc finishes"
-    )
+class _SurfaceTool:
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -1276,6 +1406,142 @@ class CURIOMESH_OT_guided_place(bpy.types.Operator):
 
     def cancel(self, context):
         self._finish(context)
+
+
+class CURIOMESH_OT_guided_place(_SurfaceTool, bpy.types.Operator):
+    bl_idname = "curiomesh.guided_place"
+    bl_label = "Place Points"
+    bl_description = (
+        "Click the surface to add a point. Ctrl+click removes one, scroll sets the radius, Shift+scroll the strength, "
+        "keys 1-4 pick Detail / Loop / Sharp / Calm, Enter or Esc finishes"
+    )
+
+
+class CURIOMESH_OT_guided_work(_SurfaceTool, bpy.types.Operator):
+    bl_idname = "curiomesh.guided_work"
+    bl_label = "Work Live"
+    bl_description = (
+        "Remesh the mesh area by area while you watch. Click or drag on your mesh or on the result to add an area. "
+        "Over an area, scroll sets its size, Shift+scroll its density and F its fill style. It redoes only what changed, in the background"
+    )
+
+    def invoke(self, context, event):
+        _gs(context).scope = "AREAS"
+        self.dab = None
+        self.under = None
+        return super().invoke(context, event)
+
+    def _status(self, context):
+        gs = _gs(context)
+        p = self._area()
+        kind, strength, fill, radius = (p.kind, p.strength, p.fill, p.radius) if p else (gs.new_kind, gs.new_strength, gs.strategy, gs.new_radius)
+        head = f"Area {self.under + 1}" if p else "New area"
+        context.workspace.status_text_set(
+            f"{head}: {kind.title()} {strength:.2f}, {fill.title()}, size {radius:.3g}  |  Click/Drag: add  Ctrl+Click: remove  "
+            "Scroll: size  Shift+Scroll: density  F: fill style  Enter/Esc: done"
+        )
+
+    def _area(self):
+        pts = self.obj.curiomesh_points
+        return pts[self.under] if self.under is not None and self.under < len(pts) else None
+
+    def _ray(self, region_, event):
+        hit = super()._ray(region_, event)
+        preview = bpy.data.objects.get(PREVIEW_NAME)
+        if hit is not None or preview is None:
+            return hit
+        from bpy_extras import view3d_utils
+
+        coord = (event.mouse_x - region_.x, event.mouse_y - region_.y)
+        try:  # same object-space shape as your mesh, only moved aside
+            return surface_hit(preview, view3d_utils.region_2d_to_origin_3d(region_, region_.data, coord), view3d_utils.region_2d_to_vector_3d(region_, region_.data, coord))
+        except RuntimeError:  # the result was swapped this very moment
+            return None
+
+    def _hover(self, context, hit):
+        gs = _gs(context)
+        self.under = None
+        if hit is not None:
+            near = [(float(np.linalg.norm(np.asarray(p.co) - hit[0])) / max(p.radius, 1e-9), i) for i, p in enumerate(self.obj.curiomesh_points)]
+            near = [n for n in near if n[0] <= 1.0]
+            self.under = min(near)[1] if near else None
+        p = self._area()
+        if self.under is not None:
+            self.obj.curiomesh_point_index = self.under
+        state["hover"] = {"co": hit[0], "nrm": hit[1], "r": p.radius if p else gs.new_radius, "kind": p.kind if p else gs.new_kind} if hit else None
+        self._status(context)
+
+    def _add(self, gs, hit):
+        add_point(self.obj, hit[0], hit[1], gs.new_kind, gs.new_radius, gs.new_strength, fill=gs.strategy)
+        self.dab = hit[0]
+
+    def _brush_follows(self, gs, p):
+        gs.new_kind, gs.new_strength, gs.new_radius, gs.strategy = p.kind, p.strength, p.radius, p.fill
+
+    def modal(self, context, event):
+        gs = _gs(context)
+        if context.area is not None:
+            context.area.tag_redraw()
+        if event.type in {"RET", "NUMPAD_ENTER", "ESC"} and event.value == "PRESS":
+            self._finish(context)
+            return {"FINISHED"}
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            self.dab = None
+        view = self._view_region(context, event)
+        if view is None:
+            state["hover"] = None
+            self.dab = None
+            return {"PASS_THROUGH"}
+        if event.type == "RIGHTMOUSE" and event.value == "PRESS":
+            self._finish(context)
+            return {"FINISHED"}
+        if event.type == "MOUSEMOVE":
+            hit = self._ray(view, event)
+            if self.dab is not None and hit is not None and np.linalg.norm(hit[0] - self.dab) > 0.75 * gs.new_radius:
+                self._add(gs, hit)
+            self._hover(context, hit)
+            return {"RUNNING_MODAL"}
+        if event.type in {"WHEELUPMOUSE", "WHEELDOWNMOUSE"} and not event.alt and not event.ctrl:
+            up = event.type == "WHEELUPMOUSE"
+            p = self._area()
+            kind, strength, radius = (p.kind, p.strength, p.radius) if p else (gs.new_kind, gs.new_strength, gs.new_radius)
+            if event.shift:
+                kind, strength = stepped_intensity(kind, strength, up)
+            else:
+                radius *= 1.1 if up else 1 / 1.1
+            if p:
+                p.kind, p.strength, p.radius = kind, strength, radius
+                self._brush_follows(gs, p)
+            else:
+                gs.new_kind, gs.new_strength, gs.new_radius = kind, strength, radius
+            if state["hover"]:
+                state["hover"].update(r=radius, kind=kind)
+            self._status(context)
+            return {"RUNNING_MODAL"}
+        if event.type == "F" and event.value == "PRESS":
+            p = self._area()
+            fill = "GRID" if (p.fill if p else gs.strategy) == "FLOW" else "FLOW"
+            if p:
+                p.fill = fill
+            gs.strategy = fill
+            self._status(context)
+            return {"RUNNING_MODAL"}
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            hit = self._ray(view, event)
+            if hit is None:
+                return {"RUNNING_MODAL"}
+            self._hover(context, hit)
+            if event.ctrl:
+                if self.under is not None:
+                    self.obj.curiomesh_points.remove(self.under)
+                    self.obj.curiomesh_point_index = max(0, min(self.under, len(self.obj.curiomesh_points) - 1))
+                    self.under = None
+            else:
+                self._add(gs, hit)
+            return {"RUNNING_MODAL"}
+        if event.type in {"MIDDLEMOUSE", "TRACKPADPAN", "TRACKPADZOOM", "MOUSEROTATE"} or event.type.startswith("NUMPAD") or event.alt:
+            return {"PASS_THROUGH"}
+        return {"RUNNING_MODAL"}
 
 
 class CURIOMESH_OT_guided_add_point(bpy.types.Operator):
@@ -1458,6 +1724,7 @@ def _leave_preview(context):
 
 
 def _set_lock(res, locked, free_all=False):
+    stop_work()
     state["lock"] = {"co": res["co"], "faces": res["faces"], "locked": locked, "mat": res.get("mat"), "free_all": free_all, "id": time.perf_counter_ns()}
 
 
@@ -1567,6 +1834,11 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         res = state["res"]
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
+        finish_work(context)
+        res = state["res"]
+        if res is None:
+            self.report({"WARNING"}, "Nothing to apply")
+            return {"CANCELLED"}
         mesh = _make_mesh(source.name + "_Retopo", source, res)
         for poly in mesh.polygons:
             poly.use_smooth = True
@@ -1609,6 +1881,7 @@ class CURIOMESH_UL_guided_points(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
         row.prop(item, "kind", text="", icon_only=True)
+        row.prop(item, "fill", text="", icon_only=True)
         row.prop(item, "radius", text="")
         row.prop(item, "strength", text="")
 
@@ -1647,6 +1920,9 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         row.scale_y = 1.4
         row.operator("curiomesh.guided_place", text="Place Points", icon="MOUSE_LMB")
         row.operator("curiomesh.guided_suggest", text="Auto-suggest", icon="LIGHT")
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("curiomesh.guided_work", icon="BRUSH_DATA")
         if obj is not None:
             row = layout.row()
             row.template_list("CURIOMESH_UL_guided_points", "", obj, "curiomesh_points", obj, "curiomesh_point_index", rows=3)
@@ -1659,6 +1935,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 item = obj.curiomesh_points[obj.curiomesh_point_index]
                 col = layout.column(align=True)
                 col.prop(item, "kind", text="")
+                col.prop(item, "fill", text="")
                 col.prop(item, "radius")
                 col.prop(item, "strength")
                 col.prop(item, "co", text="Location")
@@ -1741,6 +2018,7 @@ CLASSES = (
     CURIOMESH_PG_guided_point,
     CURIOMESH_PG_guided,
     CURIOMESH_OT_guided_place,
+    CURIOMESH_OT_guided_work,
     CURIOMESH_OT_guided_add_point,
     CURIOMESH_OT_guided_remove_point,
     CURIOMESH_OT_guided_clear_points,
@@ -1764,6 +2042,7 @@ _draw_handles: list = []
 
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
+    stop_work()
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="")
     for sc in bpy.data.scenes:
         gs = getattr(sc, "curiomesh_guided", None)
@@ -1791,6 +2070,7 @@ def unregister() -> None:
         bpy.app.handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
+    stop_work()
     try:
         remove_preview()
     except Exception:
