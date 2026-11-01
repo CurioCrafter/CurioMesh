@@ -42,7 +42,7 @@ paints leftover triangles, n-gons and poles right on the mesh.
 ![Wireframes side by side: the original air compressor at 79,042 faces and the result at 24,222 quads, whole object and close-up](docs/images/auto_compressor.png)
 
 Choose **Auto Segments** as the Remesh mode in the Guided panel and press Update.
-There are no points to place and no face count to guess. You set **Change Allowed**,
+There are no points to place and no face count to guess. You set **Detail**,
 how much of the view may look different, and it works out the rest:
 
 1. **Split the model into its loose parts** and make each one at several sizes.
@@ -54,7 +54,7 @@ how much of the view may look different, and it works out the rest:
    amount you asked for.
 
 These are free [Poly Haven](https://polyhaven.com) models (CC0), so you can download
-them and check these numbers yourself. All ran at 6% Change Allowed and finished with
+them and check these numbers yourself. All ran at 6% Detail and finished with
 no triangles and no folded quads. They took from 15 seconds to about 24 minutes.
 
 | Model | Original faces | Result quads | Size | View changed |
@@ -81,7 +81,7 @@ areas gain the most.
 ![Dutch ship wireframes, 110,616 faces to 58,536 quads, with the sail's cloth folds simplified in the close-up](docs/images/auto_ship.png)
 
 The close-up above shows the current weak spot: at 6% the sail loses its fine cloth
-folds. Lower Change Allowed to keep more. See [Known Limits](#known-limits).
+folds. Lower Detail to keep more. See [Known Limits](#known-limits).
 
 ## Flat Quads: Huge Quads On Flat Areas, Density Only Where It's Needed
 
@@ -153,9 +153,11 @@ know:
   that off for a faster preview of big meshes; a few triangles then stay.
 - UV layers and materials carry over from your mesh in both modes. A quad
   crossing a UV seam takes its UVs from one side, so it does not stretch across
-  the atlas. Auto Segments goes further: quads stay inside one UV island, and
-  seams stay in place, straightened only slightly. A model cut into many islands
-  needs more faces for this, up to about twice as many on our test models.
+  the atlas. **Keep UV Seams** in Auto Segments goes further: quads stay inside one
+  UV island, and seams stay in place, straightened only slightly. It's off by default
+  because a model cut into many islands needs more faces for this, up to about twice
+  as many on our test models. For textured game assets, Bake Detail **Normal + Color**
+  is the recommended route.
 - **Bake Detail**, next to Apply, bakes your mesh onto the result. **Normal Map**
   keeps your materials and adds a normal map. **Normal + Color** makes one new
   material and new UVs. Press Update after choosing it: seams then cost no faces.
@@ -350,10 +352,10 @@ Three optional helpers sit in step 2 of the Auto Segments panel.
   55% of the original at 6%. Fine detail such as cloth folds and small rounded ends is
   simplified first. It can take many minutes on models with hundreds of parts, and
   Blender can pause for up to about 30 seconds at a time on meshes over a million faces.
-- **Don't count on kept UVs in Auto Segments yet: re-unwrap and bake instead.** It ignores
-  UV seams while reducing, so its quads can span several UV islands and textures smear
-  there. Measured on real models, those quads cover 6% of the road barrier, 27% of the
-  compressor and 36% of the treasure chest. A fix is the next update.
+- **By default Auto Segments ignores UV seams while reducing,** so its quads can span several
+  UV islands and textures smear there. Measured on real models, those quads cover 6% of
+  the road barrier, 27% of the compressor and 36% of the treasure chest. Turn on **Keep
+  UV Seams** for up to about twice the faces, or bake with **Normal + Color** instead.
 - Auto Segments was mainly tested on Blender 5.2.
 - Region patches are always all quads with an exact seam. On noisy scans a few
   quads next to the seam can still come out bent (about 3% in our noisy scan
