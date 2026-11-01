@@ -14,7 +14,7 @@ BAKE_LAYER = "CurioMesh_Bake"
 MOST_OVERLAP = 0.01  # share of texels a UV map may reuse and still hold a bake
 
 
-def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "") -> None:
+def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02) -> None:
     """Unwrap a mesh with no UVs. With new_layer, always unwrap, into a new layer that becomes the active one."""
     if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
         return
@@ -40,7 +40,7 @@ def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: s
         if method == "UNWRAP":
             bpy.ops.uv.unwrap(method="ANGLE_BASED", margin=0.002)
         else:
-            bpy.ops.uv.smart_project(angle_limit=1.15192, island_margin=0.02)
+            bpy.ops.uv.smart_project(angle_limit=1.15192, island_margin=island_margin)
     finally:
         try:
             bpy.ops.object.mode_set(mode="OBJECT")
@@ -78,6 +78,44 @@ def _uv_layer_can_hold_bake(mesh: bpy.types.Mesh) -> bool:
     uv = np.empty(len(mesh.loops) * 2, dtype=np.float64)
     layer.data.foreach_get("uv", uv)
     return uv_overlap(uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)) <= MOST_OVERLAP
+
+
+def _harden_uv_seams(mesh: bpy.types.Mesh) -> int:
+    """Make every edge where the active UV map splits a hard edge: the normal map can't hide a shading seam there."""
+    count = len(mesh.loops)
+    verts, edges = np.empty(count, dtype=np.int64), np.empty(count, dtype=np.int64)
+    mesh.loops.foreach_get("vertex_index", verts)
+    mesh.loops.foreach_get("edge_index", edges)
+    uv = np.empty(count * 2, dtype=np.float64)
+    mesh.uv_layers.active.data.foreach_get("uv", uv)
+    uv = uv.reshape(-1, 2)
+    starts = np.empty(len(mesh.polygons), dtype=np.int64)
+    sizes = np.empty(len(mesh.polygons), dtype=np.int64)
+    mesh.polygons.foreach_get("loop_start", starts)
+    mesh.polygons.foreach_get("loop_total", sizes)
+    ahead = np.arange(1, count + 1)
+    ahead[starts + sizes - 1] = starts  # the corner after each corner, around its face
+    seen: dict[int, int] = {}
+    split = set()
+    for corner, edge in enumerate(edges.tolist()):
+        other = seen.setdefault(edge, corner)
+        if other == corner:
+            continue
+        # The two faces run along the edge in opposite directions, so each corner's vertex is the other's next one.
+        near = uv[corner] if verts[corner] == verts[ahead[other]] else uv[ahead[corner]]
+        far = uv[ahead[corner]] if verts[corner] == verts[ahead[other]] else uv[corner]
+        if np.abs(near - uv[ahead[other]]).max() > 1e-5 or np.abs(far - uv[other]).max() > 1e-5:
+            split.add(edge)
+    for edge in split:
+        mesh.edges[edge].use_edge_sharp = True
+    return len(split)
+
+
+def _keep_triangles(obj: bpy.types.Object) -> None:
+    """Fix the triangles now: the bake and the exporters read them through this, so a game can't pick other diagonals."""
+    modifier = obj.modifiers.new("CurioMesh Bake Triangles", "TRIANGULATE")
+    modifier.quad_method = "SHORTEST_DIAGONAL"
+    modifier.min_vertices = 4
 
 
 def _principled(material: bpy.types.Material):
@@ -123,7 +161,6 @@ def bake_detail(
     with_color: bool,
     resolution: int,
     cage: float,
-    margin: int = 8,
     new_uvs: bool = False,
 ) -> list[bpy.types.Image]:
     """Bake the source's detail onto the target. The source and its materials are only read.
@@ -132,11 +169,14 @@ def bake_detail(
     as private copies, with the normal map added to each. A new UV layer is made when the kept one overlaps itself.
     """
     mesh = target_obj.data
+    margin = max(4, int(resolution) // 128)  # padding that survives the texture's smaller mip levels
     if new_uvs or not _uv_layer_can_hold_bake(mesh):
-        ensure_target_uvs(target_obj, new_layer=BAKE_LAYER)
+        ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
     uv_layer = mesh.uv_layers.active.name
     keep_render = next((layer.name for layer in mesh.uv_layers if layer.active_render), uv_layer)
     mesh.uv_layers.active.active_render = True
+    _harden_uv_seams(mesh)
+    _keep_triangles(target_obj)
     images = bake_selected_to_active(
         source_obj, target_obj, maps=("NORMAL", "COLOR") if with_color else ("NORMAL",),
         resolution=resolution, margin=margin, cage=cage, ray_limit=3.0 * cage,

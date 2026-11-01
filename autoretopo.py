@@ -27,7 +27,7 @@ from .triadq import patch
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
 from .triadq.types import MeshData
-from .triadq.uvs import simplify_borders
+from .triadq.uvs import absorb_small_kinds, simplify_borders
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
@@ -37,6 +37,7 @@ PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
 TURNED_DEG = 20.0
+ISLAND_TRIANGLES = 32.0  # a UV island worth less than this many of a level's triangles isn't kept apart at that level
 BORDER_TOLERANCE = 0.05  # how far a border between kinds may straighten, as a share of the level's edge length
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
@@ -92,13 +93,19 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
     return wrong, total
 
 
-def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+def _decimate(context, points, polys, kinds, ratio, groups=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], float]:
+    """The piece reduced to this share of its triangles, and the area whose texture that gave up."""
     free = None
+    smeared = 0.0
     if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
         triangles = sum(len(p) - 2 for p in polys)
         wanted = max(ratio * triangles, 1.0)
-        edge = math.sqrt(_area(points, polys) / wanted)
-        points, polys, kinds, free = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * edge)
+        areas = _face_areas(points, polys)
+        triangle = float(areas.sum()) / wanted
+        if groups is not None:
+            kinds, smeared = absorb_small_kinds(areas, polys, kinds, ISLAND_TRIANGLES * triangle, groups)
+        if len(set(kinds)) > 1:
+            points, polys, kinds, free = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle))
         ratio = min(wanted / max(sum(len(p) - 2 for p in polys), 1), 1.0)
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
@@ -123,12 +130,14 @@ def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tu
     finally:
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh)
-    return co.reshape(-1, 3), faces, materials
+    return co.reshape(-1, 3), faces, materials, smeared
 
 
-def _area(points: np.ndarray, polys) -> float:
+def _face_areas(points: np.ndarray, polys) -> np.ndarray:
     fan = np.asarray([(p[0], p[k], p[k + 1]) for p in polys for k in range(1, len(p) - 1)], dtype=np.int64)
-    return 0.5 * float(np.linalg.norm(np.cross(points[fan[:, 1]] - points[fan[:, 0]], points[fan[:, 2]] - points[fan[:, 0]]), axis=1).sum())
+    owner = np.repeat(np.arange(len(polys)), [len(p) - 2 for p in polys])
+    tri = 0.5 * np.linalg.norm(np.cross(points[fan[:, 1]] - points[fan[:, 0]], points[fan[:, 2]] - points[fan[:, 0]]), axis=1)
+    return np.bincount(owner, weights=tri, minlength=len(polys))
 
 
 def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
@@ -146,7 +155,8 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float):
+    def __init__(self, context, co, faces, materials, detail: float, groups=None):
+        self.groups = groups  # which kinds may join when one is too small to keep apart: each kind's real material
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
@@ -226,13 +236,13 @@ class AutoJob:
             if share * triangles < 12.0:
                 continue
             yield
-            reduced = _decimate(self.context, points, polys, kinds, share)
+            *reduced, smeared = _decimate(self.context, points, polys, kinds, share, self.groups)
             view = yield from pictures(reduced[0], reduced[1], center, half, pixels)
             wrong, shown = picture_counts(reference, view, pixel)
             area = pixel * pixel
             seen = max(seen, shown * area)
             sizes.append(reduced)
-            levels.append(Level(len(reduced[1]), wrong * area))
+            levels.append(Level(len(reduced[1]), wrong * area + smeared))  # a smeared texture is a visible change too
             if wrong <= GOOD_ENOUGH * self.detail / 100.0 * shown:
                 break
         sizes.append(whole)

@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from triadq.uvs import chart_codes, simplify_borders, uv_overlap
+from triadq.uvs import absorb_small_kinds, chart_codes, simplify_borders, uv_overlap
 
 
 class UvHelpersTest(unittest.TestCase):
@@ -30,6 +30,15 @@ class UvHelpersTest(unittest.TestCase):
             self.assertTrue(all(abs(out_points[v][1] - 1) < 1e-9 for v in on_border))
             shared = {v for p, k in zip(out_polys, out_kinds) if k == "a" for v in p} & {v for p, k in zip(out_polys, out_kinds) if k == "b" for v in p}
             self.assertEqual(shared, on_border)
+
+    def test_small_kind_joins_its_neighbour_of_the_same_group(self):
+        # A row of quads: a large "0", a small "1" and a small "2" of another material
+        polys = [(0, 1, 3, 2), (2, 3, 5, 4), (4, 5, 7, 6)]
+        areas = np.array([10.0, 1.0, 1.0])
+        groups = [0, 0, 1]
+        kinds, smeared = absorb_small_kinds(areas, polys, ["0", "1", "2"], 2.0, groups)
+        self.assertEqual(kinds, ["0", "0", "2"])
+        self.assertEqual(smeared, 1.0)
 
     def test_overlap(self):
         left = [[0.0, 0.0], [0.5, 0.0], [0.0, 1.0]]

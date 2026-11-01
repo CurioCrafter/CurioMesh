@@ -19,6 +19,51 @@ def chart_codes(materials: np.ndarray, islands: np.ndarray) -> tuple[np.ndarray,
     return codes.reshape(-1), pairs[:, 0], pairs[:, 1]
 
 
+def absorb_small_kinds(areas: np.ndarray, polys, kinds, least_area: float, groups) -> tuple[list, float]:
+    """Hand each kind too small to hold its own faces to the neighbour it shares the longest border with.
+
+    A face much bigger than a whole UV island can't show that island anyway, and its seams would still cost faces. Kinds
+    only join others of the same group (the same material). Returns (new kinds, area whose texture is given up).
+    """
+
+    area: dict = {}
+    for kind, value in zip(kinds, areas.tolist()):
+        area[kind] = area.get(kind, 0.0) + value
+    first: dict[tuple[int, int], object] = {}
+    shared: dict = {kind: {} for kind in area}
+    for poly, kind in zip(polys, kinds):
+        for at, v in enumerate(poly):
+            w = poly[(at + 1) % len(poly)]
+            other = first.setdefault((v, w) if v < w else (w, v), kind)
+            if other != kind:
+                shared[kind][other] = shared[kind].get(other, 0) + 1
+                shared[other][kind] = shared[other].get(kind, 0) + 1
+    into: dict = {}
+    smeared = 0.0
+    for kind in sorted(area, key=area.get):
+        if area[kind] >= least_area:
+            continue
+        near = [k for k in shared[kind] if groups[int(k)] == groups[int(kind)]]
+        if not near:
+            continue
+        target = max(near, key=lambda k: (shared[kind][k], area[k]))
+        into[kind] = target
+        smeared += area[kind]
+        area[target] += area[kind]
+        for k, count in shared[kind].items():
+            del shared[k][kind]
+            if k != target:
+                shared[target][k] = shared[target].get(k, 0) + count
+                shared[k][target] = shared[k].get(target, 0) + count
+
+    def final(kind):
+        while kind in into:
+            kind = into[kind]
+        return kind
+
+    return [final(kind) for kind in kinds], smeared
+
+
 def _straighten(points: np.ndarray, chain: list[int], tolerance: float) -> list[int]:
     """Positions in the chain worth keeping: the first, the last, and whatever strays further than tolerance between."""
 

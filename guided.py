@@ -958,7 +958,7 @@ def _start_segments(context, gs, src) -> bool:
         return True
     stop_work()
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
-    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"] if charts is None else charts[0], gs.auto_detail)
+    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"] if charts is None else charts[0], gs.auto_detail, None if charts is None else charts[1])
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -1930,7 +1930,7 @@ def _bake_result(source, out, gs, new_uvs: bool) -> str:
         images = textures.bake_detail(source, out, with_color=gs.bake_detail == "NORMAL_COLOR", resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
     except Exception as exc:  # the bake has its own rollback, and the quads are worth keeping
         return f". Bake failed: {exc}"
-    return f", {len(images)} textures baked at {gs.bake_size}"
+    return f", {len(images)} textures baked at {gs.bake_size} (a Triangulate modifier keeps the bake's triangles on export)"
 
 
 class CURIOMESH_OT_guided_apply(bpy.types.Operator):

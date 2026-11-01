@@ -116,8 +116,10 @@ know:
   Only the normal map and base color are baked, not roughness or metal. If your
   UVs overlap themselves, Normal Map adds a second UV map for the normal map, and
   most game engines need to be told to read it.
-- Applied results keep edges sharper than 60 degrees hard. Quads survive FBX
-  export. glTF has no quads, so the exporter writes triangles.
+- Applied results keep edges sharper than 60 degrees hard. Baking also makes UV
+  seams hard and adds a Triangulate modifier, so the exported triangles match the
+  bake. Export with modifiers applied, which glTF doesn't do by default. Your
+  quads stay underneath: turn the modifier off to export them to FBX.
 - A Points Only region that wraps a limb or surrounds an open hole is cut into
   pieces that are each rebuilt, so the whole ring gets new quads. The cut stays
   as a line of kept edges between the pieces.
