@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from triadq import MeshData, flat_quad_remesh, topology_summary  # noqa: E402
 from triadq.flatquad import FlatQuadOptions, flatten_regions, make_closable  # noqa: E402
+from triadq.topology import _unpair_quads  # noqa: E402
 
 
 def plate(n: int, size: float = 2.0, height=None, offset=(0.0, 0.0, 0.0), skip=None):
@@ -74,6 +75,15 @@ def boundary_loop_count(mesh: MeshData) -> int:
             vertex = following.pop(vertex)
         loops += 1
     return loops
+
+
+class UnpairTests(unittest.TestCase):
+    def test_a_bent_quad_is_cut_along_the_fold(self):
+        points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 1.0], [2.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+        mesh = MeshData(vertices=points, faces=[(0, 1, 2, 3)], face_materials=["m"])
+        result = _unpair_quads(mesh, [0])
+        self.assertEqual(len(result.faces), 2)
+        self.assertEqual(result.face_materials, ["m", "m"])
 
 
 class FlatRegionTests(unittest.TestCase):

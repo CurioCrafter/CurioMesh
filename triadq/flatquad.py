@@ -25,7 +25,7 @@ import numpy as np
 
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
-from .topology import parity_path_quad_closure, quad_only_closure, topology_summary
+from .topology import parity_path_closure_unpairing, quad_only_closure, topology_summary
 from .types import MeshData
 
 
@@ -734,7 +734,7 @@ def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
         if all(len(face) == 4 for face in piece.faces) and topology_summary(piece).all_quads:
             kind = 0
         else:
-            for kind, closure in enumerate((parity_path_quad_closure, quad_only_closure)):
+            for kind, closure in enumerate((parity_path_closure_unpairing, quad_only_closure)):
                 try:
                     result = closure(piece)
                     break

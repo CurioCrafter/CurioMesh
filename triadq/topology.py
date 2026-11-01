@@ -934,6 +934,52 @@ def parity_path_quad_closure(
     return result
 
 
+def _unclosable_quads(mesh: MeshData) -> list[int]:
+    """Quads ParityPath would refuse: every template for them comes out warped or folded."""
+
+    selected = _turbo.parity_path_edges(mesh, frozenset()) if _turbo is not None else None
+    if selected is None:
+        selected = _parity_path_edges(mesh, frozenset())
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    midpoints = {edge: len(vertices) + k for k, edge in enumerate(sorted(selected))}
+    middles = [(vertices[a] + vertices[b]) * 0.5 for a, b in sorted(selected)]
+    output = np.vstack([vertices, *middles]) if middles else vertices
+    rows = _parity_template_validity(mesh, vertices, output, selected, midpoints)
+    return [k for k, row in enumerate(rows) if not any(row) and len(mesh.faces[k]) == 4]
+
+
+def _unpair_quads(mesh: MeshData, quads: list[int]) -> MeshData:
+    """These quads as two triangles each, cut along the diagonal that bends the surface least."""
+
+    chosen = set(quads)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces: list[Face] = []
+    materials: list[str] = []
+    for k, face in enumerate(mesh.faces):
+        if k not in chosen:
+            faces.append(face)
+            materials.append(mesh.face_materials[k])
+            continue
+        a, b, c, d = face
+        p = vertices[list(face)]
+        bend_ac = np.dot(np.cross(p[1] - p[0], p[2] - p[0]), np.cross(p[2] - p[0], p[3] - p[0]))
+        bend_bd = np.dot(np.cross(p[2] - p[1], p[3] - p[1]), np.cross(p[3] - p[1], p[0] - p[1]))
+        faces += [(a, b, c), (a, c, d)] if bend_ac >= bend_bd else [(b, c, d), (b, d, a)]
+        materials += [mesh.face_materials[k]] * 2
+    return MeshData(vertices=vertices, faces=faces, face_materials=materials, name=mesh.name)
+
+
+def parity_path_closure_unpairing(mesh: MeshData, *, tries: int = 8) -> MeshData:
+    """ParityPath closure, giving back the few quads it can't keep so they can't cost the rest of the piece its quads."""
+
+    for _ in range(tries):
+        quads = _unclosable_quads(mesh)
+        if not quads:
+            break
+        mesh = _unpair_quads(mesh, quads)
+    return parity_path_quad_closure(mesh)
+
+
 def quad_only_closure(
     mesh: MeshData,
     *,

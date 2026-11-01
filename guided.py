@@ -21,6 +21,7 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from . import overlay, region
+from . import autoretopo
 from .triadq import areas, patch
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.types import MeshData
@@ -47,6 +48,7 @@ SCOPE_ITEMS = [
     ("WHOLE", "Whole Mesh", "Remesh the whole mesh; the points change the quad size across it", "MESH_DATA", 0),
     ("POINTS", "Points Only", "Remesh only inside the point spheres; the rest of the mesh stays exactly as it is", "SELECT_SET", 1),
     ("AREAS", "Work Areas", "Each point is its own area with its own density and fill style. They are remeshed one at a time in the background, so you can keep working", "BRUSH_DATA", 2),
+    ("AUTO", "Auto Segments", "Finds the fewest faces that keep the detail you ask for, checking every loose piece with a camera, then makes all quads. No points or face count needed, and Blender stays usable while it works", "MOD_EXPLODE", 3),
 ]
 APPLY_ITEMS = [
     ("NEW", "New Object", "Write the result to a new object called <name>_Retopo", "DUPLICATE", 0),
@@ -150,6 +152,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     new_radius: bpy.props.FloatProperty(name="New Radius", description="Reach of the next point (scroll while placing). 0 picks a size from the mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
     new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
+    auto_detail: bpy.props.FloatProperty(name="Change Allowed", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces", default=6.0, min=0.5, soft_max=30.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Relax-and-project passes that settle the new quads onto your original surface", default=2, min=0, max=30)
@@ -920,6 +923,30 @@ def _start_areas(source, gs, pts, src, L0) -> bool:
     return True
 
 
+def _start_segments(context, gs, src) -> bool:
+    """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3))
+    if state["work"] is not None and state["work"]["key"] == key:
+        return True
+    stop_work()
+    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail)
+    state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
+    state.update(ms=0.0, spot=None)
+    state["message"] = job.status()
+    if not bpy.app.timers.is_registered(_auto_slice):
+        bpy.app.timers.register(_auto_slice, first_interval=0.0)
+    return True
+
+
+def _auto_slice():
+    """Run the search in short slices with gaps between them, so Blender stays usable. Ends when the job does."""
+    work = state["work"]
+    if work is None or not isinstance(work["runner"], autoretopo.AutoJob) or not work["runner"].busy:
+        return None
+    work["runner"].step(0.04)
+    return 0.01
+
+
 def _collect_work(context) -> None:
     """Show what the worker finished since the last look."""
     work = state["work"]
@@ -936,6 +963,10 @@ def _collect_work(context) -> None:
             state["res"] = runner.output
             _build_preview(context, source, runner.output, uvs=False)  # the UVs are copied when you Apply
         state["draw_key"] = None
+    if isinstance(runner, autoretopo.AutoJob):
+        state["message"] = runner.warnings[0] if runner.warnings else runner.status()
+        overlay.tag_redraw()
+        return
     res = state["res"]
     made = f"{int(res['new'].sum()):,} new quads in {len(res['faces']):,} faces" if res is not None else "No quads yet"
     if runner.busy:
@@ -964,6 +995,8 @@ def run_update(context, force: bool = False) -> bool:
     state["source"] = source.name
     if source.mode == "EDIT":
         source.update_from_editmode()
+    if gs.scope == "AUTO":
+        return _start_segments(context, gs, _source_data(source))
     pts = gather(source, gs)
     lock = state["lock"]
     if not pts and lock is None:
@@ -1082,7 +1115,7 @@ def _poll():
             overlay.tag_redraw()
         elif state["dirty"] and now - state["changed_at"] >= (AREA_DEBOUNCE_SECONDS if gs.scope == "AREAS" else DEBOUNCE_SECONDS):
             state["dirty"] = False
-            if gs.auto_update and (gs.scope == "AREAS" or state["ms"] <= LIVE_SLOW_MS):
+            if gs.auto_update and (gs.scope in {"AREAS", "AUTO"} or state["ms"] <= LIVE_SLOW_MS):
                 run_update(context)
             elif gs.auto_update:
                 state["message"] = f"The last update took {state['ms'] / 1000.0:.0f} s: press Update"
@@ -1158,6 +1191,24 @@ def _world(matrix, arr):
     return np.asarray(arr, float) @ m[:3, :3].T + m[:3, 3]
 
 
+def _part_triangles(matrix, res) -> tuple[np.ndarray, np.ndarray]:
+    """World-space triangles of a result and a see-through colour per part. Faces outside any part stay uncoloured."""
+    faces, parts = res["faces"], np.asarray(res["parts"])
+    corners, owner = [], []
+    for index, face in enumerate(faces):
+        if parts[index] >= 0 or res["new"][index]:
+            for k in range(1, len(face) - 1):
+                corners += [face[0], face[k], face[k + 1]]
+                owner += [int(parts[index])] * 3
+    if not corners:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 4), np.float32)
+    owner = np.asarray(owner)
+    hue = (np.maximum(owner, 0) * 0.61803398875) % 1.0  # golden ratio steps keep neighbouring ids far apart in colour
+    rgb = 0.45 + 0.45 * np.cos(2.0 * np.pi * (hue[:, None] + np.array([0.0, 0.33, 0.67])))
+    colours = np.concatenate((rgb, np.full((len(owner), 1), 0.4)), axis=1).astype(np.float32)
+    return _world(matrix, res["co"][corners]).astype(np.float32), colours
+
+
 def _draw_data(source, gs):
     global _SPHERE
     pts = gather(source, gs)
@@ -1169,7 +1220,9 @@ def _draw_data(source, gs):
         _SPHERE = _unit_sphere()
     m = source.matrix_world
     scale = float(np.mean(m.to_scale()))
-    data = {"spheres": {}, "rings": {}, "dots": {}, "outline": np.zeros((0, 3), np.float32), "lock": np.zeros((0, 3), np.float32), "spot": None}
+    data = {"spheres": {}, "rings": {}, "dots": {}, "outline": np.zeros((0, 3), np.float32), "lock": np.zeros((0, 3), np.float32), "spot": None, "parts": None}
+    if gs.scope == "AUTO" and state["res"] is not None and preview is not None and state["res"].get("parts") is not None:
+        data["parts"] = _part_triangles(preview.matrix_world, state["res"])
     for kind in KIND_KEYS:
         mine = [p for p in pts if p.kind == kind]
         if mine:
@@ -1225,6 +1278,14 @@ def _draw() -> None:
         b = state["batches"]
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_mask_set(False)
+        if data["parts"] is not None and len(data["parts"][0]) and gs.show_cage:
+            if state["batches"].get("parts") is None:
+                flat = gpu.shader.from_builtin("FLAT_COLOR")
+                state["batches"]["parts"] = (flat, batch_for_shader(flat, "TRIS", {"pos": data["parts"][0], "color": data["parts"][1]}))
+            flat, tinted = state["batches"]["parts"]
+            gpu.state.depth_test_set("LESS_EQUAL")
+            flat.bind()
+            tinted.draw(flat)
         shader.bind()
         if gs.show_cage:
             gpu.state.depth_test_set("LESS_EQUAL")
@@ -1950,8 +2011,13 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         layout.label(text="2. Watch the live preview", icon="HIDE_OFF")
         layout.prop(gs, "enabled", toggle=True, text="Live Preview & Cage", icon="HIDE_OFF" if gs.enabled else "HIDE_ON")
         layout.row(align=True).prop(gs, "scope", expand=True)
-        layout.row(align=True).prop(gs, "strategy", expand=True)
-        layout.prop(gs, "base_faces")
+        row = layout.row(align=True)
+        row.enabled = gs.scope != "AUTO"
+        row.prop(gs, "strategy", expand=True)
+        if gs.scope == "AUTO":
+            layout.prop(gs, "auto_detail")
+        else:
+            layout.prop(gs, "base_faces")
         row = layout.row(align=True)
         row.scale_y = 1.3
         row.operator("curiomesh.guided_update", text="Update", icon="FILE_REFRESH")
@@ -1973,6 +2039,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.enabled = previewing
         col.operator("curiomesh.guided_edit_preview", icon="EDITMODE_HLT")
         row = col.row(align=True)
+        row.enabled = gs.scope != "AUTO"
         row.operator("curiomesh.guided_lock", icon="LOCKED")
         row.operator("curiomesh.guided_redraw_strip", icon="MOD_SOLIDIFY")
         if state["lock"] is not None:

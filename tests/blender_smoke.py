@@ -1380,6 +1380,20 @@ def run_guided_case(module):
         raise AssertionError(f"guided: changing one area redid {len(runner.cache) - pieces} pieces")
     print(f"PASS guided areas: {dense} and {coarse} new quads, one area redone on its own")
 
+    # auto segments: no points or face count needed, and it ends in quads that pass its own camera
+    sphere.curiomesh_points.clear()
+    gs.scope = "AUTO"
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    runner = guided.state["work"]["runner"]
+    res = guided.state["res"]
+    if res is None or runner.report is None or runner.report["tris"] or res["parts"].shape[0] != len(res["faces"]):
+        raise AssertionError(f"guided: auto segments failed: {guided.status()}")
+    if runner.report["faces"] >= len(sphere.data.polygons) or runner.report["loss"] > 3 * gs.auto_detail:
+        raise AssertionError(f"guided: auto segments gained no reduction or lost the shape: {guided.status()}")
+    print(f"PASS guided auto segments: {guided.status()}")
+    gs.scope = "WHOLE"
+
     # auto-suggest, next spot, apply
     sphere.curiomesh_points.clear()
     bpy.ops.curiomesh.guided_suggest()
