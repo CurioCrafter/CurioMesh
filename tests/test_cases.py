@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.cases import classify, curve, explain, features, first_size, load_table, method_for  # noqa: E402
+from triadq.cases import classify, curve, explain, features, first_size, load_table, method_for
 
 TABLE = {"cases": {
     "all": {"shares": {"0.02": {"parts": 9, "loss": [0.5, 0.9, 1.0]}, "0.04": {"parts": 9, "loss": [0.2, 0.3, 0.4]}, "0.08": {"parts": 9, "loss": [0.0, 0.1, 0.2]}}, "revolve": {"fits": 0, "wins": 0}},

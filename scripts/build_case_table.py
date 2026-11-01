@@ -13,12 +13,12 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import statistics
 import sys
 import time
-
 
 
 def _drain(generator):
@@ -36,6 +36,20 @@ def _regular(faces) -> float:
         for vertex in face:
             count[vertex] = count.get(vertex, 0) + 1
     return sum(1 for value in count.values() if value == 4) / max(len(count), 1)
+
+
+def _try(auto, flatquad, types, view, method: str, share: float, mesh, reduce_s: float, pair: bool) -> dict:
+    """One method and size of a piece: what the camera sees, and with `pair` how it pairs into quads."""
+    reference, center, half, pixels, pixel = view
+    started = time.perf_counter()
+    wrong, shown = auto.picture_counts(reference, _drain(auto.pictures(mesh[0], mesh[1], center, half, pixels)), pixel)
+    row = {"method": method, "share": share, "faces": len(mesh[1]), "wrong": wrong, "shown": shown, "reduce_s": reduce_s, "look_s": time.perf_counter() - started}
+    if not pair:
+        row.update(quads=len(mesh[1]), regular=_regular(mesh[1]))
+    elif len(mesh[1]) <= 30000:
+        paired = flatquad.pair_and_close(types.MeshData(mesh[0], mesh[1], mesh[2]), seed_count=2)[0]
+        row.update(quads=len(paired.faces), regular=_regular(paired.faces))
+    return row
 
 
 def measure(out_path: str, model_path: str, parts_path: str | None) -> None:
@@ -70,7 +84,7 @@ def measure(out_path: str, model_path: str, parts_path: str | None) -> None:
     shell = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
     order = np.argsort(shell, kind="stable")
     cuts = np.concatenate(([0], np.flatnonzero(shell[order][1:] != shell[order][:-1]) + 1, [len(order)]))
-    pieces = sorted((order[a:b] for a, b in zip(cuts[:-1], cuts[1:])), key=len, reverse=True)
+    pieces = sorted((order[a:b] for a, b in itertools.pairwise(cuts)), key=len, reverse=True)
     extent = float(np.ptp(co, axis=0).max()) or 1.0
     sizes = np.asarray([2.0 * 0.55 * float(np.ptp(co[np.unique(np.concatenate([faces[f] for f in ids.tolist()]))], axis=0).max()) for ids in pieces]) / extent
     pixels_for = auto._picture_sizes(sizes).tolist()
@@ -91,31 +105,19 @@ def measure(out_path: str, model_path: str, parts_path: str | None) -> None:
             reference = _drain(auto.pictures(points, polys, center, half, pixels_for[index]))
             row["reference_s"] = time.perf_counter() - started
 
-            def look(method: str, share: float, mesh, reduce_s: float, pair: bool) -> None:
-                started = time.perf_counter()
-                wrong, shown = auto.picture_counts(reference, _drain(auto.pictures(mesh[0], mesh[1], center, half, pixels_for[index])), pixel)
-                try_row = {"method": method, "share": share, "faces": len(mesh[1]), "wrong": wrong, "shown": shown, "reduce_s": reduce_s, "look_s": time.perf_counter() - started}
-                if pair and len(mesh[1]) <= 30000:
-                    paired = flatquad.pair_and_close(types.MeshData(mesh[0], mesh[1], mesh[2]), seed_count=2)[0]
-                    try_row["quads"] = len(paired.faces)
-                    try_row["regular"] = _regular(paired.faces)
-                elif not pair:
-                    try_row["quads"] = len(mesh[1])
-                    try_row["regular"] = _regular(mesh[1])
-                row["tries"].append(try_row)
-
+            view = (reference, center, half, pixels_for[index], pixel)
             for share in auto.LEVELS:
                 if share * triangles < 12.0:
                     continue
                 started = time.perf_counter()
                 mesh = auto._decimate(bpy.context, points, polys, kinds, share)
-                look("decimate", share, mesh, time.perf_counter() - started, True)
+                row["tries"].append(_try(auto, flatquad, types, view, "decimate", share, mesh, time.perf_counter() - started, True))
             if rebuilds is not None:
                 started = time.perf_counter()
                 for built in rebuilds.rebuilds(points, polys, "0"):
                     if built is not None:
                         mesh = (built[0], rebuilds.orient_like(built[0], built[1], points, polys), built[2])
-                        look("revolve", len(mesh[1]) / triangles, mesh, time.perf_counter() - started, False)
+                        row["tries"].append(_try(auto, flatquad, types, view, "revolve", len(mesh[1]) / triangles, mesh, time.perf_counter() - started, False))
                     started = time.perf_counter()
             out.write(json.dumps(row) + "\n")
             out.flush()
