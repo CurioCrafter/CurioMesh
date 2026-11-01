@@ -25,7 +25,8 @@ from mathutils.bvhtree import BVHTree
 
 from .triadq import parts, patch
 from .triadq.budget import Level, allocate, allocate_to_faces
-from .triadq.flatquad import pair_and_close
+from .triadq.flatquad import _face_frames, pair_and_close
+from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
 from . import guides, symmetry
 from .triadq.types import Cancelled, MeshData
 
@@ -153,6 +154,41 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
         most *= 0.85
 
 
+def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=None):
+    """The reduced mesh with its smooth round areas rebuilt as rows of quads, using BVH lookups on the source."""
+
+    if labels is None:
+        domes = smooth_areas(co, faces)
+        labels = (domes, crease_areas(co, faces, domes >= 0))
+    coarse = MeshData(coarse_points, coarse_faces, coarse_kinds)
+    report = GridReport()
+    if int(max(area.max(initial=-1) for area in labels)) < 0:
+        return coarse, report
+    points = co.tolist()
+    whole = BVHTree.FromPolygons(points, [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+
+    def nearest(query):
+        found = [whole.find_nearest(Vector(p)) for p in query.tolist()]
+        return np.asarray([row[2] for row in found], dtype=np.int64), np.asarray([row[0] for row in found], dtype=np.float64).reshape(-1, 3)
+
+    def project_for(area):
+        ids = np.flatnonzero(labels[1] == area).tolist()
+        tree = BVHTree.FromPolygons(points, [list(faces[f]) for f in ids], all_triangles=False, epsilon=0.0)
+        return lambda query: np.asarray([tree.find_nearest(Vector(p))[0] for p in query.tolist()], dtype=np.float64).reshape(-1, 3)
+
+    extent = float(np.ptp(co, axis=0).max())
+    normals = _face_frames(co, faces)[0]
+    coarse, report = grid_areas(coarse, labels[0], nearest, extent=extent, normals=normals)
+    coarse, later = grid_areas(coarse, labels[1], nearest, project_for=project_for, extent=extent, normals=normals)
+    report.built += later.built
+    report.faces_in += later.faces_in
+    report.quads_out += later.quads_out
+    report.loops += later.loops
+    for reason, count in later.rejected.items():
+        report.rejected[reason] = report.rejected.get(reason, 0) + count
+    return coarse, report
+
+
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
@@ -185,6 +221,7 @@ class AutoJob:
         self._stopped = False
         self._pair_thread: threading.Thread | None = None
         self._paired = None
+        self._labels = None
         self.pieces: list[np.ndarray] = []
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
@@ -395,7 +432,13 @@ class AutoJob:
     def _pair(self, co, faces, kinds) -> None:
         started = time.perf_counter()
         try:
-            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2, cancelled=lambda: self._stopped, guide_edges=self.guide_edges)[0]
+            coarse = MeshData(co, faces, kinds)
+            if not self.guide_lines and self.drop is None:  # rows of quads would ignore the strokes and the paint
+                if self._labels is None:
+                    domes = smooth_areas(self.co, self.faces)
+                    self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
+                coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
+            self._paired = pair_and_close(coarse, seed_count=2, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True)[0]
             self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
         except Cancelled:  # Stop was pressed: the thread ends at its next stopping point
             pass

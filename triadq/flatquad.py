@@ -678,7 +678,7 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
 
 def pair_and_close(
     coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
-    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (),
+    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (), keep_quads: bool = False,
 ) -> tuple[MeshData, RemeshReport]:
     """Repair, pair with TRIAD-Q, then close every connected piece on its own.
 
@@ -687,24 +687,32 @@ def pair_and_close(
     Sparse ParityPath closure keeps each paired quad whole, so a big flat quad
     stays one face. Corner closure splits every face, so it only runs on a piece
     ParityPath refuses: one loose fragment can't cost the rest of the mesh its
-    quads. A piece neither can close stays quad-dominant.
+    quads. A piece neither can close stays quad-dominant. With `keep_quads`, quads
+    in `coarse` (grids already built) stay whole and only the triangles get paired.
     """
 
     cancel_with(cancelled)
     try:
-        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges)
+        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads)
     finally:
         cancel_with(None)
 
 
-def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges):
+def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads):
     repaired, _added = make_closable(coarse)
     check_cancelled()
+    kept: list[tuple[tuple[int, ...], str]] = []
+    if keep_quads:
+        kept = [(face, material) for face, material in zip(repaired.faces, repaired.face_materials) if len(face) == 4]
+        rest = [(face, material) for face, material in zip(repaired.faces, repaired.face_materials) if len(face) != 4]
+        repaired = MeshData(repaired.vertices, [row[0] for row in rest], [row[1] for row in rest], name=repaired.name)
     pair = RemeshOptions(
         target_faces=max(1, len(repaired.faces) // 2), seed_count=seed_count, force_quads=False, field_mode=field_mode,
         feature_angle_deg=feature_angle_deg, max_pairing=True, guide_edges=guide_edges,
     )
     paired, solver = remesh_mesh(repaired, pair)
+    if kept:
+        paired = MeshData(repaired.vertices, list(paired.faces) + [row[0] for row in kept], list(paired.face_materials) + [row[1] for row in kept], name=paired.name)
     if not force_quads or not paired.faces:
         return paired, solver
     closed, sparse, split, open_pieces = _close_pieces(paired)
