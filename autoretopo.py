@@ -23,7 +23,7 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from .triadq import patch
+from .triadq import cases, patch
 from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
 from . import guides, symmetry
@@ -43,6 +43,8 @@ TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
+USE_CASES = True  # let the table of part cases say which size of a part to look at first
+JUMP_SIZES = True  # with the cases on, far from good enough: look at every other size and guess the one between
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None):
@@ -189,6 +191,9 @@ class AutoJob:
         self.seen: list[float] = []
         self.picked: list[int] = []
         self.timings: dict[str, float] = {}  # seconds spent per kind of work, for the report
+        self.looks = 0  # sizes of pieces the camera looked at
+        self.part_cases: dict[int, tuple] = {}  # piece -> (case, sizes skipped, sizes looked at), for `explain_part`
+        self.table = cases.load_table() if USE_CASES else None
         self._search = self._run()
 
     def seconds_left(self) -> float | None:
@@ -262,39 +267,57 @@ class AutoJob:
             self.levels.append([Level(len(polys), 0.0)])
             self.seen.append(0.0)
             return
-        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()))
-        known = self.cache.get(key)
-        if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
-            self.sizes.append(known[1])
-            self.levels.append(known[2])
-            self.seen.append(known[3])
-            return
         low, high = points.min(axis=0), points.max(axis=0)
         center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
         pixel = 2.0 * half / pixels
         reference = yield from self._reference(center, half, pixels, points, polys)
-        sizes, levels, seen = [], [], 0.0
-        for share in LEVELS:
-            if share * triangles < 12.0:
-                continue
-            yield
-            started = time.perf_counter()
-            reduced = _decimate(self.context, points, polys, kinds, share, self._piece_drop(ids))
-            self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
-            view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
-            wrong, shown = picture_counts(reference, view, pixel)
-            area = pixel * pixel
-            seen = max(seen, shown * area)
-            sizes.append(reduced)
-            levels.append(Level(len(reduced[1]), wrong * area))
-            if wrong <= GOOD_ENOUGH * self.detail / 100.0 * shown:
-                break
-        sizes.append(whole)
-        levels.append(Level(len(polys), 0.0))
-        self.sizes.append(sizes)
-        self.levels.append(levels)
-        self.seen.append(seen)
-        self.cache[key] = (self.detail, sizes, levels, seen)
+        shares = [share for share in LEVELS if share * triangles >= 12.0]
+        floor = PIECE_LIMIT * self.detail / 100.0
+        enough = GOOD_ENOUGH * self.detail / 100.0
+        first, case = 0, None
+        # Reduce To and painted density want small sizes the camera limit would rule out, so they look at every size.
+        if self.table is not None and not self.target_faces and self.drop is None:
+            case = cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0))
+            first = cases.first_size(case, shares, floor, self.table)
+        # What was measured on this very mesh before, under any amount, is kept per size: another amount only adds sizes.
+        tried = self.cache.setdefault(("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes())), {})
+
+        def look(k: int):
+            """Generator: this size, measured unless it already was. Returns the share of its view that changed."""
+            if k not in tried or not tried[k][4]:
+                yield
+                started = time.perf_counter()
+                reduced = _decimate(self.context, points, polys, kinds, shares[k], self._piece_drop(ids))
+                self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
+                view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
+                wrong, shown = picture_counts(reference, view, pixel)
+                self.looks += 1
+                tried[k] = (reduced, Level(len(reduced[1]), wrong * pixel * pixel), wrong / max(shown, 1), shown * pixel * pixel, True)
+            return tried[k][2]
+
+        at = first
+        start_change = change = yield from look(at)
+        while at > 0 and change <= floor / 2.0:  # room to spare: the guess was too careful, so the camera sends the search back down
+            at -= 1
+            change = yield from look(at)
+        at, change = first, start_change
+        while change > enough and at + 1 < len(shares):
+            if JUMP_SIZES and case is not None and at + 2 < len(shares) and change > 4.0 * enough and at + 1 not in tried:
+                before = change
+                change = yield from look(at + 2)
+                middle = _decimate(self.context, points, polys, kinds, shares[at + 1], self._piece_drop(ids))  # never looked at: the end check has the final say
+                guess = math.sqrt(max(before, 1e-4) * max(change, 1e-4))
+                tried[at + 1] = (middle, Level(len(middle[1]), guess * tried[at + 2][3]), guess, tried[at + 2][3], False)
+                at += 2
+            else:
+                at += 1
+                change = yield from look(at)
+        order = sorted(tried)
+        self.sizes.append([tried[k][0] for k in order] + [whole])
+        self.levels.append([tried[k][1] for k in order] + [Level(len(polys), 0.0)])
+        self.seen.append(max(tried[k][3] for k in order))
+        if case is not None:
+            self.part_cases[len(self.sizes) - 1] = (case, order[0], len(order))
 
     def _reference(self, center, half, pixels, points, polys):
         """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
@@ -474,7 +497,7 @@ class AutoJob:
             follows = {"strokes": len(self.guide_lines), "mean": mean / size, "worst": worst / size}
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows, "looks": self.looks}
 
     def _look(self, points, out_faces, center, half, reference, pixel):
         """Generator: the percent of the view that differs from the original. Returns it when exhausted."""
@@ -495,6 +518,14 @@ class AutoJob:
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
             return
         self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
+
+    def explain_part(self, index: int) -> str:
+        """In plain words, for the segment view: what the piece `index` was taken for and what was kept. Empty before it is done."""
+        if index not in self.part_cases or index >= len(self.picked):
+            return ""
+        case, skipped, looked = self.part_cases[index]
+        kept = self.levels[index][self.picked[index]]
+        return cases.explain(case, kept.faces, kept.loss / max(self.seen[index], 1e-30), skipped, looked)
 
     def status(self) -> str:
         extra = f" | {self.note}" if self.note else ""

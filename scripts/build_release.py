@@ -87,6 +87,7 @@ def release_metadata(root: Path) -> tuple[str, str]:
 def source_files(root: Path) -> list[Path]:
     files = sorted(root.glob("*.py")) + [root / name for name in sorted(ROOT_FILES)]
     files.extend(sorted(path for path in (root / "triadq").rglob("*.py") if path.is_file()))
+    files.append(root / "triadq" / "cases_table.json")
     files.extend(sorted(path for path in (root / "docs").rglob("*.md") if path.is_file()))
     missing = [str(path) for path in files if not path.is_file()]
     if missing:
