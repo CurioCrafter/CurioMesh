@@ -15,6 +15,7 @@ which keeps Blender usable. Only the pairing, which is plain NumPy, goes to a wo
 from __future__ import annotations
 
 import math
+import shutil
 import threading
 import time
 
@@ -26,7 +27,7 @@ from mathutils.bvhtree import BVHTree
 from .triadq import patch
 from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
-from . import guides, symmetry
+from . import guides, hardware, symmetry
 from .triadq.types import Cancelled, MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -42,7 +43,6 @@ PAIRED_SHARE = 0.6  # first guess of faces after pairing per face before it, cor
 TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
-SHOW_EVERY = 1.0  # seconds between preview updates
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None):
@@ -109,7 +109,7 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
 
-def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+def _decimate(context, points, polys, kinds, ratio, drop=None, lock=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
@@ -119,12 +119,16 @@ def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarr
     try:
         modifier = obj.modifiers.new("Reduce", "DECIMATE")
         modifier.ratio = ratio
-        if drop is not None and float(drop.max(initial=0.0)) > 0.0:
+        painted = drop is not None and float(drop.max(initial=0.0)) > 0.0
+        if painted or (lock is not None and lock.any()):
             group = obj.vertex_groups.new(name="CurioMesh_Density")
             group.add(list(range(len(points))), 1.0, "REPLACE")  # a vertex outside the group is never collapsed
-            level = np.round(drop / 0.5 * DENSITY_STEPS).astype(np.int64)
-            for step in np.unique(level[level > 0]).tolist():
-                group.add(np.flatnonzero(level == step).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
+            if painted:
+                level = np.round(drop / 0.5 * DENSITY_STEPS).astype(np.int64)
+                for step in np.unique(level[level > 0]).tolist():
+                    group.add(np.flatnonzero(level == step).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
+            if lock is not None and lock.any():  # weight 0: Decimate leaves these vertices exactly where they are (chunk borders)
+                group.add(np.flatnonzero(lock).tolist(), 0.0, "REPLACE")
             modifier.vertex_group = group.name
         evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
         reduced = evaluated.to_mesh()
@@ -139,13 +143,13 @@ def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarr
     return co.reshape(-1, 3), faces, materials
 
 
-def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
+def _picture_sizes(sizes: np.ndarray, most_rays: int = MOST_RAYS, max_pixels: int = MAX_PIXELS) -> np.ndarray:
     """Pixels per side for pieces of these sizes (the whole object is 1.0), coarser for a model with very many parts."""
 
-    view, most = float(VIEW_PIXELS), float(MAX_PIXELS)
+    view, most = float(VIEW_PIXELS), float(max_pixels)
     while True:
         pixels = np.clip(np.ceil(sizes * view), 8, most).astype(np.int64)
-        if 6 * int((pixels * pixels).sum()) <= MOST_RAYS or most <= 16:
+        if 6 * int((pixels * pixels).sum()) <= most_rays or most <= 16:
             return pixels
         view *= 0.85
         most *= 0.85
@@ -154,7 +158,7 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, settings: hardware.Settings | None = None, checkpoint=None, keep_progress: bool = False):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
@@ -167,6 +171,14 @@ class AutoJob:
         self.project = project  # the nearest point on the original surface, for the points a stroke adds to the mesh
         self.guide_edges: tuple = ()
         self.drop = None if drop is None or not float(np.max(drop, initial=0.0)) > 0.0 else np.asarray(drop, dtype=np.float64)  # per vertex, from the painted density
+        self.cfg = settings or hardware.EFFORTS["NORMAL"]  # how hard to work: slice length, rays, chunk size
+        self.max_pixels = self.cfg.max_pixels
+        self.checkpoint = checkpoint  # folder where finished parts are saved so a stopped job can resume (None = don't save)
+        self.keep_progress = keep_progress
+        self.resumed = 0  # parts loaded from the saved progress instead of measured
+        self.names: list[str] = []  # where each part is, in words
+        self.locked: np.ndarray | None = None  # vertices on a chunk border: never moved, so neighbours join without a gap
+        self.chunks = 0  # how many regions a huge piece was cut into
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
@@ -202,10 +214,11 @@ class AutoJob:
         self._stopped = True
         self.busy = False
 
-    def step(self, seconds: float = 0.04) -> None:
+    def step(self, seconds: float | None = None) -> None:
         """Do the next slice of work on this (the main) thread."""
         if not self.busy:
             return
+        seconds = self.cfg.slice_s if seconds is None else seconds
         ends = time.perf_counter() + seconds
         try:
             while time.perf_counter() < ends:
@@ -238,10 +251,16 @@ class AutoJob:
 
     def _piece_drop(self, ids: np.ndarray):
         """The painted density of the vertices of a piece, in the order `_piece_arrays` lists them (or None)."""
-        if self.drop is None:
+        return self._piece_vertex(ids, self.drop)
+
+    def _piece_lock(self, ids: np.ndarray):
+        """Which vertices of a piece sit on a chunk border (or None when nothing was cut)."""
+        return self._piece_vertex(ids, self.locked)
+
+    def _piece_vertex(self, ids: np.ndarray, per_vertex):
+        if per_vertex is None:
             return None
-        used = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))
-        return self.drop[used]
+        return per_vertex[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))]
 
     def _piece_arrays(self, ids: np.ndarray):
         used, flat = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64), return_inverse=True)
@@ -263,6 +282,13 @@ class AutoJob:
             self.seen.append(0.0)
             return
         key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()))
+        saved = None
+        if self.checkpoint is not None:
+            file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
+            saved = hardware.load_piece(file) if file.exists() else None
+            if saved is not None and saved[0] <= self.detail:  # a stopped run measured this part already
+                self.cache[key] = (saved[0], saved[1], [Level(f, w) for f, w in saved[2]], saved[3])
+                self.resumed += 1
         known = self.cache.get(key)
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
@@ -279,7 +305,7 @@ class AutoJob:
                 continue
             yield
             started = time.perf_counter()
-            reduced = _decimate(self.context, points, polys, kinds, share, self._piece_drop(ids))
+            reduced = _decimate(self.context, points, polys, kinds, share, self._piece_drop(ids), self._piece_lock(ids))
             self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
             view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = picture_counts(reference, view, pixel)
@@ -295,6 +321,8 @@ class AutoJob:
         self.levels.append(levels)
         self.seen.append(seen)
         self.cache[key] = (self.detail, sizes, levels, seen)
+        if self.checkpoint is not None:
+            hardware.save_piece(file, self.detail, sizes, [(lv.faces, lv.loss) for lv in levels], seen)
 
     def _reference(self, center, half, pixels, points, polys):
         """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
@@ -303,11 +331,16 @@ class AutoJob:
             self.cache[key] = yield from self._timed("pictures", pictures(points, polys, center, half, pixels))
         return self.cache[key]
 
-    def _combined(self) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
-        """Every piece at its picked size, and any not measured yet as it is."""
+    def _combined(self, join: bool = False, only_done: bool = False) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
+        """Every piece at its picked size, and any not measured yet as it is (or left out, with `only_done`).
+
+        `join` welds the chunk borders, which were never moved, so the regions of a cut piece are one surface again.
+        """
         all_points, all_faces, all_kinds, parts = [], [], [], []
         offset = 0
         for index, ids in enumerate(self.pieces):
+            if only_done and index >= len(self.sizes):
+                continue
             if index in self.tuned:
                 points, polys, kinds = self.tuned[index]
             elif index < len(self.sizes):
@@ -319,11 +352,18 @@ class AutoJob:
             all_kinds += kinds
             parts += [index] * len(polys)
             offset += len(points)
-        return np.vstack(all_points), all_faces, all_kinds, np.asarray(parts, dtype=np.int64)
+        if not all_points:
+            return np.zeros((0, 3)), [], [], np.zeros(0, dtype=np.int64)
+        points = np.vstack(all_points)
+        if join and self.locked is not None:
+            points, all_faces = hardware.weld(points, all_faces)
+        return points, all_faces, all_kinds, np.asarray(parts, dtype=np.int64)
 
     def _show(self, final=None) -> None:
         if final is None:
-            co, faces, kinds, parts = self._combined()
+            co, faces, kinds, parts = self._combined(only_done=self.cfg.only_done)
+            if not faces:
+                return
         else:
             co, faces, kinds, parts = final
         if self.mirror is not None:
@@ -375,30 +415,49 @@ class AutoJob:
         shell = np.unique(patch._labels(len(self.faces), fa, fb), return_inverse=True)[1]
         order = np.argsort(shell, kind="stable")
         starts = np.concatenate(([0], np.flatnonzero(shell[order][1:] != shell[order][:-1]) + 1, [len(order)]))
-        self.pieces = sorted((order[a:b] for a, b in zip(starts[:-1], starts[1:])), key=len, reverse=True)
+        shells = [order[a:b] for a, b in zip(starts[:-1], starts[1:])]
+        low, high = self.co.min(axis=0), self.co.max(axis=0)
+        sizes_f = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
+        flat = np.fromiter((v for f in self.faces for v in f), dtype=np.int64, count=int(sizes_f.sum()))
+        centers = np.add.reduceat(self.co[flat], np.concatenate(([0], np.cumsum(sizes_f)[:-1])), axis=0) / sizes_f[:, None]
+        cut = []  # a piece with more faces than the machine should hold at once is cut into regions
+        for ids in shells:
+            if len(ids) > self.cfg.chunk_faces:
+                regions = hardware.split_chunks(centers[ids], self.cfg.chunk_faces)
+                cut += [ids[r] for r in regions]
+                self.chunks += len(regions)
+            else:
+                cut.append(ids)
+        cut.sort(key=len, reverse=True)
+        self.pieces = cut
+        self.names = [hardware.region_name(centers[ids].mean(axis=0), low, high) for ids in cut]
+        if self.chunks:
+            label = np.zeros(len(self.faces), dtype=np.int64)
+            for number, ids in enumerate(cut):
+                label[ids] = number
+            self.locked = hardware.border_vertices(self.faces, label, len(self.co))
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
-        picture_sizes = _picture_sizes(sizes).tolist()
+        picture_sizes = _picture_sizes(sizes, self.cfg.max_rays, self.max_pixels).tolist()
         weights = np.asarray([sum(len(self.faces[f]) - 2 for f in ids.tolist()) for ids in self.pieces], dtype=np.float64)
         done_share = np.concatenate(([0.0], np.cumsum(weights))) / max(float(weights.sum()), 1.0)
         self._show()
         for index, ids in enumerate(self.pieces):
             self.progress = (index, len(self.pieces))
             self.fraction = MEASURE_SHARE * float(done_share[index])
-            self.stage = f"Looking at piece {index + 1} of {len(self.pieces)}"
+            self.stage = f"Part {index + 1} of {len(self.pieces)}: {self.names[index]}" if self.chunks or len(self.pieces) < 40 else f"Looking at piece {index + 1} of {len(self.pieces)}"
             yield from self._measure_piece(ids, picture_sizes[index])
             yield
             if self._stopped:
                 return
-            if time.perf_counter() - self.shown_at > SHOW_EVERY:
+            if time.perf_counter() - self.shown_at > self.cfg.show_every:
                 self._show()
         self.progress = (len(self.pieces), len(self.pieces))
         self.fraction = MEASURE_SHARE
         self.stage = "Looking at the whole object"
-        low, high = self.co.min(axis=0), self.co.max(axis=0)
         center, half = (low + high) / 2.0, extent * 0.55
-        pixel = 2.0 * half / MAX_PIXELS
-        reference = yield from self._reference(center, half, MAX_PIXELS, self.co, self.faces)
+        pixel = 2.0 * half / self.max_pixels
+        reference = yield from self._reference(center, half, self.max_pixels, self.co, self.faces)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
         allowed = asked * total_seen
@@ -419,7 +478,7 @@ class AutoJob:
                 break
             tried.add(tuple(self.picked))
             self.stage = f"Pairing into quads, try {round_index + 1}"
-            co, faces, kinds, _parts = self._combined()
+            co, faces, kinds, _parts = self._combined(join=True)
             if self.guide_lines:
                 self.stage = f"Cutting the guide curves in, try {round_index + 1}"
                 yield
@@ -474,11 +533,13 @@ class AutoJob:
             follows = {"strokes": len(self.guide_lines), "mean": mean / size, "worst": worst / size}
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows, "effort": self.cfg.name, "chunks": self.chunks, "resumed": self.resumed, "peak_mb": hardware.peak_memory_mb()}
+        if self.checkpoint is not None and not self.keep_progress:
+            shutil.rmtree(self.checkpoint, ignore_errors=True)  # finished: nothing left to resume
 
     def _look(self, points, out_faces, center, half, reference, pixel):
         """Generator: the percent of the view that differs from the original. Returns it when exhausted."""
-        view = yield from self._timed("pictures", pictures(points, out_faces, center, half, MAX_PIXELS))
+        view = yield from self._timed("pictures", pictures(points, out_faces, center, half, self.max_pixels))
         wrong, shown = picture_counts(reference, view, pixel)
         return 100.0 * wrong / max(shown, 1)
 

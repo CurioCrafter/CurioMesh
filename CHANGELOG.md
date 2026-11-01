@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Auto Segments adapts to your computer, and a job can run elsewhere.** A new "This
+  computer" box reads your cores, free memory, graphics card and Turbo, times a short
+  test, and rates the mesh in words ("This mesh is large for this PC: about 40 minutes,
+  working in small steps"). **Effort** (Auto, Light, Normal, Full) sets the slice length,
+  the gaps that leave your PC usable, the camera rays, Turbo threads and the size of the
+  pieces held in memory. A piece too big for the effort is cut into regions whose borders
+  are never moved, so they join with no gap (0 open edges on a bust cut into 4); the
+  progress bar names each region ("Part 3 of 12: upper left") and it shows in the viewport
+  when done. Finished regions are saved, so a stopped job resumes (a stopped bust run
+  reused its saved part and gave the same result). **Export Job** writes a folder with the
+  mesh, settings, engine and `run_job.py` (`blender --background --python run_job.py`);
+  **Import Result** brings `result.npz` back. See docs/CLOUD_WORKFLOW.md. On a 1.5M-face
+  cliff scan: Light 70 regions, 1217 s, 5.5 GB peak; Full 4 regions, 1524 s, 6.0 GB peak
+  (shared PC, so the times are rough). Memory barely fell: the whole mesh and the pairing
+  step dominate it, not the regions. No step uses a graphics card yet.
 - **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
   vertex group and colour the parts that need more quads red; the search keeps more
   faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate

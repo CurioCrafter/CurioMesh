@@ -1392,6 +1392,47 @@ def run_guided_case(module):
     if runner.report["faces"] >= len(sphere.data.polygons) or runner.report["loss"] > 3 * gs.auto_detail:
         raise AssertionError(f"guided: auto segments gained no reduction or lost the shape: {guided.status()}")
     print(f"PASS guided auto segments: {guided.status()}")
+
+    # hardware: Light effort cuts the mesh into chunks that join with no gap; a job folder runs elsewhere and comes back
+    import dataclasses
+    import tempfile
+    from pathlib import Path
+    from curiomesh import hardware, jobpack
+
+    machine = guided.machine_info(refresh=True)
+    if machine["cores"] < 1 or not hardware.describe(machine):
+        raise AssertionError("hardware: the computer could not be described")
+    gs.auto_effort = "LIGHT"
+    real_settings = hardware.settings_for
+    hardware.settings_for = lambda effort, found=None: dataclasses.replace(real_settings(effort, found), chunk_faces=300)
+    try:
+        bpy.ops.curiomesh.guided_auto_start()
+        guided.finish_work(bpy.context)
+    finally:
+        hardware.settings_for = real_settings
+    runner = guided.state["work"]["runner"]
+    uses = {}
+    for face in guided.state["res"]["faces"]:
+        for a, b in zip(face, face[1:] + face[:1]):
+            uses[(min(a, b), max(a, b))] = uses.get((min(a, b), max(a, b)), 0) + 1
+    if runner.report is None or runner.report["effort"] != "Light" or runner.report["chunks"] < 2 or any(c == 1 for c in uses.values()):
+        raise AssertionError(f"hardware: chunked Light run left a gap or did not chunk: {runner.report}")
+    reset_selection(sphere)
+    with tempfile.TemporaryDirectory() as folder:
+        if "FINISHED" not in bpy.ops.curiomesh.guided_export_job(directory=folder):
+            raise AssertionError("hardware: export failed")
+        job = Path(folder) / f"{sphere.name}_curiomesh_job"
+        if not all((job / name).exists() for name in ("mesh.npz", "run_job.py", "README.txt")):
+            raise AssertionError("hardware: the job folder is incomplete")
+        src = guided._source_data(sphere)
+        jobpack.save_result(job / "result.npz", runner.output, runner.report, len(src["faces"]), len(src["co"]))
+        guided.stop_work()
+        guided.remove_preview()
+        guided.state["auto_base"] = None
+        if "FINISHED" not in bpy.ops.curiomesh.guided_import_result(filepath=str(job / "result.npz")) or guided.state["res"] is None:
+            raise AssertionError("hardware: the result did not come back")
+    print(f"PASS hardware: {runner.report['chunks']} chunks, no gaps, job folder out and result back")
+    gs.auto_effort = "AUTO"
     gs.scope = "WHOLE"
 
     # auto-suggest, next spot, apply
