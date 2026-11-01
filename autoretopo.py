@@ -45,6 +45,7 @@ RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
 USE_CASES = True  # let the table of part cases say which size of a part to look at first
 JUMP_SIZES = True  # with the cases on, far from good enough: look at every other size and guess the one between
+JUMP_BELOW = 0.1  # only on pieces under this share of the triangles: errors average out over many, and a big piece decides the result
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None):
@@ -192,7 +193,10 @@ class AutoJob:
         self.picked: list[int] = []
         self.timings: dict[str, float] = {}  # seconds spent per kind of work, for the report
         self.looks = 0  # sizes of pieces the camera looked at
-        self.part_cases: dict[int, tuple] = {}  # piece -> (case, sizes skipped, sizes looked at), for `explain_part`
+        self.part_cases: dict[int, tuple] = {}  # piece -> (case, sizes skipped, sizes looked at, which were guessed), for `explain_part`
+        self.kept: tuple = ([], {})  # the sizes and made-to-measure pieces of the result that was kept
+        self._centers = None
+        self.triangles = 0.0
         self.table = cases.load_table() if USE_CASES else None
         self._search = self._run()
 
@@ -275,10 +279,10 @@ class AutoJob:
         floor = PIECE_LIMIT * self.detail / 100.0
         enough = GOOD_ENOUGH * self.detail / 100.0
         first, case = 0, None
-        # Reduce To and painted density want small sizes the camera limit would rule out, so they look at every size.
-        if self.table is not None and not self.target_faces and self.drop is None:
+        if self.table is not None:
             case = cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0))
-            first = cases.first_size(case, shares, floor, self.table)
+            if not self.target_faces:  # Reduce To may want any small size to land on its count, so none is ruled out
+                first = cases.first_size(case, shares, floor, self.table)
         # What was measured on this very mesh before, under any amount, is kept per size: another amount only adds sizes.
         tried = self.cache.setdefault(("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes())), {})
 
@@ -302,7 +306,7 @@ class AutoJob:
             change = yield from look(at)
         at, change = first, start_change
         while change > enough and at + 1 < len(shares):
-            if JUMP_SIZES and case is not None and at + 2 < len(shares) and change > 4.0 * enough and at + 1 not in tried:
+            if JUMP_SIZES and case is not None and triangles < JUMP_BELOW * self.triangles and at + 2 < len(shares) and change > 4.0 * enough and at + 1 not in tried:
                 before = change
                 change = yield from look(at + 2)
                 middle = _decimate(self.context, points, polys, kinds, shares[at + 1], self._piece_drop(ids))  # never looked at: the end check has the final say
@@ -317,7 +321,7 @@ class AutoJob:
         self.levels.append([tried[k][1] for k in order] + [Level(len(polys), 0.0)])
         self.seen.append(max(tried[k][3] for k in order))
         if case is not None:
-            self.part_cases[len(self.sizes) - 1] = (case, order[0], len(order))
+            self.part_cases[len(self.sizes) - 1] = (case, order[0], sum(1 for k in order if tried[k][4]), [not tried[k][4] for k in order])
 
     def _reference(self, center, half, pixels, points, polys):
         """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
@@ -403,6 +407,7 @@ class AutoJob:
         sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
         picture_sizes = _picture_sizes(sizes).tolist()
         weights = np.asarray([sum(len(self.faces[f]) - 2 for f in ids.tolist()) for ids in self.pieces], dtype=np.float64)
+        self.triangles = float(weights.sum())
         done_share = np.concatenate(([0.0], np.cumsum(weights))) / max(float(weights.sum()), 1.0)
         self._show()
         for index, ids in enumerate(self.pieces):
@@ -466,6 +471,7 @@ class AutoJob:
                 miss = abs(len(out_faces) - self.target_faces) / self.target_faces
                 if best is None or miss < best[0]:
                     best = (miss, points, out_faces, list(result.face_materials), None)
+                    self.kept = (list(self.picked), dict(self.tuned))
                 if miss <= CLOSE_ENOUGH:
                     break
                 paired_share = len(out_faces) / max(before_pairing, 1)
@@ -477,6 +483,7 @@ class AutoJob:
             rank = (not fits, len(out_faces) if fits else loss)
             if best is None or rank < best[0]:
                 best = (rank, points, out_faces, list(result.face_materials), loss)
+                self.kept = (list(self.picked), dict(self.tuned))
             if abs(loss - self.detail) <= 0.1 * self.detail:
                 break
             allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
@@ -519,13 +526,43 @@ class AutoJob:
             return
         self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
 
-    def explain_part(self, index: int) -> str:
-        """In plain words, for the segment view: what the piece `index` was taken for and what was kept. Empty before it is done."""
-        if index not in self.part_cases or index >= len(self.picked):
+    def piece_of_part(self, part: int) -> int:
+        """The piece a part of the finished output (a label in `output["parts"]`) came from, by where it sits. -1 if none."""
+        if self.report is None:
+            return -1
+        labels = np.asarray(self.output["parts"])
+        at = np.flatnonzero(labels == part).tolist()
+        if not at:
+            return -1
+        points = self.output["co"][np.unique(np.fromiter((v for f in at for v in self.output["faces"][f]), dtype=np.int64))]
+        center = (points.min(axis=0) + points.max(axis=0)) / 2.0
+        if self._centers is None:
+            boxes = [self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))] for ids in self.pieces]
+            self._centers = np.asarray([(box.min(axis=0) + box.max(axis=0)) / 2.0 for box in boxes])
+        gap = np.linalg.norm(self._centers - center, axis=1)
+        if self.mirror is not None:  # a part on the mirrored side came from the piece across the plane
+            axis, offset = self.mirror[:2]
+            center[axis] = 2.0 * offset - center[axis]
+            gap = np.minimum(gap, np.linalg.norm(self._centers - center, axis=1))
+        return int(np.argmin(gap))
+
+    def explain_part(self, part: int) -> str:
+        """In plain words, for the segment view: what this part of the finished output was taken for and what was kept. Empty before that."""
+        index = self.piece_of_part(part)
+        picked, tuned = self.kept
+        if index < 0 or index >= len(picked):
             return ""
-        case, skipped, looked = self.part_cases[index]
-        kept = self.levels[index][self.picked[index]]
-        return cases.explain(case, kept.faces, kept.loss / max(self.seen[index], 1e-30), skipped, looked)
+        if len(self.levels[index]) == 1:
+            return "Too small to reduce, so it was kept as it was."
+        if index not in self.part_cases:
+            return ""
+        case, skipped, looked, guessed = self.part_cases[index]
+        at = picked[index]
+        if index in tuned:
+            return cases.explain(case, len(tuned[index][1]), None, skipped, looked)
+        kept = self.levels[index][at]
+        whole = at == len(self.levels[index]) - 1
+        return cases.explain(case, kept.faces, kept.loss / max(self.seen[index], 1e-30), skipped, looked, whole, not whole and guessed[at])
 
     def status(self) -> str:
         extra = f" | {self.note}" if self.note else ""

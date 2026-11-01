@@ -53,7 +53,11 @@ class CaseTests(unittest.TestCase):
     def test_method_and_words(self):
         self.assertEqual(method_for("tube", TABLE), "revolve")
         self.assertEqual(method_for("box", TABLE), "decimate")
-        self.assertIn("tube", explain("tube", 120, 0.04, 2, 3))
+        self.assertIn("Looks like a tube", explain("tube", 120, 0.04, 2, 3))
+        self.assertIn("Looks like an ornament", explain("ornament", 120, 0.04, 0, 3))
+        self.assertIn("as it was", explain("box", 120, 0.0, 0, 3, whole=True))
+        self.assertIn("an estimated 4.0%", explain("box", 120, 0.04, 0, 3, guessed=True))
+        self.assertIn("Made to measure", explain("box", 120, None, 0, 3))
 
     def test_shipped_table_has_every_part_of_the_answer(self):
         table = load_table()

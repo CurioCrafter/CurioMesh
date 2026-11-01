@@ -200,8 +200,17 @@ def method_for(case: str, table: dict) -> str:
     return "revolve" if seen["fits"] >= 3 and seen["wins"] * 2 > seen["fits"] else "decimate"
 
 
-def explain(case: str, kept_faces: int, change: float, skipped: int, looked: int, method: str = "decimate") -> str:
+def explain(case: str, faces: int, change: float | None, skipped: int, looked: int, whole: bool = False, guessed: bool = False) -> str:
     """In plain words: what the part was taken for, what was tried, what was kept. `change` is a share of the part's view."""
-    tried = f"Skipped {skipped} smaller sizes that parts like this never hold, and looked at {looked}." if skipped else f"Looked at {looked} sizes."
-    how = "rebuilt as a turned part" if method == "revolve" else "reduced"
-    return f"Looks like a {case}: {WHY.get(case, 'it matched nothing else')}. {tried} Kept {kept_faces:,} faces, {how}; {change * 100.0:.1f}% of its view changes."
+    article = "an" if case[0] in "aeiou" else "a"
+    plural = "" if looked == 1 else "s"
+    tried = f"Looked at {looked} size{plural}."
+    if skipped:
+        tried = f"Skipped the {skipped} smallest size{'' if skipped == 1 else 's'}, which parts like this don't hold, and looked at {looked}."
+    if whole:
+        kept = "Kept it as it was, because no smaller size held up."
+    elif change is None:
+        kept = f"Made to measure at {faces:,} faces before pairing into quads, to land on the face count."
+    else:
+        kept = f"Kept {faces:,} faces before pairing into quads; {'an estimated ' if guessed else ''}{change * 100.0:.1f}% of its view changes."
+    return f"Looks like {article} {case}: {WHY.get(case, 'it matched nothing else')}. {tried} {kept}"
