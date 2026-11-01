@@ -22,7 +22,7 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from . import guides, overlay, region, segments, symmetry, textures
-from . import autoretopo
+from . import autoretopo, profiles
 from .triadq import areas, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -55,7 +55,7 @@ SCOPE_ITEMS = [
     ("AUTO", "Auto Segments", "Finds the fewest faces that keep the detail you ask for, or lands on a face count you pick, checking every loose piece with a camera, then makes all quads. Guided in five steps with a progress bar, and Blender stays usable while it works", "MOD_EXPLODE", 3),
 ]
 AIM_ITEMS = [
-    ("KEEP", "Keep Detail", "Keep what you can see: the fewest faces that still look like your mesh, within Change Allowed", "ZOOM_ALL", 0),
+    ("KEEP", "Keep Detail", "Keep what you can see: the fewest faces that still look like your mesh, within Detail", "ZOOM_ALL", 0),
     ("REDUCE", "Reduce To", "Land on a face count you pick (a percent of your faces, or a number). It then tells you how much the view changed, so you can judge it", "MOD_DECIM", 1),
 ]
 REDUCE_BY_ITEMS = [
@@ -170,6 +170,30 @@ def _enabled_update(self, context):
         _stop()
 
 
+_applying = False
+
+
+def _profile_update(self, context):
+    """Picking a use sets Detail, Method and Output."""
+    global _applying
+    values = profiles.preset(self.auto_profile)
+    if values is not None:
+        _applying = True
+        try:
+            self.auto_detail, self.auto_method, self.auto_output = values
+        finally:
+            _applying = False
+    _redraw_update(self, context)
+
+
+def _custom_update(self, context):
+    """Changing Detail, Method or Output by hand leaves the preset."""
+    if not _applying and self.auto_profile != "CUSTOM":
+        if profiles.preset(self.auto_profile) != (self.auto_detail, self.auto_method, self.auto_output):
+            self.auto_profile = "CUSTOM"
+    _redraw_update(self, context)
+
+
 def _redraw_update(self, context):
     overlay.tag_redraw()
 
@@ -201,7 +225,10 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     new_radius: bpy.props.FloatProperty(name="New Radius", description="Reach of the next point (scroll while placing). 0 picks a size from the mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
     new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
-    auto_detail: bpy.props.FloatProperty(name="Change Allowed", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces", default=6.0, min=0.5, soft_max=30.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
+    auto_profile: bpy.props.EnumProperty(name="Use", description="What the result is for. Each use sets Detail, Method and Output for you; change any of them and it becomes Custom", items=profiles.PROFILE_ITEMS, default="GAME", update=_profile_update)
+    auto_detail: bpy.props.FloatProperty(name="Detail", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces; very high gives a rough, very low-poly shape", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
+    auto_method: bpy.props.EnumProperty(name="Method", description="How the faces are made. Auto lets the camera decide the detail of each part; the other methods change how the reduced part is turned into faces. Each part can have its own (step 4)", items=profiles.METHOD_ITEMS, default="AUTO", update=_custom_update)
+    auto_output: bpy.props.EnumProperty(name="Output", description="The kind of faces in the result", items=profiles.OUTPUT_ITEMS, default="QUADS", update=_custom_update)
     auto_aim: bpy.props.EnumProperty(name="Aim", description="How Auto Segments decides how many faces to keep", items=AIM_ITEMS, default="KEEP", update=_redraw_update)
     auto_reduce_by: bpy.props.EnumProperty(name="Reduce By", description="Say the face count you want as a percent of your faces or as a number", items=REDUCE_BY_ITEMS, default="PERCENT", update=_redraw_update)
     auto_reduce_percent: bpy.props.FloatProperty(name="Faces Left", description="Reduce To: how many faces to end up with, as a share of the faces your mesh has now. 25% turns 40,000 faces into about 10,000", default=25.0, min=0.1, max=100.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
@@ -740,7 +767,7 @@ def _region_pass(base_co, base_faces, mask, pts, L0, gs, project, base_locked, b
 
 def _merge_results(base_co, base_faces, results, base_locked, base_mat):
     """The base mesh with every finished patch put in. None when no patch worked."""
-    good = [r for r in results if r.ok]
+    good = [r for r in results if r.ok and len(r.faces) <= len(r.removed_faces)]  # a redo never makes a region bigger
     if not good:
         return None
     co, faces, new = region._merged_arrays({"co": base_co, "faces": base_faces, "results": good})
@@ -1105,7 +1132,7 @@ def _start_segments(context, gs, src) -> bool:
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
     charts = _uv_charts(state_source(), src) if gs.keep_uvs and gs.bake_detail != "NORMAL_COLOR" else None
     codes = src["mat"] if charts is None else charts[0]
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy)
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_method, gs.auto_output)
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
@@ -1120,7 +1147,7 @@ def _start_segments(context, gs, src) -> bool:
     cache_key = (src["sig"], mirror[:2] if mirror else None, charts is None)
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
-    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy)
+    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, method=gs.auto_method, output=gs.auto_output)
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -1197,7 +1224,11 @@ def _start_boolean(context, gs, source, src) -> bool:
         base["area"] = _face_areas(co, faces)
     jobs = []
     if mask.any():
-        edge = float(np.sqrt(base["area"][mask].mean())) * 2.5 ** (1.0 - 2.0 * gs.bool_detail)
+        edge = float(np.sqrt(base["area"][mask].mean()))
+        # Never finer than the quads already there, so a redo does not add faces; Reduce To scales it by the share asked for.
+        report = base["report"]
+        share = min(1.0, report["asked"] / max(report["before"], 1)) if report["asked"] else 1.0
+        edge = max(edge * 1.2 * 2.5 ** (1.0 - 2.0 * gs.bool_detail), edge) / math.sqrt(max(share, 0.01))
         jobs = [areas.Job(mask, edge, gs.strategy, (0,))]
     state["message"] = work["note"] or "Redoing the part inside the shapes..."
     work["runner"].start(jobs)
@@ -2191,6 +2222,9 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         baked = ""
         if gs.bake_detail != "OFF":
             baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
+        flag = res.get("flag")
+        if flag is not None and len(flag) == len(mesh.polygons) and flag.any():
+            mesh.polygons.foreach_set("select", flag)  # the faces that could not be repaired, ready in Edit Mode
         if gs.apply_mode == "REPLACE":
             bpy.data.objects.remove(out)
             source.data = mesh
@@ -2246,6 +2280,48 @@ class CURIOMESH_OT_guided_auto_start(bpy.types.Operator):
         state["sig"] = _signature(context, obj)
         state["dirty"] = False
         return {"FINISHED"} if ok else {"CANCELLED"}
+
+
+class CURIOMESH_OT_guided_pick_part(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_pick_part"
+    bl_label = "Click a Part"
+    bl_description = "Click a part of the result to remake it with the method above. Only that part is redone, and the camera checks the whole object again"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return state["auto_base"] is not None and not segments.mirrored() and context.area is not None and context.area.type == "VIEW_3D"
+
+    def invoke(self, context, event):
+        context.window_manager.modal_handler_add(self)
+        state["message"] = "Click a part of the result (Esc cancels)"
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type in {"ESC", "RIGHTMOUSE"}:
+            return {"CANCELLED"}
+        if event.type != "LEFTMOUSE" or event.value != "PRESS":
+            return {"RUNNING_MODAL"}
+        base, preview = state["auto_base"], bpy.data.objects.get(PREVIEW_NAME)
+        area = context.area
+        window = next((r for r in area.regions if r.type == "WINDOW"), None)
+        if base is None or preview is None or window is None:
+            return {"CANCELLED"}
+        from bpy_extras import view3d_utils
+
+        point = (event.mouse_x - window.x, event.mouse_y - window.y)
+        origin = view3d_utils.region_2d_to_origin_3d(window, context.region_data, point)
+        direction = view3d_utils.region_2d_to_vector_3d(window, context.region_data, point)
+        inverse = preview.matrix_world.inverted()
+        hit, _location, _normal, index = preview.ray_cast(inverse @ origin, (inverse.to_3x3() @ direction).normalized())
+        pieces = base["out"].get("piece")
+        if not hit or pieces is None or index >= len(pieces) or state["res"] is not base["out"] and len(state["res"]["faces"]) != len(pieces):
+            state["message"] = "No part under the click: try again"
+            return {"RUNNING_MODAL"}
+        segments.seg["sel"] = {int(pieces[index])}
+        if bpy.ops.curiomesh.seg_redo.poll():
+            bpy.ops.curiomesh.seg_redo()
+        return {"FINISHED"}
 
 
 class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
@@ -2572,15 +2648,6 @@ class CURIOMESH_UL_guided_points(bpy.types.UIList):
         row.prop(item, "strength", text="")
 
 
-def detail_words(gs) -> str:
-    """The plain-words note under Detail, once the presets branch is merged."""
-    try:
-        from . import profiles
-    except ImportError:
-        return ""
-    return profiles.detail_words(gs.auto_detail)
-
-
 def _is_problem(message: str) -> bool:
     return any(w in message for w in ("skipped", "error", "Error", "failed", "Would make")) or message.startswith(("Select", "Place", "Nothing", "Points Only"))
 
@@ -2644,8 +2711,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         # Settings, read-only while the search runs
         col = layout.column(align=True)
         col.enabled = not searching
-        if hasattr(gs, "auto_profile"):  # presets, once that branch is merged
-            col.prop(gs, "auto_profile")
+        col.prop(gs, "auto_profile")
         col.row(align=True).prop(gs, "auto_aim", expand=True)
         row = col.row(align=True)
         row.label(text="Mirror", icon="MOD_MIRROR")
@@ -2669,9 +2735,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 col.label(text="Press Paint, colour the parts that need more quads red", icon="INFO")
         if gs.auto_aim == "KEEP":
             col.prop(gs, "auto_detail")
-            words = detail_words(gs)
-            if words:
-                overlay.wrap_label(col, words, icon="INFO", width=36, limit=2)
+            overlay.wrap_label(col, profiles.detail_words(gs.auto_detail), icon="INFO", width=36, limit=2)
         else:
             col.row(align=True).prop(gs, "auto_reduce_by", expand=True)
             col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
@@ -2679,10 +2743,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
             col.prop(gs, "keep_uvs", toggle=True, icon="UV")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
-        if hasattr(gs, "auto_method"):
-            col.prop(gs, "auto_method")
-        if hasattr(gs, "auto_output"):
-            col.row(align=True).prop(gs, "auto_output", expand=True)
+        col.prop(gs, "auto_method")
+        col.row(align=True).prop(gs, "auto_output", expand=True)
 
         # The result
         if done:
@@ -2925,6 +2987,7 @@ CLASSES = (
     CURIOMESH_OT_guided_apply,
     CURIOMESH_OT_guided_stop,
     CURIOMESH_OT_guided_auto_start,
+    CURIOMESH_OT_guided_pick_part,
     CURIOMESH_OT_guided_stop_work,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,

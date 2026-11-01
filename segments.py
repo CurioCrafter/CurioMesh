@@ -13,7 +13,6 @@ the Method setting and this view agree on the names. Everything here works on `g
 
 from __future__ import annotations
 
-import threading
 import time
 
 import bpy
@@ -23,18 +22,8 @@ from mathutils.kdtree import KDTree
 
 from . import autoretopo, overlay
 from .triadq import parts as P
-from .triadq.flatquad import flat_quad_remesh, pair_and_close
-from .triadq.types import MeshData
 
-try:  # the presets branch has more methods; the names are the same
-    from .profiles import METHOD_ITEMS
-except ImportError:
-    METHOD_ITEMS = [
-        ("AUTO", "Auto", "The camera decides how many faces the part keeps, then pairs triangles into quads and closes the rest", "CAMERA_DATA", 0),
-        ("PAIRING", "Pairing", "Pairs triangles into quads from more starting points, so quads come out more even. Slower", "MOD_LATTICE", 1),
-        ("FLAT", "Flat Quads", "Flat areas become one big quad each, then the rest is paired. Fewest faces on hard-surface parts", "MESH_PLANE", 2),
-        ("TRIS", "Tris Only", "No pairing: the reduced triangles as they are. About twice the faces of the same shape in quads", "MESH_DATA", 6),
-    ]
+from .profiles import METHOD_ITEMS
 
 METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
 KIND_ITEMS = [(k, P.KIND_WORDS[k], "") for k in P.KINDS]
@@ -228,31 +217,7 @@ def kinds_back(kinds, charts) -> np.ndarray:
 
 def _faces_for(job, method: str, co, polys, kinds):
     """Generator: (points, faces, materials) for one reduced part by `method`. Returns None when it fails."""
-    if hasattr(job, "_build"):  # the presets branch builds every method, including the ones that need the main thread
-        return (yield from job._build(co, polys, kinds, method, len(polys) // 2))
-    box = {}
-
-    def work():
-        try:
-            mesh = MeshData(co, polys, kinds)
-            if method == "FLAT":
-                made = flat_quad_remesh(mesh, force_quads=True)[0]
-            elif method == "TRIS":
-                made = mesh
-            else:
-                made = pair_and_close(mesh, seed_count=4 if method == "PAIRING" else 2)[0]
-            box["out"] = (np.asarray(made.vertices, dtype=np.float64), [tuple(f) for f in made.faces], list(made.face_materials))
-        except Exception as exc:  # a thread has nobody above it to report to
-            box["error"] = str(exc)[:80]
-
-    thread = threading.Thread(target=work, daemon=True, name="CurioMeshPart")
-    thread.start()
-    while thread.is_alive():
-        yield
-    if "out" not in box:
-        job.warnings = [f"{method_name(method)} did not work on this part ({box.get('error', 'no result')})"]
-        return None
-    return box["out"]
+    return (yield from job._build(co, polys, kinds, method, len(polys) // 2))
 
 
 class PartJob:
@@ -848,6 +813,7 @@ def draw_parts(layout, context, gs) -> None:
     row.prop(gs, "seg_method", text="")
     if mirrored():
         layout.label(text="Redo is off with Mirror on: start again without it", icon="INFO")
+    layout.operator("curiomesh.guided_pick_part", icon="RESTRICT_SELECT_OFF")
     row.operator("curiomesh.seg_redo", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
     if busy:
         guided.draw_progress(box, *guided.progress_info())
