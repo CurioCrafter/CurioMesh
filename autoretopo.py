@@ -26,6 +26,7 @@ from mathutils.kdtree import KDTree
 
 from .triadq import checks, parts, patch, patterns
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
+from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
@@ -54,6 +55,7 @@ BORDER_TOLERANCE = 0.05  # how far a border between kinds may straighten, as a s
 SOFT_DEG = 10.0  # shallow folds in cloth only turn the shading this much
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
+OTHER_VERTICES = 8  # how far down a sample's nearest vertices to look for one of its own loose part
 SHOW_EVERY = 1.0  # seconds between preview updates
 POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
@@ -419,6 +421,8 @@ class AutoJob:
         self._pair_thread: threading.Thread | None = None
         self._paired = None
         self._labels = None
+        self._shell = None
+        self._samples = None
         self.pieces: list[np.ndarray] = []
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
@@ -633,6 +637,68 @@ class AutoJob:
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
+    def _source_samples(self):
+        """Each source triangle as a point: (positions, normals, areas, loose parts, the source's tree). Made once."""
+        if self._samples is None:
+            sizes = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
+            triangles = np.asarray([(f[0], f[i], f[i + 1]) for f in self.faces for i in range(1, len(f) - 1)], dtype=np.int64)
+            parts = np.repeat(self._shell, sizes - 2)
+            a, b, c = self.co[triangles[:, 0]], self.co[triangles[:, 1]], self.co[triangles[:, 2]]
+            cross = np.cross(b - a, c - a)
+            twice = np.linalg.norm(cross, axis=1)
+            real = twice > 0.0
+            tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
+            self._samples = (((a + b + c) / 3.0)[real], cross[real] / twice[real][:, None], twice[real] / 2.0, parts[real], tree)
+        return self._samples
+
+    def _fit(self, mesh: MeshData) -> MeshData:
+        """Fit the vertices to their share of the source, part by part, and keep it where the part really got closer.
+
+        Idea from cav3dw3ll3r: each source sample goes to its nearest vertex, so a vertex's share grows with its quads.
+        """
+        quads = np.asarray([f for f in mesh.faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+        if not len(quads):
+            return mesh
+        points = mesh.vertices
+        position, normal, area, sample_part, source_tree = self._source_samples()
+        tree = KDTree(len(points))
+        for index, point in enumerate(points.tolist()):
+            tree.insert(point, index)
+        tree.balance()
+        source_parts = int(sample_part.max()) + 1
+        if source_parts == 1:
+            vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, None)
+            owner = np.fromiter((tree.find(p)[1] for p in position.tolist()), dtype=np.int64, count=len(position))
+        else:
+            # A result part came from one source part, and samples of another part, however near, say nothing about it.
+            sample_tree = KDTree(len(position))
+            for index, point in enumerate(position.tolist()):
+                sample_tree.insert(point, index)
+            sample_tree.balance()
+            vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, lambda p: sample_tree.find(p)[1])
+            vertex_source = source_of[vertex_part]
+            owner = np.full(len(position), -1, dtype=np.int64)
+            for index, (point, part) in enumerate(zip(position.tolist(), sample_part.tolist())):
+                for _found, vertex, _away in tree.find_n(point, OTHER_VERTICES):
+                    if vertex_source[vertex] == part:
+                        owner[index] = vertex
+                        break
+        count = len(source_of)
+        moved = fit_vertices(points, quads, position, normal, area, owner)
+
+        def gaps(where: np.ndarray) -> np.ndarray:
+            """Per result part, the mean distance from its source to it plus from it to its source."""
+            result_tree = BVHTree.FromPolygons(where.tolist(), [list(f) for f in mesh.faces], all_triangles=False, epsilon=0.0)
+            to_result = np.fromiter((result_tree.find_nearest(p)[3] for p in position.tolist()), dtype=np.float64, count=len(position))
+            to_source = np.fromiter((source_tree.find_nearest(p)[3] for p in where.tolist()), dtype=np.float64, count=len(where))
+            weighted = np.bincount(sample_part, area * to_result, minlength=source_parts) / np.maximum(np.bincount(sample_part, area, minlength=source_parts), 1e-30)
+            back = np.bincount(vertex_part, to_source, minlength=count) / np.maximum(np.bincount(vertex_part, minlength=count), 1)
+            return weighted[source_of] + back
+
+        worse = gaps(moved) >= gaps(points)
+        moved[worse[vertex_part]] = points[worse[vertex_part]]
+        return MeshData(vertices=moved, faces=mesh.faces, face_materials=mesh.face_materials, name=mesh.name)
+
     def _guided(self, co, faces, kinds):
         """The mesh about to be paired, cut along the strokes: (co, faces, kinds, guide edges)."""
         started = time.perf_counter()
@@ -663,7 +729,11 @@ class AutoJob:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
                 coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
-            self._paired = make_pure(coarse, method, self.output_kind, seed_count=4 if method == "PAIRING" else 2, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True)
+            made = make_pure(coarse, method, self.output_kind, seed_count=4 if method == "PAIRING" else 2, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True)
+            # Strokes and a mirror seam must stay where they are.
+            if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and self.mirror is None and not self._stopped:
+                made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
+            self._paired = made
             self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
         except Cancelled:  # Stop was pressed: the thread ends at its next stopping point
             pass
@@ -821,6 +891,7 @@ class AutoJob:
     def _run(self):
         fa, fb = patch.face_adjacency(self.faces)
         shell = np.unique(patch._labels(len(self.faces), fa, fb), return_inverse=True)[1]
+        self._shell = shell
         order = np.argsort(shell, kind="stable")
         starts = np.concatenate(([0], np.flatnonzero(shell[order][1:] != shell[order][:-1]) + 1, [len(order)]))
         self.pieces = sorted((order[a:b] for a, b in zip(starts[:-1], starts[1:])), key=len, reverse=True)
