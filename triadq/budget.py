@@ -55,3 +55,14 @@ def allocate(pieces: list[list[Level]], allowed: float, piece_share: float, seen
         if upgrade is not None:
             heapq.heappush(heap, (-upgrade[0], piece, upgrade[1]))
     return choice
+
+
+def best_levels(levels: list[Level]) -> list[int]:
+    """Indices of the levels, by faces, that lose less than every level with as few faces or fewer."""
+
+    kept, lowest = [], float("inf")
+    for index in sorted(range(len(levels)), key=lambda k: (levels[k].faces, levels[k].loss)):
+        if levels[index].loss < lowest:
+            kept.append(index)
+            lowest = levels[index].loss
+    return kept

@@ -8,6 +8,8 @@
   then makes all quads. **Change Allowed** sets how much of the view may look
   different. Small parts are judged by how big they look on the object, and
   Blender stays usable while it works.
+  It now also tries a size between two others where a piece jumps past a limit,
+  and reports how much of the view shades differently under smooth shading.
 - **Work Live** (Guided panel). Paint areas on your mesh or on the result, each
   with its own density and fill style, and watch them remesh one at a time on a
   background thread while you keep working. Scroll sets the size, Shift+scroll

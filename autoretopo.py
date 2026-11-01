@@ -24,8 +24,9 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from .triadq import patch
-from .triadq.budget import Level, allocate
+from .triadq.budget import Level, allocate, best_levels
 from .triadq.flatquad import pair_and_close
+from .triadq.shading import blended_normals, corner_table, vertex_normals
 from .triadq.types import MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -34,15 +35,17 @@ KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to ga
 LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
+FINER_TRIANGLES = 200  # pieces smaller than this have too few faces for a size between two others to matter
 ROUNDS = 4  # tries at landing on the amount asked for
 TURNED_DEG = 20.0
+SOFT_DEG = 10.0  # shallow folds in cloth only turn the shading this much
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int):
-    """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth)] when exhausted."""
+    """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth, face)] when exhausted."""
 
     tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
     grid = (((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half).tolist()
@@ -54,6 +57,7 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
             hit = np.zeros((pixels, pixels), dtype=bool)
             normal = np.zeros((pixels, pixels, 3))
             depth = np.zeros((pixels, pixels))
+            face = np.zeros((pixels, pixels), dtype=np.int32)
             direction = [0.0, 0.0, 0.0]
             direction[axis] = -sign
             direction = Vector(direction)
@@ -67,12 +71,13 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
                     if found[0] is not None:
                         hit[i, j] = True
                         normal[i, j] = found[1]
+                        face[i, j] = found[2]
                         depth[i, j] = found[3]
                 since_yield += pixels
                 if since_yield >= RAYS_PER_YIELD:
                     since_yield = 0
                     yield
-            out.append((hit, normal, depth))
+            out.append((hit, normal, depth, face))
     return out
 
 
@@ -81,12 +86,47 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
 
     wrong, total = 0, 0
     limit = math.cos(math.radians(TURNED_DEG))
-    for (hit_a, normal_a, depth_a), (hit_b, normal_b, depth_b) in zip(reference, other):
+    for (hit_a, normal_a, depth_a, _), (hit_b, normal_b, depth_b, _) in zip(reference, other):
         both = hit_a & hit_b
         turned = np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < limit  # winding isn't shape
         moved = np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel
         wrong += int((turned | moved).sum()) + int((hit_a ^ hit_b).sum())
         total += int((hit_a | hit_b).sum())
+    return wrong, total
+
+
+def shaded(picture_set, points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int) -> list[np.ndarray]:
+    """Each picture's normals as smooth shading shows them, blended from the vertices at each hit."""
+
+    normals = vertex_normals(points, polys)
+    table = corner_table(polys)
+    grid = ((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half
+    out = []
+    views = iter(picture_set)
+    for axis in range(3):
+        u, v = (axis + 1) % 3, (axis + 2) % 3
+        for sign in (1.0, -1.0):
+            hit, _normal, depth, face = next(views)
+            i, j = np.nonzero(hit)
+            at = np.empty((len(i), 3))
+            at[:, u] = center[u] + grid[i]
+            at[:, v] = center[v] + grid[j]
+            at[:, axis] = center[axis] + sign * (2.0 * half - depth[i, j])
+            blended = np.zeros((pixels, pixels, 3))
+            blended[i, j] = blended_normals(points, table, normals, face[i, j], at)
+            out.append(blended)
+    return out
+
+
+def shading_counts(reference, other, shaded_a, shaded_b, degrees: float = TURNED_DEG) -> tuple[int, int]:
+    """(pixels showing both whose smooth-shaded normal turned by more than `degrees`, pixels showing both)."""
+
+    limit = math.cos(math.radians(degrees))
+    wrong, total = 0, 0
+    for (hit_a, *_), (hit_b, *_), normal_a, normal_b in zip(reference, other, shaded_a, shaded_b):
+        both = hit_a & hit_b
+        wrong += int((np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < limit).sum())
+        total += int(both.sum())
     return wrong, total
 
 
@@ -216,6 +256,20 @@ class AutoJob:
             levels.append(Level(len(reduced[1]), wrong * area))
             if wrong <= GOOD_ENOUGH * self.detail / 100.0 * shown:
                 break
+        if triangles >= FINER_TRIANGLES and seen > 0.0:
+            # A size halfway across the jumps that matter, so a piece doesn't get twice the faces to clear a limit.
+            asked = self.detail / 100.0
+            for limit in (asked, PIECE_LIMIT * asked):
+                upper = next((k for k, level in enumerate(levels) if level.loss <= limit * seen), None)
+                if upper:
+                    yield
+                    faces = math.sqrt(levels[upper - 1].faces * levels[upper].faces)
+                    reduced = _decimate(self.context, points, polys, kinds, faces / len(polys))
+                    view = yield from pictures(reduced[0], reduced[1], center, half, pixels)
+                    sizes.append(reduced)
+                    levels.append(Level(len(reduced[1]), picture_counts(reference, view, pixel)[0] * area))
+            kept = best_levels(levels)
+            sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
         sizes.append(whole)
         levels.append(Level(len(polys), 0.0))
         self.sizes.append(sizes)
@@ -281,6 +335,7 @@ class AutoJob:
         center, half = (low + high) / 2.0, extent * 0.55
         pixel = 2.0 * half / MAX_PIXELS
         reference = yield from pictures(self.co, self.faces, center, half, MAX_PIXELS)
+        reference_shaded = shaded(reference, self.co, self.faces, center, half, MAX_PIXELS)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
         allowed = asked * total_seen
@@ -309,23 +364,27 @@ class AutoJob:
             view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
             wrong, shown = picture_counts(reference, view, pixel)
             loss = 100.0 * wrong / max(shown, 1)
+            view_shaded = shaded(view, points, out_faces, center, half, MAX_PIXELS)
+            bad_shade, both = shading_counts(reference, view, reference_shaded, view_shaded)
+            shading = 100.0 * bad_shade / max(both, 1)
+            soft = 100.0 * shading_counts(reference, view, reference_shaded, view_shaded, SOFT_DEG)[0] / max(both, 1)
             fits = loss <= 1.1 * self.detail
             # Prefer anything that fits, then the fewest faces. With nothing fitting yet, the least change.
             rank = (not fits, len(out_faces) if fits else loss)
             if best is None or rank < best[0]:
-                best = (rank, points, out_faces, list(result.face_materials), loss)
+                best = (rank, points, out_faces, list(result.face_materials), loss, shading, soft)
             if abs(loss - self.detail) <= 0.1 * self.detail:
                 break
             allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
-        _rank, points, out_faces, materials, loss = best
+        _rank, points, out_faces, materials, loss, shading, soft = best
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         quads = sum(1 for face in out_faces if len(face) == 4)
-        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
+        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "shading": shading, "shading_soft": soft, "seconds": time.perf_counter() - self.started}
         self._show((points, out_faces, materials, parts))
 
     def status(self) -> str:
         if self.report is None:
             return self.stage
         r = self.report
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s"
+        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs, {r['shading']:.1f}% shades differently. {r['seconds']:.0f} s"
