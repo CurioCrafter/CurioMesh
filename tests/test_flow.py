@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from triadq.flow import snap_new_vertices, snap_rows
+from triadq.flow import faces_that_gain, snap_new_vertices, snap_rows, split_faces
 from triadq.patch import quad_quality
 from triadq.types import MeshData
 
@@ -39,6 +39,35 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(len(kept), len(faces) - 1)
         self.assertEqual(len(moved), loose)
         self.assertGreater(quad_quality(moved[np.asarray(kept)]).min(), 0.0)
+
+    def test_split_marked_stays_all_quads_without_t_junctions(self):
+        co, faces = _grid(5)
+        out = split_faces(MeshData(co, faces), {12, 13, 7})
+        quads = np.asarray(out.faces)
+        self.assertEqual(quads.shape[1], 4)
+        self.assertGreater(quad_quality(out.vertices[quads]).min(), 0.0)
+        area = sum(np.linalg.norm(np.cross(p[2] - p[0], p[3] - p[1])) / 2.0 for p in out.vertices[quads])
+        self.assertAlmostEqual(area, 25.0)
+        # every side shared by two faces or on the outer border: a T-junction would leave a side used once inside
+        edges = {}
+        for f in out.faces:
+            for k in range(4):
+                key = tuple(sorted((f[k], f[(k + 1) % 4])))
+                edges[key] = edges.get(key, 0) + 1
+        inner_once = [e for e, n in edges.items() if n == 1 and not all(_on_border(out.vertices[v], 5) for v in e)]
+        self.assertEqual(inner_once, [])
+
+    def test_only_faces_off_the_source_gain(self):
+        co, faces = _grid(2)
+        co[4, 2] = 0.5  # the middle rises, so the middles of the sides reaching it leave the flat source
+        co[0, 2] = 0.0
+        found = faces_that_gain(MeshData(co, faces), _flat, 0.1)
+        self.assertEqual(found, {0, 1, 2, 3})
+        self.assertEqual(faces_that_gain(MeshData(co, faces), _flat, 1.0), set())
+
+
+def _on_border(point, n):
+    return point[0] in (0.0, n) or point[1] in (0.0, n)
 
 
 if __name__ == "__main__":

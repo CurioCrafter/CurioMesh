@@ -15,6 +15,10 @@ which keeps Blender usable. Only the pairing, which is plain NumPy, goes to a wo
 from __future__ import annotations
 
 import math
+import os
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 
@@ -25,7 +29,7 @@ from mathutils.bvhtree import BVHTree
 
 from .triadq import patch
 from .triadq.flatquad import _face_frames
-from .triadq.flow import snap_new_vertices, snap_rows
+from .triadq.flow import faces_that_gain, snap_new_vertices, snap_rows, split_faces
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
 from .triadq.types import MeshData
@@ -37,11 +41,15 @@ LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles t
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
-ROWS_INPUT = 3  # Clean Rows: QuadriFlow's input needs at most this many triangles per quad asked for
 ROWS_SMALLEST = 32  # Clean Rows: a piece due fewer quads than this is paired instead
-ROWS_START = 0.08  # Clean Rows: first try, as a share of the source's triangles
+ROWS_START = 0.04  # Clean Rows: first try, as a share of the source's triangles
 ROWS_MOST = 0.8  # Clean Rows: most faces, as a share of the source's triangles
-ROWS_ROUNDS = 3
+ROWS_FAR = 2.5  # Clean Rows: a change this many times the amount asked for gets a denser layout, not local density
+ROWS_DENSER = 4  # Clean Rows: most rounds of density where the camera finds a difference
+ROWS_FIX_SHARE = 0.6  # Clean Rows: share of the wrong pixels on a quad that splitting it is assumed to fix
+ROWS_SECONDS = 30.0  # Clean Rows: QuadriFlow's time limit per piece, plus...
+ROWS_SECONDS_PER_QUAD = 0.01  # ...this much for each quad asked for
+FLAT_SNAP_PIXELS = 0.25  # Balanced: a face whose new vertices would move less than this many pixels stays whole
 NARROW_TRIES = 2  # extra tries with a new size in between, when the sizes on offer land well short of it
 TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
@@ -50,7 +58,7 @@ SHOW_EVERY = 1.0  # seconds between preview updates
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int):
-    """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth)] when exhausted."""
+    """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth, face seen)] when exhausted."""
 
     tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
     grid = (((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half).tolist()
@@ -62,6 +70,7 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
             hit = np.zeros((pixels, pixels), dtype=bool)
             normal = np.zeros((pixels, pixels, 3))
             depth = np.zeros((pixels, pixels))
+            seen = np.full((pixels, pixels), -1, dtype=np.int64)
             direction = [0.0, 0.0, 0.0]
             direction[axis] = -sign
             direction = Vector(direction)
@@ -76,11 +85,12 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
                         hit[i, j] = True
                         normal[i, j] = found[1]
                         depth[i, j] = found[3]
+                        seen[i, j] = found[2]
                 since_yield += pixels
                 if since_yield >= RAYS_PER_YIELD:
                     since_yield = 0
                     yield
-            out.append((hit, normal, depth))
+            out.append((hit, normal, depth, seen))
     return out
 
 
@@ -89,13 +99,27 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
 
     wrong, total = 0, 0
     limit = math.cos(math.radians(TURNED_DEG))
-    for (hit_a, normal_a, depth_a), (hit_b, normal_b, depth_b) in zip(reference, other):
+    for (hit_a, normal_a, depth_a, _seen_a), (hit_b, normal_b, depth_b, _seen_b) in zip(reference, other):
         both = hit_a & hit_b
         turned = np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < limit  # winding isn't shape
         moved = np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel
         wrong += int((turned | moved).sum()) + int((hit_a ^ hit_b).sum())
         total += int((hit_a | hit_b).sum())
     return wrong, total
+
+
+def wrong_pixels_per_face(reference, other, pixel: float, face_count: int) -> np.ndarray:
+    """How many pixels the viewer would see as different, on each face of `other`. A pixel it misses entirely isn't counted."""
+
+    wrong = np.zeros(face_count, dtype=np.int64)
+    limit = math.cos(math.radians(TURNED_DEG))
+    for (hit_a, normal_a, depth_a, _seen_a), (hit_b, normal_b, depth_b, seen_b) in zip(reference, other):
+        both = hit_a & hit_b
+        bad = np.abs((normal_a * normal_b).sum(axis=2)) < limit
+        bad |= np.abs(depth_a - depth_b) > 2.0 * pixel
+        rows = seen_b[(both & bad) | (hit_b & ~hit_a)]
+        np.add.at(wrong, rows[rows >= 0], 1)
+    return wrong
 
 
 def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
@@ -132,38 +156,6 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
         most *= 0.85
 
 
-def _quadriflow(context, points, polys, target: int):
-    """(points, quads) from QuadriFlow, or None where it refuses the piece. Runs on a smaller copy when that is plenty."""
-
-    triangles = sum(len(p) - 2 for p in polys)
-    if triangles > ROWS_INPUT * target:
-        points, polys, _kinds = _decimate(context, points, polys, ["0"] * len(polys), ROWS_INPUT * target / triangles)
-    mesh = bpy.data.meshes.new("CurioMesh_Rows")
-    mesh.from_pydata(points.tolist(), [], polys)
-    mesh.update()
-    obj = bpy.data.objects.new("CurioMesh_Rows", mesh)
-    context.scene.collection.objects.link(obj)
-    layer = context.view_layer
-    before = layer.objects.active
-    try:
-        layer.objects.active = obj
-        obj.select_set(True)
-        try:
-            done = bpy.ops.object.quadriflow_remesh(mode="FACES", target_faces=int(target), use_preserve_sharp=True, use_preserve_boundary=True, seed=0)
-        except RuntimeError:
-            return None
-        if "FINISHED" not in done or not len(obj.data.polygons):
-            return None
-        co = np.empty(len(obj.data.vertices) * 3, dtype=np.float64)
-        obj.data.vertices.foreach_get("co", co)
-        return co.reshape(-1, 3), [tuple(p.vertices) for p in obj.data.polygons]
-    finally:
-        layer.objects.active = before
-        data = obj.data
-        bpy.data.objects.remove(obj, do_unlink=True)
-        bpy.data.meshes.remove(data)
-
-
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
@@ -175,6 +167,8 @@ class AutoJob:
         self.detail = float(detail)
         self.style = style
         self._tree = None
+        self._worker: subprocess.Popen | None = None
+        self._refused = 0
         self.busy = True
         self.current = None
         self.output = None
@@ -198,6 +192,7 @@ class AutoJob:
     def stop(self) -> None:
         self._stopped = True
         self.busy = False
+        self._kill_worker()
 
     def step(self, seconds: float = 0.04) -> None:
         """Do the next slice of work on this (the main) thread."""
@@ -296,10 +291,16 @@ class AutoJob:
     def _pair(self, co, faces, kinds) -> None:
         try:
             coarse = MeshData(co, faces, kinds)
-            result = pair_and_close(coarse, seed_count=2, split_all=self.style == "BALANCED")[0]
             if self._tree is None:
                 self._tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
-            result = snap_new_vertices(result, coarse.vertices, self._tree.find_nearest)
+            find = self._tree.find_nearest
+            if self.style == "BALANCED":
+                paired = pair_and_close(coarse, seed_count=2, force_quads=False)[0]
+                span = float(np.ptp(self.co, axis=0).max()) * 1.1 / MAX_PIXELS
+                result = split_faces(paired, faces_that_gain(paired, find, FLAT_SNAP_PIXELS * span))
+            else:
+                result = pair_and_close(coarse, seed_count=2)[0]
+            result = snap_new_vertices(result, coarse.vertices, find)
             self._paired = result
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
@@ -409,43 +410,89 @@ class AutoJob:
         self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
         self._show((points, out_faces, materials, parts))
 
+    def _kill_worker(self) -> None:
+        if self._worker is not None:
+            self._worker.kill()
+            self._worker.wait()
+            self._worker = None
+
     def _rows_once(self, areas, target: int):
-        """Generator: every piece as field-aligned rows of one quad size, onto the source. Returns (points, faces, materials)."""
+        """Generator: QuadriFlow on every piece big enough, in a second Blender, snapped to the source. Returns (points, faces, materials)."""
 
         total = float(areas.sum()) or 1.0
-        all_points, all_faces, all_kinds = [], [], []
-        offset = 0
-        leftovers = []
-        for index, ids in enumerate(self.pieces):
-            self.stage = f"Laying rows on piece {index + 1} of {len(self.pieces)}"
-            self.progress = (index, len(self.pieces))
-            yield
-            if self._stopped:
-                return None
-            points, polys, kinds = self._piece_arrays(ids)
-            want = int(target * float(areas[index]) / total)
-            rows = _quadriflow(self.context, points, polys, want) if want >= ROWS_SMALLEST else None
-            if rows is None:  # too small for rows, or QuadriFlow refused it
-                triangles = sum(len(p) - 2 for p in polys)
-                if triangles > max(KEEP_TRIANGLES, 2 * want):
-                    points, polys, kinds = _decimate(self.context, points, polys, kinds, max(KEEP_TRIANGLES, 2 * want) / triangles)
-                leftovers.append((points, polys, kinds))
-                continue
-            yield
-            tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
-            moved, quads = snap_rows(rows[0], rows[1], tree.find_nearest)
-            all_points.append(moved)
-            all_faces += [tuple(v + offset for v in q) for q in quads]
-            centers = moved[np.asarray(quads)].mean(axis=1).tolist()
-            all_kinds += [kinds[tree.find_nearest(c)[2]] for c in centers]
-            offset += len(moved)
+        folder = tempfile.mkdtemp(prefix="curiomesh_rows_")
+        try:
+            wants = (target * areas / total).astype(np.int64)
+            jobs = [k for k, want in enumerate(wants.tolist()) if want >= ROWS_SMALLEST]
+            for k in jobs:
+                points, polys, _kinds = self._piece_arrays(self.pieces[k])
+                np.savez(os.path.join(folder, f"in_{k}.npz"), co=points, target=wants[k], lens=np.asarray([len(p) for p in polys], dtype=np.int64), flat=np.asarray([v for p in polys for v in p], dtype=np.int64))
+                yield
+            at = 0
+            while at < len(jobs):
+                self._worker = subprocess.Popen(
+                    [bpy.app.binary_path, "--background", "--factory-startup", "--python", os.path.join(os.path.dirname(__file__), "rows_worker.py"), "--", folder, str(jobs[at]), str(jobs[-1] + 1)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                since = time.perf_counter()
+                while at < len(jobs):
+                    k = jobs[at]
+                    self.stage = f"Laying rows on piece {at + 1} of {len(jobs)}"
+                    self.progress = (at, len(jobs))
+                    if os.path.exists(os.path.join(folder, f"out_{k}.npz")):
+                        at += 1
+                        since = time.perf_counter()
+                        continue
+                    if self._stopped:
+                        self._kill_worker()
+                        return None
+                    if time.perf_counter() - since > ROWS_SECONDS + ROWS_SECONDS_PER_QUAD * float(wants[k]) or self._worker.poll() is not None:
+                        if self._worker.poll() is None or not os.path.exists(os.path.join(folder, f"out_{k}.npz")):
+                            print(f"CURIOROWS piece {k} gave up, {len(self.pieces[k])} faces, asked {wants[k]}", flush=True)
+                            self._kill_worker()
+                            self._refused += 1
+                            at += 1
+                            break
+                    time.sleep(0.005)
+                    yield
+            self._kill_worker()
+            all_points, all_faces, all_kinds = [], [], []
+            offset = 0
+            leftovers = []
+            for k, ids in enumerate(self.pieces):
+                points, polys, kinds = self._piece_arrays(ids)
+                path = os.path.join(folder, f"out_{k}.npz")
+                rows = np.load(path) if os.path.exists(path) else None
+                if rows is None or not len(rows["lens"]):
+                    triangles = sum(len(p) - 2 for p in polys)
+                    want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
+                    if triangles > want:
+                        points, polys, kinds = _decimate(self.context, points, polys, kinds, want / triangles)
+                    leftovers.append((points, polys, kinds))
+                    yield
+                    continue
+                flat, faces, cursor = rows["flat"].tolist(), [], 0
+                for size in rows["lens"].tolist():
+                    faces.append(tuple(flat[cursor : cursor + size]))
+                    cursor += size
+                tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
+                moved, quads = snap_rows(rows["co"], faces, tree.find_nearest)
+                all_points.append(moved)
+                all_faces += [tuple(v + offset for v in q) for q in quads]
+                centers = np.asarray([moved[list(q)].mean(axis=0) for q in quads]).tolist()
+                all_kinds += [kinds[tree.find_nearest(c)[2]] for c in centers]
+                offset += len(moved)
+                yield
+        finally:
+            self._kill_worker()
+            shutil.rmtree(folder, ignore_errors=True)
         if leftovers:
-            pts, fcs, knd, at = [], [], [], 0
+            pts, fcs, knd, cursor = [], [], [], 0
             for points, polys, kinds in leftovers:
                 pts.append(points)
-                fcs += [tuple(v + at for v in p) for p in polys]
+                fcs += [tuple(v + cursor for v in p) for p in polys]
                 knd += kinds
-                at += len(points)
+                cursor += len(points)
             closed = pair_and_close(MeshData(np.vstack(pts), fcs, knd), seed_count=1)[0]
             all_points.append(np.asarray(closed.vertices))
             all_faces += [tuple(v + offset for v in f) for f in closed.faces]
@@ -453,7 +500,7 @@ class AutoJob:
         return np.vstack(all_points), all_faces, all_kinds
 
     def _run_rows(self):
-        """Clean Rows: order first. Looks at the result at most three times, so it reports the change it got and may miss the amount asked for."""
+        """Clean Rows: order first. Lands near the amount asked for by a denser layout, then by more density where the camera sees a difference."""
 
         fa, fb = patch.face_adjacency(self.faces)
         shell = np.unique(patch._labels(len(self.faces), fa, fb), return_inverse=True)[1]
@@ -469,9 +516,19 @@ class AutoJob:
         pixel = 2.0 * half / MAX_PIXELS
         reference = yield from pictures(self.co, self.faces, center, half, MAX_PIXELS)
         source = sum(len(f) - 2 for f in self.faces)
-        target = max(int(ROWS_START * source), 256)
+        most = int(ROWS_MOST * source)
+        target = min(max(int(ROWS_START * source), 256), most)
+        tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
         best = None
-        for _round in range(ROWS_ROUNDS):
+
+        def judge(points, out_faces, kinds, loss):
+            nonlocal best
+            fits = loss <= 1.1 * self.detail
+            rank = (not fits, len(out_faces) if fits else loss)  # as in Keep Detail: fits first, then the fewest faces
+            if best is None or rank < best[0]:
+                best = (rank, points, out_faces, kinds, loss)
+
+        for _round in range(2):  # a layout near enough that local density can finish the job
             built = yield from self._rows_once(areas, target)
             if built is None:
                 return
@@ -480,23 +537,63 @@ class AutoJob:
             view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
             wrong, shown = picture_counts(reference, view, pixel)
             loss = 100.0 * wrong / max(shown, 1)
-            fits = loss <= 1.1 * self.detail
-            rank = (not fits, len(out_faces) if fits else loss)  # as in Keep Detail: fits first, then the fewest faces
-            if best is None or rank < best[0]:
-                best = (rank, points, out_faces, kinds, loss)
-            if abs(loss - self.detail) <= 0.1 * self.detail:
+            print(f"CURIOTRY layout {target} faces {len(out_faces)} loss {loss:.2f}", flush=True)
+            judge(points, out_faces, kinds, loss)
+            aim = 1.0 if loss < 0.9 * self.detail else ROWS_FAR if loss > ROWS_FAR * self.detail else None
+            if aim is None:
                 break
-            # Change falls about as the square root of the faces.
-            wanted = min(max(int(target * (loss / self.detail) ** 2), 64), int(ROWS_MOST * source))
+            wanted = min(max(int(target * (loss / (aim * self.detail)) ** 2), 64), most)  # change falls about as the square root of the faces
             if wanted == target:
                 break
             target = wanted
+        self.stage = "Adding density where it differs..."
+        for _round in range(ROWS_DENSER):
+            if loss <= 1.1 * self.detail or len(out_faces) >= most:
+                break
+            per_face = wrong_pixels_per_face(reference, view, pixel, len(out_faces))
+            order_by = np.argsort(-per_face, kind="stable")
+            to_fix = (loss - self.detail) / 100.0 * shown / ROWS_FIX_SHARE
+            count = int(np.searchsorted(np.cumsum(per_face[order_by]), to_fix)) + 1
+            marked = set(order_by[:count][per_face[order_by[:count]] > 0].tolist())
+            if not marked:
+                break
+            mesh = yield from self._in_thread(lambda: split_faces(MeshData(points, out_faces, kinds), marked))
+            if mesh is None:
+                break
+            mesh = yield from self._in_thread(lambda: snap_new_vertices(mesh, points, tree.find_nearest))
+            points, out_faces, kinds = np.asarray(mesh.vertices), [tuple(f) for f in mesh.faces], list(mesh.face_materials)
+            view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
+            wrong, shown = picture_counts(reference, view, pixel)
+            loss = 100.0 * wrong / max(shown, 1)
+            print(f"CURIOTRY denser marked {len(marked)} faces {len(out_faces)} loss {loss:.2f}", flush=True)
+            judge(points, out_faces, kinds, loss)
         _rank, points, out_faces, kinds, loss = best
+        if self._refused:
+            self.warnings = [f"QuadriFlow gave up on {self._refused} pieces. They were paired instead."]
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         quads = sum(1 for face in out_faces if len(face) == 4)
         self.report = {"faces": len(out_faces), "quads": quads, "tris": len(out_faces) - quads, "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
         self._show((points, out_faces, kinds, parts))
+
+    def _in_thread(self, work):
+        """Generator: run plain NumPy work on a worker thread, so the timer's slices stay short. Returns its result, or None if it failed."""
+
+        box = []
+
+        def run():
+            try:
+                box.append(work())
+            except ValueError as exc:
+                self.warnings = [f"Clean Rows: {exc}"]
+
+        thread = threading.Thread(target=run, daemon=True, name="CurioMeshRows")
+        thread.start()
+        while thread.is_alive():
+            if self._stopped:
+                return None
+            yield
+        return box[0] if box else None
 
     def status(self) -> str:
         if self.report is None:
