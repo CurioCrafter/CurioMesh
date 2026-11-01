@@ -20,12 +20,13 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from . import guides, overlay, region, segments, symmetry
+from . import guides, overlay, region, segments, symmetry, textures
 from . import autoretopo
 from .triadq import areas, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.types import MeshData
+from .triadq.uvs import chart_codes
 
 PREVIEW_NAME = "CurioMesh_GuidedPreview"
 POINT_TAG = "curiomesh_point"
@@ -75,6 +76,13 @@ APPLY_ITEMS = [
     ("NEW", "New Object", "Write the result to a new object called <name>_Retopo", "DUPLICATE", 0),
     ("REPLACE", "Replace Mesh", "Put the result into your object (Undo restores it)", "FILE_REFRESH", 1),
 ]
+BAKE_ITEMS = [
+    ("OFF", "Off", "Keep the UVs and materials of your mesh. No textures are made", "X", 0),
+    ("NORMAL", "Normal Map", "Keep your materials and add a baked normal map, so the fine shape still shows", "NORMALS_FACE", 1),
+    ("NORMAL_COLOR", "Normal + Color", "Bake a normal map and the base color into one new material with new UVs. Press Update after choosing it: Auto Segments then ignores the old UV seams and needs fewer faces", "IMAGE_DATA", 2),
+]
+BAKE_SIZES = [(str(s), f"{s} px", f"Textures of {s} by {s} pixels") for s in (512, 1024, 2048, 4096)]
+SHARP_ANGLE = float(np.radians(60.0))
 PRESET_ITEMS = [
     ("CHARACTER", "Character", "Organic bodies and faces: Detail points, flowing quads", "ARMATURE_DATA", 0),
     ("HARD_SURFACE", "Hard-Surface Prop", "Props with hard edges: Sharp points, grid-like quads", "MOD_BEVEL", 1),
@@ -217,6 +225,9 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
+    keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Auto Segments: quads stay inside one UV island, so textures land where they did. Costs faces, nearly double on a model cut into many islands. Bake Detail Normal + Color is the better route for most game assets, as it needs no old seams", default=False)
+    bake_detail: bpy.props.EnumProperty(name="Bake Detail", description="On Apply, bake your mesh's detail into textures on the result, on the CPU or GPU set for Cycles. Can take minutes", items=BAKE_ITEMS, default="OFF")
+    bake_size: bpy.props.EnumProperty(name="Bake Size", description="Width and height of the baked textures", items=BAKE_SIZES, default="2048")
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Relax-and-project passes that settle the new quads onto your original surface", default=2, min=0, max=30)
     feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Edges sharper than this (degrees) count as hard edges and are kept", default=40.0, min=5.0, max=170.0)
     pure_quads: bpy.props.BoolProperty(name="Pure Quads", description="Make every face of a Whole Mesh result a quad. Turn off for a faster preview of big meshes; a few triangles stay", default=True)
@@ -436,6 +447,9 @@ def _uv_islands(src: dict, uv: np.ndarray) -> np.ndarray:
 def _transfer_uvs(mesh, source, src, res) -> None:
     """Copy every UV layer: each corner reads the source at its nearest point on the UV island of its own face."""
     co, faces = res["co"], res["faces"]
+    known = res.get("chart")  # Auto Segments remembers each face's island in the active layer
+    if known is not None and len(known) != len(faces):
+        known = None
     flat = np.fromiter((v for f in faces for v in f), dtype=np.int64)
     bvh = _bvh(src)
     corner_tri = _nearest_tris(bvh, co)[flat]
@@ -447,12 +461,15 @@ def _transfer_uvs(mesh, source, src, res) -> None:
         uv = uv.reshape(-1, 2)
         island = _uv_islands(src, uv)[src["tri_face"]]
         tri = corner_tri.copy()
-        off = np.flatnonzero(island[corner_tri] != island[owner_tri])  # a corner on a UV seam: stay on this face's side
-        for chart in np.unique(island[owner_tri[off]]).tolist():
+        owner = island[owner_tri]
+        if known is not None and layer.active:
+            owner = np.repeat(known, [len(f) for f in faces])
+        off = np.flatnonzero(island[corner_tri] != owner)  # a corner on a UV seam: stay on this face's side
+        for chart in np.unique(owner[off]).tolist():
             members = np.flatnonzero(island == chart)
             used, local = np.unique(src["tris"][members], return_inverse=True)
             chart_bvh = BVHTree.FromPolygons(src["co"][used].tolist(), local.reshape(-1, 3).tolist())
-            here = off[island[owner_tri[off]] == chart]
+            here = off[owner[off] == chart]
             tri[here] = members[_nearest_tris(chart_bvh, points[here])]
         out = np.einsum("ijk,ij->ik", uv[src["tri_loops"][tri]], _barycentric(src["co"], src["tris"][tri], points))
         target = mesh.uv_layers.new(name=layer.name)
@@ -998,7 +1015,7 @@ def auto_target(gs, faces: int) -> int:
     return max(12, int(round(gs.auto_reduce_percent / 100.0 * faces)) if gs.auto_reduce_by == "PERCENT" else int(gs.auto_reduce_count))
 
 
-def _mirror_half(gs, src):
+def _mirror_half(gs, src, codes):
     """(half, note): the half to solve as (co, faces, mat, mirror) or None, and what to tell the user about the symmetry."""
     if gs.sym_axis == "OFF":
         return None, ""
@@ -1011,7 +1028,7 @@ def _mirror_half(gs, src):
     if not faces:
         return None, "Mirror found nothing on one side of the plane: solved the whole mesh"
     note = f"Mirrored from the {'+' if keep > 0 else '-'}{symmetry.AXES[found.axis]} half. {found.text()}"
-    return (co, faces, src["mat"][source], (found.axis, found.offset, src["diag"], len(src["faces"]), keep), origin), note
+    return (co, faces, codes[source], (found.axis, found.offset, src["diag"], len(src["faces"]), keep), origin), note
 
 
 def _guide_lines(context, gs, src) -> list[np.ndarray]:
@@ -1044,28 +1061,46 @@ def _painted(source, gs, src) -> np.ndarray | None:
     return welded if welded.max() > 0.0 else None
 
 
+def _real_materials(out: dict, charts) -> dict:
+    """A copy of a result with its face kinds turned back into real materials, remembering each face's UV island."""
+    return dict(out) if charts is None else dict(out, mat=charts[1][out["mat"]], chart=charts[2][out["mat"]])
+
+
+def _uv_charts(source, src):
+    """(code per face, material per code, UV island per code) for the active UV layer, or None if there's nothing to keep."""
+    layer = source.data.uv_layers.active if source is not None else None
+    if layer is None:
+        return None
+    uv = np.empty(len(source.data.loops) * 2, dtype=np.float64)
+    layer.data.foreach_get("uv", uv)
+    return chart_codes(src["mat"], _uv_islands(src, uv.reshape(-1, 2)))
+
+
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
     target = auto_target(gs, len(src["faces"]))
     lines = _guide_lines(context, gs, src)
     paint = _painted(state_source(), gs, src)
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength))
+    # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
+    charts = _uv_charts(state_source(), src) if gs.keep_uvs and gs.bake_detail != "NORMAL_COLOR" else None
+    codes = src["mat"] if charts is None else charts[0]
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None)
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
     state["auto_base"] = None
-    half, note = _mirror_half(gs, src)
-    co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], src["mat"], None)
+    half, note = _mirror_half(gs, src, codes)
+    co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], codes, None)
     if paint is not None:
         paint = paint[half[4]] if half is not None else paint
     if lines and mirror:
         lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
     bvh = _bvh(src)
-    cache_key = (src["sig"], mirror[:2] if mirror else None)
+    cache_key = (src["sig"], mirror[:2] if mirror else None, charts is None)
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
     job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength))
-    state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
+    state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
     if not bpy.app.timers.is_registered(_auto_slice):
@@ -1171,8 +1206,9 @@ def _collect_work(context) -> None:
         if runner.output is None:
             remove_preview()
         else:
-            state["res"] = runner.output
-            _build_preview(context, source, runner.output, uvs=False)  # the UVs are copied when you Apply
+            res = _real_materials(runner.output, work.get("charts"))
+            state["res"] = res
+            _build_preview(context, source, res, uvs=False)  # the UVs are copied when you Apply
         state["draw_key"] = None
     if isinstance(runner, segments.PartJob):
         state["message"] = runner.status()
@@ -1184,7 +1220,7 @@ def _collect_work(context) -> None:
         state["message"] = runner.warnings[0] if runner.warnings else runner.status()
         base = state["auto_base"]
         if not runner.busy and runner.report is not None and runner.output is not None and (base is None or base["job"] is not runner):
-            state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": dict(runner.output), "report": runner.report, "job": runner, "summary": state["message"]}
+            state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": _real_materials(runner.output, work.get("charts")), "charts": work.get("charts"), "report": runner.report, "job": runner, "summary": state["message"]}
             segments.ensure()
         overlay.tag_redraw()
         return
@@ -2080,6 +2116,27 @@ class CURIOMESH_OT_guided_frame(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _bake_result(source, out, gs, new_uvs: bool) -> str:
+    """Bake on Apply. A failed bake leaves the result as it was: the quads are still good. Returns text for the report."""
+    src = _source_data(source)
+    co = np.empty(len(out.data.vertices) * 3, dtype=np.float64)
+    out.data.vertices.foreach_get("co", co)
+    bvh = _bvh(src)
+    gaps = np.asarray([bvh.find_nearest(p)[3] for p in co.reshape(-1, 3).tolist()])
+    # The rays must start outside both surfaces: past the widest gap between them, measured on this mesh.
+    cage = (1.5 * float(np.percentile(gaps, 99)) + 0.002 * src["diag"]) * max(source.matrix_world.to_scale())
+    for slot in out.material_slots:  # baking works on the mesh's own material list
+        if slot.link == "OBJECT":
+            material = slot.material
+            slot.link = "DATA"
+            slot.material = material
+    try:
+        images = textures.bake_detail(source, out, with_color=gs.bake_detail == "NORMAL_COLOR", resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
+    except Exception as exc:  # the bake has its own rollback, and the quads are worth keeping
+        return f". Bake failed: {exc}"
+    return f", {len(images)} textures baked at {gs.bake_size} (a Triangulate modifier keeps the bake's triangles on export)"
+
+
 class CURIOMESH_OT_guided_apply(bpy.types.Operator):
     bl_idname = "curiomesh.guided_apply"
     bl_label = "Apply"
@@ -2102,25 +2159,31 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
             self.report({"WARNING"}, "Nothing to apply")
             return {"CANCELLED"}
         mesh = _make_mesh(source.name + "_Retopo", source, res)
-        for poly in mesh.polygons:
-            poly.use_smooth = True
+        mesh.shade_smooth()
+        mesh.set_sharp_from_angle(angle=SHARP_ANGLE)  # hard corners stay hard, in the viewport and in a game
+        out = bpy.data.objects.new(source.name + "_Retopo", mesh)
+        (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(out)
+        out.matrix_world = source.matrix_world.copy()
+        for slot, copy in zip(source.material_slots, out.material_slots):
+            if slot.link == "OBJECT":  # materials kept on the object, not in the mesh
+                copy.link = "OBJECT"
+                copy.material = slot.material
+        baked = ""
+        if gs.bake_detail != "OFF":
+            baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
         if gs.apply_mode == "REPLACE":
+            bpy.data.objects.remove(out)
             source.data = mesh
             out = source
-        else:
-            out = bpy.data.objects.new(source.name + "_Retopo", mesh)
-            (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(out)
-            out.matrix_world = source.matrix_world.copy()
-            for slot, copy in zip(source.material_slots, out.material_slots):
-                if slot.link == "OBJECT":  # materials kept on the object, not in the mesh
-                    copy.link = "OBJECT"
-                    copy.material = slot.material
+            if baked:  # the baked materials live on the mesh
+                for slot in out.material_slots:
+                    slot.link = "DATA"
         count = len(mesh.polygons)
         gs.enabled = False  # removes the preview, stops the timer
         bpy.ops.object.select_all(action="DESELECT")
         out.select_set(True)
         context.view_layer.objects.active = out
-        self.report({"INFO"}, f"{count:,} faces written to {out.name}")
+        self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, f"{count:,} faces written to {out.name}{baked}")
         return {"FINISHED"}
 
 
@@ -2593,6 +2656,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             col.row(align=True).prop(gs, "auto_reduce_by", expand=True)
             col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
             col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
+        if obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
+            col.prop(gs, "keep_uvs", toggle=True, icon="UV")
         if hasattr(gs, "auto_method"):
             col.prop(gs, "auto_method")
         if hasattr(gs, "auto_output"):
@@ -2623,6 +2688,12 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row.operator("curiomesh.guided_auto_start", text="Start Again", icon="FILE_REFRESH")
             row.operator("curiomesh.guided_stop", text="Cancel", icon="X")
             layout.prop(gs, "apply_mode", text="Write to")
+            row = layout.row(align=True)
+            row.prop(gs, "bake_detail")
+            if gs.bake_detail != "OFF":
+                row.prop(gs, "bake_size", text="")
+            elif obj.data.uv_layers:
+                layout.label(text="For textured game assets, Normal + Color is recommended", icon="INFO")
         elif not searching:
             layout.operator("curiomesh.guided_stop", text="Cancel", icon="X")
             layout.label(text="Nothing changes until you press Apply.", icon="LOCKED")
@@ -2713,6 +2784,10 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         sub.operator("curiomesh.guided_apply", icon="CHECKMARK")
         row.operator("curiomesh.guided_stop", icon="X")
         layout.prop(gs, "apply_mode", text="")
+        row = layout.row(align=True)
+        row.prop(gs, "bake_detail")
+        if gs.bake_detail != "OFF":
+            row.prop(gs, "bake_size", text="")
         if not previewing and not compact:
             layout.label(text="Nothing changes until you press Apply.", icon="LOCKED")
 

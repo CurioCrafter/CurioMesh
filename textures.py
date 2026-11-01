@@ -6,11 +6,22 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 import bpy
+import numpy as np
+
+from .triadq.uvs import uv_overlap
+
+BAKE_LAYER = "CurioMesh_Bake"
+MOST_OVERLAP = 0.01  # share of texels a UV map may reuse and still hold a bake
 
 
-def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART") -> None:
-    if obj.type != "MESH" or obj.data.uv_layers:
+def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02) -> None:
+    """Unwrap a mesh with no UVs. With new_layer, always unwrap, into a new layer that becomes the active one."""
+    if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
         return
+    if new_layer:
+        layer = obj.data.uv_layers.new(name=new_layer)
+        obj.data.uv_layers.active = layer
+        layer.active_render = True
 
     previous_active = bpy.context.view_layer.objects.active
     previous_selection = list(bpy.context.selected_objects)
@@ -29,7 +40,7 @@ def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART") -> None:
         if method == "UNWRAP":
             bpy.ops.uv.unwrap(method="ANGLE_BASED", margin=0.002)
         else:
-            bpy.ops.uv.smart_project(angle_limit=1.15192, island_margin=0.02)
+            bpy.ops.uv.smart_project(angle_limit=1.15192, island_margin=island_margin)
     finally:
         try:
             bpy.ops.object.mode_set(mode="OBJECT")
@@ -54,6 +65,139 @@ def create_bake_image(name: str, resolution: int) -> bpy.types.Image:
     )
     image.generated_color = (0.0, 0.0, 0.0, 1.0)
     return image
+
+
+def _uv_layer_can_hold_bake(mesh: bpy.types.Mesh) -> bool:
+    """Every texel must belong to one place on the surface, or the bake paints over itself."""
+    layer = mesh.uv_layers.active
+    if layer is None:
+        return False
+    mesh.calc_loop_triangles()
+    loops = np.empty(len(mesh.loop_triangles) * 3, dtype=np.int64)
+    mesh.loop_triangles.foreach_get("loops", loops)
+    uv = np.empty(len(mesh.loops) * 2, dtype=np.float64)
+    layer.data.foreach_get("uv", uv)
+    return uv_overlap(uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)) <= MOST_OVERLAP
+
+
+def _harden_uv_seams(mesh: bpy.types.Mesh) -> int:
+    """Make every edge where the active UV map splits a hard edge: the normal map can't hide a shading seam there."""
+    count = len(mesh.loops)
+    verts, edges = np.empty(count, dtype=np.int64), np.empty(count, dtype=np.int64)
+    mesh.loops.foreach_get("vertex_index", verts)
+    mesh.loops.foreach_get("edge_index", edges)
+    uv = np.empty(count * 2, dtype=np.float64)
+    mesh.uv_layers.active.data.foreach_get("uv", uv)
+    uv = uv.reshape(-1, 2)
+    starts = np.empty(len(mesh.polygons), dtype=np.int64)
+    sizes = np.empty(len(mesh.polygons), dtype=np.int64)
+    mesh.polygons.foreach_get("loop_start", starts)
+    mesh.polygons.foreach_get("loop_total", sizes)
+    ahead = np.arange(1, count + 1)
+    ahead[starts + sizes - 1] = starts  # the corner after each corner, around its face
+    seen: dict[int, int] = {}
+    split = set()
+    for corner, edge in enumerate(edges.tolist()):
+        other = seen.setdefault(edge, corner)
+        if other == corner:
+            continue
+        # The two faces run along the edge in opposite directions, so each corner's vertex is the other's next one.
+        near = uv[corner] if verts[corner] == verts[ahead[other]] else uv[ahead[corner]]
+        far = uv[ahead[corner]] if verts[corner] == verts[ahead[other]] else uv[corner]
+        if np.abs(near - uv[ahead[other]]).max() > 1e-5 or np.abs(far - uv[other]).max() > 1e-5:
+            split.add(edge)
+    for edge in split:
+        mesh.edges[edge].use_edge_sharp = True
+    return len(split)
+
+
+def _keep_triangles(obj: bpy.types.Object) -> None:
+    """Fix the triangles now: the bake and the exporters read them through this, so a game can't pick other diagonals."""
+    modifier = obj.modifiers.new("CurioMesh Bake Triangles", "TRIANGULATE")
+    modifier.quad_method = "SHORTEST_DIAGONAL"
+    modifier.min_vertices = 4
+
+
+def _principled(material: bpy.types.Material):
+    return next((node for node in material.node_tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+
+
+def _connect_normal(material: bpy.types.Material, image: bpy.types.Image, uv_layer: str) -> None:
+    """Send a tangent-space normal map into the material's shader, read through the given UV layer."""
+    principled = _principled(material)
+    if principled is None:
+        return
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    tex = next(node for node in nodes if node.type == "TEX_IMAGE" and node.image == image)
+    normal = nodes.new("ShaderNodeNormalMap")
+    normal.uv_map = uv_layer
+    uv_node = nodes.new("ShaderNodeUVMap")
+    uv_node.uv_map = uv_layer
+    links.new(uv_node.outputs["UV"], tex.inputs["Vector"])
+    links.new(tex.outputs["Color"], normal.inputs["Color"])
+    links.new(normal.outputs["Normal"], principled.inputs["Normal"])
+
+
+def _baked_material(name: str, color: bpy.types.Image, normal: bpy.types.Image, uv_layer: str) -> bpy.types.Material:
+    material = bpy.data.materials.new(name=name)
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.image = normal
+    _connect_normal(material, normal, uv_layer)
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.image = color
+    uv_node = nodes.new("ShaderNodeUVMap")
+    uv_node.uv_map = uv_layer
+    material.node_tree.links.new(uv_node.outputs["UV"], tex.inputs["Vector"])
+    material.node_tree.links.new(tex.outputs["Color"], _principled(material).inputs["Base Color"])
+    return material
+
+
+def bake_detail(
+    source_obj: bpy.types.Object,
+    target_obj: bpy.types.Object,
+    *,
+    with_color: bool,
+    resolution: int,
+    cage: float,
+    new_uvs: bool = False,
+) -> list[bpy.types.Image]:
+    """Bake the source's detail onto the target. The source and its materials are only read.
+
+    With color, the target ends up with one new material holding both maps. Without it, it keeps its own materials,
+    as private copies, with the normal map added to each. A new UV layer is made when the kept one overlaps itself.
+    """
+    mesh = target_obj.data
+    margin = max(4, int(resolution) // 128)  # padding that survives the texture's smaller mip levels
+    if new_uvs or not _uv_layer_can_hold_bake(mesh):
+        ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
+    uv_layer = mesh.uv_layers.active.name
+    keep_render = next((layer.name for layer in mesh.uv_layers if layer.active_render), uv_layer)
+    mesh.uv_layers.active.active_render = True
+    _harden_uv_seams(mesh)
+    _keep_triangles(target_obj)
+    images = bake_selected_to_active(
+        source_obj, target_obj, maps=("NORMAL", "COLOR") if with_color else ("NORMAL",),
+        resolution=resolution, margin=margin, cage=cage, ray_limit=3.0 * cage,
+    )
+    normal = images[0]
+    if with_color:
+        private = [m for m in mesh.materials if m is not None]
+        mesh.materials.clear()
+        mesh.materials.append(_baked_material(f"{target_obj.name}_Baked", images[1], normal, uv_layer))
+        mesh.polygons.foreach_set("material_index", np.zeros(len(mesh.polygons), dtype=np.int32))
+        mesh.update()
+        for material in private:
+            bpy.data.materials.remove(material)
+        for layer in [layer for layer in mesh.uv_layers if layer.name != uv_layer]:  # game engines read the first UV map
+            mesh.uv_layers.remove(layer)
+    else:
+        mesh.uv_layers[keep_render].active_render = True  # the kept materials read their own textures through this one
+        for material in mesh.materials:
+            if material is not None:
+                _connect_normal(material, normal, uv_layer)
+    return images
 
 
 def assign_image_to_material(obj: bpy.types.Object, image: bpy.types.Image, label: str) -> None:
@@ -126,6 +270,7 @@ def _snapshot_bake_settings(scene: bpy.types.Scene) -> list[tuple[object, str, o
         (scene.cycles, "samples", scene.cycles.samples),
         (bake, "use_selected_to_active", bake.use_selected_to_active),
         (bake, "cage_extrusion", bake.cage_extrusion),
+        (bake, "max_ray_distance", bake.max_ray_distance),
         (bake, "margin", bake.margin),
         (bake, "use_pass_direct", bake.use_pass_direct),
         (bake, "use_pass_indirect", bake.use_pass_indirect),
@@ -203,6 +348,8 @@ def bake_selected_to_active(
     resolution: int = 2048,
     margin: int = 8,
     uv_method: str = "SMART",
+    cage: float = 0.04,
+    ray_limit: float = 0.0,
 ) -> list[bpy.types.Image]:
     jobs = _bake_jobs(maps)
     if not jobs:
@@ -250,7 +397,8 @@ def bake_selected_to_active(
         # sample count. Keep the asset pipeline deterministic and bounded.
         scene.cycles.samples = 16
         scene.render.bake.use_selected_to_active = True
-        scene.render.bake.cage_extrusion = 0.04
+        scene.render.bake.cage_extrusion = cage
+        scene.render.bake.max_ray_distance = ray_limit
         scene.render.bake.margin = max(0, int(margin))
         _make_target_materials_private(target_obj, created_materials)
 
@@ -262,6 +410,9 @@ def bake_selected_to_active(
 
             image = create_bake_image(f"{target_obj.name}_{label}", int(resolution))
             created_images.append(image)
+            if bake_type == "NORMAL":  # must be set before baking, and is what game engines expect
+                image.colorspace_settings.name = "Non-Color"
+                image.generated_color = (0.5, 0.5, 1.0, 1.0)
             assign_image_to_material(target_obj, image, label)
             result = _execute_bake(bake_type)
             if "FINISHED" not in result:

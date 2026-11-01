@@ -29,6 +29,7 @@ from .triadq.flatquad import _face_frames, pair_and_close
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
 from . import guides, symmetry
 from .triadq.types import Cancelled, MeshData
+from .triadq.uvs import simplify_borders
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
@@ -43,6 +44,7 @@ ROUNDS = 4  # tries at landing on the amount asked for
 CLOSE_ENOUGH = 0.10  # Reduce To: a face count this near the one asked for is a hit
 PAIRED_SHARE = 0.6  # first guess of faces after pairing per face before it, corrected after each try
 TURNED_DEG = 20.0
+BORDER_TOLERANCE = 0.05  # how far a border between kinds may straighten, as a share of the level's edge length
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
@@ -113,6 +115,14 @@ DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vert
 
 
 def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+    free = None
+    if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
+        triangles = sum(len(p) - 2 for p in polys)
+        wanted = max(ratio * triangles, 1.0)
+        triangle = float(_face_areas(points, polys).sum()) / wanted
+        points, polys, kinds, free, used = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle))
+        drop = None if drop is None else drop[used]
+        ratio = min(wanted / max(sum(len(p) - 2 for p in polys), 1), 1.0)
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
@@ -122,13 +132,17 @@ def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarr
     try:
         modifier = obj.modifiers.new("Reduce", "DECIMATE")
         modifier.ratio = ratio
-        if drop is not None and float(drop.max(initial=0.0)) > 0.0:
+        painted = drop is not None and float(drop.max(initial=0.0)) > 0.0
+        if free is not None or painted:  # Decimate never collapses a vertex outside the group or of weight 0
             group = obj.vertex_groups.new(name="CurioMesh_Density")
-            group.add(list(range(len(points))), 1.0, "REPLACE")  # a vertex outside the group is never collapsed
+            group.add(list(range(len(points))) if free is None else free, 1.0, "REPLACE")
+            modifier.vertex_group = group.name
+            modifier.vertex_group_factor = 1.0
+        if painted:
             level = np.round(drop / 0.5 * DENSITY_STEPS).astype(np.int64)
             for step in np.unique(level[level > 0]).tolist():
-                group.add(np.flatnonzero(level == step).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
-            modifier.vertex_group = group.name
+                at = np.flatnonzero(level == step)
+                group.add((at if free is None else np.intersect1d(at, free)).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
         evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
         reduced = evaluated.to_mesh()
         co = np.empty(len(reduced.vertices) * 3, dtype=np.float64)
@@ -139,7 +153,14 @@ def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarr
     finally:
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh)
-    return co.reshape(-1, 3), faces, materials
+    return co.reshape(-1, 3), faces, materials, smeared
+
+
+def _face_areas(points: np.ndarray, polys) -> np.ndarray:
+    fan = np.asarray([(p[0], p[k], p[k + 1]) for p in polys for k in range(1, len(p) - 1)], dtype=np.int64)
+    owner = np.repeat(np.arange(len(polys)), [len(p) - 2 for p in polys])
+    tri = 0.5 * np.linalg.norm(np.cross(points[fan[:, 1]] - points[fan[:, 0]], points[fan[:, 2]] - points[fan[:, 0]]), axis=1)
+    return np.bincount(owner, weights=tri, minlength=len(polys))
 
 
 def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
@@ -317,7 +338,7 @@ class AutoJob:
         reference = yield from self._reference(center, half, pixels, points, polys)
         sizes, levels, seen, ready = [], [], 0.0, []
         enough = GOOD_ENOUGH * self.detail / 100.0
-        if not self.guide_lines and self.drop is None:  # a rebuilt part would ignore the strokes and the paint
+        if not self.guide_lines and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
             for out in parts.rebuilds(points, polys, max(set(kinds), key=kinds.count)):
                 yield
                 if out is None:

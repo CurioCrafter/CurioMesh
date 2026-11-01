@@ -153,7 +153,21 @@ know:
   that off for a faster preview of big meshes; a few triangles then stay.
 - UV layers and materials carry over from your mesh in both modes. A quad
   crossing a UV seam takes its UVs from one side, so it does not stretch across
-  the atlas.
+  the atlas. Auto Segments goes further: quads stay inside one UV island, and
+  seams stay in place, straightened only slightly. A model cut into many islands
+  needs more faces for this, up to about twice as many on our test models.
+- **Bake Detail**, next to Apply, bakes your mesh onto the result. **Normal Map**
+  keeps your materials and adds a normal map. **Normal + Color** makes one new
+  material and new UVs. Press Update after choosing it: seams then cost no faces.
+  Your mesh is only read. Baking blocks Blender until it's done, and it reads the
+  surface nearest to each texel, so parts that touch can bleed into each other.
+  Only the normal map and base color are baked, not roughness or metal. If your
+  UVs overlap themselves, Normal Map adds a second UV map for the normal map, and
+  most game engines need to be told to read it.
+- Applied results keep edges sharper than 60 degrees hard. Baking also makes UV
+  seams hard and adds a Triangulate modifier, so the exported triangles match the
+  bake. Export with modifiers applied, which glTF doesn't do by default. Your
+  quads stay underneath: turn the modifier off to export them to FBX.
 - A Points Only region that wraps a limb or surrounds an open hole is cut into
   pieces that are each rebuilt, so the whole ring gets new quads. The cut stays
   as a line of kept edges between the pieces.

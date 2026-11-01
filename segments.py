@@ -214,6 +214,12 @@ def info_lines(piece: int) -> list[str]:
 # --------------------------------------------------------------------------- redoing parts
 
 
+def kinds_back(kinds, charts) -> np.ndarray:
+    """Face kinds of a job as real materials (with Keep UV Seams each kind is a material and UV island)."""
+    codes = np.asarray([int(m) if str(m).isdigit() else 0 for m in kinds], dtype=np.int32)
+    return codes if charts is None else charts[1][codes]
+
+
 def _faces_for(job, method: str, co, polys, kinds):
     """Generator: (points, faces, materials) for one reduced part by `method`. Returns None when it fails."""
     if hasattr(job, "_build"):  # the presets branch builds every method, including the ones that need the main thread
@@ -351,13 +357,16 @@ class PartJob:
             if p in job.tuned:
                 points, polys, kinds = job.tuned[p]
             else:
-                points, polys, kinds = job.sizes[p][job.picked[p]]
+                at = job.picked[p]
+                if job.ready[p][at]:  # a rebuilt turned part: start from the triangles nearest its size
+                    at = next((k for k in range(at, len(job.sizes[p])) if not job.ready[p][k]), at)
+                points, polys, kinds = job.sizes[p][at]
             made = yield from _faces_for(job, self.method, points, polys, kinds)
             if made is None:
                 continue
             change = yield from self._change(p, made[0], made[1])
             builds[p] = made
-            self.new_tries[p] = {"method": self.method, "after": len(made[1]), "change": change, "build": (made[0], made[1], np.asarray([int(m) if str(m).isdigit() else 0 for m in made[2]]))}
+            self.new_tries[p] = {"method": self.method, "after": len(made[1]), "change": change, "build": (made[0], made[1], kinds_back(made[2], self.base.get("charts")))}
         self.progress = (len(self.pieces), len(self.pieces))
         self.stage = "Looking at the whole object"
         self.fraction = 0.85

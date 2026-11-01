@@ -58,6 +58,13 @@
   are redone, live, as you move the shapes. An Organized / Detailed slider sets how
   big the new quads are; everything outside stays as it is. Uses the Regions
   winding-number test and the Work Live background worker; no mesh Boolean needed.
+- **Bake Detail** (Guided panel, next to Apply). Off, Normal Map, or Normal +
+  Color, at 512 to 4096 pixels. Your mesh is only read. Normal + Color makes one
+  new material with new UVs. Tested through FBX and glTF export and re-import.
+- Auto Segments keeps UVs good: quads stay inside one UV island and seams stay in
+  place, so textures land where they did. This costs faces on models cut into
+  many islands, except with Normal + Color, which doesn't need the old seams.
+- Applied Guided results keep edges sharper than 60 degrees hard.
 - **Auto Segments** (new mode in the Remesh setting of the Guided panel). Press
   Update with no points and no face count: it reduces each loose piece as far as
   a camera says it can, looking from six sides at the original and the result,
