@@ -24,9 +24,9 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from .triadq import patch
-from .triadq.budget import Level, allocate, best_levels
+from .triadq.budget import Level, allocate, best_levels, hottest, vertex_heat
 from .triadq.flatquad import pair_and_close
-from .triadq.shading import blended_normals, corner_table, vertex_normals
+from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.types import MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -36,6 +36,8 @@ LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles t
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 FINER_TRIANGLES = 200  # pieces smaller than this have too few faces for a size between two others to matter
+LOCKED_SHARE = 0.2  # vertices held in the first pass, as a share of those the piece ends with
+HELD_SIZE = 1.5  # the first pass stops at this many times the faces asked for
 ROUNDS = 4  # tries at landing on the amount asked for
 TURNED_DEG = 20.0
 SOFT_DEG = 10.0  # shallow folds in cloth only turn the shading this much
@@ -98,7 +100,7 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
 def shaded(picture_set, points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int) -> list[np.ndarray]:
     """Each picture's normals as smooth shading shows them, blended from the vertices at each hit."""
 
-    normals = vertex_normals(points, polys)
+    normals = corner_normals(points, polys)
     table = corner_table(polys)
     grid = ((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half
     out = []
@@ -130,7 +132,33 @@ def shading_counts(reference, other, shaded_a, shaded_b, degrees: float = TURNED
     return wrong, total
 
 
-def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+def wrong_points(reference, other, center: np.ndarray, half: float, pixels: int, pixel: float) -> np.ndarray:
+    """Where on the object the pixels `picture_counts` calls wrong are, as seen in each of the two pictures."""
+
+    limit = math.cos(math.radians(TURNED_DEG))
+    grid = ((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half
+    found = []
+    views = iter(zip(reference, other))
+    for axis in range(3):
+        u, v = (axis + 1) % 3, (axis + 2) % 3
+        for sign in (1.0, -1.0):
+            (hit_a, normal_a, depth_a, _), (hit_b, normal_b, depth_b, _) = next(views)
+            turned = np.abs((normal_a * normal_b).sum(axis=2)) < limit
+            moved = np.abs(depth_a - depth_b) > 2.0 * pixel
+            wrong = (hit_a & hit_b & (turned | moved)) | (hit_a ^ hit_b)
+            for hit, depth in ((hit_a, depth_a), (hit_b, depth_b)):
+                i, j = np.nonzero(wrong & hit)
+                at = np.empty((len(i), 3))
+                at[:, u] = center[u] + grid[i]
+                at[:, v] = center[v] + grid[j]
+                at[:, axis] = center[axis] + sign * (2.0 * half - depth[i, j])
+                found.append(at)
+    return np.vstack(found)
+
+
+def _decimate(context, points, polys, kinds, ratio, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+    """Reduce to `ratio`. Vertices in the mask `keep` go last: Decimate's group is a lock, at any strength."""
+
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
@@ -138,7 +166,13 @@ def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tu
     obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
     context.scene.collection.objects.link(obj)
     try:
-        obj.modifiers.new("Reduce", "DECIMATE").ratio = ratio
+        reduce = obj.modifiers.new("Reduce", "DECIMATE")
+        reduce.ratio = ratio
+        if keep is not None:
+            free = obj.vertex_groups.new(name="Free")  # weight 1 collapses, anything outside the group counts as 0
+            free.add(np.flatnonzero(~keep).tolist(), 1.0, "REPLACE")
+            reduce.vertex_group = free.name
+            reduce.vertex_group_factor = 1000.0
         evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
         reduced = evaluated.to_mesh()
         co = np.empty(len(reduced.vertices) * 3, dtype=np.float64)
@@ -242,7 +276,7 @@ class AutoJob:
         center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
         pixel = 2.0 * half / pixels
         reference = yield from pictures(points, polys, center, half, pixels)
-        sizes, levels, seen = [], [], 0.0
+        sizes, levels, seen, spots = [], [], 0.0, []
         for share in LEVELS:
             if share * triangles < 12.0:
                 continue
@@ -254,20 +288,31 @@ class AutoJob:
             seen = max(seen, shown * area)
             sizes.append(reduced)
             levels.append(Level(len(reduced[1]), wrong * area))
+            spots.append(wrong_points(reference, view, center, half, pixels, pixel))
             if wrong <= GOOD_ENOUGH * self.detail / 100.0 * shown:
                 break
         if triangles >= FINER_TRIANGLES and seen > 0.0:
-            # A size halfway across the jumps that matter, so a piece doesn't get twice the faces to clear a limit.
             asked = self.detail / 100.0
-            for limit in (asked, PIECE_LIMIT * asked):
-                upper = next((k for k, level in enumerate(levels) if level.loss <= limit * seen), None)
-                if upper:
+            uppers = {next((k for k, level in enumerate(levels) if level.loss <= limit * seen), 0) for limit in (asked, PIECE_LIMIT * asked)} - {0}
+            for upper in sorted(uppers):
+                # A size halfway across the jump, so a piece doesn't get twice the faces to clear a limit.
+                yield
+                faces = math.sqrt(levels[upper - 1].faces * levels[upper].faces)
+                reduced = _decimate(self.context, points, polys, kinds, faces / len(polys))
+                view = yield from pictures(reduced[0], reduced[1], center, half, pixels)
+                sizes.append(reduced)
+                levels.append(Level(len(reduced[1]), picture_counts(reference, view, pixel)[0] * area))
+                spots.append(wrong_points(reference, view, center, half, pixels, pixel))
+                # Density where the camera saw it go wrong: hold those spots while the rest goes further, then let go.
+                for k in (upper - 1, upper, len(levels) - 1):
                     yield
-                    faces = math.sqrt(levels[upper - 1].faces * levels[upper].faces)
-                    reduced = _decimate(self.context, points, polys, kinds, faces / len(polys))
+                    keep = hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0)
+                    held = _decimate(self.context, points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep)
+                    reduced = _decimate(self.context, held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1))
                     view = yield from pictures(reduced[0], reduced[1], center, half, pixels)
                     sizes.append(reduced)
                     levels.append(Level(len(reduced[1]), picture_counts(reference, view, pixel)[0] * area))
+                    spots.append(spots[k])
             kept = best_levels(levels)
             sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
         sizes.append(whole)
@@ -387,4 +432,4 @@ class AutoJob:
         if self.report is None:
             return self.stage
         r = self.report
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs, {r['shading']:.1f}% shades differently. {r['seconds']:.0f} s"
+        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape, {r['shading']:.1f}% in smooth shading. {r['seconds']:.0f} s"

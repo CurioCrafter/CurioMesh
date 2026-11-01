@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import heapq
+from itertools import product
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -66,3 +69,30 @@ def best_levels(levels: list[Level]) -> list[int]:
             kept.append(index)
             lowest = levels[index].loss
     return kept
+
+
+def vertex_heat(vertices: np.ndarray, spots: np.ndarray, cell: float) -> np.ndarray:
+    """For each vertex, how many of the `spots` lie in its grid cell or a neighboring one."""
+
+    heat = np.zeros(len(vertices), dtype=np.int64)
+    if not len(spots) or not len(vertices):
+        return heat
+    low = np.minimum(vertices.min(axis=0), spots.min(axis=0)) - 2.0 * cell
+    wide = 3 + int(np.ceil((np.maximum(vertices.max(axis=0), spots.max(axis=0)) - low).max() / cell))
+    stride = np.asarray((1, wide, wide * wide), dtype=np.int64)
+    filled, counts = np.unique(((spots - low) / cell).astype(np.int64) @ stride, return_counts=True)
+    at = ((vertices - low) / cell).astype(np.int64) @ stride
+    for step in product((-1, 0, 1), repeat=3):
+        key = at + int(np.asarray(step) @ stride)
+        slot = np.minimum(np.searchsorted(filled, key), len(filled) - 1)
+        match = filled[slot] == key
+        heat[match] += counts[slot[match]]
+    return heat
+
+
+def hottest(heat: np.ndarray, count: float) -> np.ndarray:
+    """Mask of the `count` hottest vertices, leaving out any with no heat."""
+
+    keep = np.zeros(len(heat), dtype=bool)
+    keep[np.argsort(-heat, kind="stable")[: min(int(count), int((heat > 0).sum()))]] = True
+    return keep

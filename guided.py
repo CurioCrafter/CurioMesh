@@ -11,6 +11,7 @@ fixed; Redraw Strip rebuilds a selected strip; Next spot points at the worst are
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -24,6 +25,7 @@ from . import overlay, region
 from . import autoretopo
 from .triadq import areas, patch
 from .triadq.engine import RemeshOptions, remesh_mesh
+from .triadq.shading import sharp_edges
 from .triadq.types import MeshData
 
 PREVIEW_NAME = "CurioMesh_GuidedPreview"
@@ -848,6 +850,25 @@ def _make_mesh(name, source, res, uvs=True):
     if uvs:
         _transfer_uvs(mesh, source, _source_data(source), res)
     return mesh
+
+
+def _shade_by_angle(mesh) -> None:
+    """Smooth shading, hard edges past SMOOTH_DEG. Sharp edges work the same from Blender 3.6 to now, with no modifier."""
+    faces = len(mesh.polygons)
+    mesh.polygons.foreach_set("use_smooth", np.ones(faces, dtype=bool))
+    if hasattr(mesh, "use_auto_smooth"):  # gone in 4.1. Before that, sharp edges only count with this on.
+        mesh.use_auto_smooth = True
+        mesh.auto_smooth_angle = math.pi
+    edge_of_corner = np.empty(len(mesh.loops), dtype=np.int64)
+    mesh.loops.foreach_get("edge_index", edge_of_corner)
+    starts, sizes, normals = np.empty(faces, dtype=np.int64), np.empty(faces, dtype=np.int64), np.empty(faces * 3)
+    mesh.polygons.foreach_get("loop_start", starts)
+    mesh.polygons.foreach_get("loop_total", sizes)
+    mesh.polygons.foreach_get("normal", normals)
+    order = np.argsort(starts)
+    face_of_corner = np.repeat(order, sizes[order])
+    mesh.edges.foreach_set("use_edge_sharp", sharp_edges(edge_of_corner, face_of_corner, normals.reshape(-1, 3), len(mesh.edges)))
+    mesh.update()
 
 
 def _build_preview(context, source, res, uvs=True) -> None:
@@ -1901,8 +1922,7 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
             self.report({"WARNING"}, "Nothing to apply")
             return {"CANCELLED"}
         mesh = _make_mesh(source.name + "_Retopo", source, res)
-        for poly in mesh.polygons:
-            poly.use_smooth = True
+        _shade_by_angle(mesh)
         if gs.apply_mode == "REPLACE":
             source.data = mesh
             out = source
