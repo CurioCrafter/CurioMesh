@@ -26,6 +26,7 @@ from mathutils.bvhtree import BVHTree
 from .triadq import patch
 from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
+from . import symmetry
 from .triadq.types import Cancelled, MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -142,13 +143,15 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = ""):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
         self.cache = {} if cache is None else cache  # what was measured on this very mesh before: starting again with another amount skips it
+        self.mirror = mirror  # (axis, plane offset, size, faces of the whole mesh): co/faces are one half, the result is mirrored
+        self.note = note
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
@@ -299,12 +302,18 @@ class AutoJob:
     def _show(self, final=None) -> None:
         if final is None:
             co, faces, kinds, parts = self._combined()
-            count = len(faces)
-            new = np.ones(count, bool)
         else:
             co, faces, kinds, parts = final
-            count = len(faces)
-            new = np.ones(count, bool)
+        if self.mirror is not None:
+            axis, offset, size, _whole = self.mirror
+            co, faces, kinds, _snapped = symmetry.mirror_result(co, faces, kinds, axis, offset, size)
+            if final is None:
+                parts = np.concatenate((parts, parts + int(parts.max(initial=-1)) + 1))
+            else:
+                fa, fb = patch.face_adjacency(faces)
+                parts = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
+        count = len(faces)
+        new = np.ones(count, bool)
         self.output = {"co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
         self.output_id += 1
         self.shown_at = time.perf_counter()
@@ -409,10 +418,12 @@ class AutoJob:
             loss = yield from self._look(points, out_faces, center, half, reference, pixel)
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
-        quads = sum(1 for face in out_faces if len(face) == 4)
-        self.report = {"before": len(self.faces), "faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces, "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}}
         self.fraction = 1.0
         self._show((points, out_faces, materials, parts))
+        shown = self.output["faces"]
+        whole = self.mirror[3] if self.mirror is not None else len(self.faces)
+        quads = sum(1 for face in shown if len(face) == 4)
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}}
 
     def _look(self, points, out_faces, center, half, reference, pixel):
         """Generator: the percent of the view that differs from the original. Returns it when exhausted."""
@@ -435,7 +446,8 @@ class AutoJob:
         self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles)
 
     def status(self) -> str:
+        extra = f" | {self.note}" if self.note else ""
         if self.report is None:
-            return self.stage
+            return self.stage + extra
         r = self.report
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s"
+        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s{extra}"

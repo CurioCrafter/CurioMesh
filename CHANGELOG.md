@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Mirror** (Auto Segments, step 2). Pick Auto, X, Y or Z and it solves one half of
+  the mesh (the side with more surface) and mirrors it: the two sides are identical
+  and the seam sits exactly on the plane, with no gap. Auto finds the plane and uses
+  it only when 90% of the surface matches its mirror (70% when you pick the axis
+  yourself); otherwise it solves the whole mesh and says how well the mesh matched.
+  Tested on a mirrored bust: 100% match, watertight, all quads, nothing open on the seam.
 - **Auto Segments is much faster and Stop really stops.** Waiting for the pairing no
   longer spins the main thread (it fought the pairing thread for Python's lock): a
   17,000-face bust went from 37 s to 7 s and a 61,000-face barrier from 13 s to 6 s,

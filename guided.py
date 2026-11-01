@@ -20,7 +20,7 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from . import overlay, region
+from . import overlay, region, symmetry
 from . import autoretopo
 from .triadq import areas, patch
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -62,6 +62,13 @@ SHAPE_OP_ITEMS = [
     ("UNION", "Union", "Redo the faces inside this shape, in addition to the shapes above it", "SELECT_EXTEND", 0),
     ("SUBTRACT", "Subtract", "Take the faces inside this shape out of what the shapes above it cover", "SELECT_SUBTRACT", 1),
     ("INTERSECT", "Intersect", "Keep only the faces that the shapes above it and this shape both cover", "SELECT_INTERSECT", 2),
+]
+SYMMETRY_ITEMS = [
+    ("OFF", "Off", "Solve the whole mesh", "BLANK1", 0),
+    ("AUTO", "Auto", "Find the mirror plane (X, Y or Z). It is used only when the mesh is symmetric enough", "MOD_MIRROR", 1),
+    ("X", "X", "Mirror across the plane facing X", "BLANK1", 2),
+    ("Y", "Y", "Mirror across the plane facing Y", "BLANK1", 3),
+    ("Z", "Z", "Mirror across the plane facing Z", "BLANK1", 4),
 ]
 APPLY_ITEMS = [
     ("NEW", "New Object", "Write the result to a new object called <name>_Retopo", "DUPLICATE", 0),
@@ -181,6 +188,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_reduce_by: bpy.props.EnumProperty(name="Reduce By", description="Say the face count you want as a percent of your faces or as a number", items=REDUCE_BY_ITEMS, default="PERCENT", update=_redraw_update)
     auto_reduce_percent: bpy.props.FloatProperty(name="Faces Left", description="Reduce To: how many faces to end up with, as a share of the faces your mesh has now. 25% turns 40,000 faces into about 10,000", default=25.0, min=0.1, max=100.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
     auto_reduce_count: bpy.props.IntProperty(name="Faces", description="Reduce To: the number of faces to end up with. The result lands within about 10% of it, unless the pieces can't go that low", default=5000, min=12, soft_max=500000, update=_redraw_update)
+    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Auto Segments: solve one half of the mesh and mirror it. The two sides come out identical and the seam is exact. Only used when the mesh really is symmetric; otherwise the whole mesh is solved and you are told why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redo the part of the result inside the shapes, live, while everything outside stays as it is. Move or resize a shape and the new quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
@@ -969,17 +977,36 @@ def auto_target(gs, faces: int) -> int:
     return max(12, int(round(gs.auto_reduce_percent / 100.0 * faces)) if gs.auto_reduce_by == "PERCENT" else int(gs.auto_reduce_count))
 
 
+def _mirror_half(gs, src):
+    """(half, note): the half to solve as (co, faces, mat, mirror) or None, and what to tell the user about the symmetry."""
+    if gs.sym_axis == "OFF":
+        return None, ""
+    found = symmetry.find_plane(src["co"], _bvh(src), "XYZ" if gs.sym_axis == "AUTO" else gs.sym_axis)[0]
+    if not found.ok(gs.sym_axis != "AUTO"):
+        return None, f"Not symmetric enough to mirror ({found.text()}): solved the whole mesh"
+    side = src["tri_cent"][:, found.axis] >= found.offset
+    keep = 1 if src["tri_area"][side].sum() >= src["tri_area"][~side].sum() else -1  # solve the side with more surface
+    co, faces, source = symmetry.cut_half(src["co"], src["faces"], found.axis, found.offset, keep)
+    if not faces:
+        return None, "Mirror found nothing on one side of the plane: solved the whole mesh"
+    note = f"Mirrored from the {'+' if keep > 0 else '-'}{symmetry.AXES[found.axis]} half. {found.text()}"
+    return (co, faces, src["mat"][source], (found.axis, found.offset, src["diag"], len(src["faces"]))), note
+
+
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
     target = auto_target(gs, len(src["faces"]))
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target)
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis)
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
     state["auto_base"] = None
-    if state["auto_cache"][0] != src["sig"]:
-        state["auto_cache"] = (src["sig"], {})  # a different mesh: what was measured on the old one is no use
-    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail, target, state["auto_cache"][1])
+    half, note = _mirror_half(gs, src)
+    co, faces, mat, mirror = half if half is not None else (src["co"], src["faces"], src["mat"], None)
+    cache_key = (src["sig"], mirror[:2] if mirror else None)
+    if state["auto_cache"][0] != cache_key:
+        state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
+    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note)
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -2293,6 +2320,9 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col = box.column()
         col.enabled = not searching
         col.row(align=True).prop(gs, "auto_aim", expand=True)
+        row = col.row(align=True)
+        row.label(text="Mirror", icon="MOD_MIRROR")
+        row.prop(gs, "sym_axis", expand=True)
         if gs.auto_aim == "KEEP":
             col.prop(gs, "auto_detail")
         else:
