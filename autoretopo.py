@@ -23,7 +23,7 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from .triadq import patch
+from .triadq import parts, patch
 from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
 from . import guides, symmetry
@@ -35,6 +35,8 @@ KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to ga
 MEASURE_SHARE = 0.6  # of the progress bar, spent looking at the pieces
 LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
+REBUILD_MARGIN = 1.5  # a rebuilt part's measured change counts this many times, as it looks better alone than in the whole view
+QUAD_WEIGHT = 0.9  # a rebuilt quad counts as this many faces of a triangle level (those end up about 1.1 quads each)
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
 CLOSE_ENOUGH = 0.10  # Reduce To: a face count this near the one asked for is a hit
@@ -186,6 +188,7 @@ class AutoJob:
         self.pieces: list[np.ndarray] = []
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
+        self.ready: list[list[bool]] = []  # per piece and size: already all quads, so it skips pairing
         self.seen: list[float] = []
         self.picked: list[int] = []
         self.timings: dict[str, float] = {}  # seconds spent per kind of work, for the report
@@ -260,20 +263,37 @@ class AutoJob:
         if triangles <= KEEP_TRIANGLES:
             self.sizes.append([whole])
             self.levels.append([Level(len(polys), 0.0)])
+            self.ready.append([False])
             self.seen.append(0.0)
             return
-        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()))
+        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines))
         known = self.cache.get(key)
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
             self.levels.append(known[2])
+            self.ready.append(known[4])
             self.seen.append(known[3])
             return
         low, high = points.min(axis=0), points.max(axis=0)
         center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
         pixel = 2.0 * half / pixels
         reference = yield from self._reference(center, half, pixels, points, polys)
-        sizes, levels, seen = [], [], 0.0
+        sizes, levels, seen, ready = [], [], 0.0, []
+        enough = GOOD_ENOUGH * self.detail / 100.0
+        if not self.guide_lines and self.drop is None:  # a rebuilt part would ignore the strokes and the paint
+            for out in parts.rebuilds(points, polys, max(set(kinds), key=kinds.count)):
+                yield
+                if out is None:
+                    continue
+                rebuilt = (out[0], parts.orient_like(out[0], out[1], points, polys), out[2])
+                view = yield from self._timed("pictures", pictures(rebuilt[0], rebuilt[1], center, half, pixels))
+                wrong, shown = picture_counts(reference, view, pixel)
+                seen = max(seen, shown * pixel * pixel)
+                sizes.append(rebuilt)
+                levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
+                ready.append(True)
+                if wrong <= enough * shown:
+                    break
         for share in LEVELS:
             if share * triangles < 12.0:
                 continue
@@ -287,14 +307,19 @@ class AutoJob:
             seen = max(seen, shown * area)
             sizes.append(reduced)
             levels.append(Level(len(reduced[1]), wrong * area))
-            if wrong <= GOOD_ENOUGH * self.detail / 100.0 * shown:
+            ready.append(False)
+            if wrong <= enough * shown:
                 break
         sizes.append(whole)
         levels.append(Level(len(polys), 0.0))
+        ready.append(False)
+        order = sorted(range(len(sizes)), key=lambda k: levels[k].faces)
+        sizes, levels, ready = [sizes[k] for k in order], [levels[k] for k in order], [ready[k] for k in order]
         self.sizes.append(sizes)
         self.levels.append(levels)
+        self.ready.append(ready)
         self.seen.append(seen)
-        self.cache[key] = (self.detail, sizes, levels, seen)
+        self.cache[key] = (self.detail, sizes, levels, seen, ready)
 
     def _reference(self, center, half, pixels, points, polys):
         """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
@@ -303,23 +328,30 @@ class AutoJob:
             self.cache[key] = yield from self._timed("pictures", pictures(points, polys, center, half, pixels))
         return self.cache[key]
 
-    def _combined(self) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
-        """Every piece at its picked size, and any not measured yet as it is."""
-        all_points, all_faces, all_kinds, parts = [], [], [], []
+    def _combined(self, rebuilt: bool | None = None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
+        """Every piece at its picked size, and any not measured yet as it is. `rebuilt` True or False keeps only those."""
+        all_points, all_faces, all_kinds, owner = [], [], [], []
         offset = 0
         for index, ids in enumerate(self.pieces):
             if index in self.tuned:
+                if rebuilt:
+                    continue
                 points, polys, kinds = self.tuned[index]
             elif index < len(self.sizes):
-                points, polys, kinds = self.sizes[index][self.picked[index] if index < len(self.picked) else 0]
+                at = self.picked[index] if index < len(self.picked) else 0
+                if rebuilt is not None and self.ready[index][at] != rebuilt:
+                    continue
+                points, polys, kinds = self.sizes[index][at]
+            elif rebuilt:
+                continue
             else:
                 points, polys, kinds = self._piece_arrays(ids)
             all_points.append(points)
             all_faces += [tuple(v + offset for v in p) for p in polys]
             all_kinds += kinds
-            parts += [index] * len(polys)
+            owner += [index] * len(polys)
             offset += len(points)
-        return np.vstack(all_points), all_faces, all_kinds, np.asarray(parts, dtype=np.int64)
+        return np.vstack(all_points) if all_points else np.zeros((0, 3)), all_faces, all_kinds, np.asarray(owner, dtype=np.int64)
 
     def _show(self, final=None) -> None:
         if final is None:
@@ -419,30 +451,37 @@ class AutoJob:
                 break
             tried.add(tuple(self.picked))
             self.stage = f"Pairing into quads, try {round_index + 1}"
-            co, faces, kinds, _parts = self._combined()
+            co, faces, kinds, _parts = self._combined(False)
+            rco, rfaces, rkinds, _owner = self._combined(True)  # rebuilt parts are already quads
             if self.guide_lines:
                 self.stage = f"Cutting the guide curves in, try {round_index + 1}"
                 yield
                 co, faces, kinds, self.guide_edges = self._guided(co, faces, kinds)
-            before_pairing = len(faces)
-            self._paired = None
-            self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds), daemon=True, name="CurioMeshPair")
-            self._pair_thread.start()
-            while self._pair_thread.is_alive():
-                if self._stopped:
+            before_pairing = len(faces) + len(rfaces)
+            self._paired = MeshData(np.zeros((0, 3)), [], [])
+            if faces:
+                self._paired = None
+                self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds), daemon=True, name="CurioMeshPair")
+                self._pair_thread.start()
+                while self._pair_thread.is_alive():
+                    if self._stopped:
+                        return
+                    self._pair_thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the pairing thread (shared GIL)
+                    yield
+                if self._paired is None:
                     return
-                self._pair_thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the pairing thread (shared GIL)
-                yield
-            if self._paired is None:
-                return
             result = self._paired
-            points = np.asarray(result.vertices, dtype=np.float64)
+            points = np.asarray(result.vertices, dtype=np.float64).reshape(-1, 3)
             out_faces = [tuple(face) for face in result.faces]
+            out_kinds = list(result.face_materials)
+            out_faces += [tuple(v + len(points) for v in f) for f in rfaces]
+            out_kinds += rkinds
+            points = np.vstack([points, rco])
             self.fraction += 0.5 * (1.0 - MEASURE_SHARE) / ROUNDS
             if reducing:
                 miss = abs(len(out_faces) - self.target_faces) / self.target_faces
                 if best is None or miss < best[0]:
-                    best = (miss, points, out_faces, list(result.face_materials), None)
+                    best = (miss, points, out_faces, out_kinds, None)
                 if miss <= CLOSE_ENOUGH:
                     break
                 paired_share = len(out_faces) / max(before_pairing, 1)
@@ -453,7 +492,7 @@ class AutoJob:
             # Prefer anything that fits, then the fewest faces. With nothing fitting yet, the least change.
             rank = (not fits, len(out_faces) if fits else loss)
             if best is None or rank < best[0]:
-                best = (rank, points, out_faces, list(result.face_materials), loss)
+                best = (rank, points, out_faces, out_kinds, loss)
             if abs(loss - self.detail) <= 0.1 * self.detail:
                 break
             allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
@@ -488,7 +527,8 @@ class AutoJob:
         miss = want - total
         if abs(miss) <= 0.03 * want:
             return
-        index = max(range(len(self.picked)), key=lambda i: self.levels[i][self.picked[i]].faces)
+        made = [i for i in range(len(self.picked)) if not self.ready[i][self.picked[i]]]  # leave a rebuilt part alone while another can take it
+        index = max(made or range(len(self.picked)), key=lambda i: self.levels[i][self.picked[i]].faces)
         points, polys, kinds = self._piece_arrays(self.pieces[index])
         triangles = sum(len(p) - 2 for p in polys)
         goal = self.levels[index][self.picked[index]].faces + miss
