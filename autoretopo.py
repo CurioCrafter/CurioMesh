@@ -28,6 +28,7 @@ from .triadq import checks, parts, patch, patterns
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
+from .triadq.quadreduce import QuadReducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
@@ -56,10 +57,19 @@ SOFT_DEG = 10.0  # shallow folds in cloth only turn the shading this much
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 OTHER_VERTICES = 8  # how far down a sample's nearest vertices to look for one of its own loose part
+REDUCE_STEP = 0.16  # share of the quads to try taking away between looks; halved on going too far, down to REDUCE_FINEST
+REDUCE_FINEST = 0.015
+MOST_LOOKS = 40
+AIM = 0.9  # share of the amount asked for that a start should reach
+ROOM = 0.5  # a start this close to the amount asked for is good enough: taking quads away uses up the rest
+PART_PIXELS = 100  # a part showing fewer pixels than this over the six views can't be judged by itself
+REFINE_PIECES = 8
+REFINE_COVER = 0.8  # share of the faces the extra sizes need to cover
 SHOW_EVERY = 1.0  # seconds between preview updates
 POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
 MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
+REPAIR_GROWTH = 1.1  # a repair may not add more than this share of faces to the whole result
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 
@@ -259,6 +269,24 @@ def wrong_points(reference, other, center: np.ndarray, half: float, pixels: int,
     return np.vstack(found)
 
 
+def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, limit: float) -> np.ndarray:
+    """The labels of connected parts of the viewed mesh where over `limit` of what's shown has changed.
+
+    A big flat part can hide a ruined small one in the total. Parts showing too few pixels to judge are left out.
+    """
+
+    count = int(labels.max()) + 1
+    wrong, shown = np.zeros(count), np.zeros(count)
+    cosine = math.cos(math.radians(TURNED_DEG))
+    for (hit_a, normal_a, depth_a, _face_a), (hit_b, normal_b, depth_b, face_b) in zip(reference, view):
+        parts = labels[face_b[hit_b]]
+        shown += np.bincount(parts, minlength=count)
+        both = hit_a & hit_b
+        changed = (np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < cosine) | (np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel)
+        wrong += np.bincount(labels[face_b[both]][changed], minlength=count)
+    return np.flatnonzero((shown >= PART_PIXELS) & (wrong > limit * shown))
+
+
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
 
@@ -380,6 +408,7 @@ class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
     def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None):
+        self.collapse = method == "AUTO" and output == "QUADS" and not guide_lines and mirror is None and (drop is None or not float(np.max(drop, initial=0.0)) > 0.0)  # take quads away after pairing: only where nothing else asks for the layout
         self.tidy = tidy  # try to tidy the finished quads, kept only if the score rises and the camera allows it
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
@@ -424,6 +453,7 @@ class AutoJob:
         self._shell = None
         self._samples = None
         self.pieces: list[np.ndarray] = []
+        self.picture_sizes: list[int] = []
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
         self.ready: list[list[bool]] = []  # per piece and size: already all quads, so it skips pairing
@@ -729,7 +759,7 @@ class AutoJob:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
                 coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
-            made = make_pure(coarse, method, self.output_kind, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True)
+            made = make_pure(coarse, method, self.output_kind, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, join_triangles=self.collapse and method == "AUTO")
             # Strokes and a mirror seam must stay where they are.
             if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and self.mirror is None and not self._stopped:
                 made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
@@ -756,6 +786,104 @@ class AutoJob:
                 self._paired = tidied
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Tidying failed, kept the quads as they were: {exc}"]
+
+    def _background(self, work):
+        """Generator: run this on a worker thread, so a very large mesh can't hold up Blender. Returns its result."""
+        out = []
+        thread = threading.Thread(target=lambda: out.append(work()), daemon=True, name="CurioMeshReduce")
+        thread.start()
+        while thread.is_alive():
+            thread.join(0.02)
+            yield
+        return out[0]
+
+    def _refine(self, finer: bool, kept: list[int]):
+        """Generator: a size halfway between two tried ones, for the pieces holding most of the faces.
+
+        Sizes double from one to the next, which is a huge step on a big piece: it would land well under what was asked
+        for, or over it. So only the sizes next to the current pick, and only for the pieces where that matters.
+        """
+        counts = [self.levels[i][k].faces for i, k in enumerate(self.picked)]
+        total = sum(counts)
+        spent = 0
+        for index in sorted(range(len(counts)), key=lambda i: -counts[i])[:REFINE_PIECES]:  # `kept`, the pick of the best try so far, stays right
+            if spent > REFINE_COVER * total:
+                break
+            spent += counts[index]
+            at = self.picked[index]
+            other = at + 1 if finer else at - 1
+            whole = self.sizes[index][-1]
+            triangles = sum(len(f) - 2 for f in whole[1])
+            if other < 0 or other >= len(self.sizes[index]) or self.ready[index][at] or self.ready[index][other]:
+                continue
+            first, second = len(self.sizes[index][at][1]) / triangles, len(self.sizes[index][other][1]) / triangles
+            share = math.sqrt(first * second)
+            if abs(share - first) * triangles < 8 or abs(share - second) * triangles < 8:
+                continue
+            pixels = self.picture_sizes[index]
+            low, high = whole[0].min(axis=0), whole[0].max(axis=0)
+            center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
+            pixel = 2.0 * half / pixels
+            self.stage = f"Trying one more size of piece {index + 1}"
+            reference = yield from self._reference(center, half, pixels, whole[0], whole[1])
+            yield
+            reduced = _decimate(self.context, whole[0], whole[1], whole[2], share)
+            view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
+            wrong, _shown = picture_counts(reference, view, pixel)
+            where = max(at, other)
+            self.sizes[index].insert(where, reduced)
+            self.levels[index].insert(where, Level(len(reduced[1]), wrong * pixel * pixel))
+            self.ready[index].insert(where, False)
+            if where <= kept[index]:
+                kept[index] += 1
+
+    def _reduce(self, result, loss, reference, center, half, pixel, rebuilt_from: int):
+        """Generator: take quads away until the view has changed by the amount asked for. Returns (mesh, loss)."""
+        if loss > self.detail:
+            return result, loss
+        reducer = yield from self._background(lambda: QuadReducer(result))
+        limit = PIECE_LIMIT * self.detail / 100.0
+
+        def over_limit(mesh, view):
+            fa, fb = patch.face_adjacency(mesh.faces)
+            labels = np.unique(patch._labels(len(mesh.faces), fa, fb), return_inverse=True)[1]
+            parts = parts_changed_too_much(reference, view, pixel, labels, limit)
+            kept = np.isin(labels, parts)
+            return sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]})
+
+        view = yield from self._timed("pictures", pictures(np.asarray(result.vertices), result.faces, center, half, MAX_PIXELS))
+        reducer.freeze(over_limit(result, view) + list(range(rebuilt_from, len(result.vertices))))  # whatever is at its limit stays as it is, and so do rebuilt parts
+        saved = yield from self._background(reducer.save)
+        step = REDUCE_STEP
+        looks = 0
+        while step >= REDUCE_FINEST and looks < MOST_LOOKS:
+            looks += 1
+            before = reducer.alive
+            yield from reducer.remove(max(1, int(step * before)))
+            if reducer.alive == before:
+                if not reducer.refused:
+                    break
+                reducer.retry_refused()
+                yield from reducer.remove(max(1, int(step * before)))
+                if reducer.alive == before:
+                    break
+            attempt = yield from self._background(reducer.result)
+            self.stage = f"Taking away quads: {len(attempt.faces):,}"
+            view = yield from self._timed("pictures", pictures(np.asarray(attempt.vertices), attempt.faces, center, half, MAX_PIXELS))
+            wrong, shown = picture_counts(reference, view, pixel)
+            now = 100.0 * wrong / max(shown, 1)
+            ruined = over_limit(attempt, view)
+            if now <= self.detail and not ruined:
+                result, loss = attempt, now
+                saved = yield from self._background(reducer.save)
+                continue
+            names = reducer.original_ids(ruined)
+            yield from self._background(lambda: reducer.restore(saved))
+            if ruined:  # those parts stop here, and the rest can go on
+                reducer.freeze(names, renamed=True)
+            else:
+                step *= 0.5
+        return result, loss
 
     def _build(self, co, faces, kinds, method, goal=0):
         """Generator: faces for these pieces by `method` in the chosen output. Returns (points, faces, materials) or None."""
@@ -866,24 +994,30 @@ class AutoJob:
         fixed = 0
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx")
         first = {k: getattr(after, k) for k in keys}
+        start_faces = len(faces)
         for attempt in range(FIX_TRIES):
             bad = checks.new_spots(before, after)[:MOST_REPAIRED]
             if not bad or self._stopped:
                 break
             self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
             yield
-            points, faces, mats, piece = yield from self._remake(bad, points, faces, mats, piece, attempt == FIX_TRIES - 1)
+            picked, tuned = list(self.picked), dict(self.tuned)
+            # The source's own faces are often triangles, so that last try isn't for an all-quads result.
+            tried = yield from self._remake(bad, points, faces, mats, piece, attempt == FIX_TRIES - 1 and self.output_kind != "QUADS")
+            seen = yield from self._look(tried[0], tried[1], *self._view)
+            if seen[0] > max(1.1 * self.detail, 1.02 * view[0]) or len(tried[1]) > REPAIR_GROWTH * start_faces:  # worse than what it repairs
+                self.picked, self.tuned = picked, tuned
+                break
+            points, faces, mats, piece = tried
+            view = seen
             after = checks.inspect(points, faces, piece)
             fixed += len(bad) - len(checks.new_spots(before, after))
-            view = None
         left = checks.new_spots(before, after)
         flag = np.zeros(len(faces), bool)
         for p in left:
             here = piece == p
             mask = here & (after.broken | after.crossing)
             flag |= mask if mask.any() else here
-        if view is None:
-            view = yield from self._look(points, faces, *self._view)
         self.face_piece, self.flag = piece, flag
         check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left)}
         return points, faces, mats, view, check
@@ -897,7 +1031,7 @@ class AutoJob:
         self.pieces = sorted((order[a:b] for a, b in zip(starts[:-1], starts[1:])), key=len, reverse=True)
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
-        picture_sizes = _picture_sizes(sizes).tolist()
+        picture_sizes = self.picture_sizes = _picture_sizes(sizes).tolist()
         weights = np.asarray([sum(len(self.faces[f]) - 2 for f in ids.tolist()) for ids in self.pieces], dtype=np.float64)
         done_share = np.concatenate(([0.0], np.cumsum(weights))) / max(float(weights.sum()), 1.0)
         self._show()
@@ -936,9 +1070,10 @@ class AutoJob:
                 self._tune(want)
             else:
                 self.picked = allocate(self.levels, allowed, PIECE_LIMIT * asked, self.seen)
-            if tuple(self.picked) in tried and not self.tuned:
+            pick = tuple(self.levels[i][k].faces for i, k in enumerate(self.picked))
+            if pick in tried and not self.tuned:
                 break
-            tried.add(tuple(self.picked))
+            tried.add(pick)
             self.stage = f"Making the faces, try {round_index + 1}"
             co, faces, kinds, _parts = self._combined(False)
             rco, rfaces, rkinds, _owner = self._combined(True)  # rebuilt parts are already quads
@@ -953,6 +1088,7 @@ class AutoJob:
                 if result is None:
                     return
             points, out_faces, out_kinds = result
+            rebuilt_from = len(points)  # the rebuilt parts' vertices come last
             out_faces += [tuple(v + len(points) for v in f) for f in rfaces]
             out_kinds += rkinds
             points = np.vstack([points, rco])
@@ -961,7 +1097,7 @@ class AutoJob:
             if reducing:
                 miss = abs(len(out_faces) - self.target_faces) / self.target_faces
                 if best is None or miss < best[0]:
-                    best = (miss, points, out_faces, out_kinds, None, None, None, picked, tuned)
+                    best = (miss, points, out_faces, out_kinds, None, None, None, picked, tuned, rebuilt_from)
                 if miss <= CLOSE_ENOUGH:
                     break
                 paired_share = len(out_faces) / max(before_pairing, 1)
@@ -970,17 +1106,32 @@ class AutoJob:
             loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
             fits = loss <= 1.1 * self.detail
             # Prefer anything that fits, then the fewest faces. With nothing fitting yet, the least change.
-            rank = (not fits, len(out_faces) if fits else loss)
+            over = loss > self.detail
+            rank = (not fits, over and self.collapse, len(out_faces) if fits else loss)
             if best is None or rank < best[0]:
-                best = (rank, points, out_faces, out_kinds, loss, shading, soft, picked, tuned)
-            if abs(loss - self.detail) <= 0.1 * self.detail:
-                break
-            allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
-        _rank, points, out_faces, materials, loss, shading, soft, self.picked, self.tuned = best
+                best = (rank, points, out_faces, out_kinds, loss, shading, soft, picked, tuned, rebuilt_from)
+            if self.collapse:
+                if ROOM * self.detail <= loss <= self.detail:
+                    break
+                if round_index + 1 < ROUNDS:
+                    yield from self._refine(over, best[7])
+                # What the sizes say they lose differs from what the whole result loses, so go by the last pick.
+                planned = sum(self.levels[i][k].loss for i, k in enumerate(self.picked))
+                allowed = max(planned, 0.01 * asked * total_seen) * min(max(AIM * self.detail / max(loss, 0.01), 0.3), 4.0)
+            else:
+                if abs(loss - self.detail) <= 0.1 * self.detail:
+                    break
+                allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
+        _rank, points, out_faces, materials, loss, shading, soft, self.picked, self.tuned, rebuilt_from = best
         if loss is None:  # Reduce To looks at the one it keeps, so the view change can still be judged
             self.stage = "Checking the view"
             self.fraction = 0.95
             loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
+        elif self.collapse:
+            taken, taken_loss = yield from self._reduce(MeshData(points, out_faces, materials), loss, reference, center, half, pixel, rebuilt_from)
+            if len(taken.faces) < len(out_faces):
+                points, out_faces, materials = np.asarray(taken.vertices, dtype=np.float64), [tuple(face) for face in taken.faces], list(taken.face_materials)
+                loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
         for level in POLISH_LEVELS if self.tidy and self.output_kind != "TRIS" else ():  # an option: it is slow and the loss goes up a little
             self.stage = "Tidying the quads..."
             self._paired = None

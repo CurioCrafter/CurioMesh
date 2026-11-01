@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Auto Segments makes about 20-55% fewer quads at the same Change Allowed.** Leftover
+  triangles now join in twos along a short path of quads instead of splitting all
+  their edges, then quads are taken away cheapest first until the camera says the
+  amount asked for is used up. No connected part may pass its own limit. Big pieces
+  get extra sizes between the old ones, so they no longer land far under the amount.
 - **The add-on is now named plain CurioMesh**, in Blender's add-on list and in the
   extension listing. Its id stays `curiomesh`.
 - **Tidiness score** at the end of Auto Segments: a number from 0 to 100 for how close
