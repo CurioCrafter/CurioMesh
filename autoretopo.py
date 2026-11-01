@@ -207,7 +207,6 @@ class AutoJob:
         reference = yield from pictures(points, polys, center, half, pixels)
         sizes, levels, seen, ready = [], [], 0.0, []
         enough = GOOD_ENOUGH * self.detail / 100.0
-        built = False
         for out in parts.rebuilds(points, polys, max(set(kinds), key=kinds.count)):
             yield
             if out is None:
@@ -220,11 +219,8 @@ class AutoJob:
             levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, wrong * pixel * pixel))
             ready.append(True)
             if wrong <= enough * shown:
-                built = True
                 break
         for share in LEVELS:
-            if built:
-                break
             if share * triangles < 12.0:
                 continue
             yield

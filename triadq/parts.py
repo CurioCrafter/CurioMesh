@@ -15,9 +15,9 @@ import math
 import numpy as np
 
 CLUSTER = 0.004  # vertices closer than this (share of the piece's diagonal) in (radius, height) are one ring
-MIN_SPIN = 4  # a ring has at least this many vertices to count as turned around the axis
+MIN_SPIN = 8  # a ring has at least this many vertices to count as turned around the axis
 REVOLVES = ((8, 0.010), (12, 0.006), (16, 0.004), (24, 0.002), (32, 0.001))  # (steps around, profile tolerance), fewest faces first
-BEAM_STATIONS = (1, 2, 4, 8)
+BEAM_STATIONS = (1, 2, 4)
 BOX_SHARE = 0.7  # share of surface area that must face along the box axes for a closed piece to count as a box
 FITS = 0.75  # share of vertices that must sit on a ring (or the axis) for the piece to count as turned
 
@@ -150,7 +150,6 @@ def fit_revolve(points: np.ndarray, polys) -> dict | None:
         order = [end]
         while parent[order[-1]] != -1:
             order.append(parent[order[-1]])
-    ends = [] if closed else [order[0], order[-1]]
     profile = mean[order]
     sizes = np.bincount(ids)[order]
     # which end is open: an end with boundary edges is a rim, otherwise the piece is capped there
