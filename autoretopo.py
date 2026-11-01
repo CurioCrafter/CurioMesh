@@ -1001,7 +1001,7 @@ class AutoJob:
                     return points, faces, mats, piece
             else:
                 co, polys, kinds = sizes[-1]
-                if len(polys) > SOURCE_BACK:
+                if len(polys) > SOURCE_BACK or self.output_kind == "QUADS":  # the source's own faces are often triangles
                     continue
                 made = triangulate(co, polys, kinds) if self.output_kind == "TRIS" else (co, list(polys), list(kinds))
             builds[p] = made
