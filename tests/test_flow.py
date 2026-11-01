@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from triadq.flow import faces_that_gain, snap_new_vertices, snap_rows, split_faces
+from triadq.flow import faces_that_gain, snap_new_vertices, snap_rows, split_faces, unfold
 from triadq.patch import quad_quality
 from triadq.types import MeshData
 
@@ -61,9 +61,18 @@ class FlowTest(unittest.TestCase):
         co, faces = _grid(2)
         co[4, 2] = 0.5  # the middle rises, so the middles of the sides reaching it leave the flat source
         co[0, 2] = 0.0
-        found = faces_that_gain(MeshData(co, faces), _flat, 0.1)
+        found = faces_that_gain(MeshData(co, faces), _flat, 0.05)
         self.assertEqual(found, {0, 1, 2, 3})
-        self.assertEqual(faces_that_gain(MeshData(co, faces), _flat, 1.0), set())
+        self.assertEqual(faces_that_gain(MeshData(co, faces), _flat, 2.0), set())
+
+    def test_stuck_fold_closes_along_its_short_diagonal(self):
+        co, faces = _grid(4)
+        a, b, c, d = faces[5]
+        co[[a, c]] = co[[c, a]]  # a crossed quad
+        points, kept, keep = unfold(co, faces, _flat, rounds=0)
+        self.assertLess(len(kept), len(faces))
+        self.assertEqual(len(keep), len(kept))
+        self.assertGreater(quad_quality(points[np.asarray(kept)]).min(), 0.0)
 
 
 def _on_border(point, n):

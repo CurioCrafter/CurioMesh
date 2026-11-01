@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 
 from . import topology
 from .patch import quad_quality
 from .types import MeshData
 
+FEATURE_TRIANGLES = 6  # with fewer source triangles around a vertex, their planes say more about noise than about shape
 MIN_QUALITY = 0.05  # a snap may not push a quad below this, unless it was already lower
 
 
@@ -67,7 +70,9 @@ def seek_features(points: np.ndarray, source: np.ndarray, triangles: np.ndarray,
     np.add.at(matrix, owner, weight[:, None, None] * normal[:, :, None] * normal[:, None, :])
     np.add.at(target, owner, weight[:, None] * normal * (normal * middle).sum(axis=1, keepdims=True))
     np.add.at(total, owner, weight)
-    used = total > 0.0
+    used = np.bincount(owner, minlength=len(points)) >= FEATURE_TRIANGLES
+    if not used.any():
+        return points
     ridge = pull * total[used]
     matrix = matrix[used] + ridge[:, None, None] * np.eye(3)
     placed = np.linalg.solve(matrix, (target[used] + ridge[:, None] * points[used])[:, :, None])[:, :, 0]
@@ -80,26 +85,52 @@ def seek_features(points: np.ndarray, source: np.ndarray, triangles: np.ndarray,
     return out
 
 
-def snap_rows(points: np.ndarray, faces, find_nearest, rounds: int = 6, sharpen=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
-    """Put a field-aligned mesh back on the source, and ease folded quads open by moving corners between their neighbours.
+def _collapse_folded(points: np.ndarray, faces: list[tuple[int, ...]]) -> list[int | None]:
+    """Close each still folded quad along its shorter diagonal, in place. Returns the new face list's source: index per face."""
 
-    The first rounds stay on the source. Later ones don't, and take the ring around the fold too: a fold that still
-    remains costs a little shape instead. Stuck quads with a corner no other quad uses are QuadriFlow debris, and go.
+    alive: list[int | None] = list(range(len(faces)))
+    for _round in range(8):
+        quads = [k for k, f in enumerate(faces) if f is not None and len(f) == 4]
+        array = np.asarray([faces[k] for k in quads], dtype=np.int64)
+        bad = np.flatnonzero(quad_quality(points[array]) <= 0.0)
+        if not len(bad):
+            break
+        users: dict[int, list[int]] = {}
+        for k, f in enumerate(faces):
+            if f is not None:
+                for v in f:
+                    users.setdefault(v, []).append(k)
+        touched: set[int] = set()
+        for row in bad.tolist():
+            k = quads[row]
+            a, b, c, d = faces[k]
+            first, second = (a, c) if np.linalg.norm(points[a] - points[c]) <= np.linalg.norm(points[b] - points[d]) else (b, d)
+            around = {v for f in set(users[first]) | set(users[second]) if faces[f] is not None for v in faces[f]}
+            if touched & around or set(users[first]) & set(users[second]) != {k}:
+                continue  # closing it would pinch a neighbour, or the area changed this round
+            touched |= around
+            points[first] = (points[first] + points[second]) * 0.5
+            for f in users[second]:
+                faces[f] = tuple(first if v == second else v for v in faces[f])
+            faces[k] = None
+            alive[k] = None
+    return alive
+
+
+def unfold(points: np.ndarray, faces, find_nearest, rounds: int = 6) -> tuple[np.ndarray, list[tuple[int, ...]], list[int]]:
+    """Ease folded quads open by moving corners between their neighbours. Returns (points, faces, source index per face).
+
+    The first rounds stay on the source. Later ones don't, and take the ring around the fold too: a fold that remains
+    costs a little shape instead. Quads still stuck go, either as debris with a corner no other quad uses, or by closing
+    them along a diagonal.
     """
 
     faces = [tuple(f) for f in faces]
     quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64)
     moved = np.array(points, dtype=np.float64)
-
-    def onto(ids) -> None:
-        for i in ids:
-            hit = find_nearest(moved[i].tolist())
-            if hit[0] is not None:
-                moved[i] = hit[0]
-
-    onto(range(len(moved)))
-    if sharpen is not None:
-        moved = sharpen(moved)
+    keep = list(range(len(faces)))
+    if not len(quads) or not (quad_quality(moved[quads]) <= 0.0).any():
+        return moved, faces, keep
     a, b = quads.ravel(), np.roll(quads, -1, axis=1).ravel()
     count = np.bincount(a, minlength=len(moved)) + np.bincount(b, minlength=len(moved))
     for k in range(8 * rounds):
@@ -118,25 +149,45 @@ def snap_rows(points: np.ndarray, faces, find_nearest, rounds: int = 6, sharpen=
         np.add.at(total, b, moved[a])
         moved[ids] = total[ids] / np.maximum(count[ids], 1)[:, None]
         if k < rounds:
-            onto(ids.tolist())
+            for i in ids.tolist():
+                hit_at = find_nearest(moved[i].tolist())
+                if hit_at[0] is not None:
+                    moved[i] = hit_at[0]
     uses = np.bincount(quads.ravel(), minlength=len(moved))
     stuck = quad_quality(moved[quads]) <= 0.0
     debris = {tuple(q) for q in quads[stuck & (uses[quads] == 1).any(axis=1)].tolist()}
-    if not debris:
-        return moved, faces
-    kept = [f for f in faces if f not in debris]
-    alive = sorted({v for f in kept for v in f})
+    working: list = [None if f in debris else f for f in faces]
+    source = _collapse_folded(moved, working)
+    corners = Counter(tuple(sorted(f)) for k, f in enumerate(working) if f is not None and source[k] is not None)
+    # Closing can leave two quads back to back on the same corners, touching nothing else.
+    keep = [k for k, f in enumerate(working) if f is not None and source[k] is not None and corners[tuple(sorted(f))] == 1]
+    alive = sorted({v for k in keep for v in working[k]})
     remap = {v: i for i, v in enumerate(alive)}
-    return moved[alive], [tuple(remap[v] for v in f) for f in kept]
+    return moved[alive], [tuple(remap[v] for v in working[k]) for k in keep], keep
 
 
-def faces_that_gain(mesh: MeshData, find_nearest, tolerance: float) -> set[int]:
-    """Faces with a side middle or a center farther than `tolerance` from the source: new vertices there would carry shape."""
+def snap_rows(points: np.ndarray, faces, find_nearest, sharpen=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
+    """Put a field-aligned mesh back on the source, and leave no quad folded."""
+
+    moved = np.array(points, dtype=np.float64)
+    for i in range(len(moved)):
+        hit = find_nearest(moved[i].tolist())
+        if hit[0] is not None:
+            moved[i] = hit[0]
+    if sharpen is not None:
+        moved = sharpen(moved)
+    out_points, out_faces, _keep = unfold(moved, faces, find_nearest)
+    return out_points, out_faces
+
+
+def faces_that_gain(mesh: MeshData, find_nearest, share: float) -> set[int]:
+    """Faces with a side middle or a center farther from the source than `share` of their longest side: new vertices there would carry shape."""
 
     points = np.asarray(mesh.vertices)
     found = set()
     for index, face in enumerate(mesh.faces):
         p = points[list(face)]
+        tolerance = share * float(np.linalg.norm(np.roll(p, -1, axis=0) - p, axis=1).max())
         probes = np.vstack((p.mean(axis=0, keepdims=True), (p + np.roll(p, -1, axis=0)) * 0.5))
         for probe in probes.tolist():
             hit = find_nearest(probe)
@@ -192,4 +243,4 @@ def split_faces(mesh: MeshData, marked: set[int]) -> MeshData:
     return MeshData(stacked, output, materials, name=mesh.name)
 
 
-__all__ = ["faces_that_gain", "seek_features", "snap_new_vertices", "snap_rows", "split_faces"]
+__all__ = ["faces_that_gain", "seek_features", "snap_new_vertices", "snap_rows", "split_faces", "unfold"]

@@ -30,7 +30,7 @@ from mathutils.kdtree import KDTree
 
 from .triadq import patch
 from .triadq.flatquad import _face_frames
-from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces
+from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces, unfold
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
 from .triadq.types import MeshData
@@ -50,7 +50,9 @@ ROWS_DENSER = 0  # Clean Rows: most rounds of density where the camera finds a d
 ROWS_FIX_SHARE = 0.6  # Clean Rows: share of the wrong pixels on a quad that splitting it is assumed to fix
 ROWS_SECONDS = 30.0  # Clean Rows: QuadriFlow's time limit per piece, plus...
 ROWS_SECONDS_PER_QUAD = 0.01  # ...this much for each quad asked for
-FLAT_SNAP_PIXELS = 0.25  # Balanced: a face whose new vertices would move less than this many pixels stays whole
+FLAT_SNAP_SHARE = 0.015  # Balanced: a face whose new vertices would move less than this share of its size stays whole
+ROWS_TIME = 300.0  # Clean Rows: don't start another layout if the last ones suggest it would end past this many seconds
+ROWS_BAD = 0.01  # Clean Rows: a piece with more than this share of its quads folded before repair gets paired instead
 NARROW_TRIES = 2  # extra tries with a new size in between, when the sizes on offer land well short of it
 TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
@@ -297,11 +299,11 @@ class AutoJob:
             find = self._tree.find_nearest
             if self.style == "BALANCED":
                 paired = pair_and_close(coarse, seed_count=2, force_quads=False)[0]
-                span = float(np.ptp(self.co, axis=0).max()) * 1.1 / MAX_PIXELS
-                result = split_faces(paired, faces_that_gain(paired, find, FLAT_SNAP_PIXELS * span))
+                result = snap_new_vertices(split_faces(paired, faces_that_gain(paired, find, FLAT_SNAP_SHARE)), coarse.vertices, find)
+                points, out_faces, keep = unfold(result.vertices, result.faces, find)
+                result = MeshData(points, out_faces, [result.face_materials[k] for k in keep])
             else:
-                result = pair_and_close(coarse, seed_count=2)[0]
-            result = snap_new_vertices(result, coarse.vertices, find)
+                result = snap_new_vertices(pair_and_close(coarse, seed_count=2)[0], coarse.vertices, find)
             self._paired = result
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
@@ -487,7 +489,18 @@ class AutoJob:
                     grid.balance()
                     return seek_features(moved, points, triangles, lambda at: grid.find(at)[1])
 
-                moved, quads = yield from self._in_thread(lambda: snap_rows(rows["co"], faces, tree.find_nearest, sharpen=sharpen))
+                done = yield from self._in_thread(lambda: snap_rows(rows["co"], faces, tree.find_nearest, sharpen=sharpen))
+                if done is None:
+                    return None
+                moved, quads = done
+                if len(quads) < (1.0 - ROWS_BAD) * len(faces):  # repair had to remove too much: QuadriFlow doesn't suit this piece
+                    triangles_in = sum(len(p) - 2 for p in polys)
+                    want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
+                    if triangles_in > want:
+                        points, polys, kinds = _decimate(self.context, points, polys, kinds, want / triangles_in)
+                    leftovers.append((points, polys, kinds))
+                    self._refused += 1
+                    continue
                 all_points.append(moved)
                 all_faces += [tuple(v + offset for v in q) for q in quads]
                 centers = np.asarray([moved[list(q)].mean(axis=0) for q in quads]).tolist()
@@ -554,7 +567,7 @@ class AutoJob:
             if aim is None:
                 break
             wanted = min(max(int(target * (loss / (aim * self.detail)) ** 2), 64), most)  # change falls about as the square root of the faces
-            if wanted == target:
+            if wanted == target or (time.perf_counter() - self.started) * (1.0 + wanted / target) > ROWS_TIME:
                 break
             target = wanted
         self.stage = "Adding density where it differs..."
