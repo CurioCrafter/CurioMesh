@@ -2,6 +2,18 @@
 
 ## 0.8.0 - 2026-11-01
 
+- **Segment view** (Auto Segments, new Parts panel). The whole result is drawn with every part
+  in its own colour. Hover a part (Inspect Parts) to see its faces before and after, how much of
+  its view changed and its method; click to select, Shift+click to add. Pick another method for
+  the selected parts and only they are redone, with the progress bar, while Blender stays usable;
+  every result is kept, so you can go back to any earlier one at once. Select all tubes, flat or
+  rough parts in one click, or jump through "parts that changed the most". Switches for part
+  colours, a heat map of each part's camera check, the wireframe, and your original beside the
+  result or drawn over it. Part kinds are a rough guess from each part's shape. The heat map is
+  per part, not per face.
+- **A cleaner Guided panel for Auto Segments**: one big button that is always the next step
+  (Start, then Apply Result), settings under it, the result in one box, and Parts and Redo Inside
+  Shapes as sub-panels. Empty states say what to click, and a non-mesh object says how to convert it.
 - **Auto Segments is now a guided, five-step panel**: pick the mesh, choose the aim,
   press Start and watch, fix areas you don't like, Apply. One big button always shows
   the next step. A real progress bar (a text bar before Blender 4.0) shows the stage

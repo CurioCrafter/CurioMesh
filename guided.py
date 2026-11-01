@@ -21,7 +21,7 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from . import overlay, region
-from . import autoretopo
+from . import autoretopo, segments
 from .triadq import areas, patch
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.types import MeshData
@@ -180,6 +180,13 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_reduce_by: bpy.props.EnumProperty(name="Reduce By", description="Say the face count you want as a percent of your faces or as a number", items=REDUCE_BY_ITEMS, default="PERCENT", update=_redraw_update)
     auto_reduce_percent: bpy.props.FloatProperty(name="Faces Left", description="Reduce To: how many faces to end up with, as a share of the faces your mesh has now. 25% turns 40,000 faces into about 10,000", default=25.0, min=0.1, max=100.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
     auto_reduce_count: bpy.props.IntProperty(name="Faces", description="Reduce To: the number of faces to end up with. The result lands within about 10% of it, unless the pieces can't go that low", default=5000, min=12, soft_max=500000, update=_redraw_update)
+    seg_colors: bpy.props.BoolProperty(name="Part Colors", description="Tint every part of the result in its own colour", default=True, update=segments.on_view)
+    seg_heat: bpy.props.BoolProperty(name="Heat Map", description="Colour each part by how much the camera check says its view changed: green for none, red for the most", default=False, update=segments.on_view)
+    seg_wire: bpy.props.BoolProperty(name="Wireframe", description="Show the edges of the result", default=True, update=segments.on_view)
+    seg_compare: bpy.props.EnumProperty(name="Original", description="Where your original mesh is shown", items=[("BESIDE", "Beside", "The result sits next to your mesh"), ("OVER", "Over", "The result sits on your mesh, which is drawn over it as a white wireframe")], default="BESIDE", update=segments.on_view)
+    seg_method: bpy.props.EnumProperty(name="Method", description="The method to remake the selected parts with", items=segments.METHOD_ITEMS, default="FLAT")
+    seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
+    seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redo the part of the result inside the shapes, live, while everything outside stays as it is. Move or resize a shape and the new quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
@@ -899,11 +906,9 @@ def _build_preview(context, source, res, uvs=True) -> None:
         obj.data = mesh
         if old.users == 0:
             bpy.data.meshes.remove(old)
-    matrix = source.matrix_world.copy()
-    matrix.translation.x += max(source.dimensions.x, 0.1) * 1.25
-    obj.matrix_world = matrix
-    obj.show_wire = True
-    obj.show_all_edges = True
+    gs = context.scene.curiomesh_guided
+    segments.place(obj, source, gs)
+    obj.show_wire = obj.show_all_edges = gs.seg_wire or gs.scope != "AUTO"
     obj.hide_select = False
 
 
@@ -1063,7 +1068,7 @@ def _start_boolean(context, gs, source, src) -> bool:
 def _auto_slice():
     """Run the search in short slices with gaps between them, so Blender stays usable. Ends when the job does."""
     work = state["work"]
-    if work is None or not isinstance(work["runner"], autoretopo.AutoJob) or not work["runner"].busy:
+    if work is None or not isinstance(work["runner"], (autoretopo.AutoJob, segments.PartJob)) or not work["runner"].busy:
         return None
     work["runner"].step(0.04)
     return 0.01
@@ -1071,6 +1076,7 @@ def _auto_slice():
 
 def _collect_work(context) -> None:
     """Show what the worker finished since the last look."""
+    segments.ensure()
     work = state["work"]
     source = state_source()
     if work is None or source is None:
@@ -1085,11 +1091,18 @@ def _collect_work(context) -> None:
             state["res"] = runner.output
             _build_preview(context, source, runner.output, uvs=False)  # the UVs are copied when you Apply
         state["draw_key"] = None
+    if isinstance(runner, segments.PartJob):
+        state["message"] = runner.status()
+        if not runner.busy and not runner.committed:
+            segments.commit(runner)
+        overlay.tag_redraw()
+        return
     if isinstance(runner, autoretopo.AutoJob):
         state["message"] = runner.warnings[0] if runner.warnings else runner.status()
         base = state["auto_base"]
         if not runner.busy and runner.report is not None and runner.output is not None and (base is None or base["job"] is not runner):
-            state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "out": dict(runner.output), "report": runner.report, "job": runner, "summary": state["message"]}
+            state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": dict(runner.output), "report": runner.report, "job": runner, "summary": state["message"]}
+            segments.ensure()
         overlay.tag_redraw()
         return
     res = state["res"]
@@ -1216,6 +1229,7 @@ def _stop() -> None:
     stop_work()
     remove_preview()
     state.update(sig=None, message="", lock=None, hover=None, auto_base=None)
+    segments.reset()
     overlay.tag_redraw()
 
 
@@ -1323,24 +1337,6 @@ def _world(matrix, arr):
     return np.asarray(arr, float) @ m[:3, :3].T + m[:3, 3]
 
 
-def _part_triangles(matrix, res) -> tuple[np.ndarray, np.ndarray]:
-    """World-space triangles of a result and a see-through colour per part. Faces outside any part stay uncoloured."""
-    faces, parts = res["faces"], np.asarray(res["parts"])
-    corners, owner = [], []
-    for index, face in enumerate(faces):
-        if parts[index] >= 0 or res["new"][index]:
-            for k in range(1, len(face) - 1):
-                corners += [face[0], face[k], face[k + 1]]
-                owner += [int(parts[index])] * 3
-    if not corners:
-        return np.zeros((0, 3), np.float32), np.zeros((0, 4), np.float32)
-    owner = np.asarray(owner)
-    hue = (np.maximum(owner, 0) * 0.61803398875) % 1.0  # golden ratio steps keep neighbouring ids far apart in colour
-    rgb = 0.45 + 0.45 * np.cos(2.0 * np.pi * (hue[:, None] + np.array([0.0, 0.33, 0.67])))
-    colours = np.concatenate((rgb, np.full((len(owner), 1), 0.4)), axis=1).astype(np.float32)
-    return _world(matrix, res["co"][corners]).astype(np.float32), colours
-
-
 def _draw_data(source, gs):
     global _SPHERE
     pts = gather(source, gs)
@@ -1352,9 +1348,7 @@ def _draw_data(source, gs):
         _SPHERE = _unit_sphere()
     m = source.matrix_world
     scale = float(np.mean(m.to_scale()))
-    data = {"spheres": {}, "rings": {}, "dots": {}, "outline": np.zeros((0, 3), np.float32), "lock": np.zeros((0, 3), np.float32), "spot": None, "parts": None}
-    if gs.scope == "AUTO" and state["res"] is not None and preview is not None and state["res"].get("parts") is not None:
-        data["parts"] = _part_triangles(preview.matrix_world, state["res"])
+    data = {"spheres": {}, "rings": {}, "dots": {}, "outline": np.zeros((0, 3), np.float32), "lock": np.zeros((0, 3), np.float32), "spot": None}
     for kind in KIND_KEYS:
         mine = [p for p in pts if p.kind == kind]
         if mine:
@@ -1410,14 +1404,6 @@ def _draw() -> None:
         b = state["batches"]
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_mask_set(False)
-        if data["parts"] is not None and len(data["parts"][0]) and gs.show_cage:
-            if state["batches"].get("parts") is None:
-                flat = gpu.shader.from_builtin("FLAT_COLOR")
-                state["batches"]["parts"] = (flat, batch_for_shader(flat, "TRIS", {"pos": data["parts"][0], "color": data["parts"][1]}))
-            flat, tinted = state["batches"]["parts"]
-            gpu.state.depth_test_set("LESS_EQUAL")
-            flat.bind()
-            tinted.draw(flat)
         shader.bind()
         if gs.show_cage:
             gpu.state.depth_test_set("LESS_EQUAL")
@@ -2105,7 +2091,10 @@ class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
     def execute(self, context):
         gs = _gs(context)
         work = state["work"]
-        if work is not None and work["key"][1] == "BOOL" and state["auto_base"] is not None:
+        if work is not None and isinstance(work["runner"], segments.PartJob) and state["auto_base"] is not None:
+            _show_base(context, state_source())
+            state["message"] = "Stopped. The parts are as they were"
+        elif work is not None and work["key"][1] == "BOOL" and state["auto_base"] is not None:
             gs["bool_on"] = False
             _show_base(context, state_source())
             state["message"] = "Stopped. The shapes are kept: turn Redo Inside Shapes back on to go on"
@@ -2211,6 +2200,11 @@ def progress_info(kind: str | None = None):
     if work is None or not work["runner"].busy:
         return None
     runner = work["runner"]
+    if isinstance(runner, segments.PartJob):
+        if kind == "AUTO":
+            return None
+        left = runner.seconds_left()
+        return runner.fraction, runner.stage + (f", about {_clock(left)} left" if left is not None else "")
     if isinstance(runner, autoretopo.AutoJob):
         if kind == "BOOL":
             return None
@@ -2247,6 +2241,15 @@ class CURIOMESH_UL_guided_points(bpy.types.UIList):
         row.prop(item, "strength", text="")
 
 
+def detail_words(gs) -> str:
+    """The plain-words note under Detail, once the presets branch is merged."""
+    try:
+        from . import profiles
+    except ImportError:
+        return ""
+    return profiles.detail_words(gs.auto_detail)
+
+
 def _is_problem(message: str) -> bool:
     return any(w in message for w in ("skipped", "error", "Error", "failed", "Would make")) or message.startswith(("Select", "Place", "Nothing", "Points Only"))
 
@@ -2267,105 +2270,91 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         self.layout.label(icon="PIVOT_ACTIVE")
 
     def _draw_auto(self, layout, context, gs, obj):
-        """Auto Segments as five numbered steps; the one big button is the next thing to do."""
+        """Auto Segments: one big button that is always the next thing to do, then settings, the result and sub-panels."""
         layout.row(align=True).prop(gs, "scope", expand=True)
         base = state["auto_base"]
         searching = progress_info("AUTO")
         redoing = progress_info("BOOL")
         res = state["res"]
         done = base is not None and res is not None
-
-        def step(box, number, text, state_icon):
-            box.label(text=f"{number}. {text}", icon=state_icon)
-
-        box = layout.box()
+        active = context.object
         faces = len(obj.data.polygons) if obj is not None else 0
-        if obj is None:
-            step(box, 1, "Click the mesh you want to reduce", "RIGHTARROW")
-        else:
-            step(box, 1, f"{obj.name}: {faces:,} faces", "CHECKMARK")
 
-        box = layout.box()
-        step(box, 2, "Choose how to aim", "CHECKMARK" if searching or done else "RIGHTARROW")
-        col = box.column()
+        if obj is None:  # empty state: say what to do, not just what is missing
+            box = layout.box()
+            if active is not None and active.type != "MESH":
+                box.label(text=f"{active.name} is a {active.type.title()}, not a mesh", icon="ERROR")
+                overlay.wrap_label(box, "Convert it first: Object menu, Convert, Mesh.", icon="BLANK1", width=36, limit=2)
+            else:
+                box.label(text="Click a mesh in the 3D view", icon="RESTRICT_SELECT_OFF")
+                overlay.wrap_label(box, "Auto Segments keeps the shape and cuts the faces, part by part.", icon="BLANK1", width=36, limit=2)
+            return
+        row = layout.row(align=True)
+        row.label(text=obj.name, icon="MESH_DATA")
+        row.label(text=f"{faces:,} faces")
+        if faces == 0:
+            layout.box().label(text="This mesh has no faces to reduce", icon="ERROR")
+            return
+
+        # The one primary action
+        if searching:
+            draw_progress(layout, *searching)
+            layout.operator("curiomesh.guided_stop_work", icon="CANCEL")
+        elif done:
+            row = layout.row()
+            row.scale_y = 1.9
+            row.enabled = not redoing and progress_info() is None
+            row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
+        else:
+            row = layout.row()
+            row.scale_y = 1.9
+            row.operator("curiomesh.guided_auto_start", text="Start", icon="PLAY")
+
+        # Settings, read-only while the search runs
+        col = layout.column(align=True)
         col.enabled = not searching
+        if hasattr(gs, "auto_profile"):  # presets, once that branch is merged
+            col.prop(gs, "auto_profile")
         col.row(align=True).prop(gs, "auto_aim", expand=True)
         if gs.auto_aim == "KEEP":
             col.prop(gs, "auto_detail")
+            words = detail_words(gs)
+            if words:
+                overlay.wrap_label(col, words, icon="INFO", width=36, limit=2)
         else:
             col.row(align=True).prop(gs, "auto_reduce_by", expand=True)
             col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
-            if faces:
-                col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
+            col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
+        if hasattr(gs, "auto_method"):
+            col.prop(gs, "auto_method")
+        if hasattr(gs, "auto_output"):
+            col.row(align=True).prop(gs, "auto_output", expand=True)
 
-        box = layout.box()
-        step(box, 3, "Press Start and watch", "CHECKMARK" if done else ("TIME" if searching else "RIGHTARROW"))
-        if searching:
-            draw_progress(box, *searching)
-            box.operator("curiomesh.guided_stop_work", icon="CANCEL")
-        elif done:
-            box.operator("curiomesh.guided_auto_start", text="Start Again", icon="FILE_REFRESH")
-        else:
-            row = box.row()
-            row.scale_y = 1.8
-            row.operator("curiomesh.guided_auto_start", icon="PLAY")
-            if not gs.enabled and obj is not None:
-                box.label(text="Turns on the live preview next to your mesh", icon="INFO")
-
-        box = layout.box()
-        step(box, 4, "Fix areas you don't like (optional)", "TIME" if redoing else ("RIGHTARROW" if done else "BLANK1"))
-        col = box.column()
-        col.enabled = done
-        if not done:
-            col.label(text="Available once the search has finished")
-        else:
-            col.label(text="Put shapes over a part to redo it live:")
-            row = col.row(align=True)
-            row.operator("curiomesh.guided_add_shape", text="Box", icon="CUBE").kind = "BOX"
-            row.operator("curiomesh.guided_add_shape", text="Sphere", icon="MESH_UVSPHERE").kind = "SPHERE"
-            row.operator("curiomesh.guided_add_shape", text="Selected", icon="RESTRICT_SELECT_OFF").kind = "SELECTED"
-            if len(gs.bool_shapes):
-                row = col.row()
-                row.template_list("CURIOMESH_UL_guided_shapes", "", gs, "bool_shapes", gs, "bool_index", rows=2)
-                row.operator("curiomesh.guided_remove_shape", text="", icon="REMOVE")
-                col.prop(gs, "bool_on", toggle=True, icon="HIDE_OFF" if gs.bool_on else "HIDE_ON")
-                row = col.row(align=True)
-                row.label(text="Organized")
-                row.prop(gs, "bool_detail", text="")
-                row.label(text="Detailed")
-                col.row(align=True).prop(gs, "strategy", expand=True)
-                if redoing:
-                    draw_progress(col, *redoing)
-                    col.operator("curiomesh.guided_stop_work", icon="CANCEL")
-            else:
-                col.label(text="Union, Subtract and Intersect combine them")
+        # The result
+        if done:
+            report = base["report"]
+            after, before = len(res["faces"]), report["before"]
+            col = layout.box().column(align=True)
+            col.label(text=f"{before:,} to {after:,} faces ({100.0 * (1.0 - after / max(before, 1)):.0f}% fewer)", icon="CHECKMARK")
+            col.label(text=f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1")
+            if report["asked"]:
+                col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
 
         message = status()
-        if message:
+        if message and not (done and message == base["summary"]):
             box = layout.box()
             box.alert = _is_problem(message)
             for i, chunk in enumerate(message.split(" | ")[:2]):
                 overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=36, limit=2)
 
-        box = layout.box()
-        step(box, 5, "Apply", "RIGHTARROW" if done and not redoing else "BLANK1")
         if done:
-            report = base["report"]
-            after, before = len(res["faces"]), report["before"]
-            col = box.column(align=True)
-            col.label(text=f"Faces: {before:,} to {after:,} ({100.0 * (1.0 - after / max(before, 1)):.0f}% fewer)")
-            col.label(text=f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""))
-            if report["asked"]:
-                col.label(text=f"You asked for about {report['asked']:,}")
-        row = box.row(align=True)
-        row.scale_y = 1.8 if done and not redoing else 1.2
-        sub = row.row(align=True)
-        sub.enabled = done
-        sub.operator("curiomesh.guided_apply", icon="CHECKMARK")
-        row.operator("curiomesh.guided_stop", icon="X")
-        box.prop(gs, "apply_mode", text="")
-        if not done:
-            box.label(text="Nothing changes until you press Apply.", icon="LOCKED")
+            row = layout.row(align=True)
+            row.operator("curiomesh.guided_auto_start", text="Start Again", icon="FILE_REFRESH")
+            row.operator("curiomesh.guided_stop", text="Cancel", icon="X")
+            layout.prop(gs, "apply_mode", text="Write to")
+        elif not searching:
+            layout.operator("curiomesh.guided_stop", text="Cancel", icon="X")
+            layout.label(text="Nothing changes until you press Apply.", icon="LOCKED")
 
     def draw(self, context):
         layout = self.layout
@@ -2457,6 +2446,67 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             layout.label(text="Nothing changes until you press Apply.", icon="LOCKED")
 
 
+class _AutoSub:
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CurioMesh"
+    bl_parent_id = "CURIOMESH_PT_guided"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(overlay.get_prefs().show_guided) and context.scene.curiomesh_guided.scope == "AUTO"
+
+
+class CURIOMESH_PT_guided_parts(_AutoSub, bpy.types.Panel):
+    bl_label = "Parts"
+    bl_idname = "CURIOMESH_PT_guided_parts"
+
+    def draw_header(self, context):
+        self.layout.label(icon="MOD_EXPLODE")
+
+    def draw(self, context):
+        segments.draw_parts(self.layout, context, context.scene.curiomesh_guided)
+
+
+class CURIOMESH_PT_guided_shapes(_AutoSub, bpy.types.Panel):
+    bl_label = "Redo Inside Shapes"
+    bl_idname = "CURIOMESH_PT_guided_shapes"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context):
+        self.layout.label(icon="CUBE")
+
+    def draw(self, context):
+        layout, gs = self.layout, context.scene.curiomesh_guided
+        done = state["auto_base"] is not None and state["res"] is not None
+        redoing = progress_info("BOOL")
+        col = layout.column()
+        col.enabled = done
+        if not done:
+            col.label(text="Available once the search has finished")
+            return
+        col.label(text="Put a shape over a part to redo it live:")
+        row = col.row(align=True)
+        row.operator("curiomesh.guided_add_shape", text="Box", icon="CUBE").kind = "BOX"
+        row.operator("curiomesh.guided_add_shape", text="Sphere", icon="MESH_UVSPHERE").kind = "SPHERE"
+        row.operator("curiomesh.guided_add_shape", text="Selected", icon="RESTRICT_SELECT_OFF").kind = "SELECTED"
+        if len(gs.bool_shapes):
+            row = col.row()
+            row.template_list("CURIOMESH_UL_guided_shapes", "", gs, "bool_shapes", gs, "bool_index", rows=2)
+            row.operator("curiomesh.guided_remove_shape", text="", icon="REMOVE")
+            col.prop(gs, "bool_on", toggle=True, icon="HIDE_OFF" if gs.bool_on else "HIDE_ON")
+            row = col.row(align=True)
+            row.label(text="Organized")
+            row.prop(gs, "bool_detail", text="")
+            row.label(text="Detailed")
+            col.row(align=True).prop(gs, "strategy", expand=True)
+            if redoing:
+                draw_progress(col, *redoing)
+                col.operator("curiomesh.guided_stop_work", icon="CANCEL")
+        else:
+            col.label(text="Union, Subtract and Intersect combine them")
+
+
 class CURIOMESH_PT_guided_advanced(bpy.types.Panel):
     bl_label = "Advanced"
     bl_idname = "CURIOMESH_PT_guided_advanced"
@@ -2481,7 +2531,7 @@ class CURIOMESH_PT_guided_advanced(bpy.types.Panel):
         layout.prop(gs, "suggest_count")
 
 
-PANEL_CLASSES = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_advanced)
+PANEL_CLASSES = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_parts, CURIOMESH_PT_guided_shapes, CURIOMESH_PT_guided_advanced)
 
 CLASSES = (
     CURIOMESH_PG_guided_point,
@@ -2509,6 +2559,8 @@ CLASSES = (
     CURIOMESH_UL_guided_points,
     CURIOMESH_UL_guided_shapes,
     CURIOMESH_PT_guided,
+    CURIOMESH_PT_guided_parts,
+    CURIOMESH_PT_guided_shapes,
     CURIOMESH_PT_guided_advanced,
 )
 
@@ -2518,6 +2570,7 @@ _draw_handles: list = []
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
     stop_work()
+    segments.reset()
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None)
     for sc in bpy.data.scenes:
         gs = getattr(sc, "curiomesh_guided", None)
@@ -2526,12 +2579,13 @@ def _on_load_post(*_args):
 
 
 def register() -> None:
-    for cls in CLASSES:
+    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES):
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_guided = bpy.props.PointerProperty(type=CURIOMESH_PG_guided)
     bpy.types.Object.curiomesh_points = bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_point)
     bpy.types.Object.curiomesh_point_index = bpy.props.IntProperty(default=0)
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_VIEW"))
+    segments.register()
     bpy.app.handlers.load_post.append(_on_load_post)
 
 
@@ -2541,6 +2595,7 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_draw_handles.pop(), "WINDOW")
         except Exception:
             pass
+    segments.unregister()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_poll):
@@ -2554,5 +2609,5 @@ def unregister() -> None:
     for owner, name in ((bpy.types.Scene, "curiomesh_guided"), (bpy.types.Object, "curiomesh_points"), (bpy.types.Object, "curiomesh_point_index")):
         if hasattr(owner, name):
             delattr(owner, name)
-    for cls in reversed(CLASSES):
+    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES)):
         bpy.utils.unregister_class(cls)

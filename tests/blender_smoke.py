@@ -1392,6 +1392,53 @@ def run_guided_case(module):
     if runner.report["faces"] >= len(sphere.data.polygons) or runner.report["loss"] > 3 * gs.auto_detail:
         raise AssertionError(f"guided: auto segments gained no reduction or lost the shape: {guided.status()}")
     print(f"PASS guided auto segments: {guided.status()}")
+
+    # segment view: two loose parts, redo one by another method, go back to the first result
+    from curiomesh import segments
+
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=1.0)
+    bmesh.ops.create_cube(bm, size=1.0, matrix=__import__("mathutils").Matrix.Translation((4.0, 0.0, 0.0)))
+    two = bpy.data.meshes.new("CurioSmoke_TwoParts")
+    bm.to_mesh(two)
+    bm.free()
+    duo = bpy.data.objects.new("CurioSmoke_TwoParts", two)
+    bpy.context.scene.collection.objects.link(duo)
+    reset_selection(duo)
+    guided.stop_work()
+    guided.remove_preview()
+    guided.state["auto_base"] = None
+    guided.state["source"] = duo.name
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    if len(segments.seg["parts"]) != 2 or not segments.ready():
+        raise AssertionError(f"segments: expected two parts, got {len(segments.seg['parts'])}: {guided.status()}")
+    kinds = sorted(r["kind"] for r in segments.seg["parts"])
+    first_faces = len(guided.state["res"]["faces"])
+    target = max(segments.seg["parts"], key=lambda r: r["after"])["id"]
+    other = 1 - target
+    before_other = segments.seg["parts"][other]["after"]
+    segments.select([target])
+    gs.seg_method = "TRIS"
+    if "FINISHED" not in bpy.ops.curiomesh.seg_redo():
+        raise AssertionError("segments: redo did not start")
+    guided.finish_work(bpy.context)
+    record = segments.seg["parts"][target]
+    if len(record["tries"]) != 2 or record["method"] != "TRIS" or segments.seg["parts"][other]["after"] != before_other:
+        raise AssertionError(f"segments: redo changed the wrong thing: {record['method']} {len(record['tries'])}")
+    if len(guided.state["res"]["faces"]) == first_faces or len(segments.seg["piece"]) != len(guided.state["res"]["faces"]):
+        raise AssertionError("segments: the result did not take the redone part")
+    if "FINISHED" not in bpy.ops.curiomesh.seg_try(index=0):
+        raise AssertionError("segments: could not go back to the first result")
+    guided.finish_work(bpy.context)
+    if len(guided.state["res"]["faces"]) != first_faces or segments.seg["parts"][target]["method"] == "TRIS":
+        raise AssertionError("segments: going back did not restore the first result")
+    bpy.ops.curiomesh.seg_select(what="ROUGH")
+    gs.seg_compare = "OVER"
+    gs.seg_heat = True
+    print(f"PASS guided segment view: two parts ({', '.join(kinds)}), redo and back, {first_faces} faces")
+    bpy.data.objects.remove(duo)
+    guided.state["source"] = sphere.name
     gs.scope = "WHOLE"
 
     # auto-suggest, next spot, apply
