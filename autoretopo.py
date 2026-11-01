@@ -729,7 +729,7 @@ class AutoJob:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
                 coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
-            made = make_pure(coarse, method, self.output_kind, seed_count=4 if method == "PAIRING" else 2, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True)
+            made = make_pure(coarse, method, self.output_kind, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True)
             # Strokes and a mirror seam must stay where they are.
             if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and self.mirror is None and not self._stopped:
                 made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
