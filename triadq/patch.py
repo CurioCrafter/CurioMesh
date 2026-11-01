@@ -567,12 +567,14 @@ def _unique_edges(faces) -> np.ndarray:
     return np.unique(np.sort(np.stack((a, b), axis=1), axis=1), axis=0)
 
 
-def tutte_embedding(count: int, faces, boundary, boundary_uv, positions=None) -> np.ndarray:
+def tutte_embedding(count: int, faces, boundary, boundary_uv, positions=None, weights=None, start=None, tol: float = 1e-11) -> np.ndarray:
     """Tutte barycentric embedding with the boundary pinned to `boundary_uv`.
 
     Each interior vertex is the weighted mean of its neighbours. With positive
     symmetric weights (1 / 3D edge length here) and a convex boundary polygon
-    the map is a bijection (Tutte 1963, Floater 1997). Solved by CG.
+    the map is a bijection (Tutte 1963, Floater 1997). Solved by CG. `weights`,
+    one per `_unique_edges(faces)` row, replaces the 1 / length ones. `start` is
+    a map to begin from, when one close to the answer is known.
     """
 
     edges = _unique_edges(faces)
@@ -583,7 +585,9 @@ def tutte_embedding(count: int, faces, boundary, boundary_uv, positions=None) ->
     fixed[boundary] = True
     if fixed.all():
         return uv
-    if positions is not None:
+    if weights is not None:
+        weights = np.asarray(weights, dtype=np.float64)
+    elif positions is not None:
         lengths = np.linalg.norm(positions[edges[:, 0]] - positions[edges[:, 1]], axis=1)
         weights = 1.0 / np.maximum(lengths, 1e-12 * max(float(lengths.max(initial=0.0)), 1e-30))
     else:
@@ -608,8 +612,8 @@ def tutte_embedding(count: int, faces, boundary, boundary_uv, positions=None) ->
             out[:, axis] -= np.bincount(ii, ww * x[jj, axis], len(free)) + np.bincount(jj, ww * x[ii, axis], len(free))
         return out
 
-    x0 = np.tile(uv[boundary].mean(axis=0), (len(free), 1))
-    uv[free] = _cg(matvec, rhs, diagonal, x0)
+    x0 = np.tile(uv[boundary].mean(axis=0), (len(free), 1)) if start is None else start[free]
+    uv[free] = _cg(matvec, rhs, diagonal, x0, tol=tol)
     return uv
 
 

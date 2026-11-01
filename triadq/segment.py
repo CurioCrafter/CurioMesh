@@ -26,6 +26,7 @@ from .patch import (
     _labels,
     _Locator,
     _triangulate_component,
+    _unique_edges,
     boundary_loops,
     circle_boundary,
     coons_grid,
@@ -60,6 +61,12 @@ MOST_CUT = 0.3  # and at 0
 SMALLEST = 0.004  # of a loose piece's area: a segment smaller than this is noise, at any detail
 SNAP_LEVELS = 16
 SHEET_RATIO = 1.6  # how fast a row of an Animation sheet may gain or lose vertices
+RING_SAMPLES = 128
+RING_LEVELS = 96
+RING_CHANGE = 0.18  # a row stays the same length until the surface wants this much more or less
+RING_GRID = 12  # vertices round the last row at which a grid can finish a disk
+SHEET_DETAIL = 0.5  # how much more of the sheet's rows a bumpy area gets, on a smooth one's 1
+SHEET_EVEN_ROUNDS = 10  # rounds of evening out its flat map
 SHEET_RELAX = 12  # passes settling a sheet on the surface
 SHEET_GOOD = 70.0  # a sheet with this topology score needs no flow fill to compare it with
 
@@ -743,21 +750,85 @@ def _local_mesh(co, faces):
     return np.asarray(co)[used], out
 
 
-def _equal_area_radii(uv, tris, points, radii):
-    """Move radii on the flattened disk so that equal areas of the disk are equal areas of the surface: flattening squeezes the far end of a dome into the middle."""
+def even_embedding(points, tris, border, circle, rounds: int = SHEET_EVEN_ROUNDS) -> np.ndarray:
+    """A flat map of a disk where equal areas stay about equal, so a grid laid on it comes out even on the surface.
 
-    centre = np.linalg.norm(uv[tris].mean(axis=1), axis=1)
-    corners = points[tris]
-    area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1)
-    order = np.argsort(centre)
-    total = np.cumsum(area[order])
-    return np.interp(np.minimum(radii, 1.0) ** 2, total / max(float(total[-1]), 1e-30), centre[order])
+    A plain Tutte map squeezes the far end of a dome into the middle. Edge weights are lowered where the map stretches
+    (Yoshizawa, Belyaev and Seidel 2004), keeping them symmetric and positive, so the map stays one-to-one. The least stretched map found wins.
+    """
+
+    edges = _unique_edges(tris)
+    i, j = edges[:, 0], edges[:, 1]
+    weights = 1.0 / np.maximum(np.linalg.norm(points[i] - points[j], axis=1), 1e-30)
+    q = points[tris]
+    area3 = np.maximum(0.5 * np.linalg.norm(np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]), axis=1), 1e-30)
+    normals = np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0])
+    normals /= np.maximum(np.linalg.norm(normals, axis=1), 1e-30)[:, None]
+    fa, fb, _u, _v = face_links([tuple(t) for t in tris.tolist()])
+    bend = np.arccos(np.clip((normals[fa] * normals[fb]).sum(axis=1), -1.0, 1.0))
+    bent = np.bincount(np.concatenate((fa, fb)), np.tile(bend, 2), len(tris)) / 3.0
+    bumpy = np.bincount(tris.ravel(), np.repeat(bent, 3), len(points)) / np.maximum(np.bincount(tris.ravel(), minlength=len(points)), 1)
+    importance = 1.0 + SHEET_DETAIL * np.minimum(bumpy / max(float(np.median(bumpy)), 1e-6), 4.0)
+    best, best_stretch, uv = None, np.inf, None
+    for k in range(rounds):
+        uv = tutte_embedding(len(points), tris, border, circle, points, weights, uv, 1e-7 if k < rounds - 1 else 1e-9)
+        s, t = uv[tris][:, :, 0], uv[tris][:, :, 1]
+        double = (s[:, 1] - s[:, 0]) * (t[:, 2] - t[:, 0]) - (s[:, 2] - s[:, 0]) * (t[:, 1] - t[:, 0])
+        double = np.where(np.abs(double) < 1e-14, 1e-14, double)[:, None]
+        ds = (q[:, 0] * (t[:, 1] - t[:, 2])[:, None] + q[:, 1] * (t[:, 2] - t[:, 0])[:, None] + q[:, 2] * (t[:, 0] - t[:, 1])[:, None]) / double
+        dt = (q[:, 0] * (s[:, 2] - s[:, 1])[:, None] + q[:, 1] * (s[:, 0] - s[:, 2])[:, None] + q[:, 2] * (s[:, 1] - s[:, 0])[:, None]) / double
+        gamma = 0.5 * ((ds * ds).sum(axis=1) + (dt * dt).sum(axis=1))
+        stretch = float(np.sqrt((area3 * gamma).sum() / area3.sum()))
+        if stretch < best_stretch:
+            best, best_stretch = uv, stretch
+        corner = np.repeat(area3, 3)
+        weight_sum = np.bincount(tris.ravel(), corner, len(points))
+        vertex = np.sqrt(np.bincount(tris.ravel(), corner * np.repeat(gamma, 3), len(points)) / np.maximum(weight_sum, 1e-30))
+        vertex = np.maximum(vertex * importance / np.median(vertex * importance), 1e-3)
+        weights = weights / np.sqrt(vertex[i] * vertex[j])
+        weights /= float(np.median(weights))
+    return best
+
+
+def _ring_plan(uv, tris, points, edge: float, seam_count: int):
+    """How rows should run inside a flattened disk: (radius of each row, vertices on it). Rows are `edge` apart on the surface and have quads about `edge` long.
+
+    A row keeps its count until the surface asks for clearly more or fewer, so most rows run clean all the way round.
+    """
+
+    locator = _Locator(uv, tris)
+    angles = np.linspace(0.0, 2.0 * np.pi, RING_SAMPLES, endpoint=False)
+    radii = np.linspace(1.0, 0.02, RING_LEVELS)
+    flat = np.stack((np.outer(radii, np.cos(angles)).ravel(), np.outer(radii, np.sin(angles)).ravel()), axis=1)
+    tri, weights = locator.locate(flat)
+    rings = np.einsum("ij,ijk->ik", weights, points[tris[tri]]).reshape(len(radii), len(angles), 3)
+    around = np.linalg.norm(np.roll(rings, -1, axis=1) - rings, axis=2).sum(axis=1)
+    inwards = np.concatenate(([0.0], np.cumsum(np.linalg.norm(rings[1:] - rings[:-1], axis=2).mean(axis=1))))
+    rows = int(inwards[-1] / max(edge, 1e-30))
+    out_radii, counts = [], []
+    current = seam_count
+    for k in range(1, rows + 1):
+        radius = float(np.interp(k * edge, inwards, radii))
+        wanted = float(np.interp(k * edge, inwards, around)) / max(edge, 1e-30)
+        if abs(wanted - current) > RING_CHANGE * current:
+            current = int(np.clip(wanted, current / SHEET_RATIO, current * SHEET_RATIO))
+            current = max(8, current - current % 2)
+        if radius < 0.03 or (current <= 2.0 * RING_GRID and k > 1 and wanted < current):
+            break
+        out_radii.append(radius)
+        counts.append(current)
+    if not counts:  # too small for a row: one row just inside the seam, and the grid
+        out_radii, counts = [0.7], [max(8, seam_count)]
+    counts[-1] = max(8, 4 * max(2, int(round(counts[-1] / 4.0))))
+    if len(counts) > 1 and (counts[-2] - counts[-1]) % 2:
+        counts[-1] += 2
+    return out_radii, counts
 
 
 def _sheet(co, faces, comp, edge, project):
-    """A grid in the middle of a disk with rows around it, the even sheet an animator lays by hand: (points, quads, seam loop) or None.
+    """Rows round a disk with a small grid at the far end, the even sheet an animator lays by hand: (points, quads, seam loop) or None.
 
-    Four poles sit just inside the rows, and rows gain or lose vertices (smoothgrid's strips) between the seam's count and the grid's.
+    Four poles sit where the rows meet the grid, and a row gains or loses vertices through smoothgrid's strips only where the surface widens or narrows.
     """
 
     loops, pinched = boundary_loops(faces, comp)
@@ -769,32 +840,21 @@ def _sheet(co, faces, comp, edge, project):
     border = np.searchsorted(vertex_ids, loop)
     loop_xyz = points[border]
     count = len(border)
-    corners = points[tris]
-    area = 0.5 * float(np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1).sum())
-    side = max(2, int(round(np.sqrt(area) / max(edge, 1e-30))))
-    first = side
-    second = side
-    grid_loop = 2 * (first + second)
     circle = circle_boundary(loop_xyz)
-    uv = tutte_embedding(len(points), tris, border, circle, points)
-    if grid_loop < count:
-        counts = smoothgrid._row_counts(count, grid_loop, 1, SHEET_RATIO)
-    elif grid_loop > count:
-        counts = smoothgrid._row_counts(grid_loop, count, 1, SHEET_RATIO)[::-1]
-    else:
-        counts = [count, count]
-    rows = len(counts) - 1
+    uv = even_embedding(points, tris, border, circle)
+    ring_radii, ring_counts = _ring_plan(uv, tris, points, edge, count)
+    counts = [count] + ring_counts
+    rows = len(ring_counts)
     table = [np.arange(count)]
     phases = [_arc_parameters(loop_xyz)]
     at = count
     new_uv = []
-    shrink = 1.0 / (rows + 0.5 * first + 0.5)  # rows and grid cells about as wide as each other
-    for r in range(1, rows + 1):
-        angle = 2.0 * np.pi * np.arange(counts[r]) / counts[r]
-        new_uv.append((1.0 - r * shrink) * np.stack((np.cos(angle), np.sin(angle)), axis=1))
-        table.append(at + np.arange(counts[r]))
-        phases.append(np.arange(counts[r]) / counts[r])
-        at += counts[r]
+    for r in range(rows):
+        angle = 2.0 * np.pi * np.arange(counts[r + 1]) / counts[r + 1]
+        new_uv.append(ring_radii[r] * np.stack((np.cos(angle), np.sin(angle)), axis=1))
+        table.append(at + np.arange(counts[r + 1]))
+        phases.append(np.arange(counts[r + 1]) / counts[r + 1])
+        at += counts[r + 1]
     quads, middles = [], []
     for r in range(rows):
         if counts[r] >= counts[r + 1]:
@@ -809,8 +869,8 @@ def _sheet(co, faces, comp, edge, project):
         pairs = np.asarray(middles, dtype=np.int64)
         new_uv = new_uv + [0.5 * (known[pairs[:, 0]] + known[pairs[:, 1]])]
         at += len(middles)
-    inner = new_uv[rows - 1]
-    nodes, ids = coons_grid(inner, (0, first, first + second, 2 * first + second))
+    first = counts[-1] // 4
+    nodes, ids = coons_grid(new_uv[rows - 1], (0, first, 2 * first, 3 * first))
     free = ids < 0
     ids[~free] = table[-1][ids[~free]]
     ids[free] = at + np.arange(int(free.sum()))
@@ -819,13 +879,14 @@ def _sheet(co, faces, comp, edge, project):
         for j in range(ids.shape[1] - 1):
             quads.append((int(ids[i, j]), int(ids[i + 1, j]), int(ids[i + 1, j + 1]), int(ids[i, j + 1])))
     new_uv = np.concatenate(new_uv)
-    radius = np.maximum(np.linalg.norm(new_uv, axis=1), 1e-12)
-    new_uv = new_uv * (_equal_area_radii(uv, tris, points, radius) / radius)[:, None]
     tri, weights = _Locator(uv, tris).locate(new_uv)
     xyz = np.vstack((loop_xyz, project(np.einsum("ij,ijk->ik", weights, points[tris[tri]]))))
     pinned = np.zeros(len(xyz), dtype=bool)
     pinned[:count] = True
-    return fit_to_surface(xyz, quads, pinned, project, iterations=SHEET_RELAX), quads, loop
+    settled = fit_to_surface(xyz, quads, pinned, project, iterations=SHEET_RELAX, guard=False)
+    if (quad_quality(settled[np.asarray(quads, dtype=np.int64)]) <= 0.0).any():  # the repair is slow, so only when something folded
+        settled = fit_to_surface(settled, quads, pinned, project, iterations=1)
+    return settled, quads, loop
 
 
 def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3):
