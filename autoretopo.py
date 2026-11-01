@@ -20,19 +20,20 @@ import time
 
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
-from .triadq import patch
+from .triadq import checks, patch
 from .triadq.budget import Level, allocate, allocate_to_faces
-from .triadq.flatquad import pair_and_close
+from .triadq.flatquad import flat_quad_remesh, flatten_regions, pair_and_close
 from .triadq.types import MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
 KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to gain, and thousands of them to look at
 MEASURE_SHARE = 0.6  # of the progress bar, spent looking at the pieces
-LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
+LEVELS = (0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
@@ -42,6 +43,10 @@ TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
+FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
+MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
+SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
+INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int):
@@ -93,6 +98,79 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
     return wrong, total
 
 
+def triangulate(points, faces, kinds):
+    """Every face as triangles. A quad splits on its shorter diagonal, a larger face is tessellated."""
+    out, mats = [], []
+    for face, kind in zip(faces, kinds):
+        n = len(face)
+        if n == 3:
+            tris = [face]
+        elif n == 4:
+            a, b, c, d = (points[v] for v in face)
+            tris = [(face[0], face[1], face[2]), (face[0], face[2], face[3])] if np.linalg.norm(a - c) <= np.linalg.norm(b - d) else [(face[0], face[1], face[3]), (face[1], face[2], face[3])]
+        else:
+            try:
+                tris = [tuple(face[i] for i in t) for t in geometry.tessellate_polygon([[Vector(points[v]) for v in face]])]
+            except Exception:
+                tris = [(face[0], face[i], face[i + 1]) for i in range(1, n - 1)]
+        out += tris
+        mats += [kind] * len(tris)
+    return points, out, mats
+
+
+def make_pure(co, faces, kinds, method, output):
+    """The faces for one group of pieces by NumPy alone (runs on a worker thread): (points, faces, materials)."""
+    mesh = MeshData(co, faces, kinds)
+    if method == "FLAT":
+        if output == "TRIS":
+            out = flatten_regions(mesh)[0]
+        else:
+            out = flat_quad_remesh(mesh, force_quads=output == "QUADS")[0]
+    elif output == "TRIS" or method == "TRIS":
+        out = mesh
+    else:
+        out = pair_and_close(mesh, seed_count=4 if method == "PAIRING" else 2, force_quads=output == "QUADS")[0]
+    points, out_faces, mats = np.asarray(out.vertices, dtype=np.float64), [tuple(f) for f in out.faces], list(out.face_materials)
+    if output == "TRIS" or method == "TRIS":
+        points, out_faces, mats = triangulate(points, out_faces, mats)
+    return points, out_faces, mats
+
+
+def _quadriflow(context, points, polys, kinds, goal):
+    mesh = bpy.data.meshes.new("CurioMesh_Piece")
+    mesh.from_pydata(points.tolist(), [], polys)
+    mesh.update()
+    obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
+    context.scene.collection.objects.link(obj)
+    try:
+        for other in context.view_layer.objects:
+            other.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        if "FINISHED" not in bpy.ops.object.quadriflow_remesh(mode="FACES", target_faces=max(4, int(goal)), seed=0) or not len(obj.data.polygons):
+            raise ValueError("QuadriFlow made nothing")
+        done = obj.data
+        co = np.empty(len(done.vertices) * 3, dtype=np.float64)
+        done.vertices.foreach_get("co", co)
+        return co.reshape(-1, 3), [tuple(p.vertices) for p in done.polygons], [kinds[0]] * len(done.polygons)
+    finally:
+        data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.meshes.remove(data)
+
+
+def _fill(points, polys, kinds, strategy, goal):
+    """Grid or Flow fill over a whole part: only works when the part is one open surface with a single edge loop."""
+    tris = [t for p in polys for t in ((p[0], p[i], p[i + 1]) for i in range(1, len(p) - 1))]
+    t = np.asarray(tris)
+    area = 0.5 * float(np.linalg.norm(np.cross(points[t[:, 1]] - points[t[:, 0]], points[t[:, 2]] - points[t[:, 0]]), axis=1).sum())
+    result = patch.remesh_region(points, polys, np.arange(len(polys)), strategy=strategy, target_length=math.sqrt(area / max(goal, 1.0)), max_faces=max(200, int(goal * 2)))
+    if not result.ok:
+        raise ValueError(result.message or "the part is not one open surface")
+    out = np.vstack([points, result.points])
+    return out, [tuple(f) for f in result.faces], [kinds[0]] * len(result.faces)
+
+
 def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
@@ -130,13 +208,23 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
+        self.method = method  # for every part without its own in `methods`
+        self.output_kind = output  # TRIS, QUADS or MIXED
+        self.methods: dict[int, str] = dict(methods or {})  # piece -> method
+        self.notes: list[str] = []
+        self.face_piece = np.zeros(0, dtype=np.int64)
+        self.flag = np.zeros(0, dtype=bool)
+        self._kd = None
+        self._kd_owner = None
+        self._src_check = None
+        self._view = None
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
         self.busy = True
@@ -256,21 +344,180 @@ class AutoJob:
     def _show(self, final=None) -> None:
         if final is None:
             co, faces, kinds, parts = self._combined()
-            count = len(faces)
-            new = np.ones(count, bool)
         else:
             co, faces, kinds, parts = final
-            count = len(faces)
-            new = np.ones(count, bool)
-        self.output = {"co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
+        count = len(faces)
+        self.output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
+        if final is not None:
+            self.output["piece"] = self.face_piece  # the source piece each face came from
+            self.output["flag"] = self.flag  # faces still broken after the repair tries
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
-    def _pair(self, co, faces, kinds) -> None:
+    def _pair(self, co, faces, kinds, method) -> None:
         try:
-            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2)[0]
+            self._paired = make_pure(co, faces, kinds, method, self.output_kind)
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
+
+    def _build(self, co, faces, kinds, method, goal=0):
+        """Generator: faces for these pieces by `method` in the chosen output. Returns (points, faces, materials) or None."""
+        if method in INLINE:
+            try:
+                made = _quadriflow(self.context, co, faces, kinds, goal) if method == "QUADRIFLOW" else _fill(co, faces, kinds, method, goal)
+                return triangulate(*made) if self.output_kind == "TRIS" else made
+            except Exception as exc:
+                self.notes.append(f"{method.title()} did not work on a part ({str(exc)[:60]}): Auto was used there")
+                method = "AUTO"
+        self._paired = None
+        self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds, method), daemon=True, name="CurioMeshPair")
+        self._pair_thread.start()
+        while self._pair_thread.is_alive():
+            if self._stopped:
+                return None
+            yield
+        return self._paired
+
+    def _method(self, piece: int) -> str:
+        return self.methods.get(piece, self.method)
+
+    def _vote(self, points, faces) -> np.ndarray:
+        """The source piece of each result face: by the nearest source vertices of each connected part of the result."""
+        if self._kd is None:
+            owner = np.full(len(self.co), -1, dtype=np.int64)
+            for index, ids in enumerate(self.pieces):
+                for f in ids.tolist():
+                    owner[list(self.faces[f])] = index
+            used = np.flatnonzero(owner >= 0)
+            kd = KDTree(len(used))
+            for slot, v in enumerate(used.tolist()):
+                kd.insert(Vector(self.co[v]), slot)
+            kd.balance()
+            self._kd, self._kd_owner = kd, owner[used]
+        fa, fb = patch.face_adjacency(faces)
+        labels = patch._labels(len(faces), fa, fb)
+        order = np.argsort(labels, kind="stable")
+        starts = np.concatenate(([0], np.flatnonzero(labels[order][1:] != labels[order][:-1]) + 1, [len(order)]))
+        piece = np.zeros(len(faces), dtype=np.int64)
+        for a, b in zip(starts[:-1], starts[1:]):
+            ids = order[a:b]
+            sample = ids[np.linspace(0, len(ids) - 1, min(len(ids), 24)).astype(np.int64)]
+            votes = [int(self._kd_owner[self._kd.find(Vector(points[faces[f][0]]))[1]]) for f in sample.tolist()]
+            piece[ids] = np.bincount(votes).argmax()
+        return piece
+
+    @staticmethod
+    def _splice(points, faces, mats, piece, builds):
+        """Drop every face of the pieces in `builds` ({piece: (points, faces, materials)}) and put the new ones in."""
+        gone = np.fromiter(builds, dtype=np.int64)
+        keep = ~np.isin(piece, gone)
+        pieces_points, offset = [points], len(points)
+        faces = [f for f, k in zip(faces, keep.tolist()) if k]
+        mats = [m for m, k in zip(mats, keep.tolist()) if k]
+        new_piece = []
+        for p, (pts, fs, ms) in builds.items():
+            pieces_points.append(pts)
+            faces += [tuple(v + offset for v in f) for f in fs]
+            mats += list(ms)
+            new_piece += [p] * len(fs)
+            offset += len(pts)
+        piece = np.concatenate([piece[keep], np.asarray(new_piece, dtype=np.int64)])
+        every = np.vstack(pieces_points)
+        used, flat = np.unique(np.fromiter((v for f in faces for v in f), dtype=np.int64), return_inverse=True)
+        out, at = [], 0
+        for f in faces:
+            out.append(tuple(int(x) for x in flat[at : at + len(f)]))
+            at += len(f)
+        return every[used], out, mats, piece
+
+    def _remake(self, bad, points, faces, mats, piece, to_source):
+        """Generator: remake these pieces, each one size up (or from the source's own faces), and splice them in."""
+        builds = {}
+        for p in bad:
+            self.tuned.pop(p, None)
+            sizes = self.sizes[p]
+            if not to_source and self.picked[p] < len(sizes) - 1:
+                self.picked[p] += 1
+                co, polys, kinds = sizes[self.picked[p]]
+                made = yield from self._build(co, polys, kinds, self._method(p), len(polys) // 2)
+                if made is None:
+                    return points, faces, mats, piece
+            else:
+                co, polys, kinds = sizes[-1]
+                if len(polys) > SOURCE_BACK:
+                    continue
+                made = triangulate(co, polys, kinds) if self.output_kind == "TRIS" else (co, list(polys), list(kinds))
+            builds[p] = made
+        return self._splice(points, faces, mats, piece, builds)
+
+    def _check(self, points, faces, mats, piece, loss):
+        """Generator: measure the result against the source, repair the parts that got new problems, say what happened."""
+        self.stage = "Checking for broken topology"
+        yield
+        if self._src_check is None:
+            source_piece = np.zeros(len(self.faces), dtype=np.int64)
+            for index, ids in enumerate(self.pieces):
+                source_piece[ids] = index
+            self._src_check = checks.inspect(self.co, self.faces, source_piece)
+            yield
+        before = self._src_check
+        after = checks.inspect(points, faces, piece)
+        fixed = 0
+        keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx")
+        first = {k: getattr(after, k) for k in keys}
+        for attempt in range(FIX_TRIES):
+            bad = checks.new_spots(before, after)[:MOST_REPAIRED]
+            if not bad or self._stopped:
+                break
+            self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
+            yield
+            points, faces, mats, piece = yield from self._remake(bad, points, faces, mats, piece, attempt == FIX_TRIES - 1)
+            after = checks.inspect(points, faces, piece)
+            fixed += len(bad) - len(checks.new_spots(before, after))
+            loss = None
+        left = checks.new_spots(before, after)
+        flag = np.zeros(len(faces), bool)
+        for p in left:
+            here = piece == p
+            mask = here & (after.broken | after.crossing)
+            flag |= mask if mask.any() else here
+        if loss is None:
+            center, half, reference, pixel = self._view
+            loss = yield from self._look(points, faces, center, half, reference, pixel)
+        self.face_piece, self.flag = piece, flag
+        check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left)}
+        return points, faces, mats, loss, check
+
+    def _conclude(self, points, faces, mats, loss, check):
+        out_fa, out_fb = patch.face_adjacency(faces)
+        parts = np.unique(patch._labels(len(faces), out_fa, out_fb), return_inverse=True)[1]
+        self.report = {"before": len(self.faces), "faces": len(faces), "quads": sum(1 for f in faces if len(f) == 4), "tris": sum(1 for f in faces if len(f) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces, "seconds": time.perf_counter() - self.started, "check": check, "notes": list(dict.fromkeys(self.notes))}
+        self.fraction = 1.0
+        self._show((points, faces, mats, parts))
+
+    def redo_pieces(self, pieces) -> None:
+        """Remake these source pieces by their own method (after `methods` changed) and check the whole result again."""
+        self._stopped = False
+        self.busy = True
+        self.fraction = 0.5
+        self.notes = []
+        self._search = self._redo(list(pieces))
+
+    def _redo(self, pieces):
+        out = self.output
+        self.stage = "Remaking the part"
+        yield
+        builds = {}
+        for p in pieces:
+            self.tuned.pop(p, None)
+            co, polys, kinds = self.sizes[p][self.picked[p]]
+            made = yield from self._build(co, polys, kinds, self._method(p), len(polys) // 2)
+            if made is None:
+                return
+            builds[p] = made
+        points, faces, mats, piece = self._splice(out["co"], list(out["faces"]), [str(m) for m in out["mat"]], np.asarray(out["piece"]), builds)
+        points, faces, mats, loss, check = yield from self._check(points, faces, mats, piece, None)
+        self._conclude(points, faces, mats, loss, check)
 
     def _run(self):
         fa, fb = patch.face_adjacency(self.faces)
@@ -301,11 +548,12 @@ class AutoJob:
         center, half = (low + high) / 2.0, extent * 0.55
         pixel = 2.0 * half / MAX_PIXELS
         reference = yield from pictures(self.co, self.faces, center, half, MAX_PIXELS)
+        self._view = (center, half, reference, pixel)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
         allowed = asked * total_seen
         reducing = self.target_faces > 0
-        paired_share = PAIRED_SHARE
+        paired_share = 1.0 if self.output_kind == "TRIS" else PAIRED_SHARE
         best = None
         tried: set[tuple[int, ...]] = set()
         for round_index in range(ROUNDS):
@@ -320,51 +568,72 @@ class AutoJob:
             if tuple(self.picked) in tried and not self.tuned:
                 break
             tried.add(tuple(self.picked))
-            self.stage = f"Pairing into quads, try {round_index + 1}"
+            self.stage = f"Making the faces, try {round_index + 1}"
             co, faces, kinds, _parts = self._combined()
             before_pairing = len(faces)
-            self._paired = None
-            self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds), daemon=True, name="CurioMeshPair")
-            self._pair_thread.start()
-            while self._pair_thread.is_alive():
-                if self._stopped:
-                    return
-                yield
-            if self._paired is None:
+            result = yield from self._make_all(co, faces, kinds)
+            if result is None:
                 return
-            result = self._paired
-            points = np.asarray(result.vertices, dtype=np.float64)
-            out_faces = [tuple(face) for face in result.faces]
+            points, out_faces, out_mats = result
             self.fraction += 0.5 * (1.0 - MEASURE_SHARE) / ROUNDS
+            picked, tuned = list(self.picked), dict(self.tuned)
             if reducing:
                 miss = abs(len(out_faces) - self.target_faces) / self.target_faces
                 if best is None or miss < best[0]:
-                    best = (miss, points, out_faces, list(result.face_materials), None)
+                    best = (miss, points, out_faces, out_mats, None, picked, tuned)
                 if miss <= CLOSE_ENOUGH:
                     break
                 paired_share = len(out_faces) / max(before_pairing, 1)
                 continue
-            self.stage = f"Checking the result, try {round_index + 1}"
+            self.stage = f"Checking the view, try {round_index + 1}"
             loss = yield from self._look(points, out_faces, center, half, reference, pixel)
             fits = loss <= 1.1 * self.detail
             # Prefer anything that fits, then the fewest faces. With nothing fitting yet, the least change.
             rank = (not fits, len(out_faces) if fits else loss)
             if best is None or rank < best[0]:
-                best = (rank, points, out_faces, list(result.face_materials), loss)
+                best = (rank, points, out_faces, out_mats, loss, picked, tuned)
             if abs(loss - self.detail) <= 0.1 * self.detail:
                 break
             allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
-        _rank, points, out_faces, materials, loss = best
+        _rank, points, out_faces, materials, loss, self.picked, self.tuned = best
         if loss is None:  # Reduce To looks at the one it keeps, so the view change can still be judged
-            self.stage = "Checking the result"
+            self.stage = "Checking the view"
             self.fraction = 0.95
             loss = yield from self._look(points, out_faces, center, half, reference, pixel)
-        out_fa, out_fb = patch.face_adjacency(out_faces)
-        parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
-        quads = sum(1 for face in out_faces if len(face) == 4)
-        self.report = {"before": len(self.faces), "faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces, "seconds": time.perf_counter() - self.started}
-        self.fraction = 1.0
-        self._show((points, out_faces, materials, parts))
+        piece = self._vote(points, out_faces)
+        points, out_faces, materials, loss, check = yield from self._check(points, out_faces, materials, piece, loss)
+        self._conclude(points, out_faces, materials, loss, check)
+
+    def _make_all(self, co, faces, kinds):
+        """Generator: the faces for the whole object. Pieces on the usual method go in one call; others one by one."""
+        _co, _faces, _kinds, parts = self._combined()
+        special = {i for i, m in self.methods.items() if m != self.method} | ({i for i in range(len(self.pieces))} if self.method in INLINE else set())
+        if not special:
+            return (yield from self._build(co, faces, kinds, self.method))
+        results = []
+        rest = [i for i in range(len(self.pieces)) if i not in special]
+        groups = [(self.method, rest)] if rest else []
+        groups += [(self._method(i), [i]) for i in sorted(special)]
+        for method, members in groups:
+            take = np.flatnonzero(np.isin(parts, members))
+            if not len(take):
+                continue
+            used, flat = np.unique(np.fromiter((v for f in take.tolist() for v in faces[f]), dtype=np.int64), return_inverse=True)
+            polys, at = [], 0
+            for f in take.tolist():
+                polys.append(tuple(int(x) for x in flat[at : at + len(faces[f])]))
+                at += len(faces[f])
+            made = yield from self._build(co[used], polys, [kinds[f] for f in take.tolist()], method, len(polys) // 2)
+            if made is None:
+                return None
+            results.append(made)
+        points, out, mats, offset = [], [], [], 0
+        for pts, fs, ms in results:
+            points.append(pts)
+            out += [tuple(v + offset for v in f) for f in fs]
+            mats += list(ms)
+            offset += len(pts)
+        return np.vstack(points), out, mats
 
     def _look(self, points, out_faces, center, half, reference, pixel):
         """Generator: the percent of the view that differs from the original. Returns it when exhausted."""
@@ -390,4 +659,5 @@ class AutoJob:
         if self.report is None:
             return self.stage
         r = self.report
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s"
+        text = f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s"
+        return text + (f" | {r['check']['text']}" if r.get("check") else "") + "".join(f" | {n}" for n in r.get("notes", []))

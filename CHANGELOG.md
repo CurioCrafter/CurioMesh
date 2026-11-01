@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Auto Segments by use.** Step 2 has a **Use** menu (Low Poly, Game Asset, Animation,
+  Subdivision, Scan Cleanup, Sculpt Base, Custom) that sets **Detail**, **Method** and
+  **Output**; change any of them and it becomes Custom. Game Asset is the old default.
+  Detail now runs from 0.1% to 80% with a plain-words note of what it means. Methods:
+  Auto, Pairing, Flat Quads, QuadriFlow, Grid Fill, Flow Fill, Tris Only (Grid and Flow
+  need a part with one open edge loop, QuadriFlow can fail on thin parts: Auto is used
+  then and the summary says so). Output: Triangles, Quads, or Mixed (paired quads kept,
+  leftover triangles left, no closing). In step 4, **Click a Part** remakes just that
+  part with the method next to it and checks the result again.
+- **The result is checked and repaired.** After every run Auto Segments counts
+  non-manifold edges and vertices, flipped edges, duplicate faces, holes and faces that pass through each other
+  (BVH overlap), on your mesh and on the result, and only what the result adds counts.
+  A part that got new problems is remade one size up, up to three times; a small part
+  may come back as your own faces. What cannot be fixed is selected on the applied mesh
+  and named in the summary ("2 spots could not be fixed and are selected for you").
+  Over 400,000 faces the crossing test is skipped and the summary says so.
 - **Auto Segments is now a guided, five-step panel**: pick the mesh, choose the aim,
   press Start and watch, fix areas you don't like, Apply. One big button always shows
   the next step. A real progress bar (a text bar before Blender 4.0) shows the stage
