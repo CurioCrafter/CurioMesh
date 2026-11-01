@@ -19,10 +19,11 @@ import bpy
 import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
 from . import overlay, region
 from . import autoretopo
-from .triadq import areas, patch
+from .triadq import areas, fit, patch
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.types import MeshData
 
@@ -397,6 +398,22 @@ def _transfer_uvs(mesh, source, src, res) -> None:
     active = source.data.uv_layers.active_index
     if 0 <= active < len(mesh.uv_layers):
         mesh.uv_layers.active_index = active
+
+
+def _transfer_normals(mesh, src, res) -> None:
+    """Shade the result like the source: each face corner gets its normal from the source samples around it."""
+    points, faces = res["co"], res["faces"]
+    keep = src["tri_area"] > 0.0
+    tree = KDTree(int(keep.sum()))
+    for index, point in enumerate(src["tri_cent"][keep].tolist()):
+        tree.insert(point, index)
+    tree.balance()
+    normals, area = _tri_normals(src["co"], src["tris"])[keep], src["tri_area"][keep]
+    fa, fb = patch.face_adjacency(src["faces"])
+    sample_part = np.unique(patch._labels(len(src["faces"]), fa, fb), return_inverse=True)[1][src["tri_face"]][keep]
+    part, source_of = fit.vertex_parts(points, faces, sample_part, lambda p: tree.find(p)[1])
+    out = fit.corner_normals(points, faces, normals, area, sample_part, source_of[part], tree.find_n)
+    mesh.normals_split_custom_set(out.tolist())
 
 
 # --------------------------------------------------------------------------- whole-mesh path
@@ -1903,6 +1920,7 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         mesh = _make_mesh(source.name + "_Retopo", source, res)
         for poly in mesh.polygons:
             poly.use_smooth = True
+        _transfer_normals(mesh, _source_data(source), res)
         if gs.apply_mode == "REPLACE":
             source.data = mesh
             out = source

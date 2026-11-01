@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Auto Segments fits its finished vertices to the source part by part: each source
+  point goes to its nearest vertex, and a vertex moves to best fit the surface it
+  owns, which holds ridges and corners. A part only keeps the move if it got closer
+  to the source. 2 to 10% less visible change at the same face count.
+  Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r)
+- Apply gives the result shading read from the source: each face corner takes its
+  normal from the nearest source points on its own side of a hard edge, not an average
+  across it. Hard edges stop looking melted, with no extra faces.
+  Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r)
+
 ## 0.8.0 - 2026-11-01
 
 - **Auto Segments** (new mode in the Remesh setting of the Guided panel). Press

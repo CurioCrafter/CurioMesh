@@ -22,9 +22,11 @@ import bpy
 import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
 from .triadq import patch
 from .triadq.budget import Level, allocate
+from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import pair_and_close
 from .triadq.types import MeshData
 
@@ -38,6 +40,7 @@ ROUNDS = 4  # tries at landing on the amount asked for
 TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
+OTHER_VERTICES = 8  # how far down a sample's nearest vertices to look for one of its own loose part
 SHOW_EVERY = 1.0  # seconds between preview updates
 
 
@@ -146,6 +149,8 @@ class AutoJob:
         self._stopped = False
         self._pair_thread: threading.Thread | None = None
         self._paired = None
+        self._shell = None
+        self._samples = None
         self.pieces: list[np.ndarray] = []
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
@@ -251,15 +256,78 @@ class AutoJob:
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
+    def _source_samples(self):
+        """Each source triangle as a point: (positions, normals, areas, loose parts, the source's tree). Made once."""
+        if self._samples is None:
+            sizes = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
+            triangles = np.asarray([(f[0], f[i], f[i + 1]) for f in self.faces for i in range(1, len(f) - 1)], dtype=np.int64)
+            parts = np.repeat(self._shell, sizes - 2)
+            a, b, c = self.co[triangles[:, 0]], self.co[triangles[:, 1]], self.co[triangles[:, 2]]
+            cross = np.cross(b - a, c - a)
+            twice = np.linalg.norm(cross, axis=1)
+            real = twice > 0.0
+            tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
+            self._samples = (((a + b + c) / 3.0)[real], cross[real] / twice[real][:, None], twice[real] / 2.0, parts[real], tree)
+        return self._samples
+
+    def _fit(self, mesh: MeshData) -> MeshData:
+        """Fit the vertices to their share of the source, part by part, and keep it where the part really got closer.
+
+        Idea from cav3dw3ll3r: each source sample goes to its nearest vertex, so a vertex's share grows with its quads.
+        """
+        quads = np.asarray([f for f in mesh.faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+        if not len(quads):
+            return mesh
+        points = mesh.vertices
+        position, normal, area, sample_part, source_tree = self._source_samples()
+        tree = KDTree(len(points))
+        for index, point in enumerate(points.tolist()):
+            tree.insert(point, index)
+        tree.balance()
+        source_parts = int(sample_part.max()) + 1
+        if source_parts == 1:
+            vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, None)
+            owner = np.fromiter((tree.find(p)[1] for p in position.tolist()), dtype=np.int64, count=len(position))
+        else:
+            # A result part came from one source part, and samples of another part, however near, say nothing about it.
+            sample_tree = KDTree(len(position))
+            for index, point in enumerate(position.tolist()):
+                sample_tree.insert(point, index)
+            sample_tree.balance()
+            vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, lambda p: sample_tree.find(p)[1])
+            vertex_source = source_of[vertex_part]
+            owner = np.full(len(position), -1, dtype=np.int64)
+            for index, (point, part) in enumerate(zip(position.tolist(), sample_part.tolist())):
+                for _found, vertex, _away in tree.find_n(point, OTHER_VERTICES):
+                    if vertex_source[vertex] == part:
+                        owner[index] = vertex
+                        break
+        count = len(source_of)
+        moved = fit_vertices(points, quads, position, normal, area, owner)
+
+        def gaps(where: np.ndarray) -> np.ndarray:
+            """Per result part, the mean distance from its source to it plus from it to its source."""
+            result_tree = BVHTree.FromPolygons(where.tolist(), [list(f) for f in mesh.faces], all_triangles=False, epsilon=0.0)
+            to_result = np.fromiter((result_tree.find_nearest(p)[3] for p in position.tolist()), dtype=np.float64, count=len(position))
+            to_source = np.fromiter((source_tree.find_nearest(p)[3] for p in where.tolist()), dtype=np.float64, count=len(where))
+            weighted = np.bincount(sample_part, area * to_result, minlength=source_parts) / np.maximum(np.bincount(sample_part, area, minlength=source_parts), 1e-30)
+            back = np.bincount(vertex_part, to_source, minlength=count) / np.maximum(np.bincount(vertex_part, minlength=count), 1)
+            return weighted[source_of] + back
+
+        worse = gaps(moved) >= gaps(points)
+        moved[worse[vertex_part]] = points[worse[vertex_part]]
+        return MeshData(vertices=moved, faces=mesh.faces, face_materials=mesh.face_materials, name=mesh.name)
+
     def _pair(self, co, faces, kinds) -> None:
         try:
-            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2)[0]
+            self._paired = self._fit(pair_and_close(MeshData(co, faces, kinds), seed_count=2)[0])
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
 
     def _run(self):
         fa, fb = patch.face_adjacency(self.faces)
         shell = np.unique(patch._labels(len(self.faces), fa, fb), return_inverse=True)[1]
+        self._shell = shell
         order = np.argsort(shell, kind="stable")
         starts = np.concatenate(([0], np.flatnonzero(shell[order][1:] != shell[order][:-1]) + 1, [len(order)]))
         self.pieces = sorted((order[a:b] for a, b in zip(starts[:-1], starts[1:])), key=len, reverse=True)
