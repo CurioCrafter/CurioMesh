@@ -184,6 +184,9 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_heat: bpy.props.BoolProperty(name="Heat Map", description="Colour each part by how much the camera check says its view changed: green for none, red for the most", default=False, update=segments.on_view)
     seg_wire: bpy.props.BoolProperty(name="Wireframe", description="Show the edges of the result", default=True, update=segments.on_view)
     seg_compare: bpy.props.EnumProperty(name="Original", description="Where your original mesh is shown", items=[("BESIDE", "Beside", "The result sits next to your mesh"), ("OVER", "Over", "The result sits on your mesh, which is drawn over it as a white wireframe")], default="BESIDE", update=segments.on_view)
+    seg_detail: bpy.props.FloatProperty(name="Segment Detail", description="How many segments a connected mesh splits into. Left finds only the big parts, right also the smaller ones. Changing it starts the segments over, with their tries and hand changes", default=0.65, min=0.0, max=1.0, subtype="FACTOR", update=segments.segment_goals.on_detail)
+    seg_goal: bpy.props.EnumProperty(name="Use", description="What the selected segments are for", items=segments.segment_goals.GOAL_ITEMS, default="ANIMATION")
+    seg_goal_detail: bpy.props.FloatProperty(name="Detail", description="Faces in the selected segments. The middle keeps the size of the quads they have now", default=0.5, min=0.0, max=1.0, subtype="FACTOR")
     seg_method: bpy.props.EnumProperty(name="Method", description="The method to remake the selected parts with", items=segments.METHOD_ITEMS, default="FLAT")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
@@ -356,6 +359,7 @@ def _source_data(obj) -> dict:
         "tri_loops": _fan(wloops),
         "loops": wloops,
         "mat": mat[keep],
+        "keep": keep,
         "bvh": None,
     }
     state["src"] = data
@@ -1103,6 +1107,8 @@ def _collect_work(context) -> None:
         if not runner.busy and runner.report is not None and runner.output is not None and (base is None or base["job"] is not runner):
             state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": dict(runner.output), "report": runner.report, "job": runner, "summary": state["message"]}
             segments.ensure()
+            if segments.segment_goals.worth_finding(state["auto_base"]):
+                segments.segment_goals.start_find(context)
         overlay.tag_redraw()
         return
     res = state["res"]
@@ -1118,9 +1124,12 @@ def _collect_work(context) -> None:
 
 def finish_work(context) -> None:
     """Wait for the worker, for whoever needs the finished result now (Apply)."""
-    if state["work"] is not None:
-        state["work"]["runner"].wait()
+    while state["work"] is not None:  # finishing one job can start the next (the search, then finding its segments)
+        work = state["work"]
+        work["runner"].wait()
         _collect_work(context)
+        if state["work"] is work:
+            break
 
 
 def run_update(context, force: bool = False) -> bool:
@@ -2505,6 +2514,8 @@ class CURIOMESH_PT_guided_shapes(_AutoSub, bpy.types.Panel):
                 col.operator("curiomesh.guided_stop_work", icon="CANCEL")
         else:
             col.label(text="Union, Subtract and Intersect combine them")
+        if len(gs.bool_shapes):
+            col.operator("curiomesh.seg_from_shapes", icon="MOD_BOOLEAN")
 
 
 class CURIOMESH_PT_guided_advanced(bpy.types.Panel):

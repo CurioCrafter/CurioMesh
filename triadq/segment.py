@@ -712,7 +712,7 @@ def topology_score(points, faces) -> float | None:
         return None
     try:
         return float(patterns.score(patterns.measure(points, faces))["score"])
-    except (ValueError, KeyError, IndexError):
+    except (OSError, ValueError, KeyError, IndexError):  # OSError: the scorer's data file isn't there
         return None
 
 
