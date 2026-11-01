@@ -20,7 +20,21 @@ import numpy as np
 
 from .engine import RemeshOptions, remesh_mesh
 from .flatquad import pair_and_close
-from .patch import _half_edges, _labels, _triangulate_component, boundary_loops, fit_to_surface, prepare_regions, quad_quality, remesh_region
+from .patch import (
+    _arc_parameters,
+    _half_edges,
+    _labels,
+    _Locator,
+    _triangulate_component,
+    boundary_loops,
+    circle_boundary,
+    coons_grid,
+    fit_to_surface,
+    prepare_regions,
+    quad_quality,
+    remesh_region,
+    tutte_embedding,
+)
 from .topology import parity_path_quad_closure
 from .types import MeshData
 
@@ -45,6 +59,9 @@ LEAST_CUT = 0.02  # the merge cost Segment Detail reaches at 1
 MOST_CUT = 0.3  # and at 0
 SMALLEST = 0.004  # of a loose piece's area: a segment smaller than this is noise, at any detail
 SNAP_LEVELS = 16
+SHEET_RATIO = 1.6  # how fast a row of an Animation sheet may gain or lose vertices
+SHEET_RELAX = 12  # passes settling a sheet on the surface
+SHEET_GOOD = 70.0  # a sheet with this topology score needs no flow fill to compare it with
 
 
 def face_links(faces):
@@ -726,25 +743,89 @@ def _local_mesh(co, faces):
     return np.asarray(co)[used], out
 
 
-def _grid_candidate(co, faces, comp, edge, project):
-    """Rows and a grid on a disk (smoothgrid's cap), the even sheet an animator lays by hand: (points, quads, seam loop) or None."""
+def _equal_area_radii(uv, tris, points, radii):
+    """Move radii on the flattened disk so that equal areas of the disk are equal areas of the surface: flattening squeezes the far end of a dome into the middle."""
+
+    centre = np.linalg.norm(uv[tris].mean(axis=1), axis=1)
+    corners = points[tris]
+    area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1)
+    order = np.argsort(centre)
+    total = np.cumsum(area[order])
+    return np.interp(np.minimum(radii, 1.0) ** 2, total / max(float(total[-1]), 1e-30), centre[order])
+
+
+def _sheet(co, faces, comp, edge, project):
+    """A grid in the middle of a disk with rows around it, the even sheet an animator lays by hand: (points, quads, seam loop) or None.
+
+    Four poles sit just inside the rows, and rows gain or lose vertices (smoothgrid's strips) between the seam's count and the grid's.
+    """
 
     loops, pinched = boundary_loops(faces, comp)
     if smoothgrid is None or pinched or len(loops) != 1 or len(loops[0]) % 2 or len(loops[0]) < 8:
         return None
     vertex_ids, tris, _source, _uv = _triangulate_component(faces, comp)
     points = co[vertex_ids]
-    border = np.searchsorted(vertex_ids, np.asarray(loops[0], dtype=np.int64))
+    loop = np.asarray(loops[0], dtype=np.int64)
+    border = np.searchsorted(vertex_ids, loop)
+    loop_xyz = points[border]
+    count = len(border)
     corners = points[tris]
     area = 0.5 * float(np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1).sum())
     side = max(2, int(round(np.sqrt(area) / max(edge, 1e-30))))
-    inner = min(len(border), 4 * side)
-    inner -= inner % 2
-    try:
-        xyz, quads = smoothgrid.cap_fill(points[border], tris, points, border, project, inner_count=None if inner >= len(border) else inner)
-    except (ValueError, np.linalg.LinAlgError, IndexError):
-        return None
-    return xyz, [tuple(int(v) for v in q) for q in quads], np.asarray(loops[0], dtype=np.int64)
+    first = side
+    second = side
+    grid_loop = 2 * (first + second)
+    circle = circle_boundary(loop_xyz)
+    uv = tutte_embedding(len(points), tris, border, circle, points)
+    if grid_loop < count:
+        counts = smoothgrid._row_counts(count, grid_loop, 1, SHEET_RATIO)
+    elif grid_loop > count:
+        counts = smoothgrid._row_counts(grid_loop, count, 1, SHEET_RATIO)[::-1]
+    else:
+        counts = [count, count]
+    rows = len(counts) - 1
+    table = [np.arange(count)]
+    phases = [_arc_parameters(loop_xyz)]
+    at = count
+    new_uv = []
+    shrink = 1.0 / (rows + 0.5 * first + 0.5)  # rows and grid cells about as wide as each other
+    for r in range(1, rows + 1):
+        angle = 2.0 * np.pi * np.arange(counts[r]) / counts[r]
+        new_uv.append((1.0 - r * shrink) * np.stack((np.cos(angle), np.sin(angle)), axis=1))
+        table.append(at + np.arange(counts[r]))
+        phases.append(np.arange(counts[r]) / counts[r])
+        at += counts[r]
+    quads, middles = [], []
+    for r in range(rows):
+        if counts[r] >= counts[r + 1]:
+            strip, added = smoothgrid._strip(table[r], table[r + 1], at + len(middles), phases[r], phases[r + 1])
+        else:  # the row inside has more vertices: the same strip seen from inside, wound the other way
+            strip, added = smoothgrid._strip(table[r + 1], table[r], at + len(middles), phases[r + 1], phases[r])
+            strip = [q[::-1] for q in strip]
+        quads += strip
+        middles += added
+    if middles:
+        known = np.concatenate([circle] + new_uv)
+        pairs = np.asarray(middles, dtype=np.int64)
+        new_uv = new_uv + [0.5 * (known[pairs[:, 0]] + known[pairs[:, 1]])]
+        at += len(middles)
+    inner = new_uv[rows - 1]
+    nodes, ids = coons_grid(inner, (0, first, first + second, 2 * first + second))
+    free = ids < 0
+    ids[~free] = table[-1][ids[~free]]
+    ids[free] = at + np.arange(int(free.sum()))
+    new_uv.append(nodes[free])
+    for i in range(ids.shape[0] - 1):
+        for j in range(ids.shape[1] - 1):
+            quads.append((int(ids[i, j]), int(ids[i + 1, j]), int(ids[i + 1, j + 1]), int(ids[i, j + 1])))
+    new_uv = np.concatenate(new_uv)
+    radius = np.maximum(np.linalg.norm(new_uv, axis=1), 1e-12)
+    new_uv = new_uv * (_equal_area_radii(uv, tris, points, radius) / radius)[:, None]
+    tri, weights = _Locator(uv, tris).locate(new_uv)
+    xyz = np.vstack((loop_xyz, project(np.einsum("ij,ijk->ik", weights, points[tris[tri]]))))
+    pinned = np.zeros(len(xyz), dtype=bool)
+    pinned[:count] = True
+    return fit_to_surface(xyz, quads, pinned, project, iterations=SHEET_RELAX), quads, loop
 
 
 def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3):
@@ -765,15 +846,18 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
             raise ValueError("cancelled")
         options = []
         if goal == "ANIMATION":
-            grid = _grid_candidate(co, faces, comp, edge, project or (lambda p: p))
+            grid = _sheet(co, faces, comp, edge, project or (lambda p: p))
             if grid is not None:
                 xyz, quads, loop = grid
                 new = xyz[len(loop) :]
                 remap = np.concatenate((loop, offset + np.arange(len(new))))
                 made = [tuple(int(remap[v]) for v in q) for q in quads]
                 options.append((topology_score(*_local_mesh(np.vstack((co, new)), made)) or 0.0, new, made))
-        result = remesh_region(co, faces, comp, target_length=edge, strategy="FLOW", falloff=2.5 * edge, max_faces=40_000, cancelled=cancelled)
-        if result.ok:
+        good = options and options[0][0] >= SHEET_GOOD
+        result = None if good else remesh_region(co, faces, comp, target_length=edge, strategy="FLOW", falloff=2.5 * edge, max_faces=40_000, cancelled=cancelled)
+        if good:
+            pass
+        elif result.ok:
             pts = result.points
             if project is not None and passes > 0 and len(pts):
                 seam = sorted({v for face in result.faces for v in face if v < result.base})
