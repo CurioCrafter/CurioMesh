@@ -14,6 +14,35 @@
 - **A cleaner Guided panel for Auto Segments**: one big button that is always the next step
   (Start, then Apply Result), settings under it, the result in one box, and Parts and Redo Inside
   Shapes as sub-panels. Empty states say what to click, and a non-mesh object says how to convert it.
+- **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
+  vertex group and colour the parts that need more quads red; the search keeps more
+  faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate
+  weights, so there is no brush of ours. Best with Reduce To, where the face count is
+  fixed: on a bust aimed at 3,000 faces, the painted head went from 60% to 76% of the
+  faces (81% at strength 3), and the view changed by 11.7% instead of 8.2%.
+  With Keep Detail it adds faces to the painted part instead.
+- **Guide curves** (Auto Segments, step 2). Draw strokes on the mesh with **Draw Guide**
+  (hold the left mouse button), or add curves, Grease Pencil drawings or edge-only
+  meshes with **Add Selected**. The quads follow them: an edge loop round an eye,
+  a line along a panel. The strokes are laid on the surface, the triangles near them
+  are split until they are small, and the edges that hug each stroke are kept as
+  hard edges that no quad may cross and the flow runs along. On a bust with five
+  strokes, the nearest edge was 0.30% of the size away on average (1.5% at worst)
+  without guides and 0.10% (0.5% at worst) with them, for about 27% more faces.
+  With Mirror on, a stroke on either side is used on both.
+- **Mirror** (Auto Segments, step 2). Pick Auto, X, Y or Z and it solves one half of
+  the mesh (the side with more surface) and mirrors it: the two sides are identical
+  and the seam sits exactly on the plane, with no gap. Auto finds the plane and uses
+  it only when 90% of the surface matches its mirror (70% when you pick the axis
+  yourself); otherwise it solves the whole mesh and says how well the mesh matched.
+  Tested on a mirrored bust: 100% match, watertight, all quads, nothing open on the seam.
+- **Auto Segments is much faster and Stop really stops.** Waiting for the pairing no
+  longer spins the main thread (it fought the pairing thread for Python's lock): a
+  17,000-face bust went from 37 s to 7 s and a 61,000-face barrier from 13 s to 6 s,
+  same result. Pressing Start again with another Change Allowed reuses what was
+  already measured (about 1.5 to 4 s instead of 5 to 7 s). Stop now ends the
+  pairing thread within a stopping point (0.06 s measured) instead of letting it
+  run on. The report keeps the seconds spent looking, decimating and pairing.
 - **Auto Segments is now a guided, five-step panel**: pick the mesh, choose the aim,
   press Start and watch, fix areas you don't like, Apply. One big button always shows
   the next step. A real progress bar (a text bar before Blender 4.0) shows the stage

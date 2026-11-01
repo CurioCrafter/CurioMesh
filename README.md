@@ -311,6 +311,21 @@ Every release runs the full test suite and an install test on Blender 3.6 LTS,
 draw with Blender's GPU module; if a build cannot draw them, the rest of the
 add-on keeps working.
 
+### Auto Segments: Mirror, Guide Curves, Paint Density
+
+Three optional helpers sit in step 2 of the Auto Segments panel.
+
+- **Mirror** (Auto, X, Y or Z). Solves one half of the mesh and mirrors it, so
+  both sides are identical and the seam is exact. Auto finds the plane and only
+  uses it when 90% of the surface matches its mirror (70% when you pick the axis);
+  otherwise it solves the whole mesh and tells you how well the mesh matched.
+- **Guide Curves.** Draw strokes on the mesh (**Draw Guide**) or add curves, Grease
+  Pencil drawings or edge-only meshes (**Add Selected**). The strokes become hard
+  edges the quads follow, like an edge loop round an eye or a line along a panel.
+  The result reports how far the nearest edge is from the strokes.
+- **Paint Density.** **Paint** opens Weight Paint on a vertex group; colour red the
+  parts that need more quads. Works best with **Reduce To**.
+
 ## Known Limits
 
 - Auto Segments gets the shape right before it gets the quads tidy. About half of its
@@ -343,6 +358,10 @@ add-on keeps working.
 - Atlas-Q can run for a long time on some large scans, where PairClosure is much
   faster.
 - Live preview runs on meshes up to 8,000 faces so Blender stays responsive.
+- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a
+  Grease Pencil object are read in Blender 4.3 and later (the older data model is untested).
+  Stop is felt between steps: one Decimate on a piece of several hundred thousand faces
+  cannot be interrupted.
 
 ## What's Planned
 

@@ -26,7 +26,8 @@ from mathutils.bvhtree import BVHTree
 from .triadq import patch
 from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
-from .triadq.types import MeshData
+from . import guides, symmetry
+from .triadq.types import Cancelled, MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
@@ -44,38 +45,50 @@ RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
 
 
-def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int):
-    """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth)] when exhausted."""
+def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None):
+    """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth)] when exhausted.
 
-    tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
+    `tree` is the BVH of this very mesh when the caller already has one (building it is a fifth of a picture set).
+    """
+
+    if tree is None:
+        tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
     grid = (((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half).tolist()
     out = []
     since_yield = 0
+    cast = tree.ray_cast
     for axis in range(3):
         u, v = (axis + 1) % 3, (axis + 2) % 3
         for sign in (1.0, -1.0):
-            hit = np.zeros((pixels, pixels), dtype=bool)
-            normal = np.zeros((pixels, pixels, 3))
-            depth = np.zeros((pixels, pixels))
             direction = [0.0, 0.0, 0.0]
             direction[axis] = -sign
             direction = Vector(direction)
-            origin = [0.0, 0.0, 0.0]
+            origin = Vector((0.0, 0.0, 0.0))
             origin[axis] = float(center[axis]) + sign * 2.0 * half
+            cu, cv = float(center[u]), float(center[v])
+            at, normals, depths = [], [], []  # only the hits are kept: most of a picture is often empty
             for i, x in enumerate(grid):
-                origin[u] = float(center[u]) + x
+                origin[u] = cu + x
+                base = i * pixels
                 for j, y in enumerate(grid):
-                    origin[v] = float(center[v]) + y
-                    found = tree.ray_cast(Vector(origin), direction)
+                    origin[v] = cv + y
+                    found = cast(origin, direction)
                     if found[0] is not None:
-                        hit[i, j] = True
-                        normal[i, j] = found[1]
-                        depth[i, j] = found[3]
+                        at.append(base + j)
+                        normals.append(found[1][:])
+                        depths.append(found[3])
                 since_yield += pixels
                 if since_yield >= RAYS_PER_YIELD:
                     since_yield = 0
                     yield
-            out.append((hit, normal, depth))
+            hit = np.zeros(pixels * pixels, dtype=bool)
+            normal = np.zeros((pixels * pixels, 3))
+            depth = np.zeros(pixels * pixels)
+            if at:
+                hit[at] = True
+                normal[at] = normals
+                depth[at] = depths
+            out.append((hit.reshape(pixels, pixels), normal.reshape(pixels, pixels, 3), depth.reshape(pixels, pixels)))
     return out
 
 
@@ -93,7 +106,10 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
     return wrong, total
 
 
-def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
+
+
+def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
@@ -101,7 +117,15 @@ def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tu
     obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
     context.scene.collection.objects.link(obj)
     try:
-        obj.modifiers.new("Reduce", "DECIMATE").ratio = ratio
+        modifier = obj.modifiers.new("Reduce", "DECIMATE")
+        modifier.ratio = ratio
+        if drop is not None and float(drop.max(initial=0.0)) > 0.0:
+            group = obj.vertex_groups.new(name="CurioMesh_Density")
+            group.add(list(range(len(points))), 1.0, "REPLACE")  # a vertex outside the group is never collapsed
+            level = np.round(drop / 0.5 * DENSITY_STEPS).astype(np.int64)
+            for step in np.unique(level[level > 0]).tolist():
+                group.add(np.flatnonzero(level == step).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
+            modifier.vertex_group = group.name
         evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
         reduced = evaluated.to_mesh()
         co = np.empty(len(reduced.vertices) * 3, dtype=np.float64)
@@ -130,12 +154,19 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
+        self.cache = {} if cache is None else cache  # what was measured on this very mesh before: starting again with another amount skips it
+        self.mirror = mirror  # (axis, plane offset, size, faces of the whole mesh, side solved): co/faces are one half, the result is mirrored
+        self.note = note
+        self.guide_lines = guide_lines or []  # strokes laid on the surface; the quads are made to follow them
+        self.project = project  # the nearest point on the original surface, for the points a stroke adds to the mesh
+        self.guide_edges: tuple = ()
+        self.drop = None if drop is None or not float(np.max(drop, initial=0.0)) > 0.0 else np.asarray(drop, dtype=np.float64)  # per vertex, from the painted density
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
@@ -157,6 +188,7 @@ class AutoJob:
         self.levels: list[list[Level]] = []
         self.seen: list[float] = []
         self.picked: list[int] = []
+        self.timings: dict[str, float] = {}  # seconds spent per kind of work, for the report
         self._search = self._run()
 
     def seconds_left(self) -> float | None:
@@ -192,6 +224,25 @@ class AutoJob:
                 self._pair_thread.join(0.05)
         return not self.busy
 
+    def _timed(self, name: str, work):
+        """Generator: run `work` (a generator) and add the time it really runs to `self.timings[name]`."""
+        while True:
+            started = time.perf_counter()
+            try:
+                step = next(work)
+            except StopIteration as done:
+                self.timings[name] = self.timings.get(name, 0.0) + time.perf_counter() - started
+                return done.value
+            self.timings[name] = self.timings.get(name, 0.0) + time.perf_counter() - started
+            yield step
+
+    def _piece_drop(self, ids: np.ndarray):
+        """The painted density of the vertices of a piece, in the order `_piece_arrays` lists them (or None)."""
+        if self.drop is None:
+            return None
+        used = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))
+        return self.drop[used]
+
     def _piece_arrays(self, ids: np.ndarray):
         used, flat = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64), return_inverse=True)
         polys, at = [], 0
@@ -211,17 +262,26 @@ class AutoJob:
             self.levels.append([Level(len(polys), 0.0)])
             self.seen.append(0.0)
             return
+        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()))
+        known = self.cache.get(key)
+        if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
+            self.sizes.append(known[1])
+            self.levels.append(known[2])
+            self.seen.append(known[3])
+            return
         low, high = points.min(axis=0), points.max(axis=0)
         center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
         pixel = 2.0 * half / pixels
-        reference = yield from pictures(points, polys, center, half, pixels)
+        reference = yield from self._reference(center, half, pixels, points, polys)
         sizes, levels, seen = [], [], 0.0
         for share in LEVELS:
             if share * triangles < 12.0:
                 continue
             yield
-            reduced = _decimate(self.context, points, polys, kinds, share)
-            view = yield from pictures(reduced[0], reduced[1], center, half, pixels)
+            started = time.perf_counter()
+            reduced = _decimate(self.context, points, polys, kinds, share, self._piece_drop(ids))
+            self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
+            view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = picture_counts(reference, view, pixel)
             area = pixel * pixel
             seen = max(seen, shown * area)
@@ -234,6 +294,14 @@ class AutoJob:
         self.sizes.append(sizes)
         self.levels.append(levels)
         self.seen.append(seen)
+        self.cache[key] = (self.detail, sizes, levels, seen)
+
+    def _reference(self, center, half, pixels, points, polys):
+        """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
+        key = ("view", center.tobytes(), half, pixels, len(polys), hash(points.tobytes()))
+        if key not in self.cache:
+            self.cache[key] = yield from self._timed("pictures", pictures(points, polys, center, half, pixels))
+        return self.cache[key]
 
     def _combined(self) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
         """Every piece at its picked size, and any not measured yet as it is."""
@@ -256,19 +324,49 @@ class AutoJob:
     def _show(self, final=None) -> None:
         if final is None:
             co, faces, kinds, parts = self._combined()
-            count = len(faces)
-            new = np.ones(count, bool)
         else:
             co, faces, kinds, parts = final
-            count = len(faces)
-            new = np.ones(count, bool)
+        if self.mirror is not None:
+            axis, offset, size = self.mirror[:3]
+            co, faces, kinds, _snapped = symmetry.mirror_result(co, faces, kinds, axis, offset, size)
+            if final is None:
+                parts = np.concatenate((parts, parts + int(parts.max(initial=-1)) + 1))
+            else:
+                fa, fb = patch.face_adjacency(faces)
+                parts = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
+        count = len(faces)
+        new = np.ones(count, bool)
         self.output = {"co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
+    def _guided(self, co, faces, kinds):
+        """The mesh about to be paired, cut along the strokes: (co, faces, kinds, guide edges)."""
+        started = time.perf_counter()
+        tris, owner = [], []
+        for i, face in enumerate(faces):
+            for k in range(1, len(face) - 1):
+                tris.append((face[0], face[k], face[k + 1]))
+                owner.append(i)
+        tris = np.asarray(tris, dtype=np.int64)
+        edge = np.linalg.norm(co[tris[:, 0]] - co[tris[:, 1]], axis=1)
+        spacing = float(np.median(edge))
+        samples = np.vstack([guides.resample(line, spacing / 2.0) for line in self.guide_lines])
+        kind = np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int64)[owner]
+        co, tris, kind = guides.refine(co, tris, kind, samples, spacing, self.project)
+        chains, keys = guides.chain(co, tris, self.guide_lines, spacing)
+        if chains:
+            co = guides.pull(co, tris, chains, self.guide_lines, spacing)
+        self.timings["guides"] = self.timings.get("guides", 0.0) + time.perf_counter() - started
+        return co, [tuple(t) for t in tris.tolist()], [str(k) for k in kind.tolist()], tuple(sorted(keys))
+
     def _pair(self, co, faces, kinds) -> None:
+        started = time.perf_counter()
         try:
-            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2)[0]
+            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2, cancelled=lambda: self._stopped, guide_edges=self.guide_edges)[0]
+            self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
+        except Cancelled:  # Stop was pressed: the thread ends at its next stopping point
+            pass
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
 
@@ -300,7 +398,7 @@ class AutoJob:
         low, high = self.co.min(axis=0), self.co.max(axis=0)
         center, half = (low + high) / 2.0, extent * 0.55
         pixel = 2.0 * half / MAX_PIXELS
-        reference = yield from pictures(self.co, self.faces, center, half, MAX_PIXELS)
+        reference = yield from self._reference(center, half, MAX_PIXELS, self.co, self.faces)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
         allowed = asked * total_seen
@@ -322,6 +420,10 @@ class AutoJob:
             tried.add(tuple(self.picked))
             self.stage = f"Pairing into quads, try {round_index + 1}"
             co, faces, kinds, _parts = self._combined()
+            if self.guide_lines:
+                self.stage = f"Cutting the guide curves in, try {round_index + 1}"
+                yield
+                co, faces, kinds, self.guide_edges = self._guided(co, faces, kinds)
             before_pairing = len(faces)
             self._paired = None
             self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds), daemon=True, name="CurioMeshPair")
@@ -329,6 +431,7 @@ class AutoJob:
             while self._pair_thread.is_alive():
                 if self._stopped:
                     return
+                self._pair_thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the pairing thread (shared GIL)
                 yield
             if self._paired is None:
                 return
@@ -361,14 +464,21 @@ class AutoJob:
             loss = yield from self._look(points, out_faces, center, half, reference, pixel)
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
-        quads = sum(1 for face in out_faces if len(face) == 4)
-        self.report = {"before": len(self.faces), "faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces, "seconds": time.perf_counter() - self.started}
         self.fraction = 1.0
         self._show((points, out_faces, materials, parts))
+        shown = self.output["faces"]
+        follows = None
+        if self.guide_lines:  # how far, along each stroke, the nearest edge of the result is: mean and worst, as a share of the size
+            size = float(np.linalg.norm(np.ptp(self.co, axis=0))) or 1.0
+            mean, worst = guides.follow(self.guide_lines, self.output["co"], shown, size / 400.0)
+            follows = {"strokes": len(self.guide_lines), "mean": mean / size, "worst": worst / size}
+        whole = self.mirror[3] if self.mirror is not None else len(self.faces)
+        quads = sum(1 for face in shown if len(face) == 4)
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows}
 
     def _look(self, points, out_faces, center, half, reference, pixel):
         """Generator: the percent of the view that differs from the original. Returns it when exhausted."""
-        view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
+        view = yield from self._timed("pictures", pictures(points, out_faces, center, half, MAX_PIXELS))
         wrong, shown = picture_counts(reference, view, pixel)
         return 100.0 * wrong / max(shown, 1)
 
@@ -384,10 +494,11 @@ class AutoJob:
         goal = self.levels[index][self.picked[index]].faces + miss
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
             return
-        self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles)
+        self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
 
     def status(self) -> str:
+        extra = f" | {self.note}" if self.note else ""
         if self.report is None:
-            return self.stage
+            return self.stage + extra
         r = self.report
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s"
+        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s{extra}"

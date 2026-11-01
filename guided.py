@@ -20,9 +20,10 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from . import overlay, region
-from . import autoretopo, segments
+from . import guides, overlay, region, segments, symmetry
+from . import autoretopo
 from .triadq import areas, patch
+from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.types import MeshData
 
@@ -63,6 +64,13 @@ SHAPE_OP_ITEMS = [
     ("SUBTRACT", "Subtract", "Take the faces inside this shape out of what the shapes above it cover", "SELECT_SUBTRACT", 1),
     ("INTERSECT", "Intersect", "Keep only the faces that the shapes above it and this shape both cover", "SELECT_INTERSECT", 2),
 ]
+SYMMETRY_ITEMS = [
+    ("OFF", "Off", "Solve the whole mesh", "BLANK1", 0),
+    ("AUTO", "Auto", "Find the mirror plane (X, Y or Z). It is used only when the mesh is symmetric enough", "MOD_MIRROR", 1),
+    ("X", "X", "Mirror across the plane facing X", "BLANK1", 2),
+    ("Y", "Y", "Mirror across the plane facing Y", "BLANK1", 3),
+    ("Z", "Z", "Mirror across the plane facing Z", "BLANK1", 4),
+]
 APPLY_ITEMS = [
     ("NEW", "New Object", "Write the result to a new object called <name>_Retopo", "DUPLICATE", 0),
     ("REPLACE", "Replace Mesh", "Put the result into your object (Undo restores it)", "FILE_REFRESH", 1),
@@ -98,6 +106,7 @@ state = {
     "L0": 0.1,
     "predicted": 0,
     "work": None,
+    "auto_cache": (None, {}),  # (mesh signature, measurements of it): Start again with another amount skips the looking
     "auto_base": None,  # the finished Auto Segments result that step 4 (Live Boolean) works on
 }
 
@@ -165,6 +174,14 @@ class CURIOMESH_PG_guided_shape(bpy.types.PropertyGroup):
     operation: bpy.props.EnumProperty(name="Combine", description="How this shape joins the ones above it. They are worked out from top to bottom, so start with a Union", items=SHAPE_OP_ITEMS, default="UNION", update=_redraw_update)
 
 
+def _guide_poll(self, obj) -> bool:
+    return guides.is_guide_object(obj) and obj.name != PREVIEW_NAME and obj.name != state["source"]
+
+
+class CURIOMESH_PG_guided_guide(bpy.types.PropertyGroup):
+    obj: bpy.props.PointerProperty(name="Guide", description="A curve, a Grease Pencil drawing, or a mesh made of edges only. The quads are made to follow it", type=bpy.types.Object, poll=_guide_poll)
+
+
 class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(name="Guided Preview", description="Show the point cage and keep a live preview of the new quads next to your mesh", default=False, update=_enabled_update)
     preset: bpy.props.EnumProperty(name="Mesh Type", description="Starting density, point type and fill style for this kind of mesh", items=PRESET_ITEMS, default="CHARACTER", update=_preset_update)
@@ -187,6 +204,13 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_method: bpy.props.EnumProperty(name="Method", description="The method to remake the selected parts with", items=segments.METHOD_ITEMS, default="FLAT")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
+    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Auto Segments: solve one half of the mesh and mirror it. The two sides come out identical and the seam is exact. Only used when the mesh really is symmetric; otherwise the whole mesh is solved and you are told why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
+    guide_use: bpy.props.BoolProperty(name="Use Guide Curves", description="Auto Segments: make the quads follow the guide curves in the list (an edge loop round an eye, a line along a panel). The curves are laid on the mesh, so they can float a little off it", default=True, update=_redraw_update)
+    guide_curves: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_guide)
+    guide_index: bpy.props.IntProperty(default=0)
+    density_use: bpy.props.BoolProperty(name="Paint Density", description="Auto Segments: keep more faces where you painted. Paint the vertex group in Weight Paint mode (red = more detail); the rest is left to the search", default=False, update=_redraw_update)
+    density_group: bpy.props.StringProperty(name="Group", description="The vertex group of the mesh that holds the paint", default="CM_Density")
+    density_strength: bpy.props.FloatProperty(name="Strength", description="How strongly red paint pulls faces in: 1 keeps about four times as many faces in full red, 4 about six times", default=1.0, min=0.25, max=4.0)
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redo the part of the result inside the shapes, live, while everything outside stays as it is. Move or resize a shape and the new quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
@@ -357,6 +381,7 @@ def _source_data(obj) -> dict:
         "loops": wloops,
         "mat": mat[keep],
         "bvh": None,
+        "weld": inv,
     }
     state["src"] = data
     return data
@@ -973,15 +998,73 @@ def auto_target(gs, faces: int) -> int:
     return max(12, int(round(gs.auto_reduce_percent / 100.0 * faces)) if gs.auto_reduce_by == "PERCENT" else int(gs.auto_reduce_count))
 
 
+def _mirror_half(gs, src):
+    """(half, note): the half to solve as (co, faces, mat, mirror) or None, and what to tell the user about the symmetry."""
+    if gs.sym_axis == "OFF":
+        return None, ""
+    found = symmetry.find_plane(src["co"], _bvh(src), "XYZ" if gs.sym_axis == "AUTO" else gs.sym_axis)[0]
+    if not found.ok(gs.sym_axis != "AUTO"):
+        return None, f"Not symmetric enough to mirror ({found.text()}): solved the whole mesh"
+    side = src["tri_cent"][:, found.axis] >= found.offset
+    keep = 1 if src["tri_area"][side].sum() >= src["tri_area"][~side].sum() else -1  # solve the side with more surface
+    co, faces, source, origin = symmetry.cut_half(src["co"], src["faces"], found.axis, found.offset, keep)
+    if not faces:
+        return None, "Mirror found nothing on one side of the plane: solved the whole mesh"
+    note = f"Mirrored from the {'+' if keep > 0 else '-'}{symmetry.AXES[found.axis]} half. {found.text()}"
+    return (co, faces, src["mat"][source], (found.axis, found.offset, src["diag"], len(src["faces"]), keep), origin), note
+
+
+def _guide_lines(context, gs, src) -> list[np.ndarray]:
+    """The guide curves of the list, laid on the surface of the source mesh (its object space)."""
+    source = state_source()
+    objects = [g.obj for g in gs.guide_curves if g.obj is not None]
+    if not gs.guide_use or not objects or source is None:
+        return []
+    bvh = _bvh(src)
+    raw = guides.gather(objects, source, context.evaluated_depsgraph_get())
+    return guides.on_surface(raw, lambda p: bvh.find_nearest(Vector(p))[0], src["diag"] / 400.0)
+
+
+def _painted(source, gs, src) -> np.ndarray | None:
+    """Paint 0..1 per vertex of the welded source from the vertex group, or None when there is none or it is empty."""
+    group = source.vertex_groups.get(gs.density_group)
+    if not gs.density_use or group is None:
+        return None
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(source.data)
+        layer = bm.verts.layers.deform.active
+        if layer is None:
+            return None
+        paint = np.asarray([v[layer].get(group.index, 0.0) for v in bm.verts], dtype=np.float64)
+    finally:
+        bm.free()
+    welded = np.zeros(len(src["co"]))
+    np.maximum.at(welded, src["weld"], paint)
+    return welded if welded.max() > 0.0 else None
+
+
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
     target = auto_target(gs, len(src["faces"]))
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target)
+    lines = _guide_lines(context, gs, src)
+    paint = _painted(state_source(), gs, src)
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength))
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
     state["auto_base"] = None
-    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail, target)
+    half, note = _mirror_half(gs, src)
+    co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], src["mat"], None)
+    if paint is not None:
+        paint = paint[half[4]] if half is not None else paint
+    if lines and mirror:
+        lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
+    bvh = _bvh(src)
+    cache_key = (src["sig"], mirror[:2] if mirror else None)
+    if state["auto_cache"][0] != cache_key:
+        state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
+    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength))
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -1228,7 +1311,7 @@ def _stop() -> None:
         bpy.app.timers.unregister(_poll)
     stop_work()
     remove_preview()
-    state.update(sig=None, message="", lock=None, hover=None, auto_base=None)
+    state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}))
     segments.reset()
     overlay.tag_redraw()
 
@@ -2179,6 +2262,171 @@ class CURIOMESH_OT_guided_remove_shape(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CURIOMESH_OT_guided_add_guide(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_add_guide"
+    bl_label = "Add Selected"
+    bl_description = "Use the selected curves, Grease Pencil drawings or edge-only meshes as guide curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        gs = _gs(context)
+        have = {g.obj for g in gs.guide_curves}
+        picked = [o for o in context.selected_objects if _guide_poll(None, o) and o not in have]
+        if not picked:
+            self.report({"WARNING"}, "Select a curve, a Grease Pencil drawing or an edge-only mesh first")
+            return {"CANCELLED"}
+        for obj in picked:
+            gs.guide_curves.add().obj = obj
+        gs.guide_index = len(gs.guide_curves) - 1
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_remove_guide(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_remove_guide"
+    bl_label = "Remove Guide"
+    bl_description = "Take the chosen guide out of the list. A curve drawn with Draw Guide is deleted with it; your own curves stay"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        gs = _gs(context)
+        return 0 <= gs.guide_index < len(gs.guide_curves)
+
+    def execute(self, context):
+        gs = _gs(context)
+        obj = gs.guide_curves[gs.guide_index].obj
+        gs.guide_curves.remove(gs.guide_index)
+        gs.guide_index = max(0, min(gs.guide_index, len(gs.guide_curves) - 1))
+        if obj is not None and obj.name.startswith("CM_Guide"):
+            data = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if data is not None and data.users == 0 and isinstance(data, bpy.types.Curve):
+                bpy.data.curves.remove(data)
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
+    bl_idname = "curiomesh.guided_draw_guide"
+    bl_label = "Draw Guide"
+    bl_description = "Draw a stroke on the mesh with the left mouse button held; each stroke becomes a curve in the list. Right click, Enter or Esc finishes"
+
+    def invoke(self, context, event):
+        self.obj = context.object
+        state["source"] = self.obj.name
+        self.stroke = None
+        self.last = None
+        context.window_manager.modal_handler_add(self)
+        self._status(context)
+        return {"RUNNING_MODAL"}
+
+    def _status(self, context):
+        context.workspace.status_text_set("Draw Guide  Hold left mouse and drag over the mesh: one curve per stroke  Right click/Enter/Esc: done")
+
+    def _make_curve(self, context):
+        points = self.stroke
+        self.stroke = None
+        if points is None or len(points) < 2:
+            return
+        gs = _gs(context)
+        matrix = self.obj.matrix_world
+        lift = 0.002 * max(max(self.obj.dimensions), 1e-6)  # a hair above the surface, so it shows
+        curve = bpy.data.curves.new("CM_Guide", "CURVE")
+        curve.dimensions = "3D"
+        spline = curve.splines.new("POLY")
+        spline.points.add(len(points) - 1)
+        for p, (co, nrm) in zip(spline.points, points):
+            w = matrix @ Vector(co + nrm * lift)
+            p.co = (w.x, w.y, w.z, 1.0)
+        obj = bpy.data.objects.new("CM_Guide", curve)
+        obj.show_in_front = True
+        (context.collection or context.scene.collection).objects.link(obj)
+        gs.guide_curves.add().obj = obj
+        gs.guide_index = len(gs.guide_curves) - 1
+
+    def modal(self, context, event):
+        if context.area is not None:
+            context.area.tag_redraw()
+        if event.type in {"RET", "NUMPAD_ENTER", "ESC"} and event.value == "PRESS":
+            self._make_curve(context)
+            self._finish(context)
+            return {"FINISHED"}
+        view = self._view_region(context, event)
+        if view is None:
+            return {"PASS_THROUGH"}
+        if event.type == "RIGHTMOUSE" and event.value == "PRESS":
+            self._make_curve(context)
+            self._finish(context)
+            return {"FINISHED"}
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            self.stroke, self.last = [], None
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            self._make_curve(context)
+            return {"RUNNING_MODAL"}
+        if event.type in {"LEFTMOUSE", "MOUSEMOVE"} and self.stroke is not None:
+            at = (event.mouse_x, event.mouse_y)
+            if self.last is None or (at[0] - self.last[0]) ** 2 + (at[1] - self.last[1]) ** 2 >= 36:  # one point per six pixels
+                hit = self._ray(view, event)
+                if hit is not None:
+                    self.stroke.append(hit)
+                    self.last = at
+            return {"RUNNING_MODAL"}
+        if event.type in {"MIDDLEMOUSE", "TRACKPADPAN", "TRACKPADZOOM", "MOUSEROTATE"} or event.type.startswith("NUMPAD") or event.alt:
+            return {"PASS_THROUGH"}
+        return {"RUNNING_MODAL"}
+
+
+class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_paint_density"
+    bl_label = "Paint"
+    bl_description = "Go to Weight Paint on the mesh with a vertex group for the density. Paint red where you want more quads, then leave Weight Paint (Tab) and press Start"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _source_mesh(context) is not None
+
+    def execute(self, context):
+        gs = _gs(context)
+        obj = _source_mesh(context)
+        state["source"] = obj.name
+        group = obj.vertex_groups.get(gs.density_group) or obj.vertex_groups.new(name=gs.density_group or "CM_Density")
+        gs.density_group = group.name
+        obj.vertex_groups.active_index = group.index
+        gs.density_use = True
+        context.view_layer.objects.active = obj
+        if obj.mode != "WEIGHT_PAINT":
+            bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
+        try:  # a full red brush; the setting moved between versions
+            paint = context.tool_settings.unified_paint_settings
+            paint.use_unified_weight = True
+            paint.weight = 1.0
+        except AttributeError:
+            pass
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_clear_density(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_clear_density"
+    bl_label = "Clear"
+    bl_description = "Delete the density paint (the vertex group)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = _source_mesh(context)
+        return obj is not None and obj.vertex_groups.get(_gs(context).density_group) is not None
+
+    def execute(self, context):
+        obj = _source_mesh(context)
+        obj.vertex_groups.remove(obj.vertex_groups[_gs(context).density_group])
+        return {"FINISHED"}
+
+
+class CURIOMESH_UL_guided_guides(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        layout.label(text=item.obj.name if item.obj is not None else "(removed)", icon="CURVE_DATA" if item.obj is not None else "ERROR")
+
+
 class CURIOMESH_UL_guided_shapes(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
@@ -2316,6 +2564,26 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if hasattr(gs, "auto_profile"):  # presets, once that branch is merged
             col.prop(gs, "auto_profile")
         col.row(align=True).prop(gs, "auto_aim", expand=True)
+        row = col.row(align=True)
+        row.label(text="Mirror", icon="MOD_MIRROR")
+        row.prop(gs, "sym_axis", expand=True)
+        col.prop(gs, "guide_use", text="Guide Curves", toggle=True, icon="CURVE_DATA")
+        if gs.guide_use:
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_draw_guide", icon="GREASEPENCIL")
+            row.operator("curiomesh.guided_add_guide", icon="ADD")
+            if len(gs.guide_curves):
+                row = col.row()
+                row.template_list("CURIOMESH_UL_guided_guides", "", gs, "guide_curves", gs, "guide_index", rows=2)
+                row.operator("curiomesh.guided_remove_guide", text="", icon="REMOVE")
+        col.prop(gs, "density_use", text="Paint Density", toggle=True, icon="BRUSH_DATA")
+        if gs.density_use:
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_paint_density", icon="WPAINT_HLT")
+            row.operator("curiomesh.guided_clear_density", icon="X")
+            col.prop(gs, "density_strength")
+            if obj is not None and obj.vertex_groups.get(gs.density_group) is None:
+                col.label(text="Press Paint, colour the parts that need more quads red", icon="INFO")
         if gs.auto_aim == "KEEP":
             col.prop(gs, "auto_detail")
             words = detail_words(gs)
@@ -2339,6 +2607,9 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             col.label(text=f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1")
             if report["asked"]:
                 col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
+            follows = report.get("guides")
+            if follows:
+                col.label(text=f"Guides: {follows['strokes']} strokes, the nearest edge is {100.0 * follows['mean']:.2f}% of the size away on average", icon="BLANK1")
 
         message = status()
         if message and not (done and message == base["summary"]):
@@ -2536,6 +2807,7 @@ PANEL_CLASSES = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_parts, CURIOMESH_PT_gu
 CLASSES = (
     CURIOMESH_PG_guided_point,
     CURIOMESH_PG_guided_shape,
+    CURIOMESH_PG_guided_guide,
     CURIOMESH_PG_guided,
     CURIOMESH_OT_guided_place,
     CURIOMESH_OT_guided_work,
@@ -2556,6 +2828,12 @@ CLASSES = (
     CURIOMESH_OT_guided_stop_work,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,
+    CURIOMESH_OT_guided_add_guide,
+    CURIOMESH_OT_guided_remove_guide,
+    CURIOMESH_OT_guided_draw_guide,
+    CURIOMESH_OT_guided_paint_density,
+    CURIOMESH_OT_guided_clear_density,
+    CURIOMESH_UL_guided_guides,
     CURIOMESH_UL_guided_points,
     CURIOMESH_UL_guided_shapes,
     CURIOMESH_PT_guided,
