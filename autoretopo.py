@@ -32,7 +32,7 @@ from .triadq.quadreduce import QuadReducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
-from . import guides, symmetry
+from . import guides, loops, symmetry
 from .triadq.types import Cancelled, MeshData
 from .triadq.uvs import simplify_borders
 
@@ -407,8 +407,8 @@ def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=No
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None):
-        self.collapse = method == "AUTO" and output == "QUADS" and not guide_lines and mirror is None and (drop is None or not float(np.max(drop, initial=0.0)) > 0.0)  # take quads away after pairing: only where nothing else asks for the layout
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None):
+        self.collapse = method == "AUTO" and output == "QUADS" and not guide_lines and not strips and mirror is None and (drop is None or not float(np.max(drop, initial=0.0)) > 0.0)  # take quads away after pairing: only where nothing else asks for the layout
         self.tidy = tidy  # try to tidy the finished quads, kept only if the score rises and the camera allows it
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
@@ -421,6 +421,13 @@ class AutoJob:
         self.guide_lines = guide_lines or []  # strokes laid on the surface; the quads are made to follow them
         self.project = project  # the nearest point on the original surface, for the points a stroke adds to the mesh
         self.guide_edges: tuple = ()
+        self.strips = strips  # ([(stroke, loops, tag)], gap or 0, nearest(p) -> (point, normal)): drawn edge loops and deformation lines
+        self.bend_groups: list = []  # (tag, loops) of each strip that went in
+        self.skipped = 0
+        self.outside = outside  # (co, faces, materials) left alone when only a region is redone; the result is put back beside it
+        self.seam = (0, 0)
+        self.why: list[str] = []
+        self.gap = 0.0
         self.drop = None if drop is None or not float(np.max(drop, initial=0.0)) > 0.0 else np.asarray(drop, dtype=np.float64)  # per vertex, from the painted density
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.method = method  # for every part without its own in `methods`
@@ -534,7 +541,7 @@ class AutoJob:
             self.ready.append([False])
             self.seen.append(0.0)
             return
-        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines))
+        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips))
         known = self.cache.get(key)
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
@@ -549,7 +556,7 @@ class AutoJob:
         turned_sizes, turned_levels = [], []
         sizes, levels, seen, spots = [], [], 0.0, []
         enough = GOOD_ENOUGH * self.detail / 100.0
-        if self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
+        if self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
             for out in parts.rebuilds(points, polys, max(set(kinds), key=kinds.count)):
                 yield
                 if out is None:
@@ -658,8 +665,13 @@ class AutoJob:
             else:
                 fa, fb = patch.face_adjacency(faces)
                 parts = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
+        new = None
+        if self.outside is not None:
+            co, faces, kinds, new, self.seam = loops.join_outside(co, faces, kinds, self.outside)
+            fa, fb = patch.face_adjacency(faces)
+            parts = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
         count = len(faces)
-        new = np.ones(count, bool)
+        new = np.ones(count, bool) if new is None else new
         self.output = {"co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
         if final is not None and self.mirror is None:
             self.output["piece"] = self.face_piece  # the source piece each face came from
@@ -740,12 +752,28 @@ class AutoJob:
         tris = np.asarray(tris, dtype=np.int64)
         edge = np.linalg.norm(co[tris[:, 0]] - co[tris[:, 1]], axis=1)
         spacing = float(np.median(edge))
-        samples = np.vstack([guides.resample(line, spacing / 2.0) for line in self.guide_lines])
         kind = np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int64)[owner]
-        co, tris, kind = guides.refine(co, tris, kind, samples, spacing, self.project)
-        chains, keys = guides.chain(co, tris, self.guide_lines, spacing)
-        if chains:
-            co = guides.pull(co, tris, chains, self.guide_lines, spacing)
+        parts = [(self.guide_lines, spacing)] if self.guide_lines else []
+        for lines, step in parts:
+            samples = np.vstack([guides.resample(line, step / 2.0) for line in lines])
+            co, tris, kind = guides.refine(co, tris, kind, samples, step, self.project)
+        keys: set = set()
+        for lines, step in parts:
+            chains, found = guides.chain(co, tris, lines, step)
+            if chains:
+                co = guides.pull(co, tris, chains, lines, step)
+            keys |= found
+        if self.strips:  # drawn edge loops and deformation lines go in as built strips of quads
+            items, gap, nearest = self.strips
+            self.gap = gap if gap > 0 else 0.7 * spacing  # the pairing then splits every face once more, so the result is about as fine as the rest
+            fine = min(loops.room(line, count, self.gap) for line, count, _tag in items)  # a ring round a small thing needs finer triangles
+            samples = np.vstack([guides.resample(line, fine / 4.0) for line, _count, _tag in items])
+            co, tris, kind = guides.refine(co, tris, kind, samples, fine / 2.5, self.project)  # edges under 0.6 of a gap near the strokes, so a small ring still has triangles inside it
+            co, tris, kind, keys, self.bend_groups, skipped = loops.insert(co, tris, kind, items, self.gap, nearest, keys)
+            self.skipped = len(skipped)
+            self.why = sorted(set(skipped))
+            if skipped:
+                self.note = f"{len(skipped)} loop(s) left out: " + ", ".join(self.why)
         self.timings["guides"] = self.timings.get("guides", 0.0) + time.perf_counter() - started
         return co, [tuple(t) for t in tris.tolist()], [str(k) for k in kind.tolist()], tuple(sorted(keys))
 
@@ -754,14 +782,14 @@ class AutoJob:
         try:
             coarse = MeshData(co, faces, kinds)
             # Rows of quads would ignore the strokes and the paint, and they are what Auto means.
-            if method == "AUTO" and self.output_kind != "TRIS" and not self.guide_lines and self.drop is None:
+            if method == "AUTO" and self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.drop is None:
                 if self._labels is None:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
                 coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
             made = make_pure(coarse, method, self.output_kind, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, join_triangles=self.collapse and method == "AUTO")
             # Strokes and a mirror seam must stay where they are.
-            if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and self.mirror is None and not self._stopped:
+            if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and not self._stopped:
                 made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
             self._paired = made
             self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
@@ -1077,7 +1105,7 @@ class AutoJob:
             self.stage = f"Making the faces, try {round_index + 1}"
             co, faces, kinds, _parts = self._combined(False)
             rco, rfaces, rkinds, _owner = self._combined(True)  # rebuilt parts are already quads
-            if self.guide_lines:
+            if self.guide_lines or self.strips:
                 self.stage = f"Cutting the guide curves in, try {round_index + 1}"
                 yield
                 co, faces, kinds, self.guide_edges = self._guided(co, faces, kinds)
@@ -1175,13 +1203,14 @@ class AutoJob:
             follows = {"strokes": len(self.guide_lines), "mean": mean / size, "worst": worst / size}
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "check": check, "notes": list(dict.fromkeys(self.notes)), "guides": follows}
+        bend = guides.bend_stats([group for _tag, group in self.bend_groups], self.output["co"], shown, self.gap) if self.bend_groups else None
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "check": check, "notes": list(dict.fromkeys(self.notes)), "guides": follows}
 
     def _make_all(self, co, faces, kinds):
         """Generator: the faces for the whole object. Pieces on the usual method go in one call; others one by one."""
         parts = self._combined(False)[3]
         special = {i for i, m in self.methods.items() if m != self.method} | ({i for i in range(len(self.pieces))} if self.method in INLINE else set())
-        if not special or self.guide_lines:  # with strokes the faces have changed: one call
+        if not special or self.guide_lines or self.strips:  # with strokes the faces have changed: one call
             return (yield from self._build(co, faces, kinds, self.method))
         results = []
         rest = [i for i in range(len(self.pieces)) if i not in special]
@@ -1241,3 +1270,19 @@ class AutoJob:
         tidy = "" if r.get("topology") is None else f"Tidiness: {r['topology']:.0f}/100. "
         text = f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape{shade}. {tidy}{r['seconds']:.0f} s{extra}"
         return text + (f" | {r['check']['text']}" if r.get("check") else "") + "".join(f" | {n}" for n in r.get("notes", []))
+
+
+def retopo_region(context, co, faces, materials, region, strokes=(), detail: float = 6.0, target_faces: int = 0, nearest=None, loops_per_stroke: int = 3, gap: float = 0.0):
+    """Redo only the faces in `region` (a boolean per face), the rest left exactly as it is, and run it to the end.
+
+    `strokes` are drawn edge loops and flow lines, polylines in the mesh's own space; each becomes continuous edge
+    loops with rows of regular quads beside them (see loops.py). `nearest(p)` gives (closest surface point, normal). Returns the finished job: `.output` has co, faces, new
+    (True for the redone faces), `.report` the numbers, `.seam` how many outline vertices of the region joined the rest.
+    """
+    mine, rest = loops.split_region(co, faces, materials, region)
+    strips = None
+    if len(strokes):
+        strips = ([(np.asarray(line, dtype=np.float64), loops_per_stroke, "LOOP") for line in strokes], gap, nearest)
+    job = AutoJob(context, mine[0], mine[1], mine[2], detail, target_faces, project=(lambda p: nearest(p)[0]) if nearest else None, strips=strips, outside=rest)
+    job.wait()
+    return job

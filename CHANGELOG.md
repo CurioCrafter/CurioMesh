@@ -30,6 +30,40 @@
 - **A cleaner Guided panel for Auto Segments**: one big button that is always the next step
   (Start, then Apply Result), settings under it, the result in one box, and Parts and Redo Inside
   Shapes as sub-panels. Empty states say what to click, and a non-mesh object says how to convert it.
+- **Show it how (Teach by example)** (Auto Segments, step 4). Fix a spot by hand on the
+  preview, in Edit Mode, with any tools, then press **Remember This Fix**. It stores the
+  patch of quads you replaced and the ones you put there (positions relative to the
+  patch, no mesh) plus three numbers for the shape, in a file in Blender's user config
+  folder; nothing is uploaded, and **Export / Import** share it. **Look for Known Fixes**
+  finds the same quad pattern in a result by walking the quads, checks the shape, and
+  **Apply** puts the fix in after a camera looks at the spot from six sides and finds it
+  no further from your original. The fixed area is also put back when you press Start
+  again on the same mesh, if the quads around it come out the same. Limits: one
+  area per press, the outline must stay as it was, a mirrored copy of a fix is not found,
+  and the pattern must match exactly (the same face count and connections).
+- **Draw Edge Loops** (Auto Segments, step 2). Draw closed loops (round an eye or the
+  mouth) and open flow lines on the mesh, or add curves. Each becomes a strip of regular
+  quads: three loops by default (the one you drew and one each side), evenly spaced, cut
+  into the mesh before it is paired, so the poles end up outside the loops. The drawn
+  loop runs as one continuous edge loop and sits on the stroke. On a bust (8,579
+  faces) with two eye rings, a mouth ring and a chin line, the continuous loop along each
+  stroke was 14, 14, 10 and 10 edges long (the longest 14, 14, 12, 11) where plain guide
+  curves gave a median of 2 to 3 (longest 4 to 6); the loop lies 0.011 to 0.036 of an
+  edge from the stroke on average (0.06 to 0.18 at worst). The tidiness score went from
+  41.3 to 39.7: the strips are regular but the quads around them take the poles. Move a
+  curve (G, or Edit Curve), redraw it, or delete it and the result updates by itself.
+  Limits: a ring needs room for
+  its loops (it is told "too small" and left out; lower Loop Gap), two strips that touch
+  are not both built, and a strip that would fold on a steep surface is left out.
+- **Deformation Lines** (Auto Segments, step 2). Draw a line across a joint or crease
+  (elbow, knee, mouth corner, eyelid, knuckle) and it becomes an evenly spaced set of
+  loops, three or more, in the same strip. Optional **Crease** and **Sharp** marks go on
+  the middle loop when you Apply. A new Animation mesh type asks for these lines. Tested by
+  bending a bust at the neck 70 degrees over a short span: with a ring across the neck,
+  4.0% of the quads there collapse against 6.2% without it, and the average corner
+  loses 0.058 instead of 0.087 of its squareness; over a broad span (0.012) it made
+  no difference (4.6% without, 5.2% with). So it helps tight joints and little else.
+
 - **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
   vertex group and colour the parts that need more quads red; the search keeps more
   faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate
