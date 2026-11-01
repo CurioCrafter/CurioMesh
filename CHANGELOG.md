@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Guide curves** (Auto Segments, step 2). Draw strokes on the mesh with **Draw Guide**
+  (hold the left mouse button), or add curves, Grease Pencil drawings or edge-only
+  meshes with **Add Selected**. The quads follow them: an edge loop round an eye,
+  a line along a panel. The strokes are laid on the surface, the triangles near them
+  are split until they are small, and the edges that hug each stroke are kept as
+  hard edges that no quad may cross and the flow runs along. On a bust with five
+  strokes, the nearest edge was 0.30% of the size away on average (1.5% at worst)
+  without guides and 0.10% (0.5% at worst) with them, for about 27% more faces.
+  With Mirror on, a stroke on either side is used on both.
 - **Mirror** (Auto Segments, step 2). Pick Auto, X, Y or Z and it solves one half of
   the mesh (the side with more surface) and mirrors it: the two sides are identical
   and the seam sits exactly on the plane, with no gap. Auto finds the plane and uses

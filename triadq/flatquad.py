@@ -678,7 +678,7 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
 
 def pair_and_close(
     coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
-    feature_angle_deg: float = 60.0, cancelled=None,
+    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (),
 ) -> tuple[MeshData, RemeshReport]:
     """Repair, pair with TRIAD-Q, then close every connected piece on its own.
 
@@ -692,17 +692,17 @@ def pair_and_close(
 
     cancel_with(cancelled)
     try:
-        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg)
+        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges)
     finally:
         cancel_with(None)
 
 
-def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg):
+def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges):
     repaired, _added = make_closable(coarse)
     check_cancelled()
     pair = RemeshOptions(
         target_faces=max(1, len(repaired.faces) // 2), seed_count=seed_count, force_quads=False, field_mode=field_mode,
-        feature_angle_deg=feature_angle_deg, max_pairing=True,
+        feature_angle_deg=feature_angle_deg, max_pairing=True, guide_edges=guide_edges,
     )
     paired, solver = remesh_mesh(repaired, pair)
     if not force_quads or not paired.faces:

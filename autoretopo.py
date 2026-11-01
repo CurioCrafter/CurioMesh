@@ -26,7 +26,7 @@ from mathutils.bvhtree import BVHTree
 from .triadq import patch
 from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
-from . import symmetry
+from . import guides, symmetry
 from .triadq.types import Cancelled, MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -143,15 +143,18 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = ""):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
         self.cache = {} if cache is None else cache  # what was measured on this very mesh before: starting again with another amount skips it
-        self.mirror = mirror  # (axis, plane offset, size, faces of the whole mesh): co/faces are one half, the result is mirrored
+        self.mirror = mirror  # (axis, plane offset, size, faces of the whole mesh, side solved): co/faces are one half, the result is mirrored
         self.note = note
+        self.guide_lines = guide_lines or []  # strokes laid on the surface; the quads are made to follow them
+        self.project = project  # the nearest point on the original surface, for the points a stroke adds to the mesh
+        self.guide_edges: tuple = ()
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
@@ -305,7 +308,7 @@ class AutoJob:
         else:
             co, faces, kinds, parts = final
         if self.mirror is not None:
-            axis, offset, size, _whole = self.mirror
+            axis, offset, size = self.mirror[:3]
             co, faces, kinds, _snapped = symmetry.mirror_result(co, faces, kinds, axis, offset, size)
             if final is None:
                 parts = np.concatenate((parts, parts + int(parts.max(initial=-1)) + 1))
@@ -318,10 +321,30 @@ class AutoJob:
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
+    def _guided(self, co, faces, kinds):
+        """The mesh about to be paired, cut along the strokes: (co, faces, kinds, guide edges)."""
+        started = time.perf_counter()
+        tris, owner = [], []
+        for i, face in enumerate(faces):
+            for k in range(1, len(face) - 1):
+                tris.append((face[0], face[k], face[k + 1]))
+                owner.append(i)
+        tris = np.asarray(tris, dtype=np.int64)
+        edge = np.linalg.norm(co[tris[:, 0]] - co[tris[:, 1]], axis=1)
+        spacing = float(np.median(edge))
+        samples = np.vstack([guides.resample(line, spacing / 2.0) for line in self.guide_lines])
+        kind = np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int64)[owner]
+        co, tris, kind = guides.refine(co, tris, kind, samples, spacing, self.project)
+        chains, keys = guides.chain(co, tris, self.guide_lines, spacing)
+        if chains:
+            co = guides.pull(co, tris, chains, self.guide_lines, spacing)
+        self.timings["guides"] = self.timings.get("guides", 0.0) + time.perf_counter() - started
+        return co, [tuple(t) for t in tris.tolist()], [str(k) for k in kind.tolist()], tuple(sorted(keys))
+
     def _pair(self, co, faces, kinds) -> None:
         started = time.perf_counter()
         try:
-            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2, cancelled=lambda: self._stopped)[0]
+            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2, cancelled=lambda: self._stopped, guide_edges=self.guide_edges)[0]
             self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
         except Cancelled:  # Stop was pressed: the thread ends at its next stopping point
             pass
@@ -378,6 +401,10 @@ class AutoJob:
             tried.add(tuple(self.picked))
             self.stage = f"Pairing into quads, try {round_index + 1}"
             co, faces, kinds, _parts = self._combined()
+            if self.guide_lines:
+                self.stage = f"Cutting the guide curves in, try {round_index + 1}"
+                yield
+                co, faces, kinds, self.guide_edges = self._guided(co, faces, kinds)
             before_pairing = len(faces)
             self._paired = None
             self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds), daemon=True, name="CurioMeshPair")
@@ -421,9 +448,14 @@ class AutoJob:
         self.fraction = 1.0
         self._show((points, out_faces, materials, parts))
         shown = self.output["faces"]
+        follows = None
+        if self.guide_lines:  # how far, along each stroke, the nearest edge of the result is: mean and worst, as a share of the size
+            size = float(np.linalg.norm(np.ptp(self.co, axis=0))) or 1.0
+            mean, worst = guides.follow(self.guide_lines, self.output["co"], shown, size / 400.0)
+            follows = {"strokes": len(self.guide_lines), "mean": mean / size, "worst": worst / size}
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows}
 
     def _look(self, points, out_faces, center, half, reference, pixel):
         """Generator: the percent of the view that differs from the original. Returns it when exhausted."""

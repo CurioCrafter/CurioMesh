@@ -39,6 +39,8 @@ class RemeshOptions:
     field_mode: str = "SMOOTH"
     # Accept every locally valid pair, however poorly it scores: a leftover triangle costs 3+ quads at closure.
     max_pairing: bool = False
+    # Vertex pairs (low, high) of edges no quad may cross and the cross field follows, like hard edges: guide curves.
+    guide_edges: tuple = ()
 
 
 @dataclass(slots=True)
@@ -446,6 +448,10 @@ def _feature_mask(mesh: _TriMesh, adj: _Adjacency, options: RemeshOptions) -> np
         features |= _material_edge_mask(adj)
     if options.preserve_uv_seams and mesh.face_uvs is not None:
         features |= _uv_seam_mask(mesh, adj)
+    if options.guide_edges and len(adj.edges):
+        n = int(adj.edges.max()) + 1
+        wanted = np.asarray(options.guide_edges, dtype=np.int64).reshape(-1, 2)
+        features |= np.isin(adj.edges[:, 0] * n + adj.edges[:, 1], wanted[:, 0] * n + wanted[:, 1])
     return features
 
 

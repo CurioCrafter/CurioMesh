@@ -9,6 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import guides  # noqa: E402
 import symmetry  # noqa: E402
 from triadq import flatquad  # noqa: E402
 from triadq.types import Cancelled, MeshData  # noqa: E402
@@ -66,6 +67,32 @@ class SymmetryTests(unittest.TestCase):
         self.assertFalse(symmetry.border_vertices(out_faces, len(out)).any())  # no gap along the seam
         mirrored = out * np.array([-1.0, 1.0, 1.0])
         self.assertEqual({tuple(p) for p in out.tolist()}, {tuple(p) for p in mirrored.tolist()})  # exactly mirrored
+
+
+class GuideTests(unittest.TestCase):
+    def test_quads_keep_a_stroke_as_edges(self):
+        sheet = _sheet(8)  # coarse triangles, 1 unit apart: the stroke runs between their vertices
+        co = sheet.vertices / 8.0
+        tris = np.asarray(sheet.faces)
+        stroke = np.array([[0.1, 0.2, 0.0], [0.9, 0.5, 0.0]])
+        co, tris, mat = guides.refine(co, tris, np.zeros(len(tris), dtype=np.int64), guides.resample(stroke, 0.05), 0.125)
+        chains, keys = guides.chain(co, tris, [stroke], 0.125)
+        co = guides.pull(co, tris, chains, [stroke], 0.125)
+        self.assertTrue(keys)
+        on_line = np.abs(co[np.unique(np.asarray(chains[0]))][:, 1] - (0.2 + 0.375 * (co[np.unique(np.asarray(chains[0]))][:, 0] - 0.1)))
+        self.assertLess(on_line.max(), 0.02)  # the chain lies on the stroke
+        out, _report = flatquad.pair_and_close(MeshData(co, [tuple(t) for t in tris.tolist()]), guide_edges=tuple(sorted(keys)))
+        seg = [(out.vertices[f[k]], out.vertices[f[(k + 1) % len(f)]]) for f in out.faces for k in range(len(f))]
+        p0, p1 = np.array([s[0] for s in seg]), np.array([s[1] for s in seg])
+        d = p1 - p0
+        dd = np.maximum((d * d).sum(axis=1), 1e-30)
+
+        def on_an_edge(x):  # the output edges may split a guide edge in two, but they must still cover it
+            t = np.clip(((x - p0) * d).sum(axis=1) / dd, 0.0, 1.0)
+            return np.linalg.norm(p0 + t[:, None] * d - x, axis=1).min() < 1e-9
+
+        kept = [on_an_edge(co[a] + (co[b] - co[a]) * t) for a, b in keys for t in (0.0, 0.25, 0.5, 0.75, 1.0)]
+        self.assertTrue(all(kept))  # no quad was made across the stroke
 
 
 if __name__ == "__main__":
