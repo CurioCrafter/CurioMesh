@@ -85,85 +85,168 @@ def seek_features(points: np.ndarray, source: np.ndarray, triangles: np.ndarray,
     return out
 
 
-def _collapse_folded(points: np.ndarray, faces: list[tuple[int, ...]]) -> list[int | None]:
-    """Close each still folded quad along its shorter diagonal, in place. Returns the new face list's source: index per face."""
+def _collapse_folded(points: np.ndarray, faces: list) -> None:
+    """Close each folded quad along its shorter diagonal, in place, unless that would pinch a neighbour. Closed quads become None."""
 
-    alive: list[int | None] = list(range(len(faces)))
-    for _round in range(8):
-        quads = [k for k, f in enumerate(faces) if f is not None and len(f) == 4]
-        array = np.asarray([faces[k] for k in quads], dtype=np.int64)
+    quads = [k for k, f in enumerate(faces) if f is not None]
+    if not quads:
+        return
+    array = np.asarray([faces[k] for k in quads], dtype=np.int64)
+    bad = np.flatnonzero(quad_quality(points[array]) <= 0.0)
+    users: dict[int, list[int]] = {}
+    for k in quads:
+        for v in faces[k]:
+            users.setdefault(v, []).append(k)
+    touched: set[int] = set()
+    for row in bad.tolist():
+        k = quads[row]
+        a, b, c, d = faces[k]
+        first, second = (a, c) if np.linalg.norm(points[a] - points[c]) <= np.linalg.norm(points[b] - points[d]) else (b, d)
+        around = {v for f in set(users[first]) | set(users[second]) if faces[f] is not None for v in faces[f]}
+        if touched & around or set(users[first]) & set(users[second]) != {k}:
+            continue  # closing it would pinch a neighbour, or the area changed this round
+        touched |= around
+        points[first] = (points[first] + points[second]) * 0.5
+        for f in users[second]:
+            if faces[f] is not None:
+                faces[f] = tuple(first if v == second else v for v in faces[f])
+        faces[k] = None
+
+
+def _dissolve_doublets(faces: list) -> None:
+    """A vertex with only two quads adds nothing: join them, in place. The second becomes None."""
+
+    users: dict[int, list[int]] = {}
+    for k, f in enumerate(faces):
+        if f is not None:
+            for v in f:
+                users.setdefault(v, []).append(k)
+    for vertex, around in users.items():
+        if len(around) != 2 or faces[around[0]] is None or faces[around[1]] is None:
+            continue
+        one, two = faces[around[0]], faces[around[1]]
+        if vertex not in one or vertex not in two:
+            continue
+        i, j = one.index(vertex), two.index(vertex)
+        p, x, q = one[(i + 1) % 4], one[(i + 2) % 4], one[(i + 3) % 4]
+        if two[(j + 1) % 4] != q or two[(j + 3) % 4] != p or two[(j + 2) % 4] == x:
+            continue  # border vertex, or the two quads don't share both its edges
+        faces[around[0]] = (p, x, q, two[(j + 2) % 4])
+        faces[around[1]] = None
+
+
+def _refill_folded(moved: np.ndarray, faces: list, most_rings: int = 4) -> np.ndarray:
+    """Last resort, in place on `faces`: replace a folded quad and rings around it by a fan from their middle. Returns the points, with any new ones.
+
+    The outline doesn't move, so nothing outside the area can fold because of it. The area grows until a fan fits.
+    """
+
+    extra: list[np.ndarray] = []
+    for _pass in range(64):
+        live = [k for k, f in enumerate(faces) if f is not None]
+        if not live:
+            break
+        points = np.vstack([moved, *extra]) if extra else moved
+        array = np.asarray([faces[k] for k in live], dtype=np.int64)
         bad = np.flatnonzero(quad_quality(points[array]) <= 0.0)
         if not len(bad):
             break
         users: dict[int, list[int]] = {}
-        for k, f in enumerate(faces):
-            if f is not None:
-                for v in f:
-                    users.setdefault(v, []).append(k)
-        touched: set[int] = set()
-        for row in bad.tolist():
-            k = quads[row]
-            a, b, c, d = faces[k]
-            first, second = (a, c) if np.linalg.norm(points[a] - points[c]) <= np.linalg.norm(points[b] - points[d]) else (b, d)
-            around = {v for f in set(users[first]) | set(users[second]) if faces[f] is not None for v in faces[f]}
-            if touched & around or set(users[first]) & set(users[second]) != {k}:
-                continue  # closing it would pinch a neighbour, or the area changed this round
-            touched |= around
-            points[first] = (points[first] + points[second]) * 0.5
-            for f in users[second]:
-                faces[f] = tuple(first if v == second else v for v in faces[f])
-            faces[k] = None
-            alive[k] = None
-    return alive
+        for k in live:
+            for v in faces[k]:
+                users.setdefault(v, []).append(k)
+        group = {live[int(bad[0])]}
+        done = False
+        for _ring in range(most_rings):
+            group |= {f for k in group for v in faces[k] for f in users[v]}
+            halves = {(faces[k][i], faces[k][(i + 1) % 4]) for k in group for i in range(4)}
+            following = {a: b for a, b in halves if (b, a) not in halves}
+            border = [a for a, b in halves if (b, a) not in halves]
+            if not border or len(following) != len(border) or len(border) % 2:
+                continue  # touches itself, closed, or an odd outline: take more
+            ring = [border[0]]
+            while following[ring[-1]] != border[0] and len(ring) <= len(border):
+                ring.append(following[ring[-1]])
+            if len(ring) != len(border):
+                continue
+            middle = len(points)
+            center = points[ring].mean(axis=0)
+            trial = np.vstack((points, center[None]))
+            for first in (0, 1):
+                cells = [(middle, ring[(first + 2 * i) % len(ring)], ring[(first + 2 * i + 1) % len(ring)], ring[(first + 2 * i + 2) % len(ring)]) for i in range(len(ring) // 2)]
+                if len(cells) <= len(group) and (quad_quality(trial[np.asarray(cells)]) > 0.0).all():
+                    extra.append(center[None])
+                    slots = sorted(group)
+                    for k in slots:
+                        faces[k] = None
+                    for k, cell in zip(slots, cells):
+                        faces[k] = cell
+                    done = True
+                    break
+            if done:
+                break
+        if not done:
+            break
+    return np.vstack([moved, *extra]) if extra else moved
 
 
-def unfold(points: np.ndarray, faces, find_nearest, rounds: int = 6) -> tuple[np.ndarray, list[tuple[int, ...]], list[int]]:
-    """Ease folded quads open by moving corners between their neighbours. Returns (points, faces, source index per face).
+def _ease(moved: np.ndarray, faces: list, find_nearest, rounds: int, wider: int) -> None:
+    """Move corners of folded quads between their neighbours, in place: `rounds` staying on the source, then `rounds` not, over wider rings."""
 
-    The first rounds stay on the source. Later ones don't, and take the ring around the fold too: a fold that remains
-    costs a little shape instead. Quads still stuck go, either as debris with a corner no other quad uses, or by closing
-    them along a diagonal.
-    """
-
-    faces = [tuple(f) for f in faces]
-    quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64)
-    moved = np.array(points, dtype=np.float64)
-    keep = list(range(len(faces)))
-    if not len(quads) or not (quad_quality(moved[quads]) <= 0.0).any():
-        return moved, faces, keep
+    quads = np.asarray([f for f in faces if f is not None], dtype=np.int64)
+    if not len(quads):
+        return
     a, b = quads.ravel(), np.roll(quads, -1, axis=1).ravel()
     count = np.bincount(a, minlength=len(moved)) + np.bincount(b, minlength=len(moved))
-    for k in range(8 * rounds):
+    for k in range(2 * rounds):
         folded = quads[quad_quality(moved[quads]) <= 0.0]
         if not len(folded):
-            break
-        ids = np.unique(folded)
-        if k >= rounds:
-            hit = np.zeros(len(moved), dtype=bool)
-            hit[ids] = True
-            for _ring in range(1 + (k - rounds) // rounds):  # a stubborn fold takes a wider area with it
-                hit[quads[hit[quads].any(axis=1)].ravel()] = True
-            ids = np.flatnonzero(hit)
+            return
+        hit = np.zeros(len(moved), dtype=bool)
+        hit[np.unique(folded)] = True
+        for _ring in range(wider if k >= rounds else 0):
+            hit[quads[hit[quads].any(axis=1)].ravel()] = True
+        ids = np.flatnonzero(hit)
         total = np.zeros_like(moved)
         np.add.at(total, a, moved[b])
         np.add.at(total, b, moved[a])
         moved[ids] = total[ids] / np.maximum(count[ids], 1)[:, None]
         if k < rounds:
             for i in ids.tolist():
-                hit_at = find_nearest(moved[i].tolist())
-                if hit_at[0] is not None:
-                    moved[i] = hit_at[0]
-    uses = np.bincount(quads.ravel(), minlength=len(moved))
-    stuck = quad_quality(moved[quads]) <= 0.0
-    debris = {tuple(q) for q in quads[stuck & (uses[quads] == 1).any(axis=1)].tolist()}
-    working: list = [None if f in debris else f for f in faces]
-    source = _collapse_folded(moved, working)
-    corners = Counter(tuple(sorted(f)) for k, f in enumerate(working) if f is not None and source[k] is not None)
+                found = find_nearest(moved[i].tolist())
+                if found[0] is not None:
+                    moved[i] = found[0]
+
+
+def unfold(points: np.ndarray, faces, find_nearest, rounds: int = 6, cycles: int = 6) -> tuple[np.ndarray, list[tuple[int, ...]], list[int]]:
+    """Leave no quad folded. Returns (points, faces, source index per face).
+
+    Easing costs a little shape on the first rounds and a little more later. What it can't open is closed along a
+    diagonal, which leaves one vertex fewer. Faces that aren't quads pass through.
+    """
+
+    moved = np.array(points, dtype=np.float64)
+    all_faces = [tuple(f) for f in faces]
+    working: list = [f if len(f) == 4 else None for f in all_faces]
+    array = np.asarray([f for f in working if f is not None], dtype=np.int64)
+    if not len(array) or not (quad_quality(moved[array]) <= 0.0).any():
+        return moved, all_faces, list(range(len(all_faces)))
+    for cycle in range(cycles):
+        _ease(moved, working, find_nearest, rounds, 1 + cycle)
+        array = np.asarray([f for f in working if f is not None], dtype=np.int64)
+        if not len(array) or not (quad_quality(moved[array]) <= 0.0).any():
+            break
+        _collapse_folded(moved, working)
+        _dissolve_doublets(working)
+    moved = _refill_folded(moved, working)
+    live = [f for f in working if f is not None]
+    corners = Counter(tuple(sorted(f)) for f in live)
     # Closing can leave two quads back to back on the same corners, touching nothing else.
-    keep = [k for k, f in enumerate(working) if f is not None and source[k] is not None and corners[tuple(sorted(f))] == 1]
-    alive = sorted({v for k in keep for v in working[k]})
+    keep = [k for k, f in enumerate(all_faces) if (len(f) != 4 or (working[k] is not None and corners[tuple(sorted(working[k]))] == 1))]
+    final = [all_faces[k] if len(all_faces[k]) != 4 else working[k] for k in keep]
+    alive = sorted({v for f in final for v in f})
     remap = {v: i for i, v in enumerate(alive)}
-    return moved[alive], [tuple(remap[v] for v in working[k]) for k in keep], keep
+    return moved[alive], [tuple(remap[v] for v in f) for f in final], keep
 
 
 def snap_rows(points: np.ndarray, faces, find_nearest, sharpen=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:

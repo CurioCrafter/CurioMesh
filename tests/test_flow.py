@@ -65,12 +65,11 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(found, {0, 1, 2, 3})
         self.assertEqual(faces_that_gain(MeshData(co, faces), _flat, 2.0), set())
 
-    def test_stuck_fold_closes_along_its_short_diagonal(self):
+    def test_crossed_quad_ends_unfolded(self):
         co, faces = _grid(4)
         a, b, c, d = faces[5]
         co[[a, c]] = co[[c, a]]  # a crossed quad
-        points, kept, keep = unfold(co, faces, _flat, rounds=0)
-        self.assertLess(len(kept), len(faces))
+        points, kept, keep = unfold(co, faces, _flat)
         self.assertEqual(len(keep), len(kept))
         self.assertGreater(quad_quality(points[np.asarray(kept)]).min(), 0.0)
 
