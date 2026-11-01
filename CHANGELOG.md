@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Auto Segments is now a guided, five-step panel**: pick the mesh, choose the aim,
+  press Start and watch, fix areas you don't like, Apply. One big button always shows
+  the next step. A real progress bar (a text bar before Blender 4.0) shows the stage
+  in words ("Looking at piece 12 of 250", "Pairing into quads, try 2") with a rough
+  time left, and a Stop button. Work Live shows the same bar. A summary at the end
+  gives faces before and after, percent fewer, and how much of the view changed.
+  Start is its own button now; changing a setting no longer restarts the search.
+- **Reduce To** (next to Keep Detail, the old Change Allowed). Ask for a percent of
+  your faces or a face count and Auto Segments lands within about 10% of it, then
+  reports how much the view changed.
+- **Live Boolean** (step 4). Put boxes, spheres or any closed mesh over parts of the
+  result, combine them with Union, Subtract or Intersect, and only the faces inside
+  are redone, live, as you move the shapes. An Organized / Detailed slider sets how
+  big the new quads are; everything outside stays as it is. Uses the Regions
+  winding-number test and the Work Live background worker; no mesh Boolean needed.
 - **Auto Segments** (new mode in the Remesh setting of the Guided panel). Press
   Update with no points and no face count: it reduces each loose piece as far as
   a camera says it can, looking from six sides at the original and the result,

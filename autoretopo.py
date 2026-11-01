@@ -24,17 +24,20 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from .triadq import patch
-from .triadq.budget import Level, allocate
+from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
 from .triadq.types import MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
 KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to gain, and thousands of them to look at
+MEASURE_SHARE = 0.6  # of the progress bar, spent looking at the pieces
 LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
+CLOSE_ENOUGH = 0.10  # Reduce To: a face count this near the one asked for is a hit
+PAIRED_SHARE = 0.6  # first guess of faces after pairing per face before it, corrected after each try
 TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
@@ -127,12 +130,15 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
+        self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
+        self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
+        self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
         self.busy = True
         self.current = None
         self.output = None
@@ -152,6 +158,13 @@ class AutoJob:
         self.seen: list[float] = []
         self.picked: list[int] = []
         self._search = self._run()
+
+    def seconds_left(self) -> float | None:
+        """A rough guess from the pace so far; None until there is enough to go on."""
+        if not self.busy or self.fraction < 0.05:
+            return None
+        spent = time.perf_counter() - self.started
+        return spent * (1.0 - self.fraction) / self.fraction
 
     def stop(self) -> None:
         self._stopped = True
@@ -227,7 +240,9 @@ class AutoJob:
         all_points, all_faces, all_kinds, parts = [], [], [], []
         offset = 0
         for index, ids in enumerate(self.pieces):
-            if index < len(self.sizes):
+            if index in self.tuned:
+                points, polys, kinds = self.tuned[index]
+            elif index < len(self.sizes):
                 points, polys, kinds = self.sizes[index][self.picked[index] if index < len(self.picked) else 0]
             else:
                 points, polys, kinds = self._piece_arrays(ids)
@@ -266,9 +281,12 @@ class AutoJob:
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
         picture_sizes = _picture_sizes(sizes).tolist()
+        weights = np.asarray([sum(len(self.faces[f]) - 2 for f in ids.tolist()) for ids in self.pieces], dtype=np.float64)
+        done_share = np.concatenate(([0.0], np.cumsum(weights))) / max(float(weights.sum()), 1.0)
         self._show()
         for index, ids in enumerate(self.pieces):
             self.progress = (index, len(self.pieces))
+            self.fraction = MEASURE_SHARE * float(done_share[index])
             self.stage = f"Looking at piece {index + 1} of {len(self.pieces)}"
             yield from self._measure_piece(ids, picture_sizes[index])
             yield
@@ -277,6 +295,8 @@ class AutoJob:
             if time.perf_counter() - self.shown_at > SHOW_EVERY:
                 self._show()
         self.progress = (len(self.pieces), len(self.pieces))
+        self.fraction = MEASURE_SHARE
+        self.stage = "Looking at the whole object"
         low, high = self.co.min(axis=0), self.co.max(axis=0)
         center, half = (low + high) / 2.0, extent * 0.55
         pixel = 2.0 * half / MAX_PIXELS
@@ -284,15 +304,25 @@ class AutoJob:
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
         allowed = asked * total_seen
+        reducing = self.target_faces > 0
+        paired_share = PAIRED_SHARE
         best = None
         tried: set[tuple[int, ...]] = set()
         for round_index in range(ROUNDS):
-            self.picked = allocate(self.levels, allowed, PIECE_LIMIT * asked, self.seen)
-            if tuple(self.picked) in tried:
+            self.fraction = MEASURE_SHARE + (1.0 - MEASURE_SHARE) * round_index / ROUNDS
+            self.tuned = {}
+            if reducing:
+                want = self.target_faces / paired_share  # faces before pairing that should give the faces asked for
+                self.picked = allocate_to_faces(self.levels, want, 1.0, self.seen)
+                self._tune(want)
+            else:
+                self.picked = allocate(self.levels, allowed, PIECE_LIMIT * asked, self.seen)
+            if tuple(self.picked) in tried and not self.tuned:
                 break
             tried.add(tuple(self.picked))
-            self.stage = f"Pairing into quads, try {round_index + 1}..."
+            self.stage = f"Pairing into quads, try {round_index + 1}"
             co, faces, kinds, _parts = self._combined()
+            before_pairing = len(faces)
             self._paired = None
             self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds), daemon=True, name="CurioMeshPair")
             self._pair_thread.start()
@@ -305,10 +335,17 @@ class AutoJob:
             result = self._paired
             points = np.asarray(result.vertices, dtype=np.float64)
             out_faces = [tuple(face) for face in result.faces]
-            self.stage = f"Checking the result, try {round_index + 1}..."
-            view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
-            wrong, shown = picture_counts(reference, view, pixel)
-            loss = 100.0 * wrong / max(shown, 1)
+            self.fraction += 0.5 * (1.0 - MEASURE_SHARE) / ROUNDS
+            if reducing:
+                miss = abs(len(out_faces) - self.target_faces) / self.target_faces
+                if best is None or miss < best[0]:
+                    best = (miss, points, out_faces, list(result.face_materials), None)
+                if miss <= CLOSE_ENOUGH:
+                    break
+                paired_share = len(out_faces) / max(before_pairing, 1)
+                continue
+            self.stage = f"Checking the result, try {round_index + 1}"
+            loss = yield from self._look(points, out_faces, center, half, reference, pixel)
             fits = loss <= 1.1 * self.detail
             # Prefer anything that fits, then the fewest faces. With nothing fitting yet, the least change.
             rank = (not fits, len(out_faces) if fits else loss)
@@ -318,11 +355,36 @@ class AutoJob:
                 break
             allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
         _rank, points, out_faces, materials, loss = best
+        if loss is None:  # Reduce To looks at the one it keeps, so the view change can still be judged
+            self.stage = "Checking the result"
+            self.fraction = 0.95
+            loss = yield from self._look(points, out_faces, center, half, reference, pixel)
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         quads = sum(1 for face in out_faces if len(face) == 4)
-        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
+        self.report = {"before": len(self.faces), "faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces, "seconds": time.perf_counter() - self.started}
+        self.fraction = 1.0
         self._show((points, out_faces, materials, parts))
+
+    def _look(self, points, out_faces, center, half, reference, pixel):
+        """Generator: the percent of the view that differs from the original. Returns it when exhausted."""
+        view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
+        wrong, shown = picture_counts(reference, view, pixel)
+        return 100.0 * wrong / max(shown, 1)
+
+    def _tune(self, want: float) -> None:
+        """Reduce To: the sizes come in steps of two, so remake the biggest picked piece to land closer on `want`."""
+        total = sum(levels[k].faces for levels, k in zip(self.levels, self.picked))
+        miss = want - total
+        if abs(miss) <= 0.03 * want:
+            return
+        index = max(range(len(self.picked)), key=lambda i: self.levels[i][self.picked[i]].faces)
+        points, polys, kinds = self._piece_arrays(self.pieces[index])
+        triangles = sum(len(p) - 2 for p in polys)
+        goal = self.levels[index][self.picked[index]].faces + miss
+        if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
+            return
+        self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles)
 
     def status(self) -> str:
         if self.report is None:

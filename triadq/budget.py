@@ -55,3 +55,27 @@ def allocate(pieces: list[list[Level]], allowed: float, piece_share: float, seen
         if upgrade is not None:
             heapq.heappush(heap, (-upgrade[0], piece, upgrade[1]))
     return choice
+
+
+def allocate_to_faces(pieces: list[list[Level]], faces: float, piece_share: float, seen: list[float]) -> list[int]:
+    """Pick levels whose faces add up to about `faces`, losing as little as `allocate` can for that many.
+
+    More allowed loss always means fewer faces, so the allowed loss is searched by halving. When the levels can't
+    reach `faces` (the smallest ones are still above it, or the biggest are below), the nearest total is returned.
+    """
+
+    def total(choice: list[int]) -> int:
+        return sum(levels[k].faces for levels, k in zip(pieces, choice))
+
+    low, high = 0.0, sum(max(level.loss for level in levels) for levels in pieces)
+    best = allocate(pieces, high, piece_share, seen)
+    for _ in range(24):
+        mid = (low + high) / 2.0
+        choice = allocate(pieces, mid, piece_share, seen)
+        if abs(total(choice) - faces) < abs(total(best) - faces):
+            best = choice
+        if total(choice) > faces:
+            low = mid
+        else:
+            high = mid
+    return best
