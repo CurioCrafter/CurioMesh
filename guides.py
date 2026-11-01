@@ -3,6 +3,9 @@
 
 """Guide curves: strokes the quads must follow, like an edge loop round an eye or along a panel line.
 
+Deformation lines are guide curves that become several parallel loops (`parallel`): the rows of quads a joint needs
+to bend without pinching. `loop_edges` finds those loops again in the result and `bend_stats` measures them.
+
 A stroke becomes a chain of mesh edges on the coarse triangle mesh that is about to be paired: the triangles near
 it are split until their edges are short, the cheapest path of edges that hugs the stroke is found, and the
 vertices on it are pulled onto the stroke. Those edges are then handed to the pairing as feature edges, which no
@@ -335,3 +338,93 @@ def follow(lines, co: np.ndarray, faces, spacing: float):
         total += float(best.sum())
         n += len(pts)
     return total / max(n, 1), worst
+
+
+# --------------------------------------------------------------------------- deformation lines: loops across a joint
+
+
+def parallel(lines, count: int, gap: float, nearest):
+    """`count` parallel loops for each stroke, `gap` apart and centred on it, all laid on the surface.
+
+    `nearest(p)` gives (closest surface point, surface normal). Returns one list of loops per stroke piece, the
+    middle loop being the stroke itself.
+    """
+    groups = []
+    for piece in on_surface(lines, lambda p: nearest(p)[0], gap / 2.0):
+        if len(piece) < 3:
+            continue
+        normal = np.asarray([nearest(p)[1] for p in piece.tolist()], dtype=np.float64)
+        tangent = np.gradient(piece, axis=0)
+        kernel = np.ones(5) / 5.0  # a stroke of straight pieces has jumpy tangents: smooth them so the loops stay parallel
+        tangent = np.stack([np.convolve(np.pad(tangent[:, k], 2, mode="edge"), kernel, mode="valid") for k in range(3)], axis=1)
+        side = np.cross(normal, tangent)
+        side /= np.maximum(np.linalg.norm(side, axis=1, keepdims=True), 1e-30)
+        loops = []
+        for k in range(count):
+            offset = (k - (count - 1) / 2.0) * gap
+            if abs(offset) < 1e-12:
+                loops.append(piece)
+            else:
+                loops.append(np.asarray([nearest(p)[0] for p in (piece + offset * side).tolist()], dtype=np.float64))
+        groups.append(loops)
+    return groups
+
+
+def _edge_array(faces) -> np.ndarray:
+    seen = set()
+    for f in faces:
+        for k in range(len(f)):
+            a, b = f[k], f[(k + 1) % len(f)]
+            seen.add((a, b) if a < b else (b, a))
+    return np.asarray(sorted(seen), dtype=np.int64).reshape(-1, 2)
+
+
+def _to_line(points: np.ndarray, line: np.ndarray, block: int = 512) -> np.ndarray:
+    """Distance from each point to a polyline."""
+    a, b = line[:-1], line[1:]
+    d = b - a
+    dd = np.maximum((d * d).sum(axis=1), 1e-30)
+    out = np.empty(len(points))
+    for start in range(0, len(points), block):
+        x = points[start : start + block, None, :]
+        t = np.clip(((x - a[None]) * d[None]).sum(axis=2) / dd[None], 0.0, 1.0)
+        out[start : start + block] = np.linalg.norm(a[None] + t[..., None] * d[None] - x, axis=2).min(axis=1)
+    return out
+
+
+def loop_edges(lines, co: np.ndarray, faces, tol: float) -> list[tuple[int, int]]:
+    """Edges of the result that run along one of the lines: both ends are within `tol` of it. Sorted (lo, hi) pairs."""
+    edges = _edge_array(faces)
+    if not len(edges):
+        return []
+    hit = np.zeros(len(edges), dtype=bool)
+    for line in lines:
+        near = _to_line(co, line) < tol if len(line) > 1 else np.zeros(len(co), dtype=bool)
+        hit |= near[edges[:, 0]] & near[edges[:, 1]]
+    return [(int(a), int(b)) for a, b in edges[hit]]
+
+
+def bend_stats(groups, co: np.ndarray, faces, gap: float) -> dict:
+    """How well the result carries the loops: loops found, poles on them, and how even their spacing is."""
+    edges = _edge_array(faces)
+    valence = np.bincount(edges.ravel(), minlength=len(co))
+    tol = 0.3 * gap
+    found = expected = 0
+    on_loops: set[int] = set()
+    gaps = []
+    for loops in groups:
+        previous = None
+        for loop in loops:
+            expected += 1
+            mine = loop_edges([loop], co, faces, tol)
+            length = float(np.linalg.norm(co[[b for _a, b in mine]] - co[[a for a, _b in mine]], axis=1).sum()) if mine else 0.0
+            if length >= 0.7 * float(np.linalg.norm(np.diff(loop, axis=0), axis=1).sum()):
+                found += 1
+            ids = sorted({v for e in mine for v in e})
+            on_loops.update(ids)
+            if previous is not None and ids:
+                gaps.append(_to_line(co[ids], previous))
+            previous = loop
+    poles = sum(1 for v in on_loops if valence[v] != 4)
+    spread = np.concatenate(gaps) if gaps else np.zeros(1)
+    return {"loops": expected, "found": found, "verts": len(on_loops), "poles": poles, "gap": float(spread.mean() / max(gap, 1e-30)), "uneven": float(spread.std() / max(spread.mean(), 1e-30))}
