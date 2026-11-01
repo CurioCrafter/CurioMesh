@@ -12,6 +12,7 @@ move the folder yourself. No `bpy` import, so the tests run outside Blender.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -38,7 +39,7 @@ if "--effort" in args:
 
 from curiomesh_engine import autoretopo, hardware, jobpack  # noqa: E402
 
-data = np.load(HERE / "mesh.npz")
+data = np.load(HERE / "mesh.npz", allow_pickle=False)
 loops, starts, totals = data["loops"].tolist(), data["start"].tolist(), data["total"].tolist()
 faces = [tuple(loops[a : a + b]) for a, b in zip(starts, totals)]
 machine = hardware.detect()
@@ -88,6 +89,16 @@ Good to know
 """
 
 
+def job_folder(directory, name: str) -> Path:
+    """<directory>/<name>_curiomesh_job, with the name cleaned. Raises ValueError if it would land outside `directory`."""
+    clean = re.sub(r"[^A-Za-z0-9_.-]", "_", name).lstrip(".") or "mesh"
+    base = Path(directory).resolve()
+    folder = (base / f"{clean}_curiomesh_job").resolve()
+    if folder.parent != base:
+        raise ValueError("That folder name would leave the folder you picked")
+    return folder
+
+
 def _copy_engine(source: Path, target: Path) -> None:
     """The add-on's Python files (not tests, docs or compiled binaries) as a package next to run_job.py."""
     for name in [*source.glob("*.py"), *source.glob("triadq/*.py")]:
@@ -129,13 +140,21 @@ def save_result(path, output: dict, report: dict, source_faces: int, source_vert
 
 def load_result(path, source_faces: int, source_verts: int):
     """(result dict like the preview's, report). Raises ValueError when it was made from a different mesh."""
-    with np.load(path) as data:
+    with np.load(path, allow_pickle=False) as data:
         made_from = data["source"].tolist()
         if made_from != [source_faces, source_verts]:
             raise ValueError(f"This result was made from a mesh with {made_from[0]:,} faces; the selected object has {source_faces:,}")
-        ends = np.cumsum(data["lens"])
-        flat = data["flat"]
-        faces = [tuple(int(v) for v in flat[a:b]) for a, b in zip(ends - data["lens"], ends)]
-        count = len(faces)
-        result = {"co": data["co"], "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": data["mat"], "parts": data["parts"]}
-        return result, json.loads(str(data["report"]))
+        co, lens, flat, mat, parts = data["co"], data["lens"], data["flat"], data["mat"], data["parts"]
+        report = json.loads(str(data["report"]))
+    # the file may come from anywhere: check every array before a face is built from it
+    count = len(lens)
+    if co.ndim != 2 or co.shape[1] != 3 or not np.isfinite(co).all() or lens.ndim != 1 or count == 0 or lens.min() < 3 or lens.max() > 64:
+        raise ValueError("This result file is damaged (bad points or faces)")
+    if int(lens.sum()) != len(flat) or flat.min() < 0 or flat.max() >= len(co) or len(mat) != count or len(parts) != count:
+        raise ValueError("This result file is damaged (indices out of range)")
+    if not isinstance(report, dict) or not all(isinstance(report.get(k), (int, float)) for k in ("faces", "quads", "loss", "seconds")):
+        raise ValueError("This result file is damaged (bad report)")
+    ends = np.cumsum(lens)
+    faces = [tuple(int(v) for v in flat[a:b]) for a, b in zip(ends - lens, ends)]
+    result = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": mat, "parts": parts}
+    return result, report

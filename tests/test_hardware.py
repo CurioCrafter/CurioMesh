@@ -85,6 +85,29 @@ class SavedProgressTests(unittest.TestCase):
             self.assertIsNone(hardware.load_piece(path))
 
 
+class SafetyTests(unittest.TestCase):
+    def test_checkpoints_go_in_a_private_folder_and_a_planted_temp_name_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = hardware.checkpoint_dir(np.zeros((3, 3)), 1, root)
+            self.assertEqual(folder.parent.parent, Path(root))
+            (folder / "x.tmp").write_bytes(b"planted")
+            path = hardware.piece_file(folder, b"k")
+            hardware.save_piece(path, 1.0, [(np.zeros((3, 3)), [(0, 1, 2)], ["0"])], [(1, 0.0)], 1.0)
+            self.assertEqual((folder / "x.tmp").read_bytes(), b"planted")
+            self.assertEqual([p.name for p in folder.glob("*.tmp")], ["x.tmp"])
+            self.assertIsNotNone(hardware.load_piece(path))
+
+    def test_a_job_folder_name_cannot_leave_the_chosen_folder_and_a_bad_result_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = jobpack.job_folder(root, "../../evil/..\\x")
+            self.assertEqual(folder.parent, Path(root).resolve())
+            out = {"co": np.zeros((3, 3)), "faces": [(0, 1, 7)], "mat": np.zeros(1, np.int32), "parts": np.zeros(1, np.int64)}
+            report = {"faces": 1, "quads": 0, "loss": 0.0, "seconds": 1.0}
+            jobpack.save_result(Path(root) / "ok.npz", out, report, 1, 3)  # vertex 7 does not exist
+            with self.assertRaises(ValueError):
+                jobpack.load_result(Path(root) / "ok.npz", 1, 3)
+
+
 class JobFolderTests(unittest.TestCase):
     def test_export_writes_a_runnable_folder_and_the_result_loads_back(self):
         co = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -309,10 +310,37 @@ def region_name(center, low, high) -> str:
 # --------------------------------------------------------------------------- saving progress
 
 
-def checkpoint_dir(co: np.ndarray, face_count: int, root: str | None = None) -> Path:
-    """The folder that holds the saved parts of the job on this very mesh."""
+def _private_dir(folder: Path) -> bool:
+    """Make `folder` (0700) and check it is a real directory of ours, not a symlink or someone else's."""
+    try:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if sys.platform != "win32":
+            info = os.lstat(folder)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            if info.st_mode & 0o077:
+                os.chmod(folder, 0o700)
+        return folder.is_dir() and not folder.is_symlink()
+    except OSError:
+        return False
+
+
+def checkpoint_dir(co: np.ndarray, face_count: int, root: str | None = None) -> Path | None:
+    """The folder that holds the saved parts of the job on this very mesh: private to this user, or None if none is safe."""
+    if root:
+        base = Path(root)
+    else:
+        try:
+            import bpy
+
+            base = Path(bpy.utils.user_resource("CONFIG"))
+        except Exception:
+            base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache")
     digest = hashlib.sha1(np.ascontiguousarray(co).tobytes() + str(face_count).encode()).hexdigest()[:16]
-    return Path(root or tempfile.gettempdir()) / "curiomesh_resume" / digest
+    folder = base / "curiomesh_resume"
+    if not (_private_dir(folder) and _private_dir(folder / digest)):
+        return None  # no checkpoints rather than files in a place someone else could plant
+    return folder / digest
 
 
 def piece_file(folder: Path, key: bytes) -> Path:
@@ -327,20 +355,26 @@ def save_piece(path: Path, detail: float, sizes: list, levels: list[tuple[int, f
         data[f"l{k}"] = np.fromiter((len(p) for p in polys), dtype=np.int32, count=len(polys))
         data[f"f{k}"] = np.fromiter((v for p in polys for v in p), dtype=np.int64)
         data[f"m{k}"] = np.asarray([int(m) for m in kinds], dtype=np.int32)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "wb") as handle:
-        np.savez(handle, **data)
-    os.replace(tmp, path)  # a crash while writing never leaves a half file under the real name
+    descriptor, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")  # a name nobody could have planted
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            np.savez(handle, **data)
+        os.replace(tmp, path)  # a crash while writing never leaves a half file under the real name
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def load_piece(path: Path):
     """(detail, sizes, levels, seen) of a saved part, or None if it is missing or unreadable."""
     try:
-        with np.load(path) as data:
+        with np.load(path, allow_pickle=False) as data:
             sizes = []
             for k in range(int(data["n"])):
                 lens, flat = data[f"l{k}"], data[f"f{k}"]
+                points = data[f"p{k}"]
+                if points.ndim != 2 or points.shape[1] != 3 or lens.min(initial=3) < 3 or int(lens.sum()) != len(flat) or (len(flat) and (flat.min() < 0 or flat.max() >= len(points))):
+                    return None  # not a file we wrote
                 ends = np.cumsum(lens)
                 polys = [tuple(int(v) for v in flat[a:b]) for a, b in zip(ends - lens, ends)]
                 sizes.append((data[f"p{k}"], polys, [str(int(m)) for m in data[f"m{k}"]]))

@@ -1087,7 +1087,7 @@ def _start_segments(context, gs, src) -> bool:
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
     saved = hardware.checkpoint_dir(co, len(faces))
-    resume = len(list(saved.glob("*.npz"))) if saved.exists() else 0
+    resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
     job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), settings, saved)
@@ -2248,7 +2248,11 @@ class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
         gs = _gs(context)
         obj = _source_mesh(context)
         src = _source_data(obj)
-        folder = Path(self.directory) / f"{obj.name}_curiomesh_job"
+        try:
+            folder = jobpack.job_folder(self.directory, obj.name)
+        except ValueError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
         jobpack.export_job(folder, src["co"], src["faces"], src["mat"], gs.auto_detail, auto_target(gs, len(src["faces"])), "FULL", Path(__file__).resolve().parent)
         state["message"] = f"Job written to {folder}. Copy the folder to the other computer and follow README.txt in it"
         self.report({"INFO"}, state["message"])
