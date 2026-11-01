@@ -251,6 +251,95 @@ fn winding_number<'py>(
 }
 
 #[pyfunction]
+#[allow(clippy::type_complexity)]
+fn pictures<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    triangles: PyReadonlyArray1<'py, i64>,
+    normals: PyReadonlyArray1<'py, f64>,
+    center: [f64; 3],
+    half: f64,
+    pixels: usize,
+) -> PyResult<(Bound<'py, PyArray1<bool>>, F64Array<'py>, F64Array<'py>)> {
+    let (points, triangles) = (slice(&points, "points")?, slice(&triangles, "triangles")?);
+    let normals = slice(&normals, "normals")?;
+    let vertices = (points.len() / 3) as i64;
+    if points.len() % 3 != 0
+        || triangles.len() % 3 != 0
+        || normals.len() != triangles.len()
+        || half.is_nan()
+        || half <= 0.0
+        || pixels == 0
+        || triangles.iter().any(|&v| v < 0 || v >= vertices)
+    {
+        return Err(PyValueError::new_err("picture arrays are inconsistent"));
+    }
+    let (hit, normal, depth) =
+        py.detach(|| geom::pictures(points, triangles, normals, center, half, pixels));
+    Ok((
+        hit.into_pyarray(py),
+        normal.into_pyarray(py),
+        depth.into_pyarray(py),
+    ))
+}
+
+#[pyfunction]
+fn quad_points_valid<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    epsilon: PyReadonlyArray1<'py, f64>,
+    warp_cosine: f64,
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
+    let (points, epsilon) = (slice(&points, "points")?, slice(&epsilon, "epsilon")?);
+    if points.len() != epsilon.len() * 12 {
+        return Err(PyValueError::new_err("quad arrays are inconsistent"));
+    }
+    let out = py.detach(|| {
+        topo::collect(epsilon.len(), |k| {
+            let p = &points[k * 12..k * 12 + 12];
+            let corner = |i: usize| [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]];
+            geom::quad_valid(
+                &[corner(0), corner(1), corner(2), corner(3)],
+                epsilon[k],
+                warp_cosine,
+            )
+        })
+    });
+    Ok(out.into_pyarray(py))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+fn parity_templates<'py>(
+    py: Python<'py>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    edges: PyReadonlyArray1<'py, i64>,
+    mids: PyReadonlyArray1<'py, i64>,
+    vertices: PyReadonlyArray1<'py, f64>,
+    base: PyReadonlyArray1<'py, f64>,
+    warp_cosine: f64,
+) -> PyResult<(I64Array<'py>, Bound<'py, PyArray1<bool>>)> {
+    let (indptr, flat) = (slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let (edges, mids) = (slice(&edges, "edges")?, slice(&mids, "mids")?);
+    let (vertices, base) = (slice(&vertices, "vertices")?, slice(&base, "base")?);
+    check_faces(indptr, flat)?;
+    let inside = |v: i64, n: usize| v >= 0 && (v as usize) < n / 3;
+    let ok = edges.len() == mids.len() * 2
+        && flat
+            .iter()
+            .all(|&v| inside(v, vertices.len()) && inside(v, base.len()))
+        && mids.iter().all(|&v| inside(v, base.len()));
+    if !ok {
+        return Err(PyValueError::new_err("template arrays are inconsistent"));
+    }
+    let (counts, valid) = py
+        .detach(|| geom::parity_templates(indptr, flat, edges, mids, vertices, base, warp_cosine));
+    Ok((counts.into_pyarray(py), valid.into_pyarray(py)))
+}
+
+#[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn cross_field_jacobi(
     py: Python<'_>,
@@ -337,6 +426,9 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parity_path_edges, m)?)?;
     m.add_function(wrap_pyfunction!(augment_matching, m)?)?;
     m.add_function(wrap_pyfunction!(winding_number, m)?)?;
+    m.add_function(wrap_pyfunction!(pictures, m)?)?;
+    m.add_function(wrap_pyfunction!(quad_points_valid, m)?)?;
+    m.add_function(wrap_pyfunction!(parity_templates, m)?)?;
     m.add_function(wrap_pyfunction!(cross_field_jacobi, m)?)?;
     m.add_function(wrap_pyfunction!(cross_field_gl, m)?)?;
     Ok(())

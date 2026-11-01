@@ -294,6 +294,34 @@ def parity_path_edges(mesh, frozen=frozenset()) -> set | None:
     return set(map(tuple, edges.reshape(-1, 2).tolist()))
 
 
+def quad_points_valid(points, epsilon, warp_cosine: float) -> np.ndarray | None:
+    """Native `topology._quad_points_valid` for (M, 4, 3) quads, one tolerance per quad."""
+
+    module = native()
+    if module is None or not hasattr(module, "quad_points_valid"):
+        return None
+    return module.quad_points_valid(np.ascontiguousarray(points, dtype=np.float64).reshape(-1), np.ascontiguousarray(epsilon, dtype=np.float64), float(warp_cosine))
+
+
+def parity_template_validity(faces, vertices, base, selected_edges, midpoints, warp_cosine: float) -> list | None:
+    """Native `topology._parity_template_validity`: per face, the validity of each template in the order they're tried."""
+
+    module = native()
+    if module is None or not hasattr(module, "parity_templates"):
+        return None
+    indptr, flat = _csr(faces)
+    order = sorted(selected_edges)
+    edges = np.asarray(order, dtype=np.int64).reshape(-1)
+    mids = np.asarray([midpoints[edge] for edge in order], dtype=np.int64)
+    counts, valid = module.parity_templates(
+        indptr, flat, edges, mids,
+        np.ascontiguousarray(vertices, dtype=np.float64).reshape(-1), np.ascontiguousarray(base, dtype=np.float64).reshape(-1), float(warp_cosine),
+    )
+    valid = valid.tolist()
+    ends = np.cumsum(counts).tolist()
+    return [valid[end - count : end] for count, end in zip(counts.tolist(), ends)]
+
+
 # --------------------------------------------------------------------------- matching
 
 
@@ -359,6 +387,40 @@ def inside_volume(points, triangles) -> np.ndarray | None:
     near = np.all((points >= low - pad) & (points <= high + pad), axis=1)
     inside[near] = np.abs(winding_number(points[near], triangles)) > 0.5
     return inside
+
+
+def pictures(points, polys, center, half: float, pixels: int) -> list | None:
+    """Native `autoretopo.pictures`: the same six orthographic pictures from a depth buffer, no rays or BVH.
+
+    None without the native module, or for a mesh with polygons over four sides (the rays handle those).
+    """
+
+    module = native()
+    if module is None or not hasattr(module, "pictures"):  # an older binary
+        return None
+    indptr, flat = _csr(polys)
+    sizes = np.diff(indptr)
+    if len(sizes) and int(sizes.max()) > 4:
+        return None
+    points = np.ascontiguousarray(points, dtype=np.float64)
+    tris = flat[indptr[:-1][sizes == 3][:, None] + np.arange(3)]
+    quads = flat[indptr[:-1][sizes == 4][:, None] + np.arange(4)]
+    a, b, c = np.moveaxis(points[tris], 1, 0)
+    normals = np.cross(b - a, c - a)
+    if len(quads):
+        # Blender's BVH cuts a quad's first corner off (the diagonal from corner 1 to 3), or, when corner 0 or 2 turns
+        # inward seen along the quad's normal, the other diagonal. The same split keeps the two paths' pictures equal.
+        a, b, c, d = np.moveaxis(points[quads], 1, 0)
+        facing = np.cross(c - a, d - b)
+        inward = ((np.cross(a - d, b - a) * facing).sum(axis=1) < 0.0) | ((np.cross(c - b, d - c) * facing).sum(axis=1) < 0.0)
+        quads[inward] = quads[inward][:, [1, 2, 3, 0]]
+        tris = np.vstack((tris, quads[:, [3, 0, 1]], quads[:, [1, 2, 3]]))
+        # And like the BVH, both halves report the whole quad's normal, not their own: on a bent quad that differs a lot.
+        normals = np.vstack((normals, facing, facing))
+    hit, normal, depth = module.pictures(points.reshape(-1), tris.reshape(-1), normals.reshape(-1), [float(x) for x in center], float(half), int(pixels))
+    shape = (6, pixels, pixels)
+    hit, normal, depth = hit.reshape(shape), normal.reshape((*shape, 3)), depth.reshape(shape)
+    return [(hit[i], normal[i], depth[i]) for i in range(6)]
 
 
 def cross_field_jacobi(cross, face_a, face_b, transport, pinned, degree, steps: int) -> np.ndarray | None:

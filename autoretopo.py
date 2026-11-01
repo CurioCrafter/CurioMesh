@@ -26,7 +26,7 @@ from mathutils.bvhtree import BVHTree
 from .triadq import patch
 from .triadq.budget import Level, allocate, allocate_to_faces
 from .triadq.flatquad import pair_and_close
-from . import guides, symmetry
+from . import guides, symmetry, turbo
 from .triadq.types import Cancelled, MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -49,8 +49,12 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
     """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth)] when exhausted.
 
     `tree` is the BVH of this very mesh when the caller already has one (building it is a fifth of a picture set).
+    The native core makes the same pictures in one quick call, with no BVH; these rays are the fallback.
     """
 
+    fast = turbo.pictures(points, polys, center, half, pixels)
+    if fast is not None:
+        return fast
     if tree is None:
         tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
     grid = (((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half).tolist()

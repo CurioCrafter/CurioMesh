@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Faster Auto Segments** with the Turbo core, on every vendor and without any GPU. The camera pictures
+  now come from a depth buffer in Rust instead of one Python ray per pixel, and the check of quad
+  closure templates runs in Rust on all cores. The results are the same. Without the
+  Turbo core it falls back to the rays and Python as before.
 - **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
   vertex group and colour the parts that need more quads red; the search keeps more
   faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate
