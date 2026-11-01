@@ -200,6 +200,8 @@ def _profile_update(self, context):
         _applying = True
         try:
             self.auto_detail, self.auto_method, self.auto_output = values
+            if self.auto_profile == "ANIMATION":
+                self.bend_use = True  # Animation asks for Deformation Lines across the joints
         finally:
             _applying = False
     _redraw_update(self, context)
@@ -3118,7 +3120,6 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.enabled = not searching
         col.prop(gs, "auto_profile")
         col.row(align=True).prop(gs, "auto_aim", expand=True)
-        col.prop(gs, "preset", text="Mesh Type")
         row = col.row(align=True)
         row.label(text="Mirror", icon="MOD_MIRROR")
         row.prop(gs, "sym_axis", expand=True)
