@@ -27,6 +27,7 @@ from .triadq import patch
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
 from .triadq.types import MeshData
+from .triadq.uvs import simplify_borders
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
@@ -36,6 +37,7 @@ PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
 TURNED_DEG = 20.0
+BORDER_TOLERANCE = 0.05  # how far a border between kinds may straighten, as a share of the level's edge length
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
@@ -91,6 +93,13 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
 
 
 def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+    free = None
+    if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
+        triangles = sum(len(p) - 2 for p in polys)
+        wanted = max(ratio * triangles, 1.0)
+        edge = math.sqrt(_area(points, polys) / wanted)
+        points, polys, kinds, free = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * edge)
+        ratio = min(wanted / max(sum(len(p) - 2 for p in polys), 1), 1.0)
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
@@ -98,7 +107,12 @@ def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tu
     obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
     context.scene.collection.objects.link(obj)
     try:
-        obj.modifiers.new("Reduce", "DECIMATE").ratio = ratio
+        modifier = obj.modifiers.new("Reduce", "DECIMATE")
+        modifier.ratio = ratio
+        if free is not None:  # Decimate never removes a vertex of weight 0 once the factor is above 0
+            obj.vertex_groups.new(name="Free").add(free, 1.0, "REPLACE")
+            modifier.vertex_group = "Free"
+            modifier.vertex_group_factor = 1.0
         evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
         reduced = evaluated.to_mesh()
         co = np.empty(len(reduced.vertices) * 3, dtype=np.float64)
@@ -110,6 +124,11 @@ def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tu
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh)
     return co.reshape(-1, 3), faces, materials
+
+
+def _area(points: np.ndarray, polys) -> float:
+    fan = np.asarray([(p[0], p[k], p[k + 1]) for p in polys for k in range(1, len(p) - 1)], dtype=np.int64)
+    return 0.5 * float(np.linalg.norm(np.cross(points[fan[:, 1]] - points[fan[:, 0]], points[fan[:, 2]] - points[fan[:, 0]]), axis=1).sum())
 
 
 def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
