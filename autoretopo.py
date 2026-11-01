@@ -23,9 +23,10 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from .triadq import patch
+from .triadq import patch, patterns
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
+from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.types import MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -39,6 +40,7 @@ TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
+POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int):
@@ -112,6 +114,21 @@ def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tu
     return co.reshape(-1, 3), faces, materials
 
 
+def _overlaps(points: np.ndarray, faces) -> int:
+    """Pairs of faces in one piece that pass through each other. Separate parts often overlap on purpose."""
+
+    tree = BVHTree.FromPolygons(points.tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+    fa, fb = patch.face_adjacency(faces)
+    piece = patch._labels(len(faces), fa, fb).tolist()
+    ids = [set(f) for f in faces]
+    return sum(1 for a, b in tree.overlap(tree) if a < b and piece[a] == piece[b] and not ids[a] & ids[b])
+
+
+def _folded(points: np.ndarray, faces) -> int:
+    quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+    return int((patch.quad_quality(points[quads]) <= 0.0).sum())
+
+
 def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
     """Pixels per side for pieces of these sizes (the whole object is 1.0), coarser for a model with very many parts."""
 
@@ -139,6 +156,8 @@ class AutoJob:
         self.output_id = 0
         self.warnings: list[str] = []
         self.report: dict | None = None
+        self.topology: float | None = None  # 0-100 against hand-made meshes: see triadq/patterns.py
+        self._tidied_score = 0.0
         self.progress = (0, 0)
         self.stage = "Looking at the pieces..."
         self.started = time.perf_counter()
@@ -257,6 +276,19 @@ class AutoJob:
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
 
+    def _polish(self, points, faces, materials, level) -> None:
+        """Leaves the tidied mesh in `_paired` only if the score says it is tidier and nothing got broken."""
+        try:
+            before = patterns.measure(points, faces)
+            self.topology = patterns.score(before)["score"]
+            tidied = polish(MeshData(points, faces, materials), level)[0]
+            after = patterns.measure(tidied.vertices, tidied.faces)
+            score = patterns.score(after)["score"]
+            if score > self.topology and after["non_manifold_edges"] <= before["non_manifold_edges"] and _folded(tidied.vertices, tidied.faces) <= _folded(np.asarray(points), faces):
+                self._paired, self._tidied_score = tidied, score
+        except Exception as exc:  # a thread has nobody above it to report to
+            self.warnings = [f"Tidying failed, kept the quads as they were: {exc}"]
+
     def _run(self):
         fa, fb = patch.face_adjacency(self.faces)
         shell = np.unique(patch._labels(len(self.faces), fa, fb), return_inverse=True)[1]
@@ -318,14 +350,37 @@ class AutoJob:
                 break
             allowed *= min(max(self.detail / max(loss, 0.01), 0.3), 4.0)
         _rank, points, out_faces, materials, loss = best
+        for level in POLISH_LEVELS:
+            self.stage = "Tidying the quads..."
+            self._paired = None
+            self._pair_thread = threading.Thread(target=self._polish, args=(points, out_faces, materials, level), daemon=True, name="CurioMeshPolish")
+            self._pair_thread.start()
+            while self._pair_thread.is_alive():
+                if self._stopped:
+                    return
+                self._pair_thread.join(0.02)  # this is many small Python steps: give it the interpreter
+                yield
+            if self._paired is None:
+                continue
+            tidied = self._paired
+            tidied_points = np.asarray(tidied.vertices, dtype=np.float64)
+            tidied_faces = [tuple(face) for face in tidied.faces]
+            view = yield from pictures(tidied_points, tidied_faces, center, half, MAX_PIXELS)
+            wrong, shown = picture_counts(reference, view, pixel)
+            tidied_loss = 100.0 * wrong / max(shown, 1)
+            # Passing through itself is worse than any loose quad, and the camera can't see it.
+            if tidied_loss <= max(1.1 * self.detail, loss) and _overlaps(tidied_points, tidied_faces) <= _overlaps(points, out_faces):
+                points, out_faces, materials, loss = tidied_points, tidied_faces, list(tidied.face_materials), tidied_loss
+                self.topology = self._tidied_score
+                break
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         quads = sum(1 for face in out_faces if len(face) == 4)
-        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
+        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "topology": self.topology, "seconds": time.perf_counter() - self.started}
         self._show((points, out_faces, materials, parts))
 
     def status(self) -> str:
         if self.report is None:
             return self.stage
         r = self.report
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s"
+        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. Tidiness: {r['topology'] or 0:.0f}/100. {r['seconds']:.0f} s"
