@@ -695,10 +695,10 @@ def conform(points, faces, seams):
 def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True):
     """A reduced part joined to its seams: all quads when ParityPath can close it, every second seam vertex taking the others as frozen midpoints.
 
-    Returns (points, faces, materials). Falls back to pairs and triangles on the full seam, and gives triangles with `quads` off.
+    Returns (points, faces, materials). Falls back to quads and a few triangles on the full seam, and gives triangles with `quads` off.
     """
 
-    pairing = RemeshOptions(target_faces=max(1, len(faces) // 2), seed_count=2, force_quads=False)
+    pairing = RemeshOptions(target_faces=max(1, len(faces) // 2), seed_count=2, force_quads=False, max_pairing=True)
     if not seams and quads:
         made = pair_and_close(MeshData(points, faces, kinds), seed_count=2)[0]
         return np.asarray(made.vertices, dtype=np.float64), [tuple(f) for f in made.faces], list(made.face_materials)
@@ -716,7 +716,7 @@ def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True):
             paired = remesh_mesh(MeshData(np.vstack((p, extra)), f, [kinds[i] for i in origin]), pairing)[0]
             closed = parity_path_quad_closure(paired, frozen_midpoints=frozen)
             return np.asarray(closed.vertices, dtype=np.float64), [tuple(x) for x in closed.faces], list(closed.face_materials)
-        except ValueError:
+        except ValueError:  # no valid template somewhere along a bent seam: quads and some triangles, on the full seam
             pass
     p, f, origin, _ids = conform(points, faces, seams)
     mats = [kinds[i] for i in origin]
@@ -911,7 +911,7 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
             if grid is not None:
                 xyz, quads, loop = grid
                 new = xyz[len(loop) :]
-                remap = np.concatenate((loop, offset + np.arange(len(new))))
+                remap = np.concatenate((loop, len(co) + np.arange(len(new))))
                 made = [tuple(int(remap[v]) for v in q) for q in quads]
                 options.append((topology_score(*_local_mesh(np.vstack((co, new)), made)) or 0.0, new, made))
         good = options and options[0][0] >= SHEET_GOOD
@@ -926,14 +926,13 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
                 both = np.vstack((co[seam], pts))
                 plain = [tuple(local[v] if v < result.base else len(seam) + v - result.base for v in face) for face in result.faces]
                 pts = fit_to_surface(both, plain, np.arange(len(both)) < len(seam), project, passes, 0.5)[len(seam) :]
-            made = [tuple(v if v < result.base else offset + v - result.base for v in face) for face in result.faces]
-            options.append((topology_score(*_local_mesh(np.vstack((co, pts)), made)) or 0.0, pts, made))
+            options.append((topology_score(*_local_mesh(np.vstack((co, pts)), result.faces)) or 0.0, pts, result.faces))
         elif not options:
             warnings.append(f"A piece of {len(comp)} faces stayed as it was: {result.message}")
         if options:
             _score, new, made = max(options, key=lambda row: row[0])
             all_points.append(new)
-            out_faces += made
+            out_faces += [tuple(v if v < len(co) else v + offset - len(co) for v in face) for face in made]
             offset += len(new)
             done[comp] = True
     out_faces += [faces[i] for i in np.flatnonzero(mask & ~done).tolist()]

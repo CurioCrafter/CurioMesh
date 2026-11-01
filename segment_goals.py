@@ -834,6 +834,8 @@ def on_selected(gs) -> None:
     """The Use and detail on the panel follow the segment you click."""
     if len(view.seg["sel"]) == 1:
         record = view.seg["parts"][next(iter(view.seg["sel"]))]
+        if "goal" not in record:  # a table of loose pieces, with no segments found yet
+            return
         gs["seg_goal"] = next(i for i, item in enumerate(GOAL_ITEMS) if item[0] == record["goal"])
         gs["seg_goal_detail"] = record["goal_detail"]
 
