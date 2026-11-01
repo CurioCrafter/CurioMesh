@@ -45,7 +45,42 @@ def snap_new_vertices(closed: MeshData, coarse_points: np.ndarray, find_nearest)
     return MeshData(moved, closed.faces, closed.face_materials, name=closed.name)
 
 
-def snap_rows(points: np.ndarray, faces, find_nearest, rounds: int = 6) -> tuple[np.ndarray, list[tuple[int, ...]]]:
+def seek_features(points: np.ndarray, source: np.ndarray, triangles: np.ndarray, nearest, pull: float = 0.05, reach: float = 0.5) -> np.ndarray:
+    """Move each vertex to where the planes of the source triangles around it meet, as dual contouring does.
+
+    A vertex on the surface only follows it. This one finds the crease or peak in its neighbourhood, which is what the
+    camera sees. `nearest` gives the closest of `points` to a location. `pull` keeps a flat neighbourhood's vertex where
+    it is, and `reach` limits a move to this share of the typical distance between vertices.
+    """
+
+    a, b, c = (source[triangles[:, k]] for k in range(3))
+    cross = np.cross(b - a, c - a)
+    double_area = np.linalg.norm(cross, axis=1)
+    keep = double_area > 0.0
+    normal = cross[keep] / double_area[keep, None]
+    weight = double_area[keep] * 0.5
+    middle = (a[keep] + b[keep] + c[keep]) / 3.0
+    owner = np.fromiter((nearest(m) for m in middle.tolist()), dtype=np.int64, count=len(middle))
+    matrix = np.zeros((len(points), 3, 3))
+    target = np.zeros((len(points), 3))
+    total = np.zeros(len(points))
+    np.add.at(matrix, owner, weight[:, None, None] * normal[:, :, None] * normal[:, None, :])
+    np.add.at(target, owner, weight[:, None] * normal * (normal * middle).sum(axis=1, keepdims=True))
+    np.add.at(total, owner, weight)
+    used = total > 0.0
+    ridge = pull * total[used]
+    matrix = matrix[used] + ridge[:, None, None] * np.eye(3)
+    placed = np.linalg.solve(matrix, (target[used] + ridge[:, None] * points[used])[:, :, None])[:, :, 0]
+    spacing = np.sqrt(total[used] / np.maximum(np.median(total[used]), 1e-30)) * np.sqrt(np.median(total[used]))
+    step = placed - points[used]
+    length = np.linalg.norm(step, axis=1)
+    scale = np.minimum(1.0, reach * spacing / np.maximum(length, 1e-30))
+    out = points.copy()
+    out[used] = points[used] + step * scale[:, None]
+    return out
+
+
+def snap_rows(points: np.ndarray, faces, find_nearest, rounds: int = 6, sharpen=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
     """Put a field-aligned mesh back on the source, and ease folded quads open by moving corners between their neighbours.
 
     The first rounds stay on the source. Later ones don't, and take the ring around the fold too: a fold that still
@@ -63,9 +98,11 @@ def snap_rows(points: np.ndarray, faces, find_nearest, rounds: int = 6) -> tuple
                 moved[i] = hit[0]
 
     onto(range(len(moved)))
+    if sharpen is not None:
+        moved = sharpen(moved)
     a, b = quads.ravel(), np.roll(quads, -1, axis=1).ravel()
     count = np.bincount(a, minlength=len(moved)) + np.bincount(b, minlength=len(moved))
-    for k in range(3 * rounds):
+    for k in range(8 * rounds):
         folded = quads[quad_quality(moved[quads]) <= 0.0]
         if not len(folded):
             break
@@ -73,7 +110,8 @@ def snap_rows(points: np.ndarray, faces, find_nearest, rounds: int = 6) -> tuple
         if k >= rounds:
             hit = np.zeros(len(moved), dtype=bool)
             hit[ids] = True
-            hit[quads[hit[quads].any(axis=1)].ravel()] = True
+            for _ring in range(1 + (k - rounds) // rounds):  # a stubborn fold takes a wider area with it
+                hit[quads[hit[quads].any(axis=1)].ravel()] = True
             ids = np.flatnonzero(hit)
         total = np.zeros_like(moved)
         np.add.at(total, a, moved[b])
@@ -154,4 +192,4 @@ def split_faces(mesh: MeshData, marked: set[int]) -> MeshData:
     return MeshData(stacked, output, materials, name=mesh.name)
 
 
-__all__ = ["faces_that_gain", "snap_new_vertices", "snap_rows", "split_faces"]
+__all__ = ["faces_that_gain", "seek_features", "snap_new_vertices", "snap_rows", "split_faces"]

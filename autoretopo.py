@@ -26,10 +26,11 @@ import bpy
 import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
 from .triadq import patch
 from .triadq.flatquad import _face_frames
-from .triadq.flow import faces_that_gain, snap_new_vertices, snap_rows, split_faces
+from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
 from .triadq.types import MeshData
@@ -44,8 +45,8 @@ ROUNDS = 4  # tries at landing on the amount asked for
 ROWS_SMALLEST = 32  # Clean Rows: a piece due fewer quads than this is paired instead
 ROWS_START = 0.04  # Clean Rows: first try, as a share of the source's triangles
 ROWS_MOST = 0.8  # Clean Rows: most faces, as a share of the source's triangles
-ROWS_FAR = 2.5  # Clean Rows: a change this many times the amount asked for gets a denser layout, not local density
-ROWS_DENSER = 4  # Clean Rows: most rounds of density where the camera finds a difference
+ROWS_FAR = 1.0  # Clean Rows: a change this many times the amount asked for gets a denser layout, not local density
+ROWS_DENSER = 0  # Clean Rows: most rounds of density where the camera finds a difference
 ROWS_FIX_SHARE = 0.6  # Clean Rows: share of the wrong pixels on a quad that splitting it is assumed to fix
 ROWS_SECONDS = 30.0  # Clean Rows: QuadriFlow's time limit per piece, plus...
 ROWS_SECONDS_PER_QUAD = 0.01  # ...this much for each quad asked for
@@ -422,7 +423,8 @@ class AutoJob:
         total = float(areas.sum()) or 1.0
         folder = tempfile.mkdtemp(prefix="curiomesh_rows_")
         try:
-            wants = (target * areas / total).astype(np.int64)
+            sizes = np.asarray([len(ids) for ids in self.pieces], dtype=np.float64)
+            wants = (target * 0.5 * (areas / total + sizes / sizes.sum())).astype(np.int64)  # a small part with many faces is usually detail
             jobs = [k for k, want in enumerate(wants.tolist()) if want >= ROWS_SMALLEST]
             for k in jobs:
                 points, polys, _kinds = self._piece_arrays(self.pieces[k])
@@ -476,7 +478,16 @@ class AutoJob:
                     faces.append(tuple(flat[cursor : cursor + size]))
                     cursor += size
                 tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
-                moved, quads = snap_rows(rows["co"], faces, tree.find_nearest)
+                triangles = np.asarray([(q[0], q[i], q[i + 1]) for q in polys for i in range(1, len(q) - 1)], dtype=np.int64)
+
+                def sharpen(moved, points=points, triangles=triangles):
+                    grid = KDTree(len(moved))
+                    for i, co in enumerate(moved.tolist()):
+                        grid.insert(co, i)
+                    grid.balance()
+                    return seek_features(moved, points, triangles, lambda at: grid.find(at)[1])
+
+                moved, quads = yield from self._in_thread(lambda: snap_rows(rows["co"], faces, tree.find_nearest, sharpen=sharpen))
                 all_points.append(moved)
                 all_faces += [tuple(v + offset for v in q) for q in quads]
                 centers = np.asarray([moved[list(q)].mean(axis=0) for q in quads]).tolist()
@@ -528,7 +539,7 @@ class AutoJob:
             if best is None or rank < best[0]:
                 best = (rank, points, out_faces, kinds, loss)
 
-        for _round in range(2):  # a layout near enough that local density can finish the job
+        for _round in range(3):  # a layout near enough that local density can finish the job
             built = yield from self._rows_once(areas, target)
             if built is None:
                 return
