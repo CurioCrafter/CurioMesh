@@ -678,7 +678,7 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
 
 def pair_and_close(
     coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
-    feature_angle_deg: float = 60.0,
+    feature_angle_deg: float = 60.0, split_all: bool = False,
 ) -> tuple[MeshData, RemeshReport]:
     """Repair, pair with TRIAD-Q, then close every connected piece on its own.
 
@@ -696,7 +696,10 @@ def pair_and_close(
     paired, solver = remesh_mesh(repaired, pair)
     if not force_quads or not paired.faces:
         return paired, solver
-    closed, sparse, split, open_pieces = _close_pieces(paired)
+    if split_all:
+        closed, sparse, split, open_pieces = quad_only_closure(paired), 0, 1, 0
+    else:
+        closed, sparse, split, open_pieces = _close_pieces(paired)
     solver.closure_applied = True
     solver.closure_method = "PARITY_PATH" if not split and not open_pieces else "PER_PIECE"
     solver.output_faces = len(closed.faces)

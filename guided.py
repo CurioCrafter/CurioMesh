@@ -152,6 +152,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     new_radius: bpy.props.FloatProperty(name="New Radius", description="Reach of the next point (scroll while placing). 0 picks a size from the mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
     new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
+    auto_style: bpy.props.EnumProperty(name="Style", description="Auto Segments: what comes first when the two disagree", items=(("DETAIL", "Keep Detail", "Holds the amount of change you allow, with the fewest faces. Quads follow the shape, so they can look slanted"), ("BALANCED", "Balanced", "Holds the same change with far fewer irregular vertices, by splitting every quad. Costs more faces"), ("ROWS", "Clean Rows", "Even, square quads in long rows. Costs more visible change, and small sharp detail softens")), default="DETAIL", update=_redraw_update)
     auto_detail: bpy.props.FloatProperty(name="Change Allowed", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces", default=6.0, min=0.5, soft_max=30.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
@@ -925,11 +926,11 @@ def _start_areas(source, gs, pts, src, L0) -> bool:
 
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3))
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), gs.auto_style)
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
-    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail)
+    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail, gs.auto_style)
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -2015,6 +2016,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         row.enabled = gs.scope != "AUTO"
         row.prop(gs, "strategy", expand=True)
         if gs.scope == "AUTO":
+            layout.prop(gs, "auto_style")
             layout.prop(gs, "auto_detail")
         else:
             layout.prop(gs, "base_faces")
