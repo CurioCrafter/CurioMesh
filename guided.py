@@ -226,6 +226,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
+    auto_tidy: bpy.props.BoolProperty(name="Tidy Quads", description="Auto Segments: after the search, try to make the quads tidier, like hand-made meshes. Slow, and the view changes a little more, so it is off unless you want it", default=False)
     keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Auto Segments: quads stay inside one UV island, so textures land where they did. Costs faces, nearly double on a model cut into many islands. Bake Detail Normal + Color is the better route for most game assets, as it needs no old seams", default=False)
     bake_detail: bpy.props.EnumProperty(name="Bake Detail", description="On Apply, bake your mesh's detail into textures on the result, on the CPU or GPU set for Cycles. Can take minutes", items=BAKE_ITEMS, default="OFF")
     bake_size: bpy.props.EnumProperty(name="Bake Size", description="Width and height of the baked textures", items=BAKE_SIZES, default="2048")
@@ -1104,7 +1105,7 @@ def _start_segments(context, gs, src) -> bool:
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
     charts = _uv_charts(state_source(), src) if gs.keep_uvs and gs.bake_detail != "NORMAL_COLOR" else None
     codes = src["mat"] if charts is None else charts[0]
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None)
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy)
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
@@ -1119,7 +1120,7 @@ def _start_segments(context, gs, src) -> bool:
     cache_key = (src["sig"], mirror[:2] if mirror else None, charts is None)
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
-    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength))
+    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy)
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -2677,6 +2678,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
         if obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
             col.prop(gs, "keep_uvs", toggle=True, icon="UV")
+        col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
         if hasattr(gs, "auto_method"):
             col.prop(gs, "auto_method")
         if hasattr(gs, "auto_output"):
@@ -2689,6 +2691,10 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             col = layout.box().column(align=True)
             col.label(text=f"{before:,} to {after:,} faces ({100.0 * (1.0 - after / max(before, 1)):.0f}% fewer)", icon="CHECKMARK")
             col.label(text=f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1")
+            if report.get("shading") is not None:
+                col.label(text=f"Smooth shading turned on {report['shading']:.1f}% of it", icon="BLANK1")
+            if report.get("topology") is not None:
+                overlay.wrap_label(col, f"Tidiness {report['topology']:.0f}/100: 100 is as tidy as hand-made meshes. It says nothing about shape, so read it with the view change.", icon="BLANK1", width=36, limit=3)
             if report["asked"]:
                 col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
             follows = report.get("guides")

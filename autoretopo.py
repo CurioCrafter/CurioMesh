@@ -23,9 +23,10 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from .triadq import parts, patch
+from .triadq import parts, patch, patterns
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.flatquad import _face_frames, pair_and_close
+from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
 from . import guides, symmetry
@@ -53,6 +54,7 @@ SOFT_DEG = 10.0  # shallow folds in cloth only turn the shading this much
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 SHOW_EVERY = 1.0  # seconds between preview updates
+POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None):
@@ -233,6 +235,21 @@ def _face_areas(points: np.ndarray, polys) -> np.ndarray:
     return np.bincount(owner, weights=tri, minlength=len(polys))
 
 
+def _overlaps(points: np.ndarray, faces) -> int:
+    """Pairs of faces in one piece that pass through each other. Separate parts often overlap on purpose."""
+
+    tree = BVHTree.FromPolygons(points.tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+    fa, fb = patch.face_adjacency(faces)
+    piece = patch._labels(len(faces), fa, fb).tolist()
+    ids = [set(f) for f in faces]
+    return sum(1 for a, b in tree.overlap(tree) if a < b and piece[a] == piece[b] and not ids[a] & ids[b])
+
+
+def _folded(points: np.ndarray, faces) -> int:
+    quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+    return int((patch.quad_quality(points[quads]) <= 0.0).sum())
+
+
 def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
     """Pixels per side for pieces of these sizes (the whole object is 1.0), coarser for a model with very many parts."""
 
@@ -283,7 +300,8 @@ def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=No
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False):
+        self.tidy = tidy  # try to tidy the finished quads, kept only if the score rises and the camera allows it
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
@@ -305,6 +323,7 @@ class AutoJob:
         self.output_id = 0
         self.warnings: list[str] = []
         self.report: dict | None = None
+        self.topology: float | None = None  # 0-100 against hand-made meshes: see triadq/patterns.py
         self.progress = (0, 0)
         self.stage = "Looking at the pieces..."
         self.started = time.perf_counter()
@@ -560,6 +579,23 @@ class AutoJob:
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
 
+    def _score(self, points, faces) -> None:
+        try:
+            self.topology = patterns.score(patterns.measure(points, faces))["score"]
+        except Exception as exc:  # a thread has nobody above it to report to; the score is only a report
+            self.warnings = [f"No tidiness score: {exc}"]
+
+    def _polish(self, points, faces, materials, level) -> None:
+        """Leaves the tidied mesh in `_paired` only if the score says it is tidier and nothing got broken."""
+        try:
+            before = patterns.measure(points, faces)
+            tidied = polish(MeshData(points, faces, materials), level)[0]
+            after = patterns.measure(tidied.vertices, tidied.faces)
+            if patterns.score(after)["score"] > patterns.score(before)["score"] and after["non_manifold_edges"] <= before["non_manifold_edges"] and _folded(tidied.vertices, tidied.faces) <= _folded(np.asarray(points), faces):
+                self._paired = tidied
+        except Exception as exc:  # a thread has nobody above it to report to
+            self.warnings = [f"Tidying failed, kept the quads as they were: {exc}"]
+
     def _run(self):
         fa, fb = patch.face_adjacency(self.faces)
         shell = np.unique(patch._labels(len(self.faces), fa, fb), return_inverse=True)[1]
@@ -660,6 +696,34 @@ class AutoJob:
             self.stage = "Checking the result"
             self.fraction = 0.95
             loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
+        for level in POLISH_LEVELS if self.tidy else ():  # an option: it is slow and the loss goes up a little
+            self.stage = "Tidying the quads..."
+            self._paired = None
+            self._pair_thread = threading.Thread(target=self._polish, args=(points, out_faces, materials, level), daemon=True, name="CurioMeshPolish")
+            self._pair_thread.start()
+            while self._pair_thread.is_alive():
+                if self._stopped:
+                    return
+                self._pair_thread.join(0.02)  # this is many small Python steps: give it the interpreter
+                yield
+            if self._paired is None:
+                continue
+            tidied = self._paired
+            tidied_points = np.asarray(tidied.vertices, dtype=np.float64)
+            tidied_faces = [tuple(face) for face in tidied.faces]
+            tidied_loss, tidied_shading, tidied_soft = yield from self._look(tidied_points, tidied_faces, center, half, reference, reference_shaded, pixel)
+            # Passing through itself is worse than any loose quad, and the camera can't see it.
+            if tidied_loss <= max(1.1 * self.detail, loss) and _overlaps(tidied_points, tidied_faces) <= _overlaps(points, out_faces):
+                points, out_faces, materials, loss, shading, soft = tidied_points, tidied_faces, list(tidied.face_materials), tidied_loss, tidied_shading, tidied_soft
+                break
+        self.stage = "Scoring the quads"
+        self._pair_thread = threading.Thread(target=self._score, args=(points, out_faces), daemon=True, name="CurioMeshScore")
+        self._pair_thread.start()
+        while self._pair_thread.is_alive():
+            if self._stopped:
+                return
+            self._pair_thread.join(0.02)
+            yield
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         self.fraction = 1.0
@@ -672,7 +736,7 @@ class AutoJob:
             follows = {"strokes": len(self.guide_lines), "mean": mean / size, "worst": worst / size}
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "shading": shading, "shading_soft": soft, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows}
 
     def _look(self, points, out_faces, center, half, reference, reference_shaded, pixel):
         """Generator: percent of the view that differs in shape, and in smooth shading past 20 and 10 degrees, when exhausted."""
@@ -704,4 +768,5 @@ class AutoJob:
             return self.stage + extra
         r = self.report
         shade = "" if r.get("shading") is None else f", {r['shading']:.1f}% in smooth shading"
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape{shade}. {r['seconds']:.0f} s{extra}"
+        tidy = "" if r.get("topology") is None else f"Tidiness: {r['topology']:.0f}/100. "
+        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape{shade}. {tidy}{r['seconds']:.0f} s{extra}"

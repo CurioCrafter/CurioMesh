@@ -377,7 +377,7 @@ class PartJob:
         self.output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
         self.output_id += 1
         before = self.base["report"]
-        self.report = dict(before, shading=None, shading_soft=None, faces=count, quads=sum(1 for f in faces if len(f) == 4), tris=sum(1 for f in faces if len(f) == 3), loss=loss, seconds=time.perf_counter() - self.started)
+        self.report = dict(before, shading=None, shading_soft=None, topology=None, faces=count, quads=sum(1 for f in faces if len(f) == 4), tris=sum(1 for f in faces if len(f) == 3), loss=loss, seconds=time.perf_counter() - self.started)
         self.fraction = 1.0
 
 
