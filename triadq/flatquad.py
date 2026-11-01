@@ -26,7 +26,7 @@ import numpy as np
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
 from .topology import parity_path_closure_unpairing, quad_only_closure, topology_summary
-from .types import MeshData
+from .types import MeshData, cancel_with, check_cancelled
 
 
 @dataclass(slots=True)
@@ -678,9 +678,11 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
 
 def pair_and_close(
     coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
-    feature_angle_deg: float = 60.0,
+    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (),
 ) -> tuple[MeshData, RemeshReport]:
     """Repair, pair with TRIAD-Q, then close every connected piece on its own.
+
+    `cancelled()` is polled between the long steps; once true the call raises `types.Cancelled`.
 
     Sparse ParityPath closure keeps each paired quad whole, so a big flat quad
     stays one face. Corner closure splits every face, so it only runs on a piece
@@ -688,10 +690,19 @@ def pair_and_close(
     quads. A piece neither can close stays quad-dominant.
     """
 
+    cancel_with(cancelled)
+    try:
+        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges)
+    finally:
+        cancel_with(None)
+
+
+def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges):
     repaired, _added = make_closable(coarse)
+    check_cancelled()
     pair = RemeshOptions(
         target_faces=max(1, len(repaired.faces) // 2), seed_count=seed_count, force_quads=False, field_mode=field_mode,
-        feature_angle_deg=feature_angle_deg, max_pairing=True,
+        feature_angle_deg=feature_angle_deg, max_pairing=True, guide_edges=guide_edges,
     )
     paired, solver = remesh_mesh(repaired, pair)
     if not force_quads or not paired.faces:
@@ -721,6 +732,7 @@ def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
     offset = 0
     counts = [0, 0, 0]
     for group in np.split(order, starts[1:]):
+        check_cancelled()
         members = group.tolist()
         used = sorted({v for f in members for v in paired.faces[f]})
         local = {v: k for k, v in enumerate(used)}

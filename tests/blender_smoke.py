@@ -1507,6 +1507,59 @@ def run_guided_case(module):
     guided.remove_preview()
     bpy.data.objects.remove(bell)
     guided.state["source"] = sphere.name
+    # a drawn edge loop becomes a real strip, and a hand fix on the result is remembered and found again
+    import math
+    import tempfile
+    from pathlib import Path
+
+    curve = bpy.data.curves.new("CM_Loop", "CURVE")
+    curve.dimensions = "3D"
+    spline = curve.splines.new("POLY")
+    spline.points.add(48)
+    for i, point in enumerate(spline.points):
+        a = 2.0 * math.pi * i / 48
+        point.co = (math.cos(a), math.sin(a), 0.0, 1.0)
+    ring = bpy.data.objects.new("CM_Loop", curve)
+    bpy.context.scene.collection.objects.link(ring)
+    item = gs.guide_curves.add()
+    item.obj, item.kind = ring, "LOOP"
+    gs.loop_use = True
+    bpy.context.view_layer.objects.active = sphere
+    guided.state["auto_base"] = None
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    runner = guided.state["work"]["runner"]
+    if not runner.bend_groups or not runner.report or not runner.report.get("bend"):
+        raise AssertionError(f"guided: the drawn edge loop was not built: {runner.why} {guided.status()}")
+    print(f"PASS guided edge loop: {runner.report['bend']['found']} of {runner.report['bend']['loops']} loops found")
+    library = str(Path(tempfile.mkdtemp()) / "fixes.json")
+    guided.library_path = lambda: library
+    res = guided.state["res"]
+    preview = bpy.data.objects[guided.PREVIEW_NAME]
+    import numpy as np
+    from curiomesh import teach
+
+    around = {}
+    for i, f in enumerate(res["faces"]):
+        for v in f:
+            around.setdefault(v, []).append(i)
+    pick = next(v for v, fl in around.items() if len(fl) == 4 and all(len(res["faces"][i]) == 4 for i in fl))
+    block = around[pick]
+    co = res["co"]
+    outline = teach.outline(res["faces"], block)
+    r = outline
+    if len(r) != 8:
+        raise AssertionError("guided: teach test block has no 8 sided outline")
+    kept = [f for i, f in enumerate(res["faces"]) if i not in block]
+    faces = kept + [(r[0], r[1], r[2], r[3]), (r[3], r[4], r[5], r[6]), (r[3], r[6], r[7], r[0])]
+    preview.data.clear_geometry()
+    preview.data.from_pydata(co.tolist(), [], faces)
+    preview.data.update()
+    if "FINISHED" not in bpy.ops.curiomesh.teach_remember():
+        raise AssertionError(f"guided: remember this fix failed: {guided.status()}")
+    if len(teach.load(library)) != 1:
+        raise AssertionError("guided: the remembered fix was not written to the library file")
+    print(f"PASS guided teach: fix remembered, {len(guided.state['found'])} place(s) offered")
     gs.scope = "WHOLE"
 
     # auto-suggest, next spot, apply

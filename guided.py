@@ -11,18 +11,23 @@ fixed; Redraw Strip rebuilds a selected strip; Next spot points at the worst are
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass
 
 import bmesh
 import bpy
 import numpy as np
+from bpy_extras.io_utils import ExportHelper, ImportHelper
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from . import overlay, region
-from . import autoretopo, segments
+from . import guides, overlay, region, symmetry
+from . import loops as edgeloops
+from . import autoretopo, segments, teach
 from .triadq import areas, patch
+from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.types import MeshData
 
@@ -44,6 +49,11 @@ KIND_ITEMS = [
     ("CALM", "Calm", "Fewer, bigger quads near the point (flat or boring areas). Also cuts a hole in the region of Points Only", "SMOOTHCURVE", 3),
 ]
 KIND_KEYS = ("DETAIL", "LOOP", "SHARP", "CALM")
+CURVE_KIND_ITEMS = [
+    ("GUIDE", "Guide", "A thin line the quads follow, like a panel line", "CURVE_DATA", 0),
+    ("LOOP", "Edge Loop", "A loop or flow line drawn by hand: it becomes real continuous edge loops of regular quads, with the poles outside it", "MESH_CIRCLE", 1),
+    ("BEND", "Deformation", "A line across a joint or crease: several evenly spaced loops so the mesh bends without pinching", "MOD_SIMPLEDEFORM", 2),
+]
 SCOPE_ITEMS = [
     ("WHOLE", "Whole Mesh", "Remesh the whole mesh; the points change the quad size across it", "MESH_DATA", 0),
     ("POINTS", "Points Only", "Remesh only inside the point spheres; the rest of the mesh stays exactly as it is", "SELECT_SET", 1),
@@ -63,6 +73,13 @@ SHAPE_OP_ITEMS = [
     ("SUBTRACT", "Subtract", "Take the faces inside this shape out of what the shapes above it cover", "SELECT_SUBTRACT", 1),
     ("INTERSECT", "Intersect", "Keep only the faces that the shapes above it and this shape both cover", "SELECT_INTERSECT", 2),
 ]
+SYMMETRY_ITEMS = [
+    ("OFF", "Off", "Solve the whole mesh", "BLANK1", 0),
+    ("AUTO", "Auto", "Find the mirror plane (X, Y or Z). It is used only when the mesh is symmetric enough", "MOD_MIRROR", 1),
+    ("X", "X", "Mirror across the plane facing X", "BLANK1", 2),
+    ("Y", "Y", "Mirror across the plane facing Y", "BLANK1", 3),
+    ("Z", "Z", "Mirror across the plane facing Z", "BLANK1", 4),
+]
 APPLY_ITEMS = [
     ("NEW", "New Object", "Write the result to a new object called <name>_Retopo", "DUPLICATE", 0),
     ("REPLACE", "Replace Mesh", "Put the result into your object (Undo restores it)", "FILE_REFRESH", 1),
@@ -72,12 +89,14 @@ PRESET_ITEMS = [
     ("HARD_SURFACE", "Hard-Surface Prop", "Props with hard edges: Sharp points, grid-like quads", "MOD_BEVEL", 1),
     ("SCAN", "Scan / Photogrammetry", "Noisy scans: broad strokes, smoothed curvature, flowing quads", "OUTLINER_OB_POINTCLOUD", 2),
     ("GAME_LOD", "Game LOD", "Few quads, spent only where it matters", "MOD_DECIM", 3),
+    ("ANIMATION", "Animation", "Bodies and creatures that bend: like Character, and Auto Segments asks for Deformation Lines across the joints", "BONE_DATA", 4),
 ]
 PRESETS = {
     "CHARACTER": dict(base_faces=3000, kind="DETAIL", strategy="FLOW", feature=40.0, radius=0.08, smooth=1),
     "HARD_SURFACE": dict(base_faces=1500, kind="SHARP", strategy="GRID", feature=25.0, radius=0.06, smooth=0),
     "SCAN": dict(base_faces=4000, kind="DETAIL", strategy="FLOW", feature=50.0, radius=0.10, smooth=3),
     "GAME_LOD": dict(base_faces=800, kind="DETAIL", strategy="FLOW", feature=40.0, radius=0.10, smooth=1),
+    "ANIMATION": dict(base_faces=3000, kind="LOOP", strategy="FLOW", feature=40.0, radius=0.08, smooth=1),
 }
 
 state = {
@@ -98,6 +117,11 @@ state = {
     "L0": 0.1,
     "predicted": 0,
     "work": None,
+    "auto_cache": (None, {}),  # (mesh signature, measurements of it): Start again with another amount skips the looking
+    "found": [],  # (fix, match) pairs of remembered fixes that fit the result, best first
+    "region": None,  # faces of the source (a boolean each) that Selected Faces Only redoes, taken when Start was pressed
+    "curve_sig": None,  # what the drawn curves looked like when the search last started: a change restarts it
+    "curve_at": 0.0,
     "auto_base": None,  # the finished Auto Segments result that step 4 (Live Boolean) works on
 }
 
@@ -139,6 +163,8 @@ def _preset_update(self, context):
     self.strategy = p["strategy"]
     self.new_kind = p["kind"]
     self.feature_angle = p["feature"]
+    if self.preset == "ANIMATION":
+        self.bend_use = True
     diag = state["src"]["diag"] if state["src"] else 0.0
     if diag > 0:
         self.new_radius = p["radius"] * diag
@@ -163,6 +189,15 @@ def _shape_poll(self, obj) -> bool:
 class CURIOMESH_PG_guided_shape(bpy.types.PropertyGroup):
     obj: bpy.props.PointerProperty(name="Shape", description="A box, a sphere, a lattice or any closed mesh that marks a part to redo", type=bpy.types.Object, poll=_shape_poll)
     operation: bpy.props.EnumProperty(name="Combine", description="How this shape joins the ones above it. They are worked out from top to bottom, so start with a Union", items=SHAPE_OP_ITEMS, default="UNION", update=_redraw_update)
+
+
+def _guide_poll(self, obj) -> bool:
+    return guides.is_guide_object(obj) and obj.name != PREVIEW_NAME and obj.name != state["source"]
+
+
+class CURIOMESH_PG_guided_guide(bpy.types.PropertyGroup):
+    obj: bpy.props.PointerProperty(name="Guide", description="A curve, a Grease Pencil drawing, or a mesh made of edges only. The quads are made to follow it", type=bpy.types.Object, poll=_guide_poll)
+    kind: bpy.props.EnumProperty(name="Type", description="What the quads do with this curve", items=CURVE_KIND_ITEMS, default="GUIDE", update=_redraw_update)
 
 
 class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
@@ -190,6 +225,21 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_method: bpy.props.EnumProperty(name="Method", description="The method to remake the selected parts with", items=segments.METHOD_ITEMS, default="FLAT")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
+    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Auto Segments: solve one half of the mesh and mirror it. The two sides come out identical and the seam is exact. Only used when the mesh really is symmetric; otherwise the whole mesh is solved and you are told why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
+    guide_use: bpy.props.BoolProperty(name="Use Guide Curves", description="Auto Segments: make the quads follow the guide curves in the list (an edge loop round an eye, a line along a panel). The curves are laid on the mesh, so they can float a little off it", default=True, update=_redraw_update)
+    guide_curves: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_guide)
+    guide_index: bpy.props.IntProperty(default=0)
+    region_use: bpy.props.BoolProperty(name="Selected Faces Only", description="Auto Segments: redo only the faces you selected in Edit Mode before pressing Start, and leave the rest exactly as it is. Loops you drew there are used; the seam is joined where its vertices line up. Not used with Mirror or Paint Density", default=False, update=_redraw_update)
+    loop_use: bpy.props.BoolProperty(name="Edge Loops", description="Auto Segments: loops and flow lines you drew (round an eye or the mouth, or along a cheek) become real continuous edge loops with rows of regular quads beside them. Poles are put outside them", default=True, update=_redraw_update)
+    loop_count: bpy.props.IntProperty(name="Loops", description="Parallel loops per drawn line: the one you drew and one more each side is 3", default=3, min=3, max=9, update=_redraw_update)
+    bend_use: bpy.props.BoolProperty(name="Deformation Lines", description="Auto Segments: lines drawn across a joint or crease (elbow, knee, mouth corner, eyelid, knuckle) become parallel edge loops, evenly spaced, so the mesh bends without pinching", default=False, update=_redraw_update)
+    bend_loops: bpy.props.IntProperty(name="Loops", description="Parallel loops per line. Three is the least that bends well; use more across a big joint", default=3, min=3, max=9, update=_redraw_update)
+    loop_gap: bpy.props.FloatProperty(name="Loop Gap", description="Distance between two loops of a drawn line or deformation line, in object units. 0 picks about one quad", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE", update=_redraw_update)
+    bend_crease: bpy.props.BoolProperty(name="Crease", description="Mark the middle loop of each line with Blender's edge crease (for Subdivision Surface) when you Apply", default=False)
+    bend_sharp: bpy.props.BoolProperty(name="Sharp", description="Mark the middle loop of each line as sharp edges when you Apply", default=False)
+    density_use: bpy.props.BoolProperty(name="Paint Density", description="Auto Segments: keep more faces where you painted. Paint the vertex group in Weight Paint mode (red = more detail); the rest is left to the search", default=False, update=_redraw_update)
+    density_group: bpy.props.StringProperty(name="Group", description="The vertex group of the mesh that holds the paint", default="CM_Density")
+    density_strength: bpy.props.FloatProperty(name="Strength", description="How strongly red paint pulls faces in: 1 keeps about four times as many faces in full red, 4 about six times", default=1.0, min=0.25, max=4.0)
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redo the part of the result inside the shapes, live, while everything outside stays as it is. Move or resize a shape and the new quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
@@ -361,6 +411,8 @@ def _source_data(obj) -> dict:
         "mat": mat[keep],
         "keep": keep,
         "bvh": None,
+        "weld": inv,
+        "keep": keep,
     }
     state["src"] = data
     return data
@@ -886,6 +938,270 @@ def remove_preview() -> None:
     state.update(res=None, spot=None, draw=None, draw_key=None, batches=None)
 
 
+# --------------------------------------------------------------------------- teach by example
+
+
+class _PreviewOp:
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.objects.get(PREVIEW_NAME) is not None and state["res"] is not None
+
+
+def library_path() -> str:
+    """The user's own file of remembered fixes, in Blender's user config folder (not in the add-on)."""
+    return os.path.join(bpy.utils.user_resource("CONFIG", path="curiomesh", create=True), "fixes.json")
+
+
+def _drain(generator):
+    """Run a generator to its end and give back what it returns."""
+    try:
+        while True:
+            next(generator)
+    except StopIteration as done:
+        return done.value
+
+
+def _camera_accepts(src, before, after, centre, half) -> bool:
+    """A camera looks at the spot from six sides: the new faces must not look further from the original than the old ones."""
+    pixels = 64
+    pixel = 2.0 * half / pixels
+    reference = _drain(autoretopo.pictures(src["co"], src["faces"], centre, half, pixels, _bvh(src)))
+    wrong = []
+    for co, faces in (before, after):
+        cent = np.asarray([np.mean([co[v] for v in f], axis=0) for f in faces])
+        near = np.abs(cent - centre).max(axis=1) < 2.0 * half
+        (sub_co, sub_faces, _m), _rest = edgeloops.split_region(co, faces, np.zeros(len(faces), dtype=int), near)
+        view = _drain(autoretopo.pictures(sub_co, sub_faces, centre, half, pixels))
+        wrong.append(autoretopo.picture_counts(reference, view, pixel))
+    return wrong[1][0] <= wrong[0][0] * 1.15 + 0.01 * max(wrong[0][1], 1)
+
+
+def _adopt(context, source, co, faces, mat) -> None:
+    """Make an edited mesh the result: the preview shows it and everything after it (more fixes, Apply) works on it."""
+    fa, fb = patch.face_adjacency(faces)
+    parts = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
+    count = len(faces)
+    res = {"co": np.asarray(co, dtype=np.float64), "faces": [tuple(f) for f in faces], "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": parts}
+    state["res"] = res
+    if state["auto_base"] is not None:
+        state["auto_base"]["out"] = dict(res)
+    _build_preview(context, source, res, uvs=False)
+    state["draw_key"] = None
+    overlay.tag_redraw()
+
+
+def _kept(source) -> list[dict]:
+    try:
+        return json.loads(source.get("curiomesh_kept", "[]"))
+    except ValueError:
+        return []
+
+
+def _scan(res) -> None:
+    """Which remembered fixes fit the result now."""
+    found = []
+    for fix in teach.load(library_path()):
+        found += [(fix, m) for m in teach.find(fix, res["co"], res["faces"])[:5]]
+    state["found"] = sorted(found, key=lambda pair: pair[1]["score"])
+
+
+def _restore_kept(context, source) -> None:
+    """After a new search: put each fix you made by hand last time back where it was, if the quads there came out the same."""
+    res = state["res"]
+    if res is None:
+        return
+    co, faces, mat = res["co"], list(res["faces"]), np.asarray(res["mat"])
+    done = lost = 0
+    for entry in _kept(source):
+        hits = teach.find(entry["fix"], co, faces, near=entry["at"], reach=entry["reach"])
+        if not hits:
+            lost += 1
+            continue
+        style = int(mat[hits[0]["faces"][0]]) if len(mat) else 0
+        co, faces, kept = teach.put_in(co, faces, entry["fix"], hits[0], None)
+        mat = np.concatenate((mat[kept], np.full(len(faces) - int(kept.sum()), style, dtype=np.int32)))
+        done += 1
+    if done:
+        _adopt(context, source, co, faces, mat)
+    if done or lost:
+        state["message"] = f"{state['message']} | Put back {done} fix(es) you made by hand" + (f"; {lost} did not fit the new quads" if lost else "")
+
+
+class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
+    bl_idname = "curiomesh.teach_remember"
+    bl_label = "Remember This Fix"
+    bl_description = "You fixed an area by hand on the preview, in Edit Mode, with any tools. This remembers it, in a file in your Blender config folder, and offers it again where the same pattern shows up. Nothing is uploaded. The area stays as you made it when you press Start again on the same mesh"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        source, res = state_source(), state["res"]
+        preview = bpy.data.objects[PREVIEW_NAME]
+        if preview.mode == "EDIT":
+            preview.update_from_editmode()
+        mesh = preview.data
+        co = np.empty(len(mesh.vertices) * 3)
+        mesh.vertices.foreach_get("co", co)
+        co = co.reshape(-1, 3)
+        faces = [tuple(p.vertices) for p in mesh.polygons]
+        mat = np.empty(len(faces), dtype=np.int32)
+        mesh.polygons.foreach_get("material_index", mat)
+        size = float(np.linalg.norm(res["co"].max(axis=0) - res["co"].min(axis=0))) or 1.0
+        gone, new = teach.changed(res["co"], res["faces"], co, faces, size)
+        if not gone and not new:
+            self.report({"WARNING"}, "Nothing changed on the preview: fix an area in Edit Mode first")
+            return {"CANCELLED"}
+        fix = teach.make_fix(res["co"], res["faces"], gone, co, faces, new, size)
+        if isinstance(fix, str):
+            self.report({"WARNING"}, fix)
+            return {"CANCELLED"}
+        ring = np.asarray(res["co"])[teach.outline(res["faces"], gone)]
+        edge = float(np.mean(np.linalg.norm(np.roll(ring, -1, axis=0) - ring, axis=1)))
+        _leave_preview(context)
+        teach.save(library_path(), teach.merge(teach.load(library_path()), [fix]))
+        entry = {"fix": fix, "at": ring.mean(axis=0).tolist(), "reach": 3.0 * edge}
+        source["curiomesh_kept"] = json.dumps(_kept(source) + [entry])
+        _adopt(context, source, co, faces, mat)
+        _scan(state["res"])
+        state["message"] = f"Remembered: {len(fix['before'])} faces became {len(fix['after'])}. It is kept on this mesh, and offered on others that look like it"
+        self.report({"INFO"}, state["message"])
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_teach_find(_PreviewOp, bpy.types.Operator):
+    bl_idname = "curiomesh.teach_find"
+    bl_label = "Look for Known Fixes"
+    bl_description = "Look in this result for patches that match a fix you remembered"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        _scan(state["res"])
+        state["message"] = f"{len(state['found'])} place(s) look like something you fixed before" if state["found"] else "Nothing here matches a fix you remembered"
+        overlay.tag_redraw()
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_teach_apply(_PreviewOp, bpy.types.Operator):
+    bl_idname = "curiomesh.teach_apply"
+    bl_label = "Apply Known Fix"
+    bl_description = "Put the closest remembered fix in. A camera looks at the spot from six sides first and the fix is dropped if it makes the spot look further from your original"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(state["found"]) and super().poll(context)
+
+    def execute(self, context):
+        source, res = state_source(), state["res"]
+        src = _source_data(source)
+        fix, match = state["found"][0]
+        co, faces = res["co"], list(res["faces"])
+        project = region._projector(_bvh(src))
+        new_co, new_faces, kept = teach.put_in(co, faces, fix, match, project)
+        centre = np.asarray(match["centre"])
+        ring = co[[match["vmap"][i] for i in range(int(fix["ring"]))]]
+        half = 1.5 * float(np.linalg.norm(ring - centre, axis=1).max())
+        if not _camera_accepts(src, (co, faces), (new_co, new_faces), centre, half):
+            state["found"] = state["found"][1:]
+            state["message"] = "The camera says that fix would make the spot look worse: left alone"
+            self.report({"WARNING"}, state["message"])
+            return {"CANCELLED"}
+        mat = np.asarray(res["mat"])
+        style = int(mat[match["faces"][0]]) if len(mat) else 0
+        mat = np.concatenate((mat[kept], np.full(len(new_faces) - int(kept.sum()), style, dtype=np.int32)))
+        _adopt(context, source, new_co, new_faces, mat)
+        _scan(state["res"])
+        state["message"] = f"Put in a fix you made before. {len(state['found'])} more place(s) look like it"
+        self.report({"INFO"}, state["message"])
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_teach_export(bpy.types.Operator, ExportHelper):
+    bl_idname = "curiomesh.teach_export"
+    bl_label = "Export Fixes"
+    bl_description = "Save a copy of your remembered fixes to share. They hold quad patterns and shape numbers only, no mesh"
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
+
+    def execute(self, context):
+        teach.save(self.filepath, teach.load(library_path()))
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_teach_import(bpy.types.Operator, ImportHelper):
+    bl_idname = "curiomesh.teach_import"
+    bl_label = "Import Fixes"
+    bl_description = "Add the fixes in a file somebody shared to your own. Ones you already have are skipped"
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
+
+    def execute(self, context):
+        mine = teach.load(library_path())
+        both = teach.merge(mine, teach.load(self.filepath))
+        teach.save(library_path(), both)
+        self.report({"INFO"}, f"{len(both) - len(mine)} fix(es) added")
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_teach_forget_kept(bpy.types.Operator):
+    bl_idname = "curiomesh.teach_forget_kept"
+    bl_label = "Forget Kept Fixes"
+    bl_description = "Stop putting the fixes you made by hand back on this mesh when you press Start again. Your remembered library is not touched"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        source = _source_mesh(context)
+        return source is not None and bool(_kept(source))
+
+    def execute(self, context):
+        del _source_mesh(context)["curiomesh_kept"]
+        return {"FINISHED"}
+
+
+def _bend_edges(base, res) -> list[tuple[int, int]]:
+    """Edges of the finished result that lie on the middle loop of a deformation line (and its mirror image)."""
+    job = base["job"] if base else None
+    groups = getattr(job, "bend_groups", None)
+    if not groups:
+        return []
+    centres = [loops[len(loops) // 2] for tag, loops in groups if tag == "BEND"]
+    if not centres:
+        return []
+    if job.mirror is not None:
+        axis, offset = job.mirror[:2]
+        for line in list(centres):
+            flipped = line.copy()
+            flipped[:, axis] = 2.0 * offset - flipped[:, axis]
+            centres.append(flipped)
+    return guides.loop_edges(centres, res["co"], res["faces"], 0.3 * job.gap)
+
+
+def _mark_edges(mesh, edges, crease: bool, sharp: bool) -> None:
+    """Crease and sharp marks on the given (lo, hi) edges of a new mesh."""
+    if not edges or not (crease or sharp):
+        return
+    pairs = np.empty(len(mesh.edges) * 2, dtype=np.int64)
+    mesh.edges.foreach_get("vertices", pairs)
+    index = {(min(a, b), max(a, b)): i for i, (a, b) in enumerate(pairs.reshape(-1, 2).tolist())}
+    ids = [index[e] for e in edges if e in index]
+    if crease:
+        layer = mesh.attributes.get("crease_edge")
+        if layer is None:
+            try:
+                layer = mesh.attributes.new("crease_edge", "FLOAT", "EDGE")
+            except (RuntimeError, TypeError):
+                layer = mesh.edge_creases.new() if hasattr(mesh, "edge_creases") else None
+        if layer is not None:
+            values = np.zeros(len(mesh.edges), dtype=np.float32)
+            values[ids] = 1.0
+            layer.data.foreach_set("value", values)
+    if sharp:
+        flags = np.zeros(len(mesh.edges), dtype=bool)
+        flags[ids] = True
+        layer = mesh.attributes.get("sharp_edge") or mesh.attributes.new("sharp_edge", "BOOLEAN", "EDGE")
+        layer.data.foreach_set("value", flags)
+
+
 def _make_mesh(name, source, res, uvs=True):
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(res["co"].tolist(), [], res["faces"])
@@ -977,15 +1293,104 @@ def auto_target(gs, faces: int) -> int:
     return max(12, int(round(gs.auto_reduce_percent / 100.0 * faces)) if gs.auto_reduce_by == "PERCENT" else int(gs.auto_reduce_count))
 
 
+def _mirror_half(gs, src):
+    """(half, note): the half to solve as (co, faces, mat, mirror) or None, and what to tell the user about the symmetry."""
+    if gs.sym_axis == "OFF":
+        return None, ""
+    found = symmetry.find_plane(src["co"], _bvh(src), "XYZ" if gs.sym_axis == "AUTO" else gs.sym_axis)[0]
+    if not found.ok(gs.sym_axis != "AUTO"):
+        return None, f"Not symmetric enough to mirror ({found.text()}): solved the whole mesh"
+    side = src["tri_cent"][:, found.axis] >= found.offset
+    keep = 1 if src["tri_area"][side].sum() >= src["tri_area"][~side].sum() else -1  # solve the side with more surface
+    co, faces, source, origin = symmetry.cut_half(src["co"], src["faces"], found.axis, found.offset, keep)
+    if not faces:
+        return None, "Mirror found nothing on one side of the plane: solved the whole mesh"
+    note = f"Mirrored from the {'+' if keep > 0 else '-'}{symmetry.AXES[found.axis]} half. {found.text()}"
+    return (co, faces, src["mat"][source], (found.axis, found.offset, src["diag"], len(src["faces"]), keep), origin), note
+
+
+def _guide_lines(context, gs, src, kind: str = "GUIDE") -> list[np.ndarray]:
+    """The curves of one type from the list (guides, edge loops or deformation lines), laid on the surface of the source mesh."""
+    source = state_source()
+    on = {"GUIDE": gs.guide_use, "LOOP": gs.loop_use, "BEND": gs.bend_use}[kind]
+    objects = [g.obj for g in gs.guide_curves if g.obj is not None and g.kind == kind]
+    if not on or not objects or source is None:
+        return []
+    bvh = _bvh(src)
+    raw = guides.gather(objects, source, context.evaluated_depsgraph_get())
+    return guides.on_surface(raw, lambda p: bvh.find_nearest(Vector(p))[0], src["diag"] / 400.0)
+
+
+def _curve_sig(gs) -> tuple:
+    """A cheap fingerprint of the curves in the list: moving, redrawing, adding or deleting one changes it."""
+    out = [(gs.loop_use, gs.guide_use, gs.bend_use, gs.loop_count, gs.bend_loops, round(gs.loop_gap, 6))]
+    for g in gs.guide_curves:
+        o = g.obj
+        if o is None:
+            continue
+        data = ()
+        if o.type == "CURVE":
+            data = tuple(round(c, 5) for sp in o.data.splines for pt in (sp.points if sp.type == "POLY" else sp.bezier_points) for c in pt.co[:3])
+        elif o.type == "MESH":
+            flat = np.empty(len(o.data.vertices) * 3)
+            o.data.vertices.foreach_get("co", flat)
+            data = (len(flat), round(float(flat.sum()), 5))
+        out.append((o.name, g.kind, tuple(round(x, 5) for row in o.matrix_world for x in row), data))
+    return tuple(out)
+
+
+def _painted(source, gs, src) -> np.ndarray | None:
+    """Paint 0..1 per vertex of the welded source from the vertex group, or None when there is none or it is empty."""
+    group = source.vertex_groups.get(gs.density_group)
+    if not gs.density_use or group is None:
+        return None
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(source.data)
+        layer = bm.verts.layers.deform.active
+        if layer is None:
+            return None
+        paint = np.asarray([v[layer].get(group.index, 0.0) for v in bm.verts], dtype=np.float64)
+    finally:
+        bm.free()
+    welded = np.zeros(len(src["co"]))
+    np.maximum.at(welded, src["weld"], paint)
+    return welded if welded.max() > 0.0 else None
+
+
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
     target = auto_target(gs, len(src["faces"]))
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target)
+    lines = _guide_lines(context, gs, src)
+    drawn = {kind: _guide_lines(context, gs, src, kind) for kind in ("LOOP", "BEND")}
+    paint = _painted(state_source(), gs, src)
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), (hash(b"".join(line.tobytes() for kind in drawn for line in drawn[kind])), gs.loop_count, gs.bend_loops, round(gs.loop_gap, 6)) if any(drawn.values()) else None, None if paint is None else (hash(paint.tobytes()), gs.density_strength))
+    state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
     state["auto_base"] = None
-    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail, target)
+    half, note = _mirror_half(gs, src)
+    co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], src["mat"], None)
+    outside = None
+    region = state["region"] if gs.region_use and state["region"] is not None and len(state["region"]) == len(src["faces"]) else None
+    if region is not None and region.any() and not region.all():
+        half, mirror, paint = None, None, None
+        (co, faces, mat), outside = edgeloops.split_region(src["co"], src["faces"], src["mat"], region)
+        note = f"Only the {int(region.sum()):,} selected faces are redone"
+    if paint is not None:
+        paint = paint[half[4]] if half is not None else paint
+    if lines and mirror:
+        lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
+    if mirror:
+        drawn = {kind: guides.reflect_to_side(found, mirror[0], mirror[1], mirror[4]) for kind, found in drawn.items()}
+    bvh = _bvh(src)
+    items = [(line, gs.loop_count if kind == "LOOP" else gs.bend_loops, kind) for kind, found in drawn.items() for line in found]
+    strips = (items, gs.loop_gap, lambda p: bvh.find_nearest(Vector(p))[:2]) if items else None
+    cache_key = (src["sig"], mirror[:2] if mirror else None)
+    if state["auto_cache"][0] != cache_key:
+        state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
+    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), strips, outside)
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -1106,6 +1511,9 @@ def _collect_work(context) -> None:
         base = state["auto_base"]
         if not runner.busy and runner.report is not None and runner.output is not None and (base is None or base["job"] is not runner):
             state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": dict(runner.output), "report": runner.report, "job": runner, "summary": state["message"]}
+            _restore_kept(context, source)
+            if state["res"] is not None and len(teach.load(library_path())) * len(state["res"]["faces"]) < 300_000:
+                _scan(state["res"])
             segments.ensure()
             if segments.segment_goals.worth_finding(state["auto_base"]):
                 segments.segment_goals.start_find(context)
@@ -1237,7 +1645,7 @@ def _stop() -> None:
         bpy.app.timers.unregister(_poll)
     stop_work()
     remove_preview()
-    state.update(sig=None, message="", lock=None, hover=None, auto_base=None)
+    state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}))
     segments.reset()
     overlay.tag_redraw()
 
@@ -1260,6 +1668,17 @@ def _poll():
         _collect_work(context)
         if gs.scope != "AUTO":
             state["auto_base"] = None
+        elif gs.auto_update and state["curve_sig"] is not None:  # a curve was moved, redrawn or deleted: the search starts again, quickly (what was measured is kept)
+            now = time.perf_counter()
+            if _curve_sig(gs) != state["curve_sig"]:
+                if state["curve_at"] == 0.0:
+                    state["curve_at"] = now
+                elif now - state["curve_at"] >= 0.8:
+                    state["curve_sig"], state["curve_at"] = None, 0.0
+                    state["auto_base"] = None
+                    run_update(context, force=True)
+            else:
+                state["curve_at"] = 0.0
         sig = _signature(context, source)
         now = time.perf_counter()
         if sig != state["sig"]:
@@ -1867,12 +2286,6 @@ class CURIOMESH_OT_guided_update(bpy.types.Operator):
         return {"FINISHED"} if ok else {"CANCELLED"}
 
 
-class _PreviewOp:
-    @classmethod
-    def poll(cls, context):
-        return bpy.data.objects.get(PREVIEW_NAME) is not None and state["res"] is not None
-
-
 class CURIOMESH_OT_guided_edit_preview(_PreviewOp, bpy.types.Operator):
     bl_idname = "curiomesh.guided_edit_preview"
     bl_label = "Select Faces on Preview"
@@ -2030,6 +2443,8 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         mesh = _make_mesh(source.name + "_Retopo", source, res)
         for poly in mesh.polygons:
             poly.use_smooth = True
+        if gs.bend_crease or gs.bend_sharp:
+            _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
         if gs.apply_mode == "REPLACE":
             source.data = mesh
             out = source
@@ -2081,6 +2496,11 @@ class CURIOMESH_OT_guided_auto_start(bpy.types.Operator):
         stop_work()
         remove_preview()
         state["auto_base"] = None
+        state["region"] = None
+        if gs.region_use:
+            picked = np.zeros(len(obj.data.polygons), dtype=bool)
+            obj.data.polygons.foreach_get("select", picked)
+            state["region"] = picked[_source_data(obj)["keep"]] if picked.any() else None
         gs["bool_on"] = False
         gs.scope = "AUTO"
         if not gs.enabled:
@@ -2186,6 +2606,220 @@ class CURIOMESH_OT_guided_remove_shape(bpy.types.Operator):
             if data is not None and data.users == 0 and isinstance(data, bpy.types.Mesh):
                 bpy.data.meshes.remove(data)
         return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_add_guide(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_add_guide"
+    bl_label = "Add Selected"
+    bl_description = "Use the selected curves, Grease Pencil drawings or edge-only meshes as guide curves (or as Deformation Lines)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    kind: bpy.props.EnumProperty(name="Type", items=CURVE_KIND_ITEMS, default="GUIDE", options={"SKIP_SAVE"})
+
+    def execute(self, context):
+        gs = _gs(context)
+        have = {g.obj for g in gs.guide_curves}
+        picked = [o for o in context.selected_objects if _guide_poll(None, o) and o not in have]
+        if not picked:
+            self.report({"WARNING"}, "Select a curve, a Grease Pencil drawing or an edge-only mesh first")
+            return {"CANCELLED"}
+        for obj in picked:
+            item = gs.guide_curves.add()
+            item.obj, item.kind = obj, self.kind
+        gs.guide_index = len(gs.guide_curves) - 1
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_remove_guide(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_remove_guide"
+    bl_label = "Remove Guide"
+    bl_description = "Take the chosen guide out of the list. A curve drawn with Draw Guide is deleted with it; your own curves stay"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        gs = _gs(context)
+        return 0 <= gs.guide_index < len(gs.guide_curves)
+
+    def execute(self, context):
+        gs = _gs(context)
+        obj = gs.guide_curves[gs.guide_index].obj
+        gs.guide_curves.remove(gs.guide_index)
+        gs.guide_index = max(0, min(gs.guide_index, len(gs.guide_curves) - 1))
+        if obj is not None and obj.name.startswith(("CM_Guide", "CM_Loop", "CM_Bend")):
+            data = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if data is not None and data.users == 0 and isinstance(data, bpy.types.Curve):
+                bpy.data.curves.remove(data)
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
+    bl_idname = "curiomesh.guided_draw_guide"
+    bl_label = "Draw Guide"
+    bl_description = "Draw a stroke on the mesh with the left mouse button held; each stroke becomes a curve in the list. Right click, Enter or Esc finishes"
+
+    kind: bpy.props.EnumProperty(name="Type", items=CURVE_KIND_ITEMS, default="GUIDE", options={"SKIP_SAVE"})
+    replace: bpy.props.BoolProperty(name="Redraw", description="Replace the chosen curve of the list with the next stroke", default=False, options={"SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        self.obj = context.object
+        state["source"] = self.obj.name
+        self.stroke = None
+        self.last = None
+        self.done = False
+        gs = _gs(context)
+        if self.replace and 0 <= gs.guide_index < len(gs.guide_curves):
+            self.kind = gs.guide_curves[gs.guide_index].kind
+        context.window_manager.modal_handler_add(self)
+        self._status(context)
+        return {"RUNNING_MODAL"}
+
+    def _status(self, context):
+        context.workspace.status_text_set("Draw " + {"GUIDE": "Guide", "LOOP": "Edge Loop", "BEND": "Deformation Line"}[self.kind] + "  Hold left mouse and drag over the mesh: one curve per stroke  Right click/Enter/Esc: done")
+
+    def _make_curve(self, context):
+        points = self.stroke
+        self.stroke = None
+        if points is None or len(points) < 2:
+            return
+        gs = _gs(context)
+        matrix = self.obj.matrix_world
+        lift = 0.002 * max(max(self.obj.dimensions), 1e-6)  # a hair above the surface, so it shows
+        name = {"GUIDE": "CM_Guide", "LOOP": "CM_Loop", "BEND": "CM_Bend"}[self.kind]
+        curve = bpy.data.curves.new(name, "CURVE")
+        curve.dimensions = "3D"
+        spline = curve.splines.new("POLY")
+        spline.points.add(len(points) - 1)
+        for p, (co, nrm) in zip(spline.points, points):
+            w = matrix @ Vector(co + nrm * lift)
+            p.co = (w.x, w.y, w.z, 1.0)
+        obj = bpy.data.objects.new(name, curve)
+        obj.show_in_front = True
+        (context.collection or context.scene.collection).objects.link(obj)
+        if self.replace and 0 <= gs.guide_index < len(gs.guide_curves):
+            item = gs.guide_curves[gs.guide_index]
+            old = item.obj
+            if old is not None and old.name.startswith(("CM_Guide", "CM_Loop", "CM_Bend")):
+                data = old.data
+                bpy.data.objects.remove(old, do_unlink=True)
+                if data is not None and data.users == 0 and isinstance(data, bpy.types.Curve):
+                    bpy.data.curves.remove(data)
+            item.obj = obj
+            self.done = True
+            return
+        item = gs.guide_curves.add()
+        item.obj, item.kind = obj, self.kind
+        gs.guide_index = len(gs.guide_curves) - 1
+
+    def modal(self, context, event):
+        if context.area is not None:
+            context.area.tag_redraw()
+        if event.type in {"RET", "NUMPAD_ENTER", "ESC"} and event.value == "PRESS":
+            self._make_curve(context)
+            self._finish(context)
+            return {"FINISHED"}
+        view = self._view_region(context, event)
+        if view is None:
+            return {"PASS_THROUGH"}
+        if event.type == "RIGHTMOUSE" and event.value == "PRESS":
+            self._make_curve(context)
+            self._finish(context)
+            return {"FINISHED"}
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            self.stroke, self.last = [], None
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            self._make_curve(context)
+            if self.done:
+                self._finish(context)
+                return {"FINISHED"}
+            return {"RUNNING_MODAL"}
+        if event.type in {"LEFTMOUSE", "MOUSEMOVE"} and self.stroke is not None:
+            at = (event.mouse_x, event.mouse_y)
+            if self.last is None or (at[0] - self.last[0]) ** 2 + (at[1] - self.last[1]) ** 2 >= 36:  # one point per six pixels
+                hit = self._ray(view, event)
+                if hit is not None:
+                    self.stroke.append(hit)
+                    self.last = at
+            return {"RUNNING_MODAL"}
+        if event.type in {"MIDDLEMOUSE", "TRACKPADPAN", "TRACKPADZOOM", "MOUSEROTATE"} or event.type.startswith("NUMPAD") or event.alt:
+            return {"PASS_THROUGH"}
+        return {"RUNNING_MODAL"}
+
+
+class CURIOMESH_OT_guided_edit_guide(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_edit_guide"
+    bl_label = "Edit Curve"
+    bl_description = "Select the chosen curve and open it in Edit Mode: move its points, or press G to move all of it. The preview follows. Tab back to the mesh when done"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        gs = _gs(context)
+        return 0 <= gs.guide_index < len(gs.guide_curves) and gs.guide_curves[gs.guide_index].obj is not None
+
+    def execute(self, context):
+        obj = _gs(context).guide_curves[_gs(context).guide_index].obj
+        if context.object is not None and context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        if obj.type in {"CURVE", "MESH"}:
+            bpy.ops.object.mode_set(mode="EDIT")
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_paint_density"
+    bl_label = "Paint"
+    bl_description = "Go to Weight Paint on the mesh with a vertex group for the density. Paint red where you want more quads, then leave Weight Paint (Tab) and press Start"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _source_mesh(context) is not None
+
+    def execute(self, context):
+        gs = _gs(context)
+        obj = _source_mesh(context)
+        state["source"] = obj.name
+        group = obj.vertex_groups.get(gs.density_group) or obj.vertex_groups.new(name=gs.density_group or "CM_Density")
+        gs.density_group = group.name
+        obj.vertex_groups.active_index = group.index
+        gs.density_use = True
+        context.view_layer.objects.active = obj
+        if obj.mode != "WEIGHT_PAINT":
+            bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
+        try:  # a full red brush; the setting moved between versions
+            paint = context.tool_settings.unified_paint_settings
+            paint.use_unified_weight = True
+            paint.weight = 1.0
+        except AttributeError:
+            pass
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_clear_density(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_clear_density"
+    bl_label = "Clear"
+    bl_description = "Delete the density paint (the vertex group)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = _source_mesh(context)
+        return obj is not None and obj.vertex_groups.get(_gs(context).density_group) is not None
+
+    def execute(self, context):
+        obj = _source_mesh(context)
+        obj.vertex_groups.remove(obj.vertex_groups[_gs(context).density_group])
+        return {"FINISHED"}
+
+
+class CURIOMESH_UL_guided_guides(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        layout.label(text=item.obj.name if item.obj is not None else "(removed)", icon={"GUIDE": "CURVE_DATA", "LOOP": "MESH_CIRCLE", "BEND": "MOD_SIMPLEDEFORM"}[item.kind] if item.obj is not None else "ERROR")
 
 
 class CURIOMESH_UL_guided_shapes(bpy.types.UIList):
@@ -2325,6 +2959,58 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if hasattr(gs, "auto_profile"):  # presets, once that branch is merged
             col.prop(gs, "auto_profile")
         col.row(align=True).prop(gs, "auto_aim", expand=True)
+        col.prop(gs, "preset", text="Mesh Type")
+        row = col.row(align=True)
+        row.label(text="Mirror", icon="MOD_MIRROR")
+        row.prop(gs, "sym_axis", expand=True)
+        col.prop(gs, "region_use", text="Selected Faces Only", toggle=True, icon="FACESEL")
+        if gs.region_use:
+            col.label(text="Select faces in Edit Mode, then press Start", icon="INFO")
+        col.prop(gs, "loop_use", text="Edge Loops", toggle=True, icon="MESH_CIRCLE")
+        if gs.loop_use:
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_draw_guide", text="Draw Edge Loops", icon="GREASEPENCIL").kind = "LOOP"
+            row.operator("curiomesh.guided_add_guide", text="Add Selected", icon="ADD").kind = "LOOP"
+            row = col.row(align=True)
+            row.prop(gs, "loop_count")
+            row.prop(gs, "loop_gap")
+            if not any(g.kind == "LOOP" for g in gs.guide_curves):
+                col.label(text="Draw a ring round an eye or the mouth,", icon="INFO")
+                col.label(text="or a line along the way the flow should go")
+        col.prop(gs, "guide_use", text="Guide Curves", toggle=True, icon="CURVE_DATA")
+        if gs.guide_use:
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_draw_guide", icon="GREASEPENCIL").kind = "GUIDE"
+            row.operator("curiomesh.guided_add_guide", icon="ADD").kind = "GUIDE"
+        col.prop(gs, "bend_use", text="Deformation Lines", toggle=True, icon="MOD_SIMPLEDEFORM")
+        if gs.bend_use:
+            if gs.preset == "ANIMATION" and not any(g.kind == "BEND" for g in gs.guide_curves):
+                col.label(text="Animation: draw a line across each joint", icon="INFO")
+                col.label(text="(elbow, knee, mouth corner, eyelid)")
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_draw_guide", text="Draw Bend", icon="GREASEPENCIL").kind = "BEND"
+            row.operator("curiomesh.guided_add_guide", text="Add Selected", icon="ADD").kind = "BEND"
+            row = col.row(align=True)
+            row.prop(gs, "bend_loops")
+            row.prop(gs, "loop_gap")
+            row = col.row(align=True)
+            row.prop(gs, "bend_crease", toggle=True)
+            row.prop(gs, "bend_sharp", toggle=True)
+        if len(gs.guide_curves):
+            row = col.row()
+            row.template_list("CURIOMESH_UL_guided_guides", "", gs, "guide_curves", gs, "guide_index", rows=3)
+            side = row.column(align=True)
+            side.operator("curiomesh.guided_remove_guide", text="", icon="REMOVE")
+            side.operator("curiomesh.guided_draw_guide", text="", icon="GREASEPENCIL").replace = True
+            side.operator("curiomesh.guided_edit_guide", text="", icon="EDITMODE_HLT")
+        col.prop(gs, "density_use", text="Paint Density", toggle=True, icon="BRUSH_DATA")
+        if gs.density_use:
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_paint_density", icon="WPAINT_HLT")
+            row.operator("curiomesh.guided_clear_density", icon="X")
+            col.prop(gs, "density_strength")
+            if obj is not None and obj.vertex_groups.get(gs.density_group) is None:
+                col.label(text="Press Paint, colour the parts that need more quads red", icon="INFO")
         if gs.auto_aim == "KEEP":
             col.prop(gs, "auto_detail")
             words = detail_words(gs)
@@ -2348,6 +3034,30 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             col.label(text=f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1")
             if report["asked"]:
                 col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
+
+        box = layout.box()
+        box.label(text="Show it how (optional)", icon="MODIFIER")
+        col = box.column(align=True)
+        col.enabled = done
+        if not done:
+            col.label(text="Available once the search has finished")
+        else:
+            col.label(text="Fix a spot by hand on the preview, then:")
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
+            row.operator("curiomesh.teach_remember", icon="BOOKMARKS")
+            known = len(teach.load(library_path()))
+            col.label(text=f"{known} fix(es) remembered on this PC")
+            if state["found"]:
+                col.label(text="You've fixed something like this before:", icon="INFO")
+                col.operator("curiomesh.teach_apply", text=f"Apply ({len(state['found'])} places)", icon="CHECKMARK")
+            else:
+                col.operator("curiomesh.teach_find", icon="VIEWZOOM")
+            row = col.row(align=True)
+            row.operator("curiomesh.teach_export", icon="EXPORT")
+            row.operator("curiomesh.teach_import", icon="IMPORT")
+            if obj is not None and _kept(obj):
+                col.operator("curiomesh.teach_forget_kept", text=f"Forget {len(_kept(obj))} Kept Fix(es)", icon="X")
 
         message = status()
         if message and not (done and message == base["summary"]):
@@ -2547,6 +3257,7 @@ PANEL_CLASSES = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_parts, CURIOMESH_PT_gu
 CLASSES = (
     CURIOMESH_PG_guided_point,
     CURIOMESH_PG_guided_shape,
+    CURIOMESH_PG_guided_guide,
     CURIOMESH_PG_guided,
     CURIOMESH_OT_guided_place,
     CURIOMESH_OT_guided_work,
@@ -2567,6 +3278,19 @@ CLASSES = (
     CURIOMESH_OT_guided_stop_work,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,
+    CURIOMESH_OT_guided_add_guide,
+    CURIOMESH_OT_guided_remove_guide,
+    CURIOMESH_OT_guided_draw_guide,
+    CURIOMESH_OT_guided_edit_guide,
+    CURIOMESH_OT_teach_remember,
+    CURIOMESH_OT_teach_find,
+    CURIOMESH_OT_teach_apply,
+    CURIOMESH_OT_teach_export,
+    CURIOMESH_OT_teach_import,
+    CURIOMESH_OT_teach_forget_kept,
+    CURIOMESH_OT_guided_paint_density,
+    CURIOMESH_OT_guided_clear_density,
+    CURIOMESH_UL_guided_guides,
     CURIOMESH_UL_guided_points,
     CURIOMESH_UL_guided_shapes,
     CURIOMESH_PT_guided,
@@ -2582,7 +3306,7 @@ _draw_handles: list = []
 def _on_load_post(*_args):
     stop_work()
     segments.reset()
-    state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None)
+    state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None, curve_sig=None, region=None, found=[])
     for sc in bpy.data.scenes:
         gs = getattr(sc, "curiomesh_guided", None)
         if gs is not None and gs.enabled:
