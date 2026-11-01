@@ -5,12 +5,24 @@ import sys
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.budget import Level, allocate, allocate_to_faces  # noqa: E402
+from triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat  # noqa: E402
 
 
 class AllocateTests(unittest.TestCase):
+    def test_heat_finds_the_vertices_near_the_spots(self):
+        vertices = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [9.0, 9.0, 9.0]])
+        heat = vertex_heat(vertices, np.array([[0.1, 0.0, 0.0], [0.2, 0.0, 0.0]]), 1.0)
+        self.assertEqual(heat.tolist(), [2, 2, 0])
+        self.assertEqual(hottest(heat, 5).tolist(), [True, True, False])
+
+    def test_a_size_no_better_than_a_smaller_one_is_dropped(self):
+        levels = [Level(100, 5.0), Level(50, 9.0), Level(70, 9.5), Level(200, 5.0), Level(300, 0.0)]
+        self.assertEqual(best_levels(levels), [1, 0, 4])
+
     def test_spends_faces_where_they_remove_the_most_loss(self):
         cheap_fix = [Level(10, 50.0), Level(20, 0.0)]
         costly_fix = [Level(10, 50.0), Level(1000, 0.0)]

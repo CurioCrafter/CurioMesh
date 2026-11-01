@@ -69,11 +69,13 @@
   Update with no points and no face count: it reduces each loose piece as far as
   a camera says it can, looking from six sides at the original and the result,
   then makes all quads. **Change Allowed** sets how much of the view may look
-  different. Faces go to the parts where they remove the most visible change, and
-  small parts are judged by how big they look on the object.
-- One quad that can't be closed no longer makes a whole piece split into many more
-  faces: it goes back to two triangles and the rest of the piece closes normally.
-  This also lowers the face counts of Flat Quads and Guided on some meshes.
+  different. Small parts are judged by how big they look on the object, and
+  Blender stays usable while it works.
+  It tries a size between two others where a piece jumps past a limit, gives
+  more faces to the spots the camera saw go wrong, and reports how much of the
+  view looks different in shape and in smooth shading.
+- **Apply** in the Guided panel now marks edges past 60 degrees sharp, so flat
+  sides stay flat under smooth shading.
 - **Work Live** (Guided panel). Paint areas on your mesh or on the result, each
   with its own density and fill style, and watch them remesh one at a time on a
   background thread while you keep working. Scroll sets the size, Shift+scroll
