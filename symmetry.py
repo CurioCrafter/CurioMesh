@@ -75,8 +75,9 @@ def find_plane(co: np.ndarray, bvh, axes: str = "XYZ") -> list[Plane]:
 def cut_half(co: np.ndarray, faces, axis: int, offset: float, keep: int = 1):
     """Clip the faces to one side of the plane (keep=1: the side with larger coordinates).
 
-    Returns (co, faces, source) where source[i] is the index of the face that new face i was cut from. Every new
-    vertex on the plane is exactly on it, and two faces sharing a cut edge share its new vertex.
+    Returns (co, faces, source, origin): source[i] is the face that new face i was cut from, origin[v] the original
+    vertex that vertex v is (or, for a vertex made on the plane, one end of the edge it cuts). Every new vertex on the
+    plane is exactly on it, and two faces sharing a cut edge share its new vertex.
     """
     co = np.asarray(co, dtype=np.float64).copy()
     diag = float(np.linalg.norm(co.max(axis=0) - co.min(axis=0))) or 1.0
@@ -85,6 +86,7 @@ def cut_half(co: np.ndarray, faces, axis: int, offset: float, keep: int = 1):
     co[flat, axis] = offset  # almost on the plane: put exactly on it, so the cut has no slivers
     side[flat] = 0.0
     new_co = [co]
+    ends = list(range(len(co)))
     cuts: dict[tuple[int, int], int] = {}
     count = len(co)
     out_faces, source = [], []
@@ -97,6 +99,7 @@ def cut_half(co: np.ndarray, faces, axis: int, offset: float, keep: int = 1):
             p = co[a] + (co[b] - co[a]) * t
             p[axis] = offset
             cuts[key] = count
+            ends.append(key[0])
             new_co.append(p[None, :])
             count += 1
         return cuts[key]
@@ -125,7 +128,7 @@ def cut_half(co: np.ndarray, faces, axis: int, offset: float, keep: int = 1):
     for f in out_faces:
         used[list(f)] = True
     remap = np.cumsum(used) - 1
-    return all_co[used], [tuple(int(remap[v]) for v in f) for f in out_faces], np.asarray(source, dtype=np.int64)
+    return all_co[used], [tuple(int(remap[v]) for v in f) for f in out_faces], np.asarray(source, dtype=np.int64), np.asarray(ends, dtype=np.int64)[used]
 
 
 def border_vertices(faces, count: int) -> np.ndarray:

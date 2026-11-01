@@ -106,7 +106,10 @@ def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
     return wrong, total
 
 
-def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
+
+
+def _decimate(context, points, polys, kinds, ratio, drop=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
@@ -114,7 +117,15 @@ def _decimate(context, points, polys, kinds, ratio) -> tuple[np.ndarray, list[tu
     obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
     context.scene.collection.objects.link(obj)
     try:
-        obj.modifiers.new("Reduce", "DECIMATE").ratio = ratio
+        modifier = obj.modifiers.new("Reduce", "DECIMATE")
+        modifier.ratio = ratio
+        if drop is not None and float(drop.max(initial=0.0)) > 0.0:
+            group = obj.vertex_groups.new(name="CurioMesh_Density")
+            group.add(list(range(len(points))), 1.0, "REPLACE")  # a vertex outside the group is never collapsed
+            level = np.round(drop / 0.5 * DENSITY_STEPS).astype(np.int64)
+            for step in np.unique(level[level > 0]).tolist():
+                group.add(np.flatnonzero(level == step).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
+            modifier.vertex_group = group.name
         evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
         reduced = evaluated.to_mesh()
         co = np.empty(len(reduced.vertices) * 3, dtype=np.float64)
@@ -143,7 +154,7 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
@@ -155,6 +166,7 @@ class AutoJob:
         self.guide_lines = guide_lines or []  # strokes laid on the surface; the quads are made to follow them
         self.project = project  # the nearest point on the original surface, for the points a stroke adds to the mesh
         self.guide_edges: tuple = ()
+        self.drop = None if drop is None or not float(np.max(drop, initial=0.0)) > 0.0 else np.asarray(drop, dtype=np.float64)  # per vertex, from the painted density
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
@@ -224,6 +236,13 @@ class AutoJob:
             self.timings[name] = self.timings.get(name, 0.0) + time.perf_counter() - started
             yield step
 
+    def _piece_drop(self, ids: np.ndarray):
+        """The painted density of the vertices of a piece, in the order `_piece_arrays` lists them (or None)."""
+        if self.drop is None:
+            return None
+        used = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))
+        return self.drop[used]
+
     def _piece_arrays(self, ids: np.ndarray):
         used, flat = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64), return_inverse=True)
         polys, at = [], 0
@@ -243,7 +262,7 @@ class AutoJob:
             self.levels.append([Level(len(polys), 0.0)])
             self.seen.append(0.0)
             return
-        key = ("piece", ids.tobytes())
+        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()))
         known = self.cache.get(key)
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
@@ -260,7 +279,7 @@ class AutoJob:
                 continue
             yield
             started = time.perf_counter()
-            reduced = _decimate(self.context, points, polys, kinds, share)
+            reduced = _decimate(self.context, points, polys, kinds, share, self._piece_drop(ids))
             self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
             view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = picture_counts(reference, view, pixel)
@@ -475,7 +494,7 @@ class AutoJob:
         goal = self.levels[index][self.picked[index]].faces + miss
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
             return
-        self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles)
+        self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
 
     def status(self) -> str:
         extra = f" | {self.note}" if self.note else ""

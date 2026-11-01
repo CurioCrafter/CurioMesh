@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import guides  # noqa: E402
 import symmetry  # noqa: E402
 from triadq import flatquad  # noqa: E402
+from triadq.budget import density_drop  # noqa: E402
 from triadq.types import Cancelled, MeshData  # noqa: E402
 
 
@@ -59,9 +60,10 @@ def _cube(n=5):
 class SymmetryTests(unittest.TestCase):
     def test_cut_and_mirror_gives_an_exact_closed_mirror(self):
         co, faces = _cube()
-        half, half_faces, source = symmetry.cut_half(co, faces, 0, 0.0)
+        half, half_faces, source, origin = symmetry.cut_half(co, faces, 0, 0.0)
         self.assertGreaterEqual(half[:, 0].min(), 0.0)
         self.assertEqual(len(source), len(half_faces))
+        self.assertEqual(len(origin), len(half))
         out, out_faces, _mat, snapped = symmetry.mirror_result(half, half_faces, None, 0, 0.0, 3.5)
         self.assertGreater(snapped, 0)
         self.assertFalse(symmetry.border_vertices(out_faces, len(out)).any())  # no gap along the seam
@@ -93,6 +95,16 @@ class GuideTests(unittest.TestCase):
 
         kept = [on_an_edge(co[a] + (co[b] - co[a]) * t) for a, b in keys for t in (0.0, 0.25, 0.5, 0.75, 1.0)]
         self.assertTrue(all(kept))  # no quad was made across the stroke
+
+
+class DensityTests(unittest.TestCase):
+    def test_paint_lowers_the_decimate_weight_and_stays_small(self):
+        drop = density_drop(np.array([-1.0, 0.0, 0.5, 1.0, 9.0]), 1.0)
+        self.assertEqual(drop[0], 0.0)  # no paint: collapsed freely
+        self.assertEqual(drop[1], 0.0)
+        self.assertTrue(np.all(np.diff(drop) >= 0))
+        self.assertAlmostEqual(drop[3], 0.02)  # full red at strength 1 (Decimate treats 0.98 as four times the faces)
+        self.assertLessEqual(density_drop(np.array([1.0]), 4.0)[0], 0.5)  # never as low as 0, which locks the vertex
 
 
 if __name__ == "__main__":

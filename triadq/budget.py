@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import heapq
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class Level:
@@ -79,3 +81,12 @@ def allocate_to_faces(pieces: list[list[Level]], faces: float, piece_share: floa
         else:
             high = mid
     return best
+
+
+def density_drop(paint: np.ndarray, strength: float) -> np.ndarray:
+    """How far below 1 a vertex's Decimate weight goes for a painted amount 0..1.
+
+    Decimate leaves a vertex alone at weight 0 and collapses it freely at 1, and the pull is steep: 0.99 keeps about
+    three times the faces, 0.98 four times, 0.9 six times. So a full coat of paint at strength 1 drops the weight by 0.02.
+    """
+    return np.clip(0.02 * strength * np.clip(paint, 0.0, 1.0), 0.0, 0.5)

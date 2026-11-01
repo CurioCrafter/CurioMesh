@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
+  vertex group and colour the parts that need more quads red; the search keeps more
+  faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate
+  weights, so there is no brush of ours. Best with Reduce To, where the face count is
+  fixed: on a bust aimed at 3,000 faces, the painted head went from 60% to 76% of the
+  faces (81% at strength 3), and the view changed by 11.7% instead of 8.2%.
+  With Keep Detail it adds faces to the painted part instead.
 - **Guide curves** (Auto Segments, step 2). Draw strokes on the mesh with **Draw Guide**
   (hold the left mouse button), or add curves, Grease Pencil drawings or edge-only
   meshes with **Add Selected**. The quads follow them: an edge loop round an eye,
