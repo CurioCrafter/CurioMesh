@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Auto Segments makes about 20-55% fewer quads at the same Change Allowed.** Leftover
+  triangles now join in twos along a short path of quads instead of splitting all
+  their edges, then quads are taken away cheapest first until the camera says the
+  amount asked for is used up. No connected part may pass its own limit. Big pieces
+  get extra sizes between the old ones, so they no longer land far under the amount.
+
 ## 0.8.0 - 2026-11-01
 
 - **Auto Segments** (new mode in the Remesh setting of the Guided panel). Press

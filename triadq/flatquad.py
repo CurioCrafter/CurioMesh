@@ -24,6 +24,7 @@ import math
 import numpy as np
 
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
+from .quadreduce import join_loose_triangles
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
 from .topology import parity_path_closure_unpairing, quad_only_closure, topology_summary
 from .types import MeshData
@@ -678,7 +679,7 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
 
 def pair_and_close(
     coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
-    feature_angle_deg: float = 60.0,
+    feature_angle_deg: float = 60.0, join_triangles: bool = False,
 ) -> tuple[MeshData, RemeshReport]:
     """Repair, pair with TRIAD-Q, then close every connected piece on its own.
 
@@ -696,6 +697,8 @@ def pair_and_close(
     paired, solver = remesh_mesh(repaired, pair)
     if not force_quads or not paired.faces:
         return paired, solver
+    if join_triangles:
+        paired = join_loose_triangles(paired)[0]
     closed, sparse, split, open_pieces = _close_pieces(paired)
     solver.closure_applied = True
     solver.closure_method = "PARITY_PATH" if not split and not open_pieces else "PER_PIECE"
