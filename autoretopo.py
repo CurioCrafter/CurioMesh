@@ -33,6 +33,7 @@ MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes 
 KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to gain, and thousands of them to look at
 LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
+REBUILD_MARGIN = 1.5  # a rebuilt part's measured change counts this many times, as it looks better alone than in the whole view
 QUAD_WEIGHT = 0.9  # a rebuilt quad counts as this many faces of a triangle level (those end up about 1.1 quads each)
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
@@ -216,7 +217,7 @@ class AutoJob:
             wrong, shown = picture_counts(reference, view, pixel)
             seen = max(seen, shown * pixel * pixel)
             sizes.append(rebuilt)
-            levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, wrong * pixel * pixel))
+            levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
             ready.append(True)
             if wrong <= enough * shown:
                 break

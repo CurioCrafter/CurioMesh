@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.parts import build_box, build_revolve, fit_box, fit_revolve  # noqa: E402
+from triadq.parts import build_revolve, fit_revolve  # noqa: E402
 
 
 def capped_cylinder(sides=48, rings=12, radius=0.5, height=4.0):
@@ -48,17 +48,6 @@ class RevolveTests(unittest.TestCase):
         self.assertTrue(closed(polys))
         self.assertLess(len(polys), 100)
         self.assertAlmostEqual(float(np.ptp(co[:, 2])), 4.0, places=3)
-
-
-class BoxTests(unittest.TestCase):
-    def test_box_is_found_and_rebuilt_as_six_quads(self):
-        pts, polys, _ = build_box({"frame": np.eye(3), "low": np.zeros(3), "high": np.array([4.0, 1.0, 0.5])}, (4, 2, 2))
-        fit = fit_box(pts, polys)
-        self.assertGreater(fit["share"], 0.99)
-        co, quads, _ = build_box(fit, (1, 1, 1))
-        self.assertEqual(len(quads), 6)
-        self.assertTrue(closed(quads))
-        self.assertTrue(np.allclose(np.sort(np.ptp(co, axis=0)), [0.5, 1.0, 4.0]))
 
 
 if __name__ == "__main__":

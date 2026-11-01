@@ -17,8 +17,6 @@ import numpy as np
 CLUSTER = 0.004  # vertices closer than this (share of the piece's diagonal) in (radius, height) are one ring
 MIN_SPIN = 8  # a ring has at least this many vertices to count as turned around the axis
 REVOLVES = ((8, 0.010), (12, 0.006), (16, 0.004), (24, 0.002), (32, 0.001))  # (steps around, profile tolerance), fewest faces first
-BEAM_STATIONS = (1, 2, 4)
-BOX_SHARE = 0.7  # share of surface area that must face along the box axes for a closed piece to count as a box
 FITS = 0.75  # share of vertices that must sit on a ring (or the axis) for the piece to count as turned
 
 
@@ -318,98 +316,10 @@ def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_pol
     return [tuple(reversed(p)) for p in polys] if vote < 0 else list(polys)
 
 
-def _area_normals(points: np.ndarray, polys) -> tuple[np.ndarray, np.ndarray]:
-    """(unit normal, area) of every polygon, by Newell's method."""
-
-    n = np.zeros((len(polys), 3))
-    for k, p in enumerate(polys):
-        q = points[list(p)]
-        n[k] = np.cross(q, np.roll(q, -1, axis=0)).sum(axis=0)
-    length = np.linalg.norm(n, axis=1)
-    return n / np.maximum(length, 1e-30)[:, None], 0.5 * length
-
-
-def fit_box(points: np.ndarray, polys) -> dict | None:
-    """The oriented bounding box along the piece's principal axes, and the share of surface area facing along them."""
-
-    points = np.asarray(points, dtype=np.float64)
-    normals, area = _area_normals(points, polys)
-    total = float(area.sum())
-    if total <= 0.0:
-        return None
-    centred = points - points.mean(axis=0)
-    frame = np.linalg.eigh(centred.T @ centred)[1][:, ::-1]
-    if np.linalg.det(frame) < 0:
-        frame[:, 2] *= -1.0
-    along = np.abs(normals @ frame).max(axis=1) > math.cos(math.radians(12.0))
-    local = points @ frame
-    return {"frame": frame, "low": local.min(axis=0), "high": local.max(axis=0), "share": float(area[along].sum() / total), "local": local}
-
-
-def build_box(fit: dict, divisions: tuple[int, int, int], kind: str = "0") -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
-    """The fitted box as a grid of quads on each side, `divisions` cells along each axis."""
-
-    at: dict[tuple[int, int, int], int] = {}
-    local: list[np.ndarray] = []
-    d = divisions
-    span = fit["high"] - fit["low"]
-
-    def vertex(i, j, k):
-        key = (i, j, k)
-        if key not in at:
-            at[key] = len(local)
-            local.append(fit["low"] + span * np.asarray([i / d[0], j / d[1], k / d[2]]))
-        return at[key]
-
-    polys: list[tuple[int, ...]] = []
-    for axis in range(3):
-        u, v = (axis + 1) % 3, (axis + 2) % 3
-        for side in (0, d[axis]):
-            for a in range(d[u]):
-                for b in range(d[v]):
-                    cell = []
-                    for da, db in ((0, 0), (1, 0), (1, 1), (0, 1)):
-                        idx = [0, 0, 0]
-                        idx[axis], idx[u], idx[v] = side, a + da, b + db
-                        cell.append(vertex(*idx))
-                    polys.append(tuple(cell))
-    return np.asarray(local) @ fit["frame"].T, _consistent(polys), [kind] * len(polys)
-
-
-def build_beam(fit: dict, stations: int, kind: str = "0") -> tuple[np.ndarray, list[tuple[int, ...]], list[str]] | None:
-    """A box whose rectangle is fitted again at each of `stations` + 1 places along the long axis, so taper and bow follow."""
-
-    local, low, high = fit["local"], fit["low"], fit["high"]
-    length = high[0] - low[0]
-    if length <= 0.0 or stations < 1:
-        return None
-    t = low[0] + length * np.arange(stations + 1) / stations
-    reach = 0.5 * length / stations
-    rings = []
-    for at in t:
-        near = local[np.abs(local[:, 0] - at) <= reach]
-        if len(near) < 4:
-            return None
-        lo, hi = near[:, 1:].min(axis=0), near[:, 1:].max(axis=0)
-        rings.append([(at, lo[0], lo[1]), (at, hi[0], lo[1]), (at, hi[0], hi[1]), (at, lo[0], hi[1])])
-    polys: list[tuple[int, ...]] = [(0, 1, 2, 3), tuple(range(4 * stations + 3, 4 * stations - 1, -1))]
-    for i in range(stations):
-        for j in range(4):
-            polys.append((4 * i + j, 4 * i + (j + 1) % 4, 4 * (i + 1) + (j + 1) % 4, 4 * (i + 1) + j))
-    return np.asarray([v for r in rings for v in r]) @ fit["frame"].T, _consistent(polys), [kind] * len(polys)
-
-
 def rebuilds(points: np.ndarray, polys, kind: str = "0"):
-    """Generator of rebuilt versions of a piece, fewest faces first, as (points, quads, kinds). None if it isn't a known part."""
+    """Generator of rebuilt versions of a piece, fewest faces first, as (points, quads, kinds); nothing if it isn't a known part."""
 
     fit = fit_revolve(points, polys)
     if fit is not None:
         for spin, tolerance in REVOLVES:
             yield build_revolve(fit, spin, tolerance, kind)
-        return
-    if _boundary_vertices(polys):
-        return
-    box = fit_box(points, polys)
-    if box is not None and box["share"] >= BOX_SHARE:
-        for stations in BEAM_STATIONS:
-            yield build_beam(box, stations, kind)
