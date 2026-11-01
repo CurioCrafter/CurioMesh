@@ -1,13 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-11-01
 
 - **Auto Segments** (new mode in the Remesh setting of the Guided panel). Press
   Update with no points and no face count: it reduces each loose piece as far as
   a camera says it can, looking from six sides at the original and the result,
   then makes all quads. **Change Allowed** sets how much of the view may look
-  different. Small parts are judged by how big they look on the object, and
-  Blender stays usable while it works.
+  different. Faces go to the parts where they remove the most visible change, and
+  small parts are judged by how big they look on the object.
+- One quad that can't be closed no longer makes a whole piece split into many more
+  faces: it goes back to two triangles and the rest of the piece closes normally.
+  This also lowers the face counts of Flat Quads and Guided on some meshes.
 - **Work Live** (Guided panel). Paint areas on your mesh or on the result, each
   with its own density and fill style, and watch them remesh one at a time on a
   background thread while you keep working. Scroll sets the size, Shift+scroll

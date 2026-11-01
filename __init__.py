@@ -6,7 +6,7 @@
 bl_info = {
     "name": "CurioMesh Quad Remesher",
     "author": "CurioCrafter",
-    "version": (0, 7, 0),
+    "version": (0, 8, 0),
     "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",

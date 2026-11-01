@@ -6,11 +6,13 @@
 [![GitHub stars](https://img.shields.io/github/stars/CurioCrafter/CurioMesh?style=flat)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 [![Discussions](https://img.shields.io/github/discussions/CurioCrafter/CurioMesh)](https://github.com/CurioCrafter/CurioMesh/discussions)
 
-**Turn sculpts, scans and messy game assets into clean quads inside Blender,
-then redo only the part that still looks wrong.** Drop a box or lattice cage
-over a face, a hand or a damaged panel, preview the new quads, and apply. The
-rest of the mesh stays exactly as it was, and the new patch joins it with no
-gaps. Free, open source, and tested on every Blender release from 3.6 to 5.2.
+**Turn sculpts, photogrammetry scans and dense game assets into all-quad meshes
+inside Blender, then redo only the part that still looks wrong.** CurioMesh is a
+free, open source (GPLv3) automatic retopology add-on. Press one button and it
+reduces a model part by part, checking each one with a camera. Or drop a box or
+lattice cage over a face, a hand or a damaged panel, preview the new quads, and
+apply. The rest of the mesh stays exactly as it was, and the new patch joins it
+with no gaps. Tested on every Blender release from 3.6 to 5.2.
 
 ![Regions panel: a box cage over Suzanne's brow and eyes, new quads tinted blue, the kept seam in orange](docs/images/panel_regions.png)
 
@@ -34,6 +36,50 @@ or holes to fix by hand.
 **See problems before you export.** A dashboard in the viewport shows your quad
 percentage, leftover triangles and poles, and tells you the next step. One click
 paints leftover triangles, n-gons and poles right on the mesh.
+
+## New in 0.8: Auto Segments
+
+![Wireframes side by side: the original air compressor at 79,042 faces and the result at 24,222 quads, whole object and close-up](docs/images/auto_compressor.png)
+
+Choose **Auto Segments** as the Remesh mode in the Guided panel and press Update.
+There are no points to place and no face count to guess. You set **Change Allowed**,
+how much of the view may look different, and it works out the rest:
+
+1. **Split the model into its loose parts** and make each one at several sizes.
+2. **Look at every size from six sides**, using one pixel size for the whole
+   object, so a small bolt is judged by how big it looks on the object.
+3. **Give faces to the parts where they remove the most visible change.** No single
+   part may be given up to save a few faces.
+4. **Make all quads, look at the whole result, and adjust** until it lands on the
+   amount you asked for.
+
+These are free [Poly Haven](https://polyhaven.com) models (CC0), so you can download
+them and check these numbers yourself. All ran at 6% Change Allowed and finished with
+no triangles and no folded quads. They took from 15 seconds to about 24 minutes.
+
+| Model | Original faces | Result quads | Size | View changed |
+|---|---:|---:|---:|---:|
+| [Concrete road barrier](https://polyhaven.com/a/concrete_road_barrier) | 60,928 | 1,384 | 2% | 5.7% |
+| [Treasure chest](https://polyhaven.com/a/treasure_chest) | 103,330 | 27,121 | 26% | 4.0% |
+| [Old military compressor](https://polyhaven.com/a/old_military_compressor) | 79,042 | 24,222 | 31% | 5.7% |
+| [Modular wooden pier](https://polyhaven.com/a/modular_wooden_pier) | 84,780 | 29,995 | 35% | 6.0% |
+| [Fire hydrant](https://polyhaven.com/a/fire_hydrant) | 86,316 | 37,552 | 44% | 6.1% |
+| [Overhead crane](https://polyhaven.com/a/overhead_crane) | 89,964 | 42,451 | 47% | 5.3% |
+| [Moss rocks](https://polyhaven.com/a/rock_moss_set_01) | 63,127 | 30,938 | 49% | 5.8% |
+| [Dutch ship](https://polyhaven.com/a/dutch_ship_large_01) | 110,616 | 58,536 | 53% | 6.1% |
+| [Namaqualand boulder](https://polyhaven.com/a/namaqualand_boulder_02) | 97,964 | 80,332 | 82% | 5.7% |
+
+Rough rock needs the most faces to hold its look. Hard-surface models with big smooth
+areas gain the most.
+
+![Fire hydrant wireframes, 86,316 faces to 37,552 quads](docs/images/auto_hydrant.png)
+
+![Six moss rocks wireframes, 63,127 faces to 30,938 quads](docs/images/auto_rocks.png)
+
+![Dutch ship wireframes, 110,616 faces to 58,536 quads, with the sail's cloth folds simplified in the close-up](docs/images/auto_ship.png)
+
+The close-up above shows the current weak spot: at 6% the sail loses its fine cloth
+folds. Lower Change Allowed to keep more. See [Known Limits](#known-limits).
 
 ## Flat Quads: Huge Quads On Flat Areas, Density Only Where It's Needed
 
@@ -265,6 +311,17 @@ add-on keeps working.
 
 ## Known Limits
 
+- Auto Segments gets the shape right before it gets the quads tidy. About half of its
+  vertices don't have the ideal four quads around them, so quads on smooth surfaces
+  can look slanted or scattered rather than in clean rows. This is the top item for
+  the next version.
+- Auto Segments reduces, but it isn't a hand-made low-poly yet: most results are 25% to
+  55% of the original at 6%. Fine detail such as cloth folds and small rounded ends is
+  simplified first. It can take many minutes on models with hundreds of parts, and
+  Blender can pause for several seconds at a time on meshes over a million faces.
+- Auto Segments copies UVs when you press Apply, but its big quads can stretch across
+  UV islands, and this hasn't been measured yet. Check your UVs or re-unwrap and bake.
+  It was mainly tested on Blender 5.2.
 - Region patches are always all quads with an exact seam. On noisy scans a few
   quads next to the seam can still come out bent (about 3% in our noisy scan
   test); a slightly larger cage or a bigger Quad Size usually helps.
@@ -288,7 +345,10 @@ add-on keeps working.
 - **GPU compute** through Blender's own GPU module for the parallel parts
   (inside tests, field smoothing, surface fitting), on NVIDIA, AMD, Intel and
   Apple graphics.
-- **Release builds on GitHub Actions** for every platform and Blender version.
+- **Cleaner quad rows** on smooth surfaces, and a setting to choose between keeping
+  detail and keeping quads organized.
+- **More density in tight areas**, found automatically, with a smooth-shading check.
+- **Reduce To** a percent or face count, progress bars, and detail baking for game assets.
 - A listing on extensions.blender.org.
 
 Have a use case we should cover? Tell us in
@@ -296,8 +356,8 @@ Have a use case we should cover? Tell us in
 
 ## Thank You
 
-Thank you to the first 7 people who starred CurioMesh. Every star helps another
-Blender artist find a free retopology tool.
+Thank you to everyone who starred CurioMesh. Every star helps another Blender
+artist find a free retopology tool.
 
 [![Star History Chart](https://api.star-history.com/svg?repos=CurioCrafter/CurioMesh&type=Date)](https://star-history.com/#CurioCrafter/CurioMesh&Date)
 
