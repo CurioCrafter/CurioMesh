@@ -281,7 +281,7 @@ class AutoJob:
         first, case = 0, None
         if self.table is not None:
             case = cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0))
-            if not self.target_faces:  # Reduce To may want any small size to land on its count, so none is ruled out
+            if not self.target_faces:  # Reduce To may want any small size to land on its count, and guessed sizes cost it extra pairing rounds: it looks at them all
                 first = cases.first_size(case, shares, floor, self.table)
         # What was measured on this very mesh before, under any amount, is kept per size: another amount only adds sizes.
         tried = self.cache.setdefault(("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes())), {})
@@ -306,7 +306,7 @@ class AutoJob:
             change = yield from look(at)
         at, change = first, start_change
         while change > enough and at + 1 < len(shares):
-            if JUMP_SIZES and case is not None and triangles < JUMP_BELOW * self.triangles and at + 2 < len(shares) and change > 4.0 * enough and at + 1 not in tried:
+            if JUMP_SIZES and case is not None and not self.target_faces and triangles < JUMP_BELOW * self.triangles and at + 2 < len(shares) and change > 4.0 * enough and at + 1 not in tried:
                 before = change
                 change = yield from look(at + 2)
                 middle = _decimate(self.context, points, polys, kinds, shares[at + 1], self._piece_drop(ids))  # never looked at: the end check has the final say

@@ -194,12 +194,6 @@ def first_size(case: str, shares: list[float], floor: float, table: dict) -> int
     return max(len(shares) - 1, 0)
 
 
-def method_for(case: str, table: dict) -> str:
-    """The method to try first on this case: 'revolve' when a rebuild usually beat Decimate on parts it fits, else 'decimate'."""
-    seen = table["cases"].get(case, table["cases"]["all"])["revolve"]
-    return "revolve" if seen["fits"] >= 3 and seen["wins"] * 2 > seen["fits"] else "decimate"
-
-
 def explain(case: str, faces: int, change: float | None, skipped: int, looked: int, whole: bool = False, guessed: bool = False) -> str:
     """In plain words: what the part was taken for, what was tried, what was kept. `change` is a share of the part's view."""
     article = "an" if case[0] in "aeiou" else "a"

@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.cases import classify, curve, explain, features, first_size, load_table, method_for
+from triadq.cases import classify, curve, explain, features, first_size, load_table
 
 TABLE = {"cases": {
     "all": {"shares": {"0.02": {"parts": 9, "loss": [0.5, 0.9, 1.0]}, "0.04": {"parts": 9, "loss": [0.2, 0.3, 0.4]}, "0.08": {"parts": 9, "loss": [0.0, 0.1, 0.2]}}, "revolve": {"fits": 0, "wins": 0}},
@@ -50,9 +50,7 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(first_size("tube", [0.02, 0.04, 0.08], -1.0, TABLE), 2)  # nothing fits: the biggest
         self.assertEqual(curve("no such case", [0.02], TABLE)[0], (0.5, 0.9, 1.0))
 
-    def test_method_and_words(self):
-        self.assertEqual(method_for("tube", TABLE), "revolve")
-        self.assertEqual(method_for("box", TABLE), "decimate")
+    def test_words(self):
         self.assertIn("Looks like a tube", explain("tube", 120, 0.04, 2, 3))
         self.assertIn("Looks like an ornament", explain("ornament", 120, 0.04, 0, 3))
         self.assertIn("as it was", explain("box", 120, 0.0, 0, 3, whole=True))

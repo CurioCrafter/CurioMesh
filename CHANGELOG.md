@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Part cases** (Auto Segments). Each part now gets a named case from a few cheap
+  measurements: tiny part, flat plate, thin sheet, box, tube, dome, rough scan, ornament or
+  organic smooth. A small table, built from camera results on nine models, says which
+  small sizes that case doesn't hold, so the search starts above them, and small parts
+  look at every other size. The camera still measures the sizes it looks at and checks
+  the whole result, and it sends the search back down when a part has room to spare. On nine models the
+  table never saw, the time went down 21% overall (from 820 s to 649 s) with 29% fewer looks
+  and 0.2% fewer faces. Eight got faster, by 14 to 31%; one got 19% slower, from an extra
+  pairing round. The change in the view stays near the amount asked for, but moved on some
+  models (a crane 5.3% to 4.1% with 3.5% more faces, a statue 4.3% to 4.9%). On two
+  models kept apart until the end, the table's guess at a part's change was off by a
+  factor of 1.47, against 2.10 with one curve for all parts. Reduce To looks at every
+  size as before. `AutoJob.explain_part` says in plain words what a part was taken for
+  and what was kept. The case names are rough: a smooth chess piece can come out as a
+  rough scan. Rebuild the table with `scripts/build_case_table.py`.
+  Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r).
 - **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
   vertex group and colour the parts that need more quads red; the search keeps more
   faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate
