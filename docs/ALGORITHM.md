@@ -333,16 +333,29 @@ represented as implemented by the current Python add-on.
 
 ## Smooth Grids
 
-Reducing and pairing triangles scatters the quads on a dome. Before pairing, Auto Segments rebuilds smooth doubly curved
-disks (`triadq/smoothgrid.py`):
+Reducing and pairing triangles scatters the quads on domes and dished discs. Before pairing, Auto Segments rebuilds round
+smooth areas (`triadq/smoothgrid.py`), in two passes:
 
-1. On the source, the spread of the normals around each face separates domes (smallest eigenvalue of the normal tensor
-   above zero) from cylinders and plates (zero). An area must bend mostly one way and total at least 20 degrees of
+1. Domes: on the source, the spread of the normals around each face separates domes (smallest eigenvalue of the normal
+   tensor above zero) from cylinders and plates (zero). An area must bend mostly one way and total at least 20 degrees of
    curvature, so rock stays as it is.
-2. Reduced faces take the area of their nearest source face. Spikes and notches on the border are tidied, because a
-   zigzag border folds the quads next to it.
-3. The disk is flattened onto a circle (Tutte) and gets a four-sided Coons grid. If corner quads come out poor, a ring of
-   quads goes around it, which leaves four poles just inside. Every border vertex stays, so neighbours keep conforming;
-   an odd border splits one edge, and the triangle outside it. New vertices are projected onto the source and relaxed.
-4. A grid that folds or strays from the source is dropped, and grids together may add 3% of the quads. Grid quads stay
-   whole through pairing (`keep_quads`), and the usual camera check judges the result.
+2. Then everything else with creases all around, unless it is rough (median bend between faces over 10 degrees).
+
+Reduced faces take the area of their nearest source face. Spikes and notches on the border are tidied, because a zigzag
+border folds the quads next to it. What a reduced area becomes depends on its shape:
+
+- A disk with four corners, a plate: opposite sides get equal counts by splitting border edges, then a straight grid.
+- A round disk: flattened onto a circle (Tutte), with a four-sided Coons grid inside and concentric rows around it. How
+  far the disk turns sets how fine the grid is, so a flat one closes down to a small grid.
+- A ring: concentric rows, rungs following a common angle round it so they don't spiral.
+- A thin bent strip, or a band already one strip of triangles from border to border, stays as it is for pairing.
+
+Rows lose vertices through a three-edges-to-one template of four quads, which never has a flat corner. Every border
+vertex stays; big areas with coarsely cut curved borders get extra ones, placed by interpolating the curve, because a
+chord across a flat disc lies on the disc and sag can't see it. New vertices land on the source and are relaxed.
+
+An area is judged the way the camera will judge it: its share of surface turned over 20 degrees from the source or moved
+two pixels off it must not grow, it can't fold or stray, and grids together may add 3% of the quads per pass. If it fails
+with rim vertices it goes again without them, and any split it made is undone: leftover splits cost far more than they
+look, as each triangle that doesn't pair costs about three quads at closure. Grid quads stay whole through pairing
+(`keep_quads`), and the usual camera check judges the result.

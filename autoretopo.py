@@ -25,8 +25,8 @@ from mathutils.bvhtree import BVHTree
 
 from .triadq import patch
 from .triadq.budget import Level, allocate
-from .triadq.flatquad import pair_and_close
-from .triadq.smoothgrid import GridReport, grid_areas, smooth_areas
+from .triadq.flatquad import _face_frames, pair_and_close
+from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
 from .triadq.types import MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -126,12 +126,15 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 
 
 def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=None):
-    """The reduced mesh with its smooth rounded areas rebuilt as rows of quads, using BVH lookups on the source."""
+    """The reduced mesh with its smooth round areas rebuilt as rows of quads, using BVH lookups on the source."""
 
-    labels = smooth_areas(co, faces) if labels is None else labels
+    if labels is None:
+        domes = smooth_areas(co, faces)
+        labels = (domes, crease_areas(co, faces, domes >= 0))
     coarse = MeshData(coarse_points, coarse_faces, coarse_kinds)
-    if int(labels.max(initial=-1)) < 0:
-        return coarse, GridReport()
+    report = GridReport()
+    if int(max(area.max(initial=-1) for area in labels)) < 0:
+        return coarse, report
     points = co.tolist()
     whole = BVHTree.FromPolygons(points, [list(f) for f in faces], all_triangles=False, epsilon=0.0)
 
@@ -139,7 +142,22 @@ def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=No
         found = [whole.find_nearest(Vector(p)) for p in query.tolist()]
         return np.asarray([row[2] for row in found], dtype=np.int64), np.asarray([row[0] for row in found], dtype=np.float64).reshape(-1, 3)
 
-    return grid_areas(coarse, labels, nearest)
+    def project_for(area):
+        ids = np.flatnonzero(labels[1] == area).tolist()
+        tree = BVHTree.FromPolygons(points, [list(faces[f]) for f in ids], all_triangles=False, epsilon=0.0)
+        return lambda query: np.asarray([tree.find_nearest(Vector(p))[0] for p in query.tolist()], dtype=np.float64).reshape(-1, 3)
+
+    extent = float(np.ptp(co, axis=0).max())
+    normals = _face_frames(co, faces)[0]
+    coarse, report = grid_areas(coarse, labels[0], nearest, extent=extent, normals=normals)
+    coarse, later = grid_areas(coarse, labels[1], nearest, project_for=project_for, extent=extent, normals=normals)
+    report.built += later.built
+    report.faces_in += later.faces_in
+    report.quads_out += later.quads_out
+    report.loops += later.loops
+    for reason, count in later.rejected.items():
+        report.rejected[reason] = report.rejected.get(reason, 0) + count
+    return coarse, report
 
 
 class AutoJob:
@@ -273,7 +291,8 @@ class AutoJob:
     def _pair(self, co, faces, kinds) -> None:
         try:
             if self._labels is None:
-                self._labels = smooth_areas(self.co, self.faces)
+                domes = smooth_areas(self.co, self.faces)
+                self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
             coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
             self._paired = pair_and_close(coarse, seed_count=2, keep_quads=True)[0]
         except Exception as exc:  # a thread has nobody above it to report to

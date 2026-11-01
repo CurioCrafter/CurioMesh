@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 from triadq import MeshData, topology_summary  # noqa: E402
 from triadq.flatquad import pair_and_close  # noqa: E402
 from triadq.patch import _half_edges, quad_quality  # noqa: E402
-from triadq.smoothgrid import grid_areas, smooth_areas  # noqa: E402
+from triadq.smoothgrid import _strip, grid_areas, smooth_areas  # noqa: E402
 
 
 def capsule(sides: int = 24, stacks: int = 6, length: float = 4.0):
@@ -95,6 +95,17 @@ class SmoothGridTests(unittest.TestCase):
         points = closed.vertices
         dome = np.abs(points[:, 1]) > 0.5 * length + 0.45
         self.assertLessEqual(int((valence[dome] != 4).sum()), 2 * 8)
+
+    def test_strip_closes_rows_without_flat_corners(self):
+        quads, extra = _strip(np.arange(12), 100 + np.arange(8), 200)
+        self.assertEqual(len(extra), 4)
+        uses = {}
+        for quad in quads:
+            for a, b in zip(quad, quad[1:] + quad[:1]):
+                uses[(min(a, b), max(a, b))] = uses.get((min(a, b), max(a, b)), 0) + 1
+        self.assertEqual(sum(1 for k, n in uses.items() if n == 1), 20)  # just the two rows are open
+        for quad in quads:
+            self.assertLessEqual(sum(v < 12 for v in quad), 2)  # never three in a line along a row
 
 
 if __name__ == "__main__":
