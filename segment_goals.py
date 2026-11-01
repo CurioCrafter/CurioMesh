@@ -204,6 +204,7 @@ class FindJob(view.PartJob):
         self.fresh = fresh
         super().__init__(context, [], "AUTO")
         self.stage = "Finding the segments"
+        self.report = self.base["report"]  # finding them changes no face, so the search's numbers still hold
 
     def status(self) -> str:
         if self.warnings:
@@ -549,7 +550,7 @@ def _centres():
 
 
 class _SegmentOp:
-    bl_options = {"INTERNAL", "UNDO"}
+    bl_options = {"INTERNAL"}
 
     def _done(self, problem: str):
         if problem:
@@ -576,7 +577,7 @@ class CURIOMESH_OT_seg_rename(bpy.types.Operator):
     bl_idname = "curiomesh.seg_rename"
     bl_label = "Rename Segment"
     bl_description = "Give the selected segment a name of your own"
-    bl_options = {"INTERNAL", "UNDO"}
+    bl_options = {"INTERNAL"}
 
     name: bpy.props.StringProperty(name="Name", default="")
 
@@ -654,7 +655,7 @@ class CURIOMESH_OT_seg_split(bpy.types.Operator):
     bl_idname = "curiomesh.seg_split"
     bl_label = "Split"
     bl_description = "Draw a line across a segment to cut it in two, on the side you see and through to the back. Esc cancels"
-    bl_options = {"INTERNAL", "UNDO"}
+    bl_options = {"INTERNAL"}
 
     @classmethod
     def poll(cls, context):
@@ -716,7 +717,7 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
     bl_idname = "curiomesh.seg_paint"
     bl_label = "Paint"
     bl_description = "Paint a new segment on the mesh with the left mouse button. [ and ] change the brush. Enter or right-click ends, Esc cancels"
-    bl_options = {"INTERNAL", "UNDO"}
+    bl_options = {"INTERNAL"}
 
     @classmethod
     def poll(cls, context):
