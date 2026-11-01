@@ -98,6 +98,7 @@ state = {
     "L0": 0.1,
     "predicted": 0,
     "work": None,
+    "auto_cache": (None, {}),  # (mesh signature, measurements of it): Start again with another amount skips the looking
     "auto_base": None,  # the finished Auto Segments result that step 4 (Live Boolean) works on
 }
 
@@ -976,7 +977,9 @@ def _start_segments(context, gs, src) -> bool:
         return True
     stop_work()
     state["auto_base"] = None
-    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail, target)
+    if state["auto_cache"][0] != src["sig"]:
+        state["auto_cache"] = (src["sig"], {})  # a different mesh: what was measured on the old one is no use
+    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail, target, state["auto_cache"][1])
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -1215,7 +1218,7 @@ def _stop() -> None:
         bpy.app.timers.unregister(_poll)
     stop_work()
     remove_preview()
-    state.update(sig=None, message="", lock=None, hover=None, auto_base=None)
+    state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}))
     overlay.tag_redraw()
 
 

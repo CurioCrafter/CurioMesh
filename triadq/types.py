@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 from typing import Iterable
 
 import numpy as np
@@ -78,3 +79,22 @@ def face_edges(face: Face) -> list[tuple[int, int]]:
         tuple(sorted((face[i], face[(i + 1) % len(face)])))
         for i in range(len(face))
     ]
+
+
+class Cancelled(Exception):
+    """Raised inside a worker when the caller no longer wants its result."""
+
+
+_cancel = threading.local()
+
+
+def cancel_with(check) -> None:
+    """Make `check_cancelled()` on this thread raise `Cancelled` once `check()` is true. None switches it off."""
+    _cancel.check = check
+
+
+def check_cancelled() -> None:
+    """A stopping point for long loops: free when nobody asked for cancelling."""
+    check = getattr(_cancel, "check", None)
+    if check is not None and check():
+        raise Cancelled()

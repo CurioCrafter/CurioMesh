@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Auto Segments is much faster and Stop really stops.** Waiting for the pairing no
+  longer spins the main thread (it fought the pairing thread for Python's lock): a
+  17,000-face bust went from 37 s to 7 s and a 61,000-face barrier from 13 s to 6 s,
+  same result. Pressing Start again with another Change Allowed reuses what was
+  already measured (about 1.5 to 4 s instead of 5 to 7 s). Stop now ends the
+  pairing thread within a stopping point (0.06 s measured) instead of letting it
+  run on. The report keeps the seconds spent looking, decimating and pairing.
 - **Auto Segments is now a guided, five-step panel**: pick the mesh, choose the aim,
   press Start and watch, fix areas you don't like, Apply. One big button always shows
   the next step. A real progress bar (a text bar before Blender 4.0) shows the stage

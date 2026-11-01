@@ -21,7 +21,7 @@ from .topology import (
     split_non_manifold_vertex_fans,
     topology_summary,
 )
-from .types import Face, MeshData
+from .types import Face, MeshData, check_cancelled
 
 
 @dataclass(slots=True)
@@ -157,6 +157,7 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
     seed_count = max(1, int(options.seed_count))
 
     for seed in range(seed_count):
+        check_cancelled()
         candidate = _run_candidate(tri_mesh, options, mode, seed)
         candidate.report.vertex_fan_splits = vertex_fan_splits
         candidate.report.candidates = []
@@ -581,6 +582,7 @@ def _estimate_field(
         else None
     )
     for _ in range(0 if fast is not None else steps):
+        check_cancelled()
         into_a = cross[face_b] * transport
         into_b = cross[face_a] * np.conj(transport)
         real = np.bincount(face_a, weights=into_a.real, minlength=face_count) + np.bincount(
@@ -803,7 +805,9 @@ def _augment_matching(
     adjacency = {face: [item[1] for item in linked] for face, linked in allowed.items()}
     frozen: set[int] = set()
     rescued = 0
-    for root in order:
+    for count, root in enumerate(order):
+        if not count % 256:
+            check_cancelled()
         if root in mate or root in frozen or not adjacency.get(root):
             continue
         end, parent, tree = _blossom_search(root, mate, adjacency, frozen)
