@@ -398,6 +398,18 @@ artist find a free retopology tool.
 
 [![Star History Chart](https://api.star-history.com/svg?repos=CurioCrafter/CurioMesh&type=Date)](https://star-history.com/#CurioCrafter/CurioMesh&Date)
 
+## Credits
+
+The tidiness score is based on statistics measured from hand-made meshes. It holds
+no geometry. Sources and licenses are in [docs/PATTERN_SOURCES.md](docs/PATTERN_SOURCES.md).
+Credits for the CC-BY works, changed by reducing them to statistics
+([CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)):
+
+- Sprite Rig (CC-BY) Blender Foundation, studio.blender.org
+- Rain Rig (CC) Blender Foundation, studio.blender.org
+- Pack Bot Rig (CC-BY) Blender Foundation, studio.blender.org
+- Security Bot Rig (CC-BY) Blender Foundation, studio.blender.org
+
 ## Solver Portfolio
 
 | Strategy | Use it for | Implementation and expectation |

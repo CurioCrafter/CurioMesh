@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The add-on is now named plain CurioMesh**, in Blender's add-on list and in the
+  extension listing. Its id stays `curiomesh`.
+- **Tidiness score** at the end of Auto Segments: a number from 0 to 100 for how close
+  the quads' layout is to hand-made meshes (credits and limits in `docs/PATTERN_SOURCES.md`).
+  It says nothing about shape, so read it next to the camera number. **Tidy Quads** is an
+  option, off by default: it is slow and the view changes a little more.
+- **Turned parts** (pipes, tanks, bolts, rings) are rebuilt as clean rings of quads and
+  **round and four-cornered areas** as concentric rows and grids, wherever the camera says
+  the result holds up.
+- **Keep UV Seams** is now an option, off by default, because it can nearly double the
+  faces. For textured game assets, Bake Detail Normal + Color is the recommended route.
 - **Segment view** (Auto Segments, new Parts panel). The whole result is drawn with every part
   in its own colour. Hover a part (Inspect Parts) to see its faces before and after, how much of
   its view changed and its method; click to select, Shift+click to add. Pick another method for
@@ -64,7 +75,6 @@
 - Auto Segments keeps UVs good: quads stay inside one UV island and seams stay in
   place, so textures land where they did. This costs faces on models cut into
   many islands, except with Normal + Color, which doesn't need the old seams.
-- Applied Guided results keep edges sharper than 60 degrees hard.
 - Auto Segments tries a size between two others where a piece jumps past a limit, gives
   more faces to the spots the camera saw go wrong, and reports how much of the view
   looks different in shape and in smooth shading.
