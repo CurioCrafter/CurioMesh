@@ -26,6 +26,7 @@ from mathutils.bvhtree import BVHTree
 from .triadq import patch
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
+from .triadq.smoothgrid import GridReport, grid_areas, smooth_areas
 from .triadq.types import MeshData
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -124,6 +125,23 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
         most *= 0.85
 
 
+def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=None):
+    """The reduced mesh with its smooth rounded areas rebuilt as rows of quads, using BVH lookups on the source."""
+
+    labels = smooth_areas(co, faces) if labels is None else labels
+    coarse = MeshData(coarse_points, coarse_faces, coarse_kinds)
+    if int(labels.max(initial=-1)) < 0:
+        return coarse, GridReport()
+    points = co.tolist()
+    whole = BVHTree.FromPolygons(points, [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+
+    def nearest(query):
+        found = [whole.find_nearest(Vector(p)) for p in query.tolist()]
+        return np.asarray([row[2] for row in found], dtype=np.int64), np.asarray([row[0] for row in found], dtype=np.float64).reshape(-1, 3)
+
+    return grid_areas(coarse, labels, nearest)
+
+
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
@@ -146,6 +164,7 @@ class AutoJob:
         self._stopped = False
         self._pair_thread: threading.Thread | None = None
         self._paired = None
+        self._labels = None
         self.pieces: list[np.ndarray] = []
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
@@ -253,7 +272,10 @@ class AutoJob:
 
     def _pair(self, co, faces, kinds) -> None:
         try:
-            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2)[0]
+            if self._labels is None:
+                self._labels = smooth_areas(self.co, self.faces)
+            coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
+            self._paired = pair_and_close(coarse, seed_count=2, keep_quads=True)[0]
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
 

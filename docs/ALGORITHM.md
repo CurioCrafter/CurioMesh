@@ -330,3 +330,19 @@ represented as implemented by the current Python add-on.
 - [Blossom-Quad](https://orbi.uliege.be/handle/2268/113152)
 - [Practical Quad Mesh Simplification](https://vcg-legacy.isti.cnr.it/Publications/2010/TPCPP10/Tarini%20Pietroni%20Cignoni%20Panozzo%20Puppo%20-%20Practical%20Quad%20Semplification%20-%20EG%202010.pdf)
 - [Quadrilateral Mesh Simplification](https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Daniels08.pdf)
+
+## Smooth Grids
+
+Reducing and pairing triangles scatters the quads on a dome. Before pairing, Auto Segments rebuilds smooth doubly curved
+disks (`triadq/smoothgrid.py`):
+
+1. On the source, the spread of the normals around each face separates domes (smallest eigenvalue of the normal tensor
+   above zero) from cylinders and plates (zero). An area must bend mostly one way and total at least 20 degrees of
+   curvature, so rock stays as it is.
+2. Reduced faces take the area of their nearest source face. Spikes and notches on the border are tidied, because a
+   zigzag border folds the quads next to it.
+3. The disk is flattened onto a circle (Tutte) and gets a four-sided Coons grid. If corner quads come out poor, a ring of
+   quads goes around it, which leaves four poles just inside. Every border vertex stays, so neighbours keep conforming;
+   an odd border splits one edge, and the triangle outside it. New vertices are projected onto the source and relaxed.
+4. A grid that folds or strays from the source is dropped, and grids together may add 3% of the quads. Grid quads stay
+   whole through pairing (`keep_quads`), and the usual camera check judges the result.
