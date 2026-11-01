@@ -4,13 +4,13 @@
 # ruff: noqa: E402
 
 bl_info = {
-    "name": "CurioMesh Quad Remesher",
+    "name": "CurioMesh",
     "author": "CurioCrafter",
     "version": (0, 8, 0),
     "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
-    "description": "Atlas-Q scan-aware quad retopology with explicit validation",
+    "description": "Quad retopology for scans and game assets",
     "doc_url": "https://github.com/CurioCrafter/CurioMesh",
 }
 

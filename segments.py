@@ -141,6 +141,12 @@ def build_table(base: dict) -> None:
     refresh_list()
 
 
+def mirrored() -> bool:
+    """A mirrored result holds both sides but the job only solved one: part redos would lose the other side."""
+    base = _g().state["auto_base"]
+    return base is not None and base["job"].mirror is not None
+
+
 def ensure() -> None:
     """Make the table for the result on screen, when it is a new one."""
     base = _g().state["auto_base"]
@@ -713,7 +719,7 @@ class CURIOMESH_OT_seg_redo(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return ready() and bool(seg["sel"]) and _g().progress_info() is None
+        return ready() and not mirrored() and bool(seg["sel"]) and _g().progress_info() is None
 
     def execute(self, context):
         method = context.scene.curiomesh_guided.seg_method
@@ -741,7 +747,7 @@ class CURIOMESH_OT_seg_try(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return ready() and len(seg["sel"]) == 1 and _g().progress_info() is None
+        return ready() and not mirrored() and len(seg["sel"]) == 1 and _g().progress_info() is None
 
     def execute(self, context):
         use_try(context, next(iter(seg["sel"])), self.index)
@@ -840,6 +846,8 @@ def draw_parts(layout, context, gs) -> None:
             box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
     row = box.row(align=True)
     row.prop(gs, "seg_method", text="")
+    if mirrored():
+        layout.label(text="Redo is off with Mirror on: start again without it", icon="INFO")
     row.operator("curiomesh.seg_redo", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
     if busy:
         guided.draw_progress(box, *guided.progress_info())

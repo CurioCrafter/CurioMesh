@@ -317,7 +317,7 @@ Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/rel
 | Not sure | `...-blender-4.2-plus-extension.zip` (4.2 and newer) or `...-blender-3.6-plus-addon.zip` (any version from 3.6) | as above |
 | 3.5 and older | not supported | |
 
-Then enable **CurioMesh Quad Remesher**, select a mesh, and open
+Then enable **CurioMesh**, select a mesh, and open
 `3D View > N-panel > CurioMesh`.
 
 Every release runs the full test suite and an install test on Blender 3.6 LTS,
