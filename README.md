@@ -66,7 +66,9 @@ no triangles and no folded quads. They took from 15 seconds to about 24 minutes.
 | [Fire hydrant](https://polyhaven.com/a/fire_hydrant) | 86,316 | 37,552 | 44% | 6.1% |
 | [Overhead crane](https://polyhaven.com/a/overhead_crane) | 89,964 | 42,451 | 47% | 5.3% |
 | [Moss rocks](https://polyhaven.com/a/rock_moss_set_01) | 63,127 | 30,938 | 49% | 5.8% |
+| [Ship pinnace](https://polyhaven.com/a/ship_pinnace) | 168,317 | 82,687 | 49% | 5.0% |
 | [Dutch ship](https://polyhaven.com/a/dutch_ship_large_01) | 110,616 | 58,536 | 53% | 6.1% |
+| [Coastal cliff](https://polyhaven.com/a/coastal_cliff_04) | 1,537,926 | 548,482 | 36% | 5.6% |
 | [Namaqualand boulder](https://polyhaven.com/a/namaqualand_boulder_02) | 97,964 | 80,332 | 82% | 5.7% |
 
 Rough rock needs the most faces to hold its look. Hard-surface models with big smooth
@@ -318,10 +320,12 @@ add-on keeps working.
 - Auto Segments reduces, but it isn't a hand-made low-poly yet: most results are 25% to
   55% of the original at 6%. Fine detail such as cloth folds and small rounded ends is
   simplified first. It can take many minutes on models with hundreds of parts, and
-  Blender can pause for several seconds at a time on meshes over a million faces.
-- Auto Segments copies UVs when you press Apply, but its big quads can stretch across
-  UV islands, and this hasn't been measured yet. Check your UVs or re-unwrap and bake.
-  It was mainly tested on Blender 5.2.
+  Blender can pause for up to about 30 seconds at a time on meshes over a million faces.
+- **Don't count on kept UVs in Auto Segments yet: re-unwrap and bake instead.** It ignores
+  UV seams while reducing, so its quads can span several UV islands and textures smear
+  there. Measured on real models, those quads cover 6% of the road barrier, 27% of the
+  compressor and 36% of the treasure chest. A fix is the next update.
+- Auto Segments was mainly tested on Blender 5.2.
 - Region patches are always all quads with an exact seam. On noisy scans a few
   quads next to the seam can still come out bent (about 3% in our noisy scan
   test); a slightly larger cage or a bigger Quad Size usually helps.
