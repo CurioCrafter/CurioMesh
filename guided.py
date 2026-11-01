@@ -84,7 +84,6 @@ BAKE_ITEMS = [
     ("NORMAL_COLOR", "Normal + Color", "Bake a normal map and the base color into one new material with new UVs. Press Update after choosing it: Auto Segments then ignores the old UV seams and needs fewer faces", "IMAGE_DATA", 2),
 ]
 BAKE_SIZES = [(str(s), f"{s} px", f"Textures of {s} by {s} pixels") for s in (512, 1024, 2048, 4096)]
-SHARP_ANGLE = float(np.radians(60.0))
 PRESET_ITEMS = [
     ("CHARACTER", "Character", "Organic bodies and faces: Detail points, flowing quads", "ARMATURE_DATA", 0),
     ("HARD_SURFACE", "Hard-Surface Prop", "Props with hard edges: Sharp points, grid-like quads", "MOD_BEVEL", 1),
