@@ -31,7 +31,7 @@ from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from .triadq import cases, checks, parts, patch, patterns, special
+from .triadq import bakescore, cases, checks, parts, patch, patterns, special, views
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
@@ -49,8 +49,11 @@ MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes 
 KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to gain, and thousands of them to look at
 MEASURE_SHARE = 0.6  # of the progress bar, spent looking at the pieces
 LEVELS = (0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
+BAKED_LEVELS = (0.0025, 0.005, 0.01) + LEVELS  # a normal map takes over the bumps, so far smaller sizes have a chance
+BAKED_ROUGH_SHARE = 0.8  # Judge After Baking is only for rough models: this share of the faces has to look rough
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 HOPELESS = 1.5  # a rebuild this many times over the limit for a piece won't get picked, so smaller ones aren't tried
+KEEP_SHARE = 0.25  # a piece with over this share of the faces is the body of the model, and always stays
 REBUILD_MARGIN = 1.5  # a rebuilt part's measured change counts this many times, as it looks better alone than in the whole view
 QUAD_WEIGHT = 0.9  # a rebuilt quad counts as this many faces of a triangle level (those end up about 1.1 quads each)
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
@@ -95,14 +98,14 @@ SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's 
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 
 
-def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None):
+def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None, baked_from: BVHTree | None = None):
     """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth, face)] when exhausted.
 
     `tree` is the BVH of this very mesh when the caller already has one (building it is a fifth of a picture set).
     The native core makes the same pictures in one quick call, with no BVH; these rays are the fallback.
     """
 
-    fast = turbo.pictures(points, polys, center, half, pixels)
+    fast = None if baked_from is not None else turbo.pictures(points, polys, center, half, pixels)  # `baked_from`: each normal is the source's nearest, what a bake paints there
     if fast is not None:
         return fast
     if tree is None:
@@ -129,7 +132,8 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
                     found = cast(origin, direction)
                     if found[0] is not None:
                         at.append(base + j)
-                        normals.append(found[1][:])
+                        near = found if baked_from is None else baked_from.find_nearest(found[0])
+                        normals.append((found[1] if near[1] is None else near[1])[:])
                         hit_faces.append(found[2])
                         depths.append(found[3])
                 since_yield += pixels
@@ -304,7 +308,7 @@ def wrong_points(reference, other, center: np.ndarray, half: float, pixels: int,
     return np.vstack(found)
 
 
-def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, limit: float) -> np.ndarray:
+def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, limit: float, rough: bool = False, baked: bool = False) -> np.ndarray:
     """The labels of connected parts of the viewed mesh where over `limit` of what's shown has changed.
 
     A big flat part can hide a ruined small one in the total. Parts showing too few pixels to judge are left out.
@@ -313,14 +317,12 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
     count = int(labels.max()) + 1
     wrong, shown = np.zeros(count), np.zeros(count)
     for (hit_a, normal_a, depth_a, _face_a), (hit_b, normal_b, depth_b, face_b) in zip(reference, view):
-        parts = labels[face_b[hit_b]]
-        shown += np.bincount(parts, minlength=count)
-        both = hit_a & hit_b
+        shown += np.bincount(labels[face_b[hit_b]], minlength=count)
         if baked:
-            changed = bakescore.surface_changed(hit_a, normal_a, depth_a, hit_b, normal_b, depth_b, pixel)[both]
+            changed = bakescore.surface_changed(hit_a, normal_a, depth_a, hit_b, normal_b, depth_b, pixel) & hit_a & hit_b
         else:
-            changed = (np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < cosine) | (np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel)
-        wrong += np.bincount(labels[face_b[both]][changed], minlength=count)
+            changed = views.surface_changed(hit_a, normal_a, depth_a, hit_b, normal_b, depth_b, pixel, rough)
+        wrong += np.bincount(labels[face_b[changed]], minlength=count)
     return np.flatnonzero((shown >= PART_PIXELS) & (wrong > limit * shown))
 
 
@@ -511,7 +513,12 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False):
+        self.rough = bool(rough)  # judge rough surface as texture (`views`), and let triangles walk away for fewer faces
+        self.drop_hidden = bool(drop_hidden)
+        self.dropped: list[np.ndarray] = []
+        self.baked = bool(baked)  # judge the result as it will look with a normal map baked from the source
+        self._bake_tree = None
         self.style = style  # DETAIL, BALANCED or ROWS
         self._tree = None
         self._worker: subprocess.Popen | None = None
@@ -804,7 +811,7 @@ class AutoJob:
                 turned = yield from self._off(lambda: parts.orient_like(out[0], out[1], points, polys))
                 rebuilt = (out[0], turned, out[2])
                 view = yield from self._timed("pictures", self._pictures(rebuilt[0], rebuilt[1], center, half, pixels))
-                wrong, shown = picture_counts(reference, view, pixel)
+                wrong, shown = self._counts(reference, view, pixel)
                 seen = max(seen, shown * pixel * pixel)
                 turned_sizes.append(rebuilt)
                 turned_levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
@@ -818,13 +825,15 @@ class AutoJob:
                         continue
                     rebuilt = (out[0], special.orient_like(out[0], out[1], points, polys), out[2])
                     view = yield from self._timed("pictures", self._pictures(rebuilt[0], rebuilt[1], center, half, pixels))
-                    wrong, shown = picture_counts(reference, view, pixel)
+                    wrong, shown = self._counts(reference, view, pixel)
                     if REBUILD_MARGIN * wrong > hopeless * shown:
                         break
                     seen = max(seen, shown * pixel * pixel)
                     turned_sizes.append(rebuilt)
                     turned_levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
-        shares = [share for share in LEVELS if share * triangles >= 12.0]
+        if self.baked:
+            self._bake_tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
+        shares = [share for share in (BAKED_LEVELS if self.baked else LEVELS) if share * triangles >= 12.0]
         floor = PIECE_LIMIT * self.detail / 100.0
         first, case = 0, None
         if self.table is not None:
@@ -839,7 +848,7 @@ class AutoJob:
             yield
             reduced = yield from self._reduced(points, polys, kinds, shares[k], self._piece_drop(ids), self._piece_lock(ids))
             view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
-            wrong, shown = picture_counts(reference, view, pixel)
+            wrong, shown = self._counts(reference, view, pixel)
             self.looks += 1
             looked[k] = (reduced, Level(len(reduced[1]), wrong * area), wrong_points(reference, view, center, half, pixels, pixel), shown * area)
             return wrong / max(shown, 1)
@@ -868,7 +877,7 @@ class AutoJob:
                 reduced = yield from self._reduced(points, polys, kinds, faces / len(polys))
                 view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
                 sizes.append(reduced)
-                levels.append(Level(len(reduced[1]), picture_counts(reference, view, pixel)[0] * area))
+                levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
                 spots.append(wrong_points(reference, view, center, half, pixels, pixel))
                 # Density where the camera saw it go wrong: hold those spots while the rest goes further, then let go.
                 for k in (upper - 1, upper, len(levels) - 1):
@@ -878,7 +887,7 @@ class AutoJob:
                     reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), one_off=True)
                     view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
                     sizes.append(reduced)
-                    levels.append(Level(len(reduced[1]), picture_counts(reference, view, pixel)[0] * area))
+                    levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
                     spots.append(spots[k])
             kept = best_levels(levels)
             sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
@@ -1150,7 +1159,7 @@ class AutoJob:
                 self._paired = self._balanced(coarse)
                 self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
                 return
-            made = make_pure(coarse, method, self.output_kind, self.notes, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, join_triangles=self.collapse and method == "AUTO", chunk_faces=PAIR_CHUNK_FACES if self.cfg.name == "Light" else 0)
+            made = make_pure(coarse, method, self.output_kind, self.notes, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, merge_triangles=self.rough and method == "AUTO", join_triangles=self.collapse and method == "AUTO", chunk_faces=PAIR_CHUNK_FACES if self.cfg.name == "Light" else 0)
             # Strokes and a mirror seam must stay where they are.
             if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and not self._stopped:
                 made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
@@ -1203,13 +1212,18 @@ class AutoJob:
             return work()
         return (yield from self._background(work))
 
+    def _counts(self, reference, view, pixel: float) -> tuple[int, int]:
+        """(pixels that changed, pixels showing), by this job's way of judging."""
+        return bakescore.picture_counts(reference, view, pixel) if self.baked else views.picture_counts(reference, view, pixel, self.rough)
+
     def _pictures(self, points, polys, center, half, pixels):
         """Generator: `pictures`, on a worker thread in a big job."""
+        baked_from = self._bake_tree if self.baked else None
         if len(self.faces) < OFF_MAIN_FROM:
-            return (yield from pictures(points, polys, center, half, pixels))
+            return (yield from pictures(points, polys, center, half, pixels, baked_from=baked_from))
 
         def run():
-            work = pictures(points, polys, center, half, pixels)
+            work = pictures(points, polys, center, half, pixels, baked_from=baked_from)
             while True:
                 try:
                     next(work)
@@ -1262,7 +1276,7 @@ class AutoJob:
             yield
             reduced = yield from self._reduced(whole[0], whole[1], whole[2], share)
             view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
-            wrong, _shown = picture_counts(reference, view, pixel)
+            wrong, _shown = self._counts(reference, view, pixel)
             where = max(at, other)
             self.sizes[index].insert(where, reduced)
             self.levels[index].insert(where, Level(len(reduced[1]), wrong * pixel * pixel))
@@ -1321,7 +1335,7 @@ class AutoJob:
             full, back = yield from self._background(lambda: self._with_copies(attempt, attempt_owner))
             self.stage = f"Taking away quads: {len(full.faces):,}"
             view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
-            wrong, shown = picture_counts(reference, view, pixel)
+            wrong, shown = self._counts(reference, view, pixel)
             now = 100.0 * wrong / max(shown, 1)
             ruined = yield from self._off(lambda: sorted(set(back[over_limit(full, view)].tolist())))
             if now <= self.detail and not ruined:
@@ -1686,6 +1700,51 @@ class AutoJob:
             yield
         return box[0] if box else None
 
+    def _drop_hidden_pieces(self):
+        """Generator: leave out the loose pieces no camera outside can see. A piece with a big share of the faces always stays."""
+        tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
+        labels = np.zeros(len(self.faces), dtype=np.int64)
+        for index, ids in enumerate(self.pieces):
+            labels[ids] = index
+        labels = labels.tolist()
+        pixel = float(np.ptp(self.co, axis=0).max()) / VIEW_PIXELS
+        reach = 4.0 * float(np.linalg.norm(np.ptp(self.co, axis=0)))
+
+        def cast(origin, direction):
+            return tree.ray_cast(Vector(origin), Vector(direction))[2]
+
+        kept = []
+        for index, ids in enumerate(self.pieces):
+            self.stage = f"Is piece {index + 1} of {len(self.pieces)} in sight?"
+            if len(ids) > KEEP_SHARE * len(self.faces) or (self.locked is not None and self._piece_lock(ids).any()):  # the body, or a region of a cut piece
+                kept.append(ids)
+                continue
+            points = self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))]
+            if views.pixels_seen(cast, labels, points.min(axis=0), points.max(axis=0), pixel, index, reach, enough=1):
+                kept.append(ids)
+            else:
+                self.dropped.append(ids)
+            yield
+        if self.dropped:
+            at = {ids.tobytes(): k for k, ids in enumerate(self.pieces)}
+            order = [at[ids.tobytes()] for ids in kept]
+            self.names = [self.names[k] for k in order]
+            self.picture_sizes = [self.picture_sizes[k] for k in order]
+            self.notes.append(f"Left out {len(self.dropped):,} hidden loose pieces ({sum(len(ids) for ids in self.dropped):,} faces). No camera outside could see them: anything inside a closed space goes too")
+        self.pieces = kept
+
+    def _baked_suits(self) -> bool:
+        """Judge After Baking damages hard-surface models and its own score misses that, so it only runs on models that look rough."""
+        extent = float(np.ptp(self.co, axis=0).max()) or 1.0
+        rough = 0
+        for ids in self.pieces:
+            points, polys, _kinds = self._piece_arrays(ids)
+            rough += len(ids) if cases.classify(cases.features(points, polys, extent)) == "rough scan" else 0
+        suits = rough >= BAKED_ROUGH_SHARE * max(len(self.faces), 1)
+        if not suits:
+            self.notes.append(f"Judge After Baking was not used: only {100.0 * rough / max(len(self.faces), 1):.0f}% of the faces look like rough scan, and it damages hard surfaces")
+        return suits
+
     def _split_pieces(self) -> np.ndarray:
         """Find the loose pieces and how big a picture each gets. Returns each piece's share of the work done before it."""
         fa, fb = patch.face_adjacency(self.faces)
@@ -1722,6 +1781,12 @@ class AutoJob:
 
     def _run(self):
         done_share = yield from self._off(self._split_pieces)
+        if self.drop_hidden:
+            yield from self._drop_hidden_pieces()
+            if self.dropped:
+                done_share = np.linspace(0.0, 1.0, len(self.pieces) + 1)
+        if self.baked:
+            self.baked = yield from self._off(self._baked_suits)
         picture_sizes = self.picture_sizes
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         yield from self._off(self._show)
@@ -1738,6 +1803,8 @@ class AutoJob:
         self.progress = (len(self.pieces), len(self.pieces))
         self.fraction = MEASURE_SHARE
         self.stage = "Looking at the whole object"
+        if self.baked:
+            self._bake_tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
         low, high = self.co.min(axis=0), self.co.max(axis=0)
         center, half = (low + high) / 2.0, extent * 0.55
         pixel = 2.0 * half / self.max_pixels
@@ -1892,7 +1959,7 @@ class AutoJob:
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
         bend = guides.bend_stats([group for _tag, group in self.bend_groups], self.output["co"], shown, self.gap) if self.bend_groups else None
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "copies": len(self.twins), "instanced": self.instances is not None, "check": check, "notes": list(dict.fromkeys(self.notes)), "chunks": self.chunks, "resumed": self.resumed, "memory_mb": dict(self.mem), "guides": follows}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "dropped": len(self.dropped), "dropped_faces": sum(len(ids) for ids in self.dropped), "baked": self.baked, "copies": len(self.twins), "instanced": self.instances is not None, "check": check, "notes": list(dict.fromkeys(self.notes)), "chunks": self.chunks, "resumed": self.resumed, "memory_mb": dict(self.mem), "guides": follows}
         if self.checkpoint is not None and not self.keep_progress:
             shutil.rmtree(self.checkpoint, ignore_errors=True)  # finished: nothing left to resume
         self._drop_tmp()
@@ -1931,7 +1998,7 @@ class AutoJob:
     def _look(self, points, out_faces, center, half, reference, reference_shaded, pixel):
         """Generator: percent of the view that differs in shape, and in smooth shading past 20 and 10 degrees, when exhausted."""
         view = yield from self._timed("pictures", self._pictures(points, out_faces, center, half, self.max_pixels))
-        wrong, shown = picture_counts(reference, view, pixel)
+        wrong, shown = self._counts(reference, view, pixel)
         view_shaded = yield from self._off(lambda: shaded(view, points, out_faces, center, half, self.max_pixels))
         bad_shade, seen_both = shading_counts(reference, view, reference_shaded, view_shaded)
         soft = shading_counts(reference, view, reference_shaded, view_shaded, SOFT_DEG)[0]
@@ -1974,7 +2041,7 @@ class AutoJob:
         r = self.report
         shade = "" if r.get("shading") is None else f", {r['shading']:.1f}% in smooth shading"
         tidy = "" if r.get("topology") is None else f"Tidiness: {r['topology']:.0f}/100. "
-        text = f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape{shade}. {tidy}{r['seconds']:.0f} s{extra}"
+        text = f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape{' once baked' if r.get('baked') else ''}{shade}. {tidy}{r['seconds']:.0f} s{extra}"
         return text + (f" | {r['check']['text']}" if r.get("check") else "") + "".join(f" | {n}" for n in r.get("notes", []))
 
 

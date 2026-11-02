@@ -686,7 +686,7 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
 
 def pair_and_close(
     coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
-    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (), keep_quads: bool = False, join_triangles: bool = False, chunk_faces: int = 0,
+    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (), keep_quads: bool = False, join_triangles: bool = False, chunk_faces: int = 0, merge_triangles: bool = False,
 ) -> tuple[MeshData, RemeshReport]:
     """Repair, pair with TRIAD-Q, then close every connected piece on its own.
 
@@ -702,7 +702,7 @@ def pair_and_close(
 
     cancel_with(cancelled)
     try:
-        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces)
+        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces, merge_triangles)
     finally:
         cancel_with(None)
 
@@ -773,7 +773,7 @@ def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[Me
     return out, report
 
 
-def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces=0):
+def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces=0, merge_triangles=False):
     repaired, _added = make_closable(coarse)
     check_cancelled()
     kept: list[tuple[tuple[int, ...], str]] = []
@@ -793,6 +793,8 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
         paired = MeshData(repaired.vertices, list(paired.faces) + [row[0] for row in kept], list(paired.face_materials) + [row[1] for row in kept], name=paired.name)
     if not force_quads or not paired.faces:
         return paired, solver
+    if merge_triangles:
+        paired = collapse_loose_triangles(paired)[0]
     if join_triangles:
         paired = join_loose_triangles(paired)[0]
     closed, sparse, split, open_pieces, forced = _close_pieces(paired)
