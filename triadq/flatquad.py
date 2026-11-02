@@ -25,7 +25,7 @@ import math
 import numpy as np
 
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
-from .quadreduce import join_loose_triangles
+from .quadreduce import collapse_loose_triangles, join_loose_triangles
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
 from .topology import MAX_QUAD_WARP_DEGREES, _turbo, parity_path_closure_unpairing, quad_only_closure, topology_summary
 from .types import FlatFaces, MeshData, cancel_with, check_cancelled

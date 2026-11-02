@@ -184,6 +184,19 @@
   across it. Hard edges stop looking melted, with no extra faces.
   Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r)
 
+- **Rough As Texture** (Auto Segments). For scans of rock, terrain or sea floor: rough
+  surfaces are judged by their average direction over a few pixels instead of every
+  pixel, and leftover triangles merge away along short paths. Far fewer faces on rough
+  scans (coast rocks 879,607 to 51,628 quads). Smooth surfaces are judged as before.
+  Bumps smaller than a few pixels are not kept. Off by default.
+- **Leave Out Hidden Pieces** (Auto Segments). Loose pieces no camera outside the model
+  can see, from 14 directions, are left out, and the result says how many. Off by
+  default: anything inside a closed space goes too.
+- Fixed Auto Segments failing while taking quads away, when one removal met a quad
+  it would have had to merge twice.
+- `scripts/part_report.py` looks at every loose part of a result: a table of what the
+  camera sees and a sheet of the worst parts, source beside result.
+
 ## 0.8.0 - 2026-11-01
 
 - **Auto Segments** (new mode in the Remesh setting of the Guided panel). Press

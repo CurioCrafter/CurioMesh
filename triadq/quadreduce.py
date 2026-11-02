@@ -72,6 +72,27 @@ def _quality(p) -> float:
     return worst
 
 
+def _plane_quadrics(points, faces) -> list[list[float]]:
+    """Each corner's area-weighted squared distance to the planes of its faces."""
+
+    out = [[0.0] * 11 for _ in points]
+    for face in faces:
+        for k in range(1, len(face) - 1):
+            a, b, c = points[face[0]], points[face[k]], points[face[k + 1]]
+            n = _cross(_sub(b, a), _sub(c, a))
+            twice_area = math.sqrt(_dot(n, n))
+            if twice_area < 1e-30:
+                continue
+            x, y, z = n[0] / twice_area, n[1] / twice_area, n[2] / twice_area
+            d = -(x * a[0] + y * a[1] + z * a[2])
+            row = (x * x, x * y, x * z, x * d, y * y, y * z, y * d, z * z, z * d, d * d, 1.0)
+            for v in (face[0], face[k], face[k + 1]):
+                q = out[v]
+                for i in range(11):
+                    q[i] += row[i] * twice_area
+    return out
+
+
 class QuadReducer:
     """Removes quads cheapest first. `remove(count)` is a generator; `save`/`restore` allow stepping back after a look."""
 
@@ -103,7 +124,7 @@ class QuadReducer:
         for v in range(len(self.points)):
             if self.border[v] or len(material_of[v]) > 1:
                 self.locked[v] = True
-        self.quadrics = self._start_quadrics()
+        self.quadrics = _plane_quadrics(self.points, self.faces)
         used = np.asarray(mesh.vertices, dtype=np.float64)
         self.dissolve_limit = DISSOLVE_SHARE * float(np.linalg.norm(np.ptp(used, axis=0))) if len(used) else 0.0
         self.stamps = [0] * len(self.points)
@@ -114,24 +135,6 @@ class QuadReducer:
                 self._push(index, 0)
                 self._push(index, 1)
         heapq.heapify(self.heap)
-
-    def _start_quadrics(self) -> list[list[float]]:
-        out = [[0.0] * 11 for _ in self.points]
-        for face in self.faces:
-            for k in range(1, len(face) - 1):
-                a, b, c = self.points[face[0]], self.points[face[k]], self.points[face[k + 1]]
-                n = _cross(_sub(b, a), _sub(c, a))
-                twice_area = math.sqrt(_dot(n, n))
-                if twice_area < 1e-30:
-                    continue
-                x, y, z = n[0] / twice_area, n[1] / twice_area, n[2] / twice_area
-                d = -(x * a[0] + y * a[1] + z * a[2])
-                row = (x * x, x * y, x * z, x * d, y * y, y * z, y * d, z * z, z * d, d * d, 1.0)
-                for v in (face[0], face[k], face[k + 1]):
-                    q = out[v]
-                    for i in range(11):
-                        q[i] += row[i] * twice_area
-        return out
 
     @staticmethod
     def _error(q: list[float], p) -> float:
@@ -193,6 +196,8 @@ class QuadReducer:
             elif count == 3:  # it would be left in two quads: they become one
                 first, second = sorted(f for f in users[side] if f != q)  # sorted, as a set's order isn't one the native core can match
                 if self.locked[side] or first not in moved or second not in moved or len(faces[first]) != 4 or len(faces[second]) != 4:
+                    return False
+                if first in merged_with or second in merged_with:  # both sides share a quad, which can't merge twice in one removal
                     return False
                 one, two = renamed(faces[first]), renamed(faces[second])
                 one, two = one[one.index(side):] + one[: one.index(side)], two[two.index(side):] + two[: two.index(side)]

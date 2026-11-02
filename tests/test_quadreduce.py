@@ -10,9 +10,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq.flatquad import _close_pieces  # noqa: E402
-from triadq.quadreduce import QuadReducer, join_loose_triangles  # noqa: E402
+from triadq.quadreduce import QuadReducer, collapse_loose_triangles, join_loose_triangles  # noqa: E402
 from triadq.topology import topology_summary  # noqa: E402
 from triadq.types import MeshData  # noqa: E402
+from triadq.views import picture_counts, pixels_seen  # noqa: E402
 
 
 def box(cells: int) -> MeshData:
@@ -115,6 +116,53 @@ class JoinTests(unittest.TestCase):
         result, joined = join_loose_triangles(mesh)
         self.assertEqual(joined, 0)
         self.assertEqual(result.faces, mesh.faces)
+
+
+class TestCollapseAndViews(unittest.TestCase):
+    def test_two_triangles_walk_together_and_are_gone(self) -> None:
+        mesh = box(4)
+        points = np.asarray(mesh.vertices, dtype=np.float64)
+        faces = [tuple(f) for f in mesh.faces]
+        # Cut two far apart quads of the box across a corner: two triangles for each, on a closed surface.
+        cuts = [0, len(faces) // 2]
+        out = []
+        for k, face in enumerate(faces):
+            if k in cuts:
+                out += [(face[0], face[1], face[2]), (face[0], face[2], face[3])]
+            else:
+                out.append(face)
+        before = MeshData(points, out, ["0"] * len(out))
+        after, gone = collapse_loose_triangles(before)
+        self.assertEqual(gone, 4)
+        self.assertEqual(sum(len(f) == 3 for f in after.faces), 0)
+        self.assertLess(len(after.faces), len(out))
+        self.assertTrue(topology_summary(after).all_quads)
+
+    def test_rough_block_is_judged_by_its_average(self) -> None:
+        size = 8
+        up = np.zeros((size, size, 3))
+        up[..., 2] = 1.0
+        bumpy = up.copy()
+        tilt = np.radians(35.0)
+        bumpy[..., 0] = np.where(np.indices((size, size)).sum(axis=0) % 2 == 0, np.sin(tilt), -np.sin(tilt))
+        bumpy[..., 2] = np.cos(tilt)
+        hit, depth, face = np.ones((size, size), dtype=bool), np.zeros((size, size)), np.zeros((size, size), dtype=np.int64)
+        rough_source, smooth_low = [(hit, bumpy, depth, face)], [(hit, up, depth, face)]
+        self.assertEqual(picture_counts(rough_source, smooth_low, 1.0), (size * size, size * size))
+        self.assertEqual(picture_counts(rough_source, smooth_low, 1.0, rough=True)[0], 0)
+        # A smooth source that is turned counts in both.
+        self.assertEqual(picture_counts(smooth_low, rough_source, 1.0, rough=True)[0], size * size)
+
+    def test_part_inside_another_is_not_seen(self) -> None:
+        def cast(origin, direction):  # two spheres around the origin: 0 is the outer, 1 is inside it
+            origin, direction = np.asarray(origin), np.asarray(direction)
+            along = -float(origin @ direction)
+            miss = float(np.linalg.norm(origin + direction * along))
+            return 0 if miss < 1.0 else None
+
+        low, high = (-0.1, -0.1, -0.1), (0.1, 0.1, 0.1)
+        self.assertEqual(pixels_seen(cast, [0, 1], low, high, 0.05, 1, 10.0), 0)
+        self.assertGreater(pixels_seen(cast, [0, 1], low, high, 0.05, 0, 10.0, enough=5), 0)
 
 
 if __name__ == "__main__":

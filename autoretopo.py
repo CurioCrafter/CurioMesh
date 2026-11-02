@@ -312,7 +312,6 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
 
     count = int(labels.max()) + 1
     wrong, shown = np.zeros(count), np.zeros(count)
-    cosine = math.cos(math.radians(TURNED_DEG))
     for (hit_a, normal_a, depth_a, _face_a), (hit_b, normal_b, depth_b, face_b) in zip(reference, view):
         parts = labels[face_b[hit_b]]
         shown += np.bincount(parts, minlength=count)
