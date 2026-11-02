@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1039,7 +1040,11 @@ class _PreviewOp:
 
 def library_path() -> str:
     """The user's own file of remembered fixes, in Blender's user config folder (not in the add-on)."""
-    return os.path.join(bpy.utils.user_resource("CONFIG", path="curiomesh", create=True), "fixes.json")
+    try:
+        folder = bpy.utils.user_resource("CONFIG", path="curiomesh", create=True)
+    except OSError:  # a config folder we can't write: the fixes last for this session
+        folder = tempfile.gettempdir()
+    return os.path.join(folder, "fixes.json")
 
 
 def _drain(generator):
