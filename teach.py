@@ -204,7 +204,7 @@ def find(fix: dict, co, faces, limit: float = SHAPE_LIMIT, near=None, reach: flo
         if got is None:
             continue
         fmap, vmap = got
-        if any(len(around[vmap[v]]) != n for v, n in inside.items()):
+        if any(v not in vmap for v in range(ring_n + inner_n)) or any(len(around.get(vmap[v], ())) != n for v, n in inside.items()):
             continue
         target = [f for f, _o in fmap.values()]
         key = frozenset(target)
@@ -275,6 +275,8 @@ def put_in(co, faces, fix: dict, match: dict, project=None):
     vmap = match["vmap"]
     kept = np.ones(len(faces), dtype=bool)
     kept[match["faces"]] = False
+    if any(v < ring_n and v not in vmap for f in fix["after"] for v in f):  # the match doesn't cover this fix: leave the mesh as it is
+        return co, list(faces), np.ones(len(faces), dtype=bool)
     added = [tuple(vmap[v] if v < ring_n else base + v - ring_n for v in f) for f in fix["after"]]
     all_co = np.vstack((co, placed))
     all_faces = [f for i, f in enumerate(faces) if kept[i]] + added
@@ -304,12 +306,16 @@ def _points(value) -> bool:
 def _faces_in(value, count: int) -> bool:
     """A list of faces of 3 or more corners, each a different vertex below `count`."""
     return isinstance(value, list) and 0 < len(value) <= MOST_FACES and all(
-        isinstance(f, list) and 3 <= len(f) <= 64 and len(set(f)) == len(f) and all(type(v) is int and 0 <= v < count for v in f) for f in value
+        isinstance(f, list) and 3 <= len(f) <= 64 and all(type(v) is int and 0 <= v < count for v in f) and len(set(f)) == len(f) for f in value
     )
 
 
-def valid_fix(fix) -> bool:
-    """Whether a fix read from a file is safe to use: a library can come from anybody, so nothing in it is taken on trust."""
+def _uses_all(faces, count: int) -> bool:
+    """The faces use every vertex below `count` and no other, so a walk over them always ends with a whole map."""
+    return _faces_in(faces, count) and {v for f in faces for v in f} == set(range(count))
+
+
+def _valid_fix(fix) -> bool:
     if not isinstance(fix, dict):
         return False
     ring = fix.get("ring")
@@ -317,12 +323,21 @@ def valid_fix(fix) -> bool:
         return False
     if not isinstance(fix.get("id"), str) or len(fix["id"]) > LONGEST_NAME or type(fix.get("uses", 0)) is not int:
         return False
-    if not (_points(fix.get("ring_points")) and _points(fix.get("before_inner", [])) and _points(fix.get("after_inner", []))) or len(fix["ring_points"]) != ring:
+    inner_before, inner_after = fix.get("before_inner"), fix.get("after_inner")
+    if not (_points(fix.get("ring_points")) and _points(inner_before) and _points(inner_after)) or len(fix["ring_points"]) != ring:
         return False
-    shape = fix.get("shape", [])
-    if not isinstance(shape, list) or len(shape) > 16 or not all(type(x) in (int, float) and math.isfinite(x) for x in shape):
+    shape = fix.get("shape")
+    if not isinstance(shape, list) or not 1 <= len(shape) <= 16 or not all(type(x) in (int, float) and math.isfinite(x) for x in shape):
         return False
-    return _faces_in(fix.get("before"), ring + len(fix.get("before_inner", []))) and _faces_in(fix.get("after"), ring + len(fix.get("after_inner", [])))
+    return _uses_all(fix.get("before"), ring + len(inner_before)) and _uses_all(fix.get("after"), ring + len(inner_after))
+
+
+def valid_fix(fix) -> bool:
+    """Whether a fix read from a file is safe to use: a library or a .blend can come from anybody, so nothing in it is taken on trust."""
+    try:
+        return _valid_fix(fix)
+    except Exception:  # whatever shape it came in, it isn't a fix
+        return False
 
 
 def load(path: str) -> list[dict]:
@@ -334,7 +349,7 @@ def load(path: str) -> list[dict]:
             data = json.load(handle)
         fixes = data.get("fixes", [])
         return [f for f in fixes[:MOST_FIXES] if valid_fix(f)] if isinstance(fixes, list) else []
-    except (OSError, ValueError, AttributeError, RecursionError):
+    except (OSError, ValueError, AttributeError, TypeError, RecursionError):
         return []
 
 

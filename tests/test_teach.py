@@ -52,7 +52,7 @@ class TeachTests(unittest.TestCase):
 
 
 class LibraryFileTests(unittest.TestCase):
-    good = {"id": "a", "ring": 3, "ring_points": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "before": [[0, 1, 2]], "before_inner": [], "after": [[0, 1, 2]], "after_inner": []}
+    good = {"id": "a", "ring": 3, "ring_points": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "before": [[0, 1, 2]], "before_inner": [], "after": [[0, 1, 2]], "after_inner": [], "shape": [0.0]}
 
     def test_only_valid_fixes_are_read_and_saving_leaves_no_temp_file(self):
         bad = [
@@ -63,6 +63,17 @@ class LibraryFileTests(unittest.TestCase):
             dict(self.good, ring_points=[[0, 0, float("nan")], [1, 0, 0], [0, 1, 0]]),
             dict(self.good, id=5),
             [],
+            dict(self.good, before=[[0, 1, "2"]]),  # not a whole number
+            dict(self.good, before=[[0, 1, [2]]]),  # can't be hashed
+            dict(self.good, after=[[0, {}, 2]]),
+            {k: v for k, v in self.good.items() if k != "after"},  # missing
+            {k: v for k, v in self.good.items() if k != "shape"},
+            dict(self.good, before=[[0, 1, -1]]),  # out of range
+            dict(self.good, before_inner=[[0.0, 0.0, 0.0]]),  # a vertex nothing uses
+            dict(self.good, ring_points=[[0, 0, 0], [1, 0], [0, 1, 0]]),
+            dict(self.good, before=None),
+            None,
+            7,
         ]
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / "fixes.json")
@@ -73,6 +84,17 @@ class LibraryFileTests(unittest.TestCase):
             self.assertEqual(teach.load(path), [])
             Path(path).write_text("[" * 100000, encoding="utf-8")
             self.assertEqual(teach.load(path), [])
+
+
+class RobustTests(unittest.TestCase):
+    def test_a_match_missing_a_vertex_leaves_the_mesh_alone(self):
+        co, faces = _grid()
+        fix = {"ring": 3, "after": [(0, 1, 2)], "after_inner": []}
+        match = {"fit": (1.0, np.eye(3), np.zeros(3)), "vmap": {0: 0, 1: 1}, "faces": [0]}
+        out_co, out_faces, kept = teach.put_in(co, faces, fix, match)
+        self.assertEqual(len(out_co), len(co))
+        self.assertEqual(out_faces, list(faces))
+        self.assertTrue(kept.all())
 
 
 if __name__ == "__main__":

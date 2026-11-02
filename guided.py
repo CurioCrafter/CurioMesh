@@ -1112,7 +1112,10 @@ def _kept(source) -> list[dict]:
         kept = json.loads(source.get("curiomesh_kept", "[]"))
     except (ValueError, TypeError, RecursionError):
         return []
-    return [e for e in kept if isinstance(e, dict) and teach.valid_fix(e.get("fix")) and type(e.get("reach")) in (int, float) and teach._points([e.get("at")])] if isinstance(kept, list) else []
+    try:
+        return [e for e in kept if isinstance(e, dict) and teach.valid_fix(e.get("fix")) and type(e.get("reach")) in (int, float) and teach._points([e.get("at")])] if isinstance(kept, list) else []
+    except (TypeError, ValueError):
+        return []
 
 
 def _scan(res) -> None:
