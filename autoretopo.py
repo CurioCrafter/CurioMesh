@@ -183,6 +183,7 @@ def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
 
 
 def _quadriflow(context, points, polys, kinds, goal):
+    context = bpy.context  # the operator's context, kept by the job, is gone by now
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.update()
