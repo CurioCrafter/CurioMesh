@@ -1005,7 +1005,7 @@ def next_spot(res, project, L0):
 
 
 def state_source():
-    obj = bpy.data.objects.get(state["source"])
+    obj = bpy.data.objects.get(state["source"]) if state["source"] else None
     return obj if obj is not None and obj.type == "MESH" else None
 
 
