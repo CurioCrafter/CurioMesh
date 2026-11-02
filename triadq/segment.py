@@ -63,6 +63,8 @@ SNAP_LEVELS = 16
 EVEN_ROUNDS = 6  # rounds of rounding off a border where no crease holds it
 SEAM_ROUNDS = 4  # passes straightening the result's seams
 SEAM_CREASE = 0.6  # radians between the faces either side: a seam this sharp is on a crease and stays
+CREASE_DEG, CREASE_LENGTH = 20.0, 0.1  # sharper than this and at least this share of the part's size: a crease worth keeping
+CREASE_REACH = 0.6  # edges within which a sheet vertex moves onto a crease
 CAMERA_WEIGHT = 3.0  # how much more of an Animation sheet goes where the camera saw it go wrong
 SHEET_RATIO = 1.6  # how fast a row of an Animation sheet may gain or lose vertices
 RING_SAMPLES = 128
@@ -736,7 +738,7 @@ def conform(points, faces, seams):
     return final_points, final, origin, [np.searchsorted(used, ids) for ids in seam_ids]
 
 
-def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edges=(), project=None):
+def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edges=(), project=None, seeds: int = 2):
     """A reduced part joined to its seams: all quads when ParityPath can close it, every second seam vertex taking the others as frozen midpoints.
 
     Bent seams can leave a face no valid template; it takes the first anyway and the shape is repaired with the seam held.
@@ -750,10 +752,10 @@ def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edge
     def pairing(new_points):
         at = {p.tobytes(): k for k, p in enumerate(new_points)}
         keep = [(at[x.tobytes()], at[y.tobytes()]) for x, y in wanted if x.tobytes() in at and y.tobytes() in at]  # conforming renumbers, so edges are found by place
-        return RemeshOptions(target_faces=max(1, len(faces) // 2), seed_count=2, force_quads=False, max_pairing=True, guide_edges=tuple(keep))
+        return RemeshOptions(target_faces=max(1, len(faces) // 2), seed_count=seeds, force_quads=False, max_pairing=True, guide_edges=tuple(keep))
 
     if not seams and quads:
-        made = pair_and_close(MeshData(points, faces, kinds), seed_count=2, guide_edges=tuple(guide_edges))[0]
+        made = pair_and_close(MeshData(points, faces, kinds), seed_count=seeds, guide_edges=tuple(guide_edges))[0]
         return np.asarray(made.vertices, dtype=np.float64), [tuple(f) for f in made.faces], list(made.face_materials)
     if quads and sum(len(s) for s in seams) % 2 == 0 and all(len(s) >= 6 for s in seams):  # two odd borders are fine: all quads only needs an even total
         try:
@@ -866,6 +868,45 @@ def even_embedding(points, tris, border, circle, importance=None, rounds: int = 
     return best
 
 
+def long_creases(points, faces, degrees: float = CREASE_DEG, share: float = CREASE_LENGTH) -> np.ndarray:
+    """Points along the long creases of a part (eyelids, lips, panel lines): connected sharp edges reaching `share` of its size. Short ones are scan noise."""
+
+    points = np.asarray(points, dtype=np.float64)
+    normals = face_frames(points, faces)[0]
+    fa, fb, u, v = face_links(faces)
+    sharp = (normals[fa] * normals[fb]).sum(axis=1) <= np.cos(np.radians(degrees))
+    if not sharp.any():
+        return np.zeros((0, 3))
+    a, b = u[sharp], v[sharp]
+    line = _labels(len(points), a, b)[a]
+    lengths = np.linalg.norm(points[a] - points[b], axis=1)
+    _values, which = np.unique(line, return_inverse=True)
+    total = np.bincount(which.reshape(-1), lengths)
+    keep = total[which.reshape(-1)] >= share * float(np.ptp(points, axis=0).max())
+    return np.vstack((points[a[keep]], 0.5 * (points[a[keep]] + points[b[keep]]))) if keep.any() else np.zeros((0, 3))
+
+
+def snap_to_creases(xyz, quads, pinned, creases, edge: float):
+    """Move sheet vertices close to a crease onto it, so lids and lips stay cut into the rows. A vertex stays if that would spoil a quad."""
+
+    if not len(creases):
+        return xyz
+    free = np.flatnonzero(~pinned)
+    index, dist = _nearest_on_cloud(xyz[free], creases)
+    move = dist < CREASE_REACH * edge
+    moved = xyz.copy()
+    moved[free[move]] = creases[index[move]]
+    faces = np.asarray(quads, dtype=np.int64)
+    before, after = quad_quality(xyz[faces]), quad_quality(moved[faces])
+    for _ in range(8):
+        bad = (after < 0.1) & (after < before)
+        if not bad.any():
+            break
+        moved[faces[bad].ravel()] = xyz[faces[bad].ravel()]
+        after = quad_quality(moved[faces])
+    return moved
+
+
 def _ring_plan(uv, tris, points, edge: float, seam_count: int, importance):
     """How rows should run inside a flattened disk: (radius of each row, vertices on it). Rows are `edge` apart on the surface and have quads about `edge` long.
 
@@ -906,7 +947,7 @@ def _ring_plan(uv, tris, points, edge: float, seam_count: int, importance):
     return out_radii, counts
 
 
-def _sheet(co, faces, comp, edge, project, focus=None):
+def _sheet(co, faces, comp, edge, project, focus=None, creases=None):
     """Rows round a disk with a small grid at the far end, the even sheet an animator lays by hand: (points, quads, seam loop) or None.
 
     Four poles sit where the rows meet the grid, and a row gains or loses vertices through smoothgrid's strips only where the surface widens or narrows.
@@ -968,10 +1009,12 @@ def _sheet(co, faces, comp, edge, project, focus=None):
     settled = fit_to_surface(xyz, quads, pinned, project, iterations=SHEET_RELAX, guard=False)
     if (quad_quality(settled[np.asarray(quads, dtype=np.int64)]) <= 0.0).any():  # the repair is slow, so only when something folded
         settled = fit_to_surface(settled, quads, pinned, project, iterations=1)
+    if creases is not None:
+        settled = snap_to_creases(settled, quads, pinned, creases, edge)
     return settled, quads, loop
 
 
-def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3, focus=None):
+def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3, focus=None, creases=None):
     """Rebuild a part of the result on its own seams. Returns (points, faces, warnings); seam vertices stay exactly where they were.
 
     Animation tries a row-and-grid sheet and a flow fill on each disk and keeps the better topology score. Subdivision is the flow fill.
@@ -989,7 +1032,7 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
             raise ValueError("cancelled")
         options = []
         if goal == "ANIMATION":
-            grid = _sheet(co, faces, comp, edge, project or (lambda p: p), focus)
+            grid = _sheet(co, faces, comp, edge, project or (lambda p: p), focus, creases)
             if grid is not None:
                 xyz, quads, loop = grid
                 new = xyz[len(loop) :]
@@ -1029,3 +1072,13 @@ def seam_loops(co, faces, ids) -> list[np.ndarray]:
     if pinched:
         raise ValueError("the part touches itself at a vertex")
     return [np.asarray(co)[loop] for loop in loops]
+
+
+def next_in_order(order, current, step: int) -> int | None:
+    """The next item to look at, wrapping round. From nothing, the first one going forward and the last going back."""
+
+    if not len(order):
+        return None
+    if current not in order:
+        return order[0] if step > 0 else order[-1]
+    return order[(order.index(current) + step) % len(order)]

@@ -222,7 +222,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_detail: bpy.props.FloatProperty(name="Segment Detail", description="How many segments a connected mesh splits into. Left finds only the big parts, right also the smaller ones. Changing it starts the segments over, with their tries and hand changes", default=0.65, min=0.0, max=1.0, subtype="FACTOR", update=segments.segment_goals.on_detail)
     seg_goal: bpy.props.EnumProperty(name="Use", description="What the selected segments are for", items=segments.segment_goals.GOAL_ITEMS, default="ANIMATION")
     seg_goal_detail: bpy.props.FloatProperty(name="Detail", description="Faces in the selected segments. The middle keeps the size of the quads they have now", default=0.5, min=0.0, max=1.0, subtype="FACTOR")
-    seg_method: bpy.props.EnumProperty(name="Method", description="The method to remake the selected parts with", items=segments.METHOD_ITEMS, default="FLAT")
+    seg_method: bpy.props.EnumProperty(name="Method", description="How Reduce and Low Poly make their quads", items=segments.METHOD_ITEMS, default="AUTO")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
     sym_axis: bpy.props.EnumProperty(name="Mirror", description="Auto Segments: solve one half of the mesh and mirror it. The two sides come out identical and the seam is exact. Only used when the mesh really is symmetric; otherwise the whole mesh is solved and you are told why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
@@ -1514,8 +1514,7 @@ def _collect_work(context) -> None:
             if state["res"] is not None and len(teach.load(library_path())) * len(state["res"]["faces"]) < 300_000:
                 _scan(state["res"])
             segments.ensure()
-            if segments.segment_goals.worth_finding(state["auto_base"]):
-                segments.segment_goals.start_find(context)
+            segments.segment_goals.start_find(context)
         overlay.tag_redraw()
         return
     res = state["res"]
@@ -2947,6 +2946,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row.scale_y = 1.9
             row.enabled = not redoing and progress_info() is None
             row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
+            layout.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if segments.seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(segments.seg.get("reviewing")))
         else:
             row = layout.row()
             row.scale_y = 1.9

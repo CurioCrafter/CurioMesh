@@ -30,6 +30,8 @@ from . import segments as view
 from .triadq import parts as P
 from .triadq import patch
 from .triadq import segment as S
+from .triadq.flatquad import flat_quad_remesh
+from .triadq.types import MeshData
 
 ATTRIBUTE = "curiomesh_segment"
 SAVED = "curiomesh_segments"
@@ -83,6 +85,7 @@ def save() -> None:
         "names": [r["name"] for r in view.seg["parts"]],
         "goals": [r["goal"] for r in view.seg["parts"]],
         "details": [r["goal_detail"] for r in view.seg["parts"]],
+        "methods": [r.get("choice", "AUTO") for r in view.seg["parts"]],
         "sel": sorted(view.seg["sel"]),
     })
 
@@ -133,7 +136,7 @@ def _record(job, label: int, ids: np.ndarray, count: int, saved=None) -> dict:
     return {
         "id": label, "name": pick("names", f"Segment {label + 1}"), "kind": P.classify(points, polys), "before": len(ids), "after": count,
         "change": change, "topology": None, "method": "AUTO", "goal": pick("goals", "REDUCE"), "goal_detail": pick("details", 0.5),
-        "loose": loose, "whole": whole, "source": ids,
+        "loose": loose, "whole": whole, "source": ids, "choice": pick("methods", "AUTO"),
         "tries": [{"method": "AUTO", "after": count, "change": change, "topology": None, "detail": None, "build": None}], "cur": 0,
     }
 
@@ -371,10 +374,6 @@ def start_find(context, fresh: bool = False) -> bool:
     return True
 
 
-def worth_finding(base: dict) -> bool:
-    return any(len(ids) >= S.MIN_FACES for ids in base["job"].pieces)
-
-
 # --------------------------------------------------------------------------- remaking a segment for its Use
 
 
@@ -411,6 +410,8 @@ class GoalJob(view.PartJob):
         src = guided._source_data(guided.state_source())
         bvh = guided._bvh(src)
         labels = view.seg["src"]
+        if labels is None or not hasattr(gs, "loop_count"):
+            return []
         found = []
         for kind, count in (("LOOP", gs.loop_count), ("BEND", gs.bend_loops)):
             for line in guided._guide_lines(self.context, gs, src, kind):
@@ -438,6 +439,15 @@ class GoalJob(view.PartJob):
             self.note = f"{len(skipped)} drawn line(s) left out: " + ", ".join(sorted(set(skipped)))
         return co, [tuple(t) for t in tris.tolist()], [str(k) for k in kind.tolist()], tuple(sorted(keys))
 
+    def _creases(self, record: dict, goal: str):
+        """Long creases of this part on your mesh, for an Animation sheet to keep."""
+        if goal != "ANIMATION":
+            return None
+        if "creases" not in record:
+            points, polys, _kinds = self.job._piece_arrays(record["source"])
+            record["creases"] = S.long_creases(points, polys)
+        return record["creases"]
+
     def _build(self, goal: str, record: dict, ids, edge: float, topology, project, focus=None):
         """Generator: (points, faces, materials) of this segment for this Use, or None."""
         out = self.base["out"]
@@ -464,13 +474,25 @@ class GoalJob(view.PartJob):
                 if ratio < 0.98:
                     yield
                     points, polys, kinds = autoretopo._decimate(self.context, points, polys, kinds, max(ratio, 1e-4))
-            quads = goal in {"REDUCE", "LOWPOLY", "STROKES"}
+            choice = record.get("choice", "AUTO") if goal in {"REDUCE", "LOWPOLY"} else "AUTO"
+            quads = goal in {"REDUCE", "LOWPOLY", "STROKES"} and choice != "TRIS"
+            seeds = 4 if choice == "PAIRING" else 2
+            if choice == "FLAT":
+                def flat_then_join():
+                    made = flat_quad_remesh(MeshData(points, polys, kinds), force_quads=True)[0]
+                    co2, faces2, origin, _ids = S.conform(np.asarray(made.vertices, dtype=np.float64), [tuple(f) for f in made.faces], seams)
+                    return co2, faces2, [list(made.face_materials)[i] for i in origin]
+
+                made = yield from self._in_thread(flat_then_join)
+                if made is not None:
+                    return made
+                self.warnings = []
             keep = ()
             if goal == "STROKES":
                 cut = yield from self._in_thread(lambda: self._cut_strokes(points, polys, kinds, items, nearest))
                 if cut is not None:
                     points, polys, kinds, keep = cut
-            made = yield from self._in_thread(lambda: S.pair_on_seams(points, polys, kinds, seams, quads=quads, guide_edges=keep, project=project))
+            made = yield from self._in_thread(lambda: S.pair_on_seams(points, polys, kinds, seams, quads=quads, guide_edges=keep, project=project, seeds=seeds))
             if made is not None:
                 return made
             # Your mesh's border and the result's differ too much for a join here. The seam-keeping fill always fits.
@@ -478,7 +500,7 @@ class GoalJob(view.PartJob):
             self.warnings = []
             goal = "SUBD"
             self.note = f"{GOAL_NAMES.get(record['goal'], record['goal'])} could not join its neighbours ({note}): made quads on the seam instead"
-        made = yield from self._in_thread(lambda: S.fill_part(co, faces, ids, goal, edge, project, topology, cancelled, focus=focus))
+        made = yield from self._in_thread(lambda: S.fill_part(co, faces, ids, goal, edge, project, topology, cancelled, focus=focus, creases=self._creases(record, goal)))
         if made is None:
             return None
         points, new_faces, warnings = made
@@ -536,6 +558,8 @@ class GoalJob(view.PartJob):
             elif record["goal"] == "ANIMATION" and not self._strokes(record):  # second go: more rows where the camera saw the first one go wrong
                 self.stage = f"{record['name']}: more rows where the camera found a difference"
                 misses = _misses(*self.last_look)
+                if len(self._creases(record, "ANIMATION")):
+                    misses = np.vstack((misses, self._creases(record, "ANIMATION")))
                 sharper = yield from self._build("ANIMATION", record, ids, edge, topology, project, misses)
                 if self._stopped:
                     return
@@ -549,7 +573,7 @@ class GoalJob(view.PartJob):
                 self.warnings = [f"{record['name']}: the new faces did not close on the seam, so it stays as it was"]
                 continue
             self.new_tries[p] = {
-                "method": record["goal"], "detail": round(record["goal_detail"], 3), "after": len(made[1]), "change": change, "topology": S.topology_score(made[0], made[1]),
+                "method": record["goal"], "detail": round(record["goal_detail"], 3), "choice": _choice_of(record["goal"], record.get("choice", "AUTO")), "after": len(made[1]), "change": change, "topology": S.topology_score(made[0], made[1]),
                 "build": (made[0], made[1], np.asarray([int(m) if str(m).lstrip("-").isdigit() else 0 for m in made[2]], dtype=np.int32)),
             }
         self.progress = (len(self.pieces), len(self.pieces))
@@ -586,7 +610,7 @@ def start_goal(context, pieces) -> bool:
 def _fresh_record(job, label, ids, count, like=None) -> dict:
     record = _record(job, label, ids, count)
     if like is not None:
-        record.update(goal=like["goal"], goal_detail=like["goal_detail"])
+        record.update(goal=like["goal"], goal_detail=like["goal_detail"], choice=like.get("choice", "AUTO"))
     return record
 
 
@@ -940,13 +964,13 @@ def _draw_stroke(op) -> None:
 
 class CURIOMESH_OT_seg_goal(bpy.types.Operator):
     bl_idname = "curiomesh.seg_goal"
-    bl_label = "Remake"
-    bl_description = "Remake the selected segments for this Use and detail. Only they change, their seams stay where they are, and every result stays in the list of tries"
+    bl_label = "Redo"
+    bl_description = "Remake the selected parts for this Use, Method and Detail. Only they change, their seams stay where they are, and every result stays in the list of tries"
     bl_options = {"INTERNAL"}
 
     @classmethod
     def poll(cls, context):
-        return view.ready() and view.seg.get("src") is not None and bool(view.seg["sel"]) and _g().progress_info() is None
+        return view.ready() and bool(view.seg["sel"]) and _g().progress_info() is None
 
     def execute(self, context):
         gs = context.scene.curiomesh_guided
@@ -954,30 +978,41 @@ class CURIOMESH_OT_seg_goal(bpy.types.Operator):
         detail = round(gs.seg_goal_detail, 3)
         for p in sorted(view.seg["sel"]):
             record = view.seg["parts"][p]
-            record.update(goal=gs.seg_goal, goal_detail=gs.seg_goal_detail)
-            tried = next((i for i, t in enumerate(record["tries"]) if t["method"] == gs.seg_goal and t.get("detail") == detail), None)
+            record.update(goal=gs.seg_goal, goal_detail=gs.seg_goal_detail, choice=gs.seg_method)
+            tried = next((i for i, t in enumerate(record["tries"]) if t["method"] == gs.seg_goal and t.get("detail") == detail and t.get("choice") == _choice_of(gs.seg_goal, gs.seg_method)), None)
             if tried is None:
                 todo.append(p)
             elif record["cur"] != tried:
                 view.use_try(context, p, tried)
         save()
-        if todo:
+        # A whole loose piece at the search's own size can keep what the search measured and only change method.
+        keeps_size = abs(gs.seg_goal_detail - 0.5) < 1e-3 and gs.seg_goal == "REDUCE" and all(view.seg["parts"][p].get("whole") for p in todo)
+        if todo and keeps_size and gs.seg_method != "AUTO":
+            view.start_redo(context, todo, gs.seg_method)
+        elif todo:
             start_goal(context, todo)
         return {"FINISHED"}
 
 
+def _choice_of(goal: str, method: str):
+    return method if goal in {"REDUCE", "LOWPOLY"} else None
+
+
 def on_selected(gs) -> None:
-    """The Use and detail on the panel follow the segment you click."""
+    """The Use, Method and Detail on the panel follow the part you click."""
     if len(view.seg["sel"]) == 1:
         record = view.seg["parts"][next(iter(view.seg["sel"]))]
-        if "goal" not in record:  # a table of loose pieces, with no segments found yet
-            return
-        gs["seg_goal"] = next(i for i, item in enumerate(GOAL_ITEMS) if item[0] == record["goal"])
+        gs["seg_goal"] = next(item[4] for item in GOAL_ITEMS if item[0] == record["goal"])
         gs["seg_goal_detail"] = record["goal_detail"]
+        method = next((item[4] for item in view.METHOD_ITEMS if item[0] == record.get("choice", "AUTO")), None)
+        if method is not None:
+            gs["seg_method"] = method
 
 
 def draw_tools(layout, gs) -> None:
     """Segment Detail and the hand tools, for the top of the Parts panel."""
+    if view.seg["src"] is None:
+        return
     col = layout.column(align=True)
     col.prop(gs, "seg_detail", slider=True)
     row = col.row(align=True)
@@ -987,13 +1022,233 @@ def draw_tools(layout, gs) -> None:
     row.operator("curiomesh.seg_rename", text="Rename", icon="GREASEPENCIL")
 
 
-def draw_goal(box, gs, multi: bool) -> None:
-    """Use and detail for the selected segments."""
+def draw_selected(layout, gs) -> None:
+    """The selected part, here and in the panel that opens at the click: numbers, what to change, the tries, and on to the next."""
+    guided = _g()
+    row = layout.row(align=True)
+    row.operator("curiomesh.seg_walk", text="Previous", icon="TRIA_LEFT").step = -1
+    row.operator("curiomesh.seg_walk", text="Next", icon="TRIA_RIGHT").step = 1
+    row.operator("curiomesh.seg_frame", text="", icon="VIEWZOOM")
+    selected = sorted(view.seg["sel"])
+    if not selected:
+        layout.label(text="Click a part, or press Next: worst first", icon="INFO")
+        return
+    box = layout.box()
+    if len(selected) == 1:
+        for i, line in enumerate(view.info_lines(selected[0])):
+            box.label(text=line, icon="OBJECT_DATA" if i == 0 else "BLANK1")
+    else:
+        parts = [view.seg["parts"][p] for p in selected]
+        known = [r["change"] for r in parts if r["change"] is not None]
+        box.label(text=f"{len(selected)} parts, {sum(r['after'] for r in parts):,} faces now", icon="OBJECT_DATA")
+        if known:
+            box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
     col = box.column(align=True)
     col.prop(gs, "seg_goal", text="Use")
-    row = col.row(align=True)
-    row.prop(gs, "seg_goal_detail", text="Detail", slider=True)
-    row.operator("curiomesh.seg_goal", text="Remake All" if multi else "Remake", icon="FILE_REFRESH")
+    method = col.row(align=True)
+    method.enabled = gs.seg_goal in {"REDUCE", "LOWPOLY"}
+    method.prop(gs, "seg_method", text="Method")
+    col.prop(gs, "seg_goal_detail", text="Detail", slider=True)
+    row = box.row(align=True)
+    row.scale_y = 1.3
+    row.operator("curiomesh.seg_goal", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
+    if guided.progress_info() is not None:
+        guided.draw_progress(box, *guided.progress_info())
+        box.operator("curiomesh.guided_stop_work", icon="CANCEL")
+    if len(selected) == 1:
+        record = view.seg["parts"][selected[0]]
+        if len(record["tries"]) > 1:
+            box.label(text="Tried (click to go back):")
+            col = box.column(align=True)
+            for i, t in enumerate(record["tries"]):
+                change = "?" if t["change"] is None else f"{t['change']:.1f}%"
+                score = "" if t.get("topology") is None else f", topology {t['topology']:.0f}"
+                col.operator("curiomesh.seg_try", text=f"{view.method_name(t['method'])}: {t['after']:,} faces, {change}{score}", depress=i == record["cur"]).index = i
+
+
+class CURIOMESH_PT_seg_review(bpy.types.Panel):
+    """Opens at the click. Registered in the header region, which Blender does not draw panels in by itself."""
+
+    bl_label = "Segment"
+    bl_idname = "CURIOMESH_PT_seg_review"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "HEADER"
+    bl_ui_units_x = 14
+
+    def draw(self, context):
+        draw_selected(self.layout, context.scene.curiomesh_guided)
+
+
+class CURIOMESH_OT_seg_walk(bpy.types.Operator):
+    bl_idname = "curiomesh.seg_walk"
+    bl_label = "Next Part"
+    bl_description = "Go to the next or previous part, worst first, and move the view to it"
+    bl_options = {"INTERNAL"}
+
+    step: bpy.props.IntProperty(default=1)
+
+    @classmethod
+    def poll(cls, context):
+        return view.ready()
+
+    def execute(self, context):
+        walk(context, self.step)
+        return {"FINISHED"}
+
+
+def walk(context, step: int) -> None:
+    order = P.worst_first([view.judged(r) for r in view.seg["parts"]])
+    current = next(iter(view.seg["sel"])) if len(view.seg["sel"]) == 1 else None
+    target = S.next_in_order(order, current, step)
+    if target is None:
+        return
+    view.select([target])
+    view.frame_selected(context)
+    overlay.tag_redraw()
+
+
+HOVER_GAP = 1.0 / 30.0  # seconds between looks under the mouse, stretched when a look takes long
+
+
+class CURIOMESH_OT_seg_review(bpy.types.Operator):
+    bl_idname = "curiomesh.seg_review"
+    bl_label = "Review Segments"
+    bl_description = "Go through the parts one by one. The one under the mouse lights up with its outline; click for its numbers and to change it; arrows walk them, worst first, and move the view. Esc leaves and keeps everything"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return view.ready() and context.area is not None and context.area.type == "VIEW_3D"
+
+    def invoke(self, context, event):
+        if view.seg.get("reviewing"):  # the same button leaves
+            view.seg["reviewing"] = False
+            return {"FINISHED"}
+        view.seg["reviewing"] = True
+        self.next_look, self.gap = 0.0, HOVER_GAP
+        if context.space_data is not None and hasattr(context.space_data, "show_region_ui"):
+            context.space_data.show_region_ui = True
+        context.window_manager.modal_handler_add(self)
+        context.workspace.status_text_set("Review Segments   Hover: outline and numbers   Click: select   Shift+Click: add   Left, Right: previous, next, worst first   Esc: done")
+        overlay.tag_redraw()
+        return {"RUNNING_MODAL"}
+
+    def _end(self, context):
+        view.seg["reviewing"] = False
+        view.seg["hover"] = None
+        context.workspace.status_text_set(None)
+        overlay.tag_redraw()
+
+    def cancel(self, context):
+        self._end(context)
+
+    def _look(self, context, region_, event):
+        """What is under the mouse, no oftener than the mesh can take: the first look on a big mesh builds its ray tree."""
+        now = time.perf_counter()
+        if now < self.next_look:
+            return
+        part = view._part_at(context, region_, event)
+        spent = time.perf_counter() - now
+        self.gap = max(HOVER_GAP, 4.0 * spent)
+        self.next_look = time.perf_counter() + self.gap
+        if part != view.seg["hover"]:
+            view.seg["hover"] = part
+        overlay.tag_redraw()
+
+    def modal(self, context, event):
+        if not view.seg.get("reviewing") or _g().state["auto_base"] is None:
+            self._end(context)
+            return {"FINISHED"}
+        if event.type == "ESC" and event.value == "PRESS":
+            self._end(context)
+            return {"FINISHED"}
+        if not view.ready():  # a redo is putting its result in: look again in a moment
+            return {"PASS_THROUGH"}
+        if event.type in {"RIGHT_ARROW", "LEFT_ARROW"} and event.value == "PRESS":
+            walk(context, 1 if event.type == "RIGHT_ARROW" else -1)
+            return {"RUNNING_MODAL"}
+        region_ = view._region_under_mouse(context, event)
+        if region_ is None:
+            if view.seg["hover"] is not None:
+                view.seg["hover"] = None
+                overlay.tag_redraw()
+            return {"PASS_THROUGH"}
+        x, y = event.mouse_x - region_.x, event.mouse_y - region_.y
+        if x > region_.width - 100 and y > region_.height - 240:  # the view gizmo in the corner
+            return {"PASS_THROUGH"}
+        if event.type == "MOUSEMOVE":
+            view.seg["mouse"], view.seg["region"] = (x, y), region_.as_pointer()
+            self._look(context, region_, event)
+            return {"PASS_THROUGH"}
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            part = view._part_at(context, region_, event)
+            if part is None:
+                if not event.shift:
+                    view.select([])
+            else:
+                view.select([part], extend=event.shift)
+                if not event.shift:
+                    try:
+                        bpy.ops.wm.call_panel(name=CURIOMESH_PT_seg_review.bl_idname, keep_open=False)
+                    except RuntimeError:  # no window to open it in: the sidebar shows the same
+                        pass
+            return {"RUNNING_MODAL"}
+        return {"PASS_THROUGH"}
+
+
+def _outlines(res, piece):
+    """(edge ends, labels on either side) of every border between parts, worked out once per result, on a thread so a big mesh doesn't wait."""
+    key = (id(res), id(piece))
+    seg = view.seg
+    if seg.get("outline_key") != key:
+        seg["outline_key"], seg["outline"] = key, None
+
+        def work():
+            fa, fb, u, v = S.face_links(res["faces"])
+            across = piece[fa] != piece[fb]
+            if seg.get("outline_key") == key:
+                seg["outline"] = (u[across], v[across], piece[fa[across]], piece[fb[across]])
+                overlay.tag_redraw()
+
+        threading.Thread(target=work, daemon=True, name="CurioMeshOutlines").start()
+    return seg["outline"]
+
+
+def draw_highlight(guided, preview, res, piece, flat, batch_for_shader) -> None:
+    """The part under the mouse in light, its outline and those of the selected parts. Small batches, so hovering costs little on a big mesh."""
+    import gpu
+
+    seg = view.seg
+    hover, selected = seg["hover"], frozenset(seg["sel"])
+    outline = _outlines(res, piece)
+    key = (id(res), id(piece), hover, selected, tuple(round(x, 5) for row in preview.matrix_world for x in row), outline is not None)
+    if seg.get("high_key") != key:
+        fill, lines = None, None
+        if hover is not None:
+            _id, corners, owners = view._triangles(guided, res, piece)
+            world = guided._world(preview.matrix_world, res["co"][corners[owners == hover]]).astype(np.float32)
+            fill = batch_for_shader(flat, "TRIS", {"pos": world, "color": np.tile(np.float32((1.0, 1.0, 1.0, 0.22)), (len(world), 1))})
+        if outline is not None and (hover is not None or selected):
+            u, v, la, lb = outline
+            lit = {*selected} | ({hover} if hover is not None else set())
+            near = np.isin(la, list(lit)) | np.isin(lb, list(lit))
+            if near.any():
+                ends = np.stack((u[near], v[near]), axis=1).reshape(-1)
+                on_hover = (la[near] == hover) | (lb[near] == hover) if hover is not None else np.zeros(int(near.sum()), dtype=bool)
+                colour = np.where(np.repeat(on_hover, 2)[:, None], np.float32((1.0, 1.0, 1.0, 1.0)), np.float32((1.0, 0.6, 0.1, 1.0))).astype(np.float32)
+                lines = batch_for_shader(flat, "LINES", {"pos": guided._world(preview.matrix_world, res["co"][ends]).astype(np.float32), "color": colour})
+        seg["high"], seg["high_key"] = (fill, lines), key
+    fill, lines = seg["high"]
+    flat.bind()
+    if fill is not None:
+        fill.draw(flat)
+    if lines is not None:
+        gpu.state.line_width_set(2.5)
+        lines.draw(flat)
+        gpu.state.depth_test_set("NONE")  # a faint line where the outline passes behind something
+        gpu.state.line_width_set(1.0)
+        lines.draw(flat)
+        gpu.state.depth_test_set("LESS_EQUAL")
 
 
 CLASSES = (
@@ -1003,4 +1258,7 @@ CLASSES = (
     CURIOMESH_OT_seg_split,
     CURIOMESH_OT_seg_paint,
     CURIOMESH_OT_seg_goal,
+    CURIOMESH_OT_seg_walk,
+    CURIOMESH_OT_seg_review,
+    CURIOMESH_PT_seg_review,
 )

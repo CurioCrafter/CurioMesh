@@ -77,6 +77,25 @@ class LineTests(unittest.TestCase):
         self.assertEqual(segment.side_of_line(points, stroke).tolist(), [True, False, True, False])
 
 
+class WalkTests(unittest.TestCase):
+    def test_order_wraps_and_starts_at_the_worst(self):
+        self.assertEqual(segment.next_in_order([3, 1, 2], None, 1), 3)
+        self.assertEqual(segment.next_in_order([3, 1, 2], None, -1), 2)
+        self.assertEqual(segment.next_in_order([3, 1, 2], 2, 1), 3)
+        self.assertIsNone(segment.next_in_order([], 2, 1))
+
+
+class CreaseTests(unittest.TestCase):
+    def test_a_long_ridge_counts_and_a_short_one_does_not(self):
+        co, faces = grid(10, 10)
+        co[:, 2] = np.abs(co[:, 0] - 5.0)
+        found = segment.long_creases(co, faces)
+        self.assertTrue(len(found) > 0 and np.allclose(found[:, 0], 5.0))
+        co[:, 2] = 0.0
+        co[60, 2] = 1.0  # one bump: its sharp edges are nowhere near three times the sheet
+        self.assertEqual(len(segment.long_creases(co, faces, share=3.0)), 0)
+
+
 class SeamTests(unittest.TestCase):
     def test_a_stepped_seam_on_a_flat_sheet_gets_straighter(self):
         co, faces = grid(12, 12)

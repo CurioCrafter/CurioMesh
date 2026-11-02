@@ -1433,6 +1433,22 @@ def run_guided_case(module):
     guided.finish_work(bpy.context)
     if len(guided.state["res"]["faces"]) != first_faces or segments.seg["parts"][target]["method"] == "TRIS":
         raise AssertionError("segments: going back did not restore the first result")
+    gs.seg_goal, gs.seg_method, gs.seg_goal_detail = "REDUCE", "PAIRING", 0.35
+    segments.select([other])
+    gs.seg_goal, gs.seg_method, gs.seg_goal_detail = "REDUCE", "PAIRING", 0.35
+    if "FINISHED" not in bpy.ops.curiomesh.seg_goal():  # a loose part takes a Use and Detail the same way a segment does
+        raise AssertionError("segments: Use on a loose part did not start")
+    guided.finish_work(bpy.context)
+    if segments.seg["parts"][other]["method"] != "REDUCE" or segments.seg["parts"][other]["tries"][-1].get("choice") != "PAIRING":
+        raise AssertionError(f"segments: Use on a loose part: {segments.seg['parts'][other]['method']}: {guided.status()}")
+    order = segments.P.worst_first([segments.judged(r) for r in segments.seg["parts"]])
+    segments.select([])
+    bpy.ops.curiomesh.seg_walk(step=1)
+    if segments.seg["sel"] != {order[0]}:
+        raise AssertionError("segments: Next did not start at the worst part")
+    bpy.ops.curiomesh.seg_walk(step=-1)
+    if segments.seg["sel"] != {order[-1]}:
+        raise AssertionError("segments: Previous did not wrap round")
     bpy.ops.curiomesh.seg_select(what="ROUGH")
     gs.seg_compare = "OVER"
     gs.seg_heat = True
