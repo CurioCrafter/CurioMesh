@@ -153,6 +153,8 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_detail: bpy.props.FloatProperty(name="Change Allowed", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces", default=6.0, min=0.5, soft_max=30.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
+    auto_rough: bpy.props.BoolProperty(name="Rough As Texture", description="Auto Segments: judge rough surfaces, like scanned rock or sea floor, by their average direction over a few pixels instead of each pixel, and merge edges to get rid of leftover triangles. Far fewer faces on rough scans; bumps smaller than a few pixels are not kept. Smooth surfaces are judged as before", default=False)
+    auto_drop_hidden: bpy.props.BoolProperty(name="Leave Out Hidden Pieces", description="Auto Segments: leave out loose pieces no camera outside the model can see, from 14 directions. The count of what was left out is shown with the result", default=False)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Relax-and-project passes that settle the new quads onto your original surface", default=2, min=0, max=30)
@@ -925,11 +927,11 @@ def _start_areas(source, gs, pts, src, L0) -> bool:
 
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3))
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), gs.auto_rough, gs.auto_drop_hidden)
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
-    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail)
+    job = autoretopo.AutoJob(context, src["co"], src["faces"], src["mat"], gs.auto_detail, gs.auto_rough, gs.auto_drop_hidden)
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": []}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -2016,6 +2018,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         row.prop(gs, "strategy", expand=True)
         if gs.scope == "AUTO":
             layout.prop(gs, "auto_detail")
+            layout.prop(gs, "auto_rough")
+            layout.prop(gs, "auto_drop_hidden")
         else:
             layout.prop(gs, "base_faces")
         row = layout.row(align=True)

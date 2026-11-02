@@ -71,6 +71,27 @@ def _quality(p) -> float:
     return worst
 
 
+def _plane_quadrics(points, faces) -> list[list[float]]:
+    """Each corner's area-weighted squared distance to the planes of its faces."""
+
+    out = [[0.0] * 11 for _ in points]
+    for face in faces:
+        for k in range(1, len(face) - 1):
+            a, b, c = points[face[0]], points[face[k]], points[face[k + 1]]
+            n = _cross(_sub(b, a), _sub(c, a))
+            twice_area = math.sqrt(_dot(n, n))
+            if twice_area < 1e-30:
+                continue
+            x, y, z = n[0] / twice_area, n[1] / twice_area, n[2] / twice_area
+            d = -(x * a[0] + y * a[1] + z * a[2])
+            row = (x * x, x * y, x * z, x * d, y * y, y * z, y * d, z * z, z * d, d * d, 1.0)
+            for v in (face[0], face[k], face[k + 1]):
+                q = out[v]
+                for i in range(11):
+                    q[i] += row[i] * twice_area
+    return out
+
+
 class QuadReducer:
     """Removes quads cheapest first. `remove(count)` is a generator; `save`/`restore` allow stepping back after a look."""
 
@@ -102,7 +123,7 @@ class QuadReducer:
         for v in range(len(self.points)):
             if self.border[v] or len(material_of[v]) > 1:
                 self.locked[v] = True
-        self.quadrics = self._start_quadrics()
+        self.quadrics = _plane_quadrics(self.points, self.faces)
         used = np.asarray(mesh.vertices, dtype=np.float64)
         self.dissolve_limit = DISSOLVE_SHARE * float(np.linalg.norm(np.ptp(used, axis=0))) if len(used) else 0.0
         self.stamps = [0] * len(self.points)
@@ -113,24 +134,6 @@ class QuadReducer:
                 self._push(index, 0)
                 self._push(index, 1)
         heapq.heapify(self.heap)
-
-    def _start_quadrics(self) -> list[list[float]]:
-        out = [[0.0] * 11 for _ in self.points]
-        for face in self.faces:
-            for k in range(1, len(face) - 1):
-                a, b, c = self.points[face[0]], self.points[face[k]], self.points[face[k + 1]]
-                n = _cross(_sub(b, a), _sub(c, a))
-                twice_area = math.sqrt(_dot(n, n))
-                if twice_area < 1e-30:
-                    continue
-                x, y, z = n[0] / twice_area, n[1] / twice_area, n[2] / twice_area
-                d = -(x * a[0] + y * a[1] + z * a[2])
-                row = (x * x, x * y, x * z, x * d, y * y, y * z, y * d, z * z, z * d, d * d, 1.0)
-                for v in (face[0], face[k], face[k + 1]):
-                    q = out[v]
-                    for i in range(11):
-                        q[i] += row[i] * twice_area
-        return out
 
     @staticmethod
     def _error(q: list[float], p) -> float:
@@ -192,6 +195,8 @@ class QuadReducer:
             elif count == 3:  # it would be left in two quads: they become one
                 first, second = (f for f in users[side] if f != q)
                 if self.locked[side] or first not in moved or second not in moved or len(faces[first]) != 4 or len(faces[second]) != 4:
+                    return False
+                if first in merged_with or second in merged_with:  # both sides share a quad, which can't merge twice in one removal
                     return False
                 one, two = renamed(faces[first]), renamed(faces[second])
                 one, two = one[one.index(side):] + one[: one.index(side)], two[two.index(side):] + two[: two.index(side)]
@@ -537,4 +542,159 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
     return MeshData(vertices=np.asarray(points, dtype=np.float64), faces=[faces[k] for k in kept], face_materials=[materials[k] for k in kept], name=mesh.name), joined
 
 
-__all__ = ["QuadReducer", "join_loose_triangles"]
+def collapse_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, int]:
+    """Get rid of leftover triangles by merging edges along a path of quads. Returns (mesh, triangles gone).
+
+    Merging an edge a triangle shares with a quad removes the triangle and leaves the quad a triangle: one face fewer,
+    and the triangle has moved a step. When it reaches another triangle, both are gone. So where `join_loose_triangles`
+    pays k - 2 faces for a path of k quads, this gains k + 2, for moving a few corners by about an edge's length. Every
+    merge is checked first. A triangle that gets stuck is left where it is for joining and closure.
+    """
+
+    points = [tuple(p) for p in np.asarray(mesh.vertices, dtype=np.float64).tolist()]
+    faces: list[list[int] | None] = [list(f) for f in mesh.faces]
+    materials = mesh.face_materials
+    users: list[set[int]] = [set() for _ in points]
+    edge_use: dict[tuple[int, int], int] = {}
+    material_of: list[set[str]] = [set() for _ in points]
+    for index, face in enumerate(faces):
+        for k, v in enumerate(face):
+            users[v].add(index)
+            material_of[v].add(materials[index])
+            w = face[(k + 1) % len(face)]
+            key = (v, w) if v < w else (w, v)
+            edge_use[key] = edge_use.get(key, 0) + 1
+    locked = [len(m) > 1 for m in material_of]
+    for (v, w), count in edge_use.items():
+        if count != 2:
+            locked[v] = locked[w] = True
+    quadrics = _plane_quadrics(points, faces)
+    loose = {k for k, face in enumerate(faces) if len(face) == 3}
+    start_count = len(loose)
+
+    def around(vertex: int) -> set[int]:
+        out = set()
+        for f in users[vertex]:
+            face = faces[f]
+            at = face.index(vertex)
+            out.add(face[at - 1])
+            out.add(face[(at + 1) % len(face)])
+        return out
+
+    def facing(spots) -> tuple[float, float, float]:
+        return _normal(spots) if len(spots) == 4 else _unit(_cross(_sub(spots[1], spots[0]), _sub(spots[2], spots[0])))
+
+    def still_good(corners: list[int], old: list[int], position, keep: int, drop: int) -> bool:
+        new = [position if v == keep else points[v] for v in corners]
+        before = [points[v] for v in old]
+        if len(new) == 4 and _quality(new) < min(JOIN_QUALITY, _quality(before)):
+            return False
+        return _dot(facing(new), facing(before)) >= MOST_TURNED
+
+    def collapse(tri: int, other: int) -> bool:
+        """Merge the edge between this triangle and the next face. False leaves everything as it was."""
+        face, next_face = faces[tri], faces[other]
+        common = set(face) & set(next_face)
+        if len(common) != 2 or materials[tri] != materials[other]:
+            return False
+        a, b = sorted(common)
+        at = next_face.index(a)
+        if b not in (next_face[at - 1], next_face[(at + 1) % len(next_face)]):
+            return False
+        if (users[a] & users[b]) != {tri, other} or (locked[a] and locked[b]):
+            return False
+        tips = {v for v in face if v not in common} | ({v for v in next_face if v not in common} if len(next_face) == 3 else set())
+        if (around(a) & around(b)) != tips or any(len(users[v]) < 3 for v in tips):
+            return False
+        pa, pb = points[a], points[b]
+        total = [x + y for x, y in zip(quadrics[a], quadrics[b])]
+        if locked[a]:
+            options = [(pa, a, b)]
+        elif locked[b]:
+            options = [(pb, b, a)]
+        else:
+            middle = ((pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5)
+            options = sorted([(middle, a, b), (pa, a, b), (pb, b, a)], key=lambda item: QuadReducer._error(total, item[0]))
+        for position, keep, drop in options:
+            moved = {}
+            shapes = set()
+            for f in (users[a] | users[b]) - {tri}:
+                if f == other and len(next_face) == 3:
+                    continue
+                corners = list(dict.fromkeys(keep if v == drop else v for v in faces[f]))
+                if f != other and len(corners) != len(faces[f]):
+                    break
+                shape = frozenset(corners)
+                if shape in shapes or not still_good(corners, faces[f], position, keep, drop):
+                    break
+                shapes.add(shape)
+                moved[f] = corners
+            else:
+                break
+        else:
+            return False
+        for f in (tri,) if len(next_face) == 4 else (tri, other):
+            for v in faces[f]:
+                users[v].discard(f)
+            faces[f] = None
+            loose.discard(f)
+        for f, corners in moved.items():
+            for v in faces[f]:
+                users[v].discard(f)
+            faces[f] = corners
+            for v in corners:
+                users[v].add(f)
+            if len(corners) == 3:
+                loose.add(f)
+        quadrics[keep] = total
+        points[keep] = position
+        return True
+
+    def search(start: int, reach: int) -> None:
+        """Walk this triangle to the nearest other triangle within `reach` quads."""
+        parents = {start: -1}
+        level = [start]
+        for _depth in range(reach + 1):
+            following = []
+            for f in level:
+                for other in {g for v in faces[f] for g in users[v]}:
+                    if other in parents or len(set(faces[f]) & set(faces[other])) != 2:
+                        continue
+                    parents[other] = f
+                    if other not in loose:
+                        following.append(other)
+                        continue
+                    path = [other]
+                    while path[-1] != start:
+                        path.append(parents[path[-1]])
+                    path.reverse()
+                    for k, (at, step) in enumerate(zip(path, path[1:])):
+                        if not collapse(at, step):
+                            if k:
+                                return  # it has moved: the next round starts from where it is
+                            break
+                    else:
+                        return
+            level = following
+
+    reach = 0
+    while reach < farthest:
+        reach = max(1, reach * 2)
+        for start in sorted(loose):
+            if start in loose:
+                search(start, reach)
+        if not loose:
+            break
+    kept = [k for k, face in enumerate(faces) if face is not None]
+    used = sorted({v for k in kept for v in faces[k]})
+    table = {v: k for k, v in enumerate(used)}
+    result = MeshData(
+        vertices=np.asarray([points[v] for v in used], dtype=np.float64).reshape(-1, 3),
+        faces=[tuple(table[v] for v in faces[k]) for k in kept],
+        face_materials=[materials[k] for k in kept],
+        name=mesh.name,
+    )
+    return result, start_count - len(loose)
+
+
+__all__ = ["QuadReducer", "collapse_loose_triangles", "join_loose_triangles"]

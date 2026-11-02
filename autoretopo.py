@@ -24,7 +24,7 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from .triadq import patch
+from .triadq import patch, views
 from .triadq.budget import Level, allocate
 from .triadq.flatquad import pair_and_close
 from .triadq.quadreduce import QuadReducer
@@ -35,9 +35,9 @@ MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes 
 KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to gain, and thousands of them to look at
 LEVELS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
+KEEP_SHARE = 0.25  # a piece with over this share of the faces is the body of the model, and always stays
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 ROUNDS = 4  # tries at landing on the amount asked for
-TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
 RAYS_PER_YIELD = 2000
 REDUCE_STEP = 0.16  # share of the quads to try taking away between looks; halved on going too far, down to REDUCE_FINEST
@@ -88,21 +88,7 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
     return out
 
 
-def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
-    """(pixels a viewer would see as different in outline, direction or depth, pixels showing the object)."""
-
-    wrong, total = 0, 0
-    limit = math.cos(math.radians(TURNED_DEG))
-    for (hit_a, normal_a, depth_a, _face_a), (hit_b, normal_b, depth_b, _face_b) in zip(reference, other):
-        both = hit_a & hit_b
-        turned = np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < limit  # winding isn't shape
-        moved = np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel
-        wrong += int((turned | moved).sum()) + int((hit_a ^ hit_b).sum())
-        total += int((hit_a | hit_b).sum())
-    return wrong, total
-
-
-def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, limit: float) -> np.ndarray:
+def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, limit: float, rough: bool = False) -> np.ndarray:
     """The labels of connected parts of the viewed mesh where over `limit` of what's shown has changed.
 
     A big flat part can hide a ruined small one in the total. Parts showing too few pixels to judge are left out.
@@ -110,13 +96,10 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
 
     count = int(labels.max()) + 1
     wrong, shown = np.zeros(count), np.zeros(count)
-    cosine = math.cos(math.radians(TURNED_DEG))
     for (hit_a, normal_a, depth_a, _face_a), (hit_b, normal_b, depth_b, face_b) in zip(reference, view):
-        parts = labels[face_b[hit_b]]
-        shown += np.bincount(parts, minlength=count)
-        both = hit_a & hit_b
-        changed = (np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < cosine) | (np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel)
-        wrong += np.bincount(labels[face_b[both]][changed], minlength=count)
+        shown += np.bincount(labels[face_b[hit_b]], minlength=count)
+        changed = views.surface_changed(hit_a, normal_a, depth_a, hit_b, normal_b, depth_b, pixel, rough)
+        wrong += np.bincount(labels[face_b[changed]], minlength=count)
     return np.flatnonzero((shown >= PART_PIXELS) & (wrong > limit * shown))
 
 
@@ -157,12 +140,15 @@ def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float):
+    def __init__(self, context, co, faces, materials, detail: float, rough: bool = False, drop_hidden: bool = False):
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = list(faces)
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
+        self.rough = bool(rough)  # judge rough surface as texture (`views`), and let triangles walk away for fewer faces
+        self.drop_hidden = bool(drop_hidden)
+        self.dropped: list[np.ndarray] = []
         self.busy = True
         self.current = None
         self.output = None
@@ -211,6 +197,33 @@ class AutoJob:
                 self._pair_thread.join(0.05)
         return not self.busy
 
+    def _drop_hidden_pieces(self):
+        """Generator: leave out the loose pieces no camera outside can see. A piece with a big share of the faces always stays."""
+        tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
+        labels = np.zeros(len(self.faces), dtype=np.int64)
+        for index, ids in enumerate(self.pieces):
+            labels[ids] = index
+        labels = labels.tolist()
+        pixel = float(np.ptp(self.co, axis=0).max()) / VIEW_PIXELS
+        reach = 4.0 * float(np.linalg.norm(np.ptp(self.co, axis=0)))
+
+        def cast(origin, direction):
+            return tree.ray_cast(Vector(origin), Vector(direction))[2]
+
+        kept = []
+        for index, ids in enumerate(self.pieces):
+            self.stage = f"Is piece {index + 1} of {len(self.pieces)} in sight?"
+            if len(ids) > KEEP_SHARE * len(self.faces):
+                kept.append(ids)
+                continue
+            points = self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))]
+            if views.pixels_seen(cast, labels, points.min(axis=0), points.max(axis=0), pixel, index, reach, enough=1):
+                kept.append(ids)
+            else:
+                self.dropped.append(ids)
+            yield
+        self.pieces = kept
+
     def _piece_arrays(self, ids: np.ndarray):
         used, flat = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64), return_inverse=True)
         polys, at = [], 0
@@ -242,7 +255,7 @@ class AutoJob:
             yield
             reduced = _decimate(self.context, points, polys, kinds, share)
             view = yield from pictures(reduced[0], reduced[1], center, half, pixels)
-            wrong, shown = picture_counts(reference, view, pixel)
+            wrong, shown = views.picture_counts(reference, view, pixel, self.rough)
             area = pixel * pixel
             seen = max(seen, shown * area)
             sizes.append(reduced)
@@ -289,7 +302,7 @@ class AutoJob:
 
     def _pair(self, co, faces, kinds) -> None:
         try:
-            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2, join_triangles=True)[0]
+            self._paired = pair_and_close(MeshData(co, faces, kinds), seed_count=2, join_triangles=True, merge_triangles=self.rough)[0]
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
 
@@ -335,7 +348,7 @@ class AutoJob:
             yield
             reduced = _decimate(self.context, whole[0], whole[1], whole[2], share)
             view = yield from pictures(reduced[0], reduced[1], center, half, pixels)
-            wrong, _shown = picture_counts(reference, view, pixel)
+            wrong, _shown = views.picture_counts(reference, view, pixel, self.rough)
             where = max(at, other)
             self.sizes[index].insert(where, reduced)
             self.levels[index].insert(where, Level(len(reduced[1]), wrong * pixel * pixel))
@@ -351,7 +364,7 @@ class AutoJob:
         def over_limit(mesh, view):
             fa, fb = patch.face_adjacency(mesh.faces)
             labels = np.unique(patch._labels(len(mesh.faces), fa, fb), return_inverse=True)[1]
-            parts = parts_changed_too_much(reference, view, pixel, labels, limit)
+            parts = parts_changed_too_much(reference, view, pixel, labels, limit, self.rough)
             kept = np.isin(labels, parts)
             return sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]})
 
@@ -374,7 +387,7 @@ class AutoJob:
             attempt = yield from self._background(reducer.result)
             self.stage = f"Taking away quads: {len(attempt.faces):,}"
             view = yield from pictures(np.asarray(attempt.vertices), attempt.faces, center, half, MAX_PIXELS)
-            wrong, shown = picture_counts(reference, view, pixel)
+            wrong, shown = views.picture_counts(reference, view, pixel, self.rough)
             now = 100.0 * wrong / max(shown, 1)
             ruined = over_limit(attempt, view)
             if now <= self.detail and not ruined:
@@ -395,6 +408,8 @@ class AutoJob:
         order = np.argsort(shell, kind="stable")
         starts = np.concatenate(([0], np.flatnonzero(shell[order][1:] != shell[order][:-1]) + 1, [len(order)]))
         self.pieces = sorted((order[a:b] for a, b in zip(starts[:-1], starts[1:])), key=len, reverse=True)
+        if self.drop_hidden:
+            yield from self._drop_hidden_pieces()
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
         picture_sizes = self.picture_sizes = _picture_sizes(sizes).tolist()
@@ -441,7 +456,7 @@ class AutoJob:
             out_faces = [tuple(face) for face in result.faces]
             self.stage = f"Checking the result, try {round_index + 1}..."
             view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
-            wrong, shown = picture_counts(reference, view, pixel)
+            wrong, shown = views.picture_counts(reference, view, pixel, self.rough)
             unreduced = 100.0 * wrong / max(shown, 1)
             # Prefer anything at or under the amount asked for, then the fewest faces. With nothing fitting, the least change.
             over = unreduced > self.detail
@@ -462,11 +477,12 @@ class AutoJob:
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         quads = sum(1 for face in out_faces if len(face) == 4)
-        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
+        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started, "dropped": len(self.dropped), "dropped_faces": sum(len(ids) for ids in self.dropped)}
         self._show((points, out_faces, materials, parts))
 
     def status(self) -> str:
         if self.report is None:
             return self.stage
         r = self.report
-        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s"
+        hidden = f" Left out {r['dropped']:,} hidden pieces ({r['dropped_faces']:,} faces)." if r["dropped"] else ""
+        return f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs. {r['seconds']:.0f} s.{hidden}"
