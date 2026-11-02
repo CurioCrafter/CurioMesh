@@ -81,13 +81,16 @@ MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of pa
 RAYS_PER_YIELD = 2000
 OTHER_VERTICES = 8  # how far down a sample's nearest vertices to look for one of its own loose part
 REDUCE_STEP = 0.16  # share of the quads to try taking away between looks; halved on going too far, down to REDUCE_FINEST
-REDUCE_FINEST = 0.004
-MOST_LOOKS = 60
+REDUCE_FINEST = 0.015
+MOST_LOOKS = 40
+CHORDS_FINEST, CHORDS_LOOKS = 0.004, 60  # with Redraw Messy Quads, which can land closer
 NEARLY = 0.7  # when a part passes its limit, parts this close to theirs stop too
 CHORDS_UP_TO = 120_000  # quads: the redrawing Python reducer up to here, the native one past it
-START_SHARE = 0.4  # start well inside what was asked for: quads come away far tidier than pieces get reduced
-AIM = 0.5  # share of the amount asked for that a start should reach
-ROOM = 0.25  # a start this close to the amount asked for is good enough: taking quads away uses up the rest
+AIM = 0.9  # share of the amount asked for that a start should reach
+ROOM = 0.5  # a start this close to the amount asked for is good enough: taking quads away uses up the rest
+CHORDS_START = (0.4, 0.5, 0.25)  # with Redraw Messy Quads: start share, AIM and ROOM. Starting well inside what was asked for leaves the redraw room
+CHORDS_SECONDS = 240.0  # time for redrawing and judging per run; plain collapses go on after it
+CHORDS_MESSY = 0.3  # a part is redrawn when more than this share of its corners are poles
 PART_PIXELS = 100  # a part showing fewer pixels than this over the six views can't be judged by itself
 REFINE_PIECES = 8
 REFINE_COVER = 0.8  # share of the faces the extra sizes need to cover
@@ -517,7 +520,8 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False):
+        self.chords = bool(chords)  # Redraw Messy Quads: messy parts redrawn as grids, collapses priced by the pixels they change
         self.rough = bool(rough)  # judge rough surface as texture (`views`), and let triangles walk away for fewer faces
         self.drop_hidden = bool(drop_hidden)
         self.dropped: list[np.ndarray] = []
@@ -1297,18 +1301,23 @@ class AutoJob:
                     if where <= kept[twin]:
                         kept[twin] += 1
 
-    def _reduce(self, result, owner, loss, reference, center, half, pixel):
+    def _reduce(self, result, owner, loss, reference, center, half, pixel, take: bool = True):
         """Generator: take quads away until the view has changed by the amount asked for. Returns (mesh, its vertices' pieces, loss).
 
-        Quads only come off the worked-out pieces, so copies stay exact; each look is at them all.
+        Quads only come off the worked-out pieces, so copies stay exact; each look is at them all. With `take` False,
+        messy parts are only redrawn (Redraw Messy Quads), and nothing else changes.
         """
-        if loss > self.detail:
+        if loss > self.detail or (not take and not self.chords):
             return result, owner, loss
         # Up to CHORDS_UP_TO quads, the Python reducer that redraws messy patches as grids and prices collapses by the
         # pixels they change; past that, the native one, which only counts distance.
-        chords = len(result.faces) <= CHORDS_UP_TO
+        chords = self.chords and len(result.faces) <= CHORDS_UP_TO
         judge = PictureJudge(reference, center, half, self.max_pixels, TURNED_DEG) if chords else None
         reducer = yield from self._background(lambda: ChordReducer(result, judge) if chords else quad_reducer(result))
+        if chords:
+            reducer.deadline = time.perf_counter() + CHORDS_SECONDS
+            reducer.flag_messy(CHORDS_MESSY)
+            reducer.project = self.project
         start_owner = owner
         # A rebuilt part is as few rows as it can hold. Its long flat quads look cheap to take away, but each one shows.
         rebuilt = [i for i, k in enumerate(self.picked) if self.ready[i][k]]
@@ -1327,8 +1336,19 @@ class AutoJob:
         limited = yield from self._off(lambda: over_limit(full, view))
         reducer.freeze(sorted(set(back[limited].tolist())))  # whatever is at its limit stays as it is
 
-        def look():
-            """Generator: (mesh, its vertices' pieces, change, corners of parts past their limit) as the reducer stands."""
+        def look(saved):
+            """Generator: (mesh, its vertices' pieces, change, corners of parts past their limit) as the reducer stands.
+
+            With the chord reducer, parts past their limit go back to `saved` on their own and are looked at again, so one
+            bad bolt does not cost every other part its progress (with hundreds of parts the looks ran out at half the target).
+            """
+            attempt, attempt_owner, now, ruined = yield from one_look()
+            if ruined and chords:
+                reducer.roll_back_parts(saved, reducer.original_ids(ruined))
+                attempt, attempt_owner, now, ruined = yield from one_look()
+            return attempt, attempt_owner, now, ruined
+
+        def one_look():
             attempt = yield from self._background(reducer.result)
             ids = np.asarray(reducer.original_ids(range(len(attempt.vertices))), dtype=np.int64)
             attempt_owner = start_owner[np.asarray(reducer.home, dtype=np.int64)[ids]] if chords else start_owner[ids]
@@ -1344,7 +1364,7 @@ class AutoJob:
         if chords:
             self.stage = "Redrawing messy patches as grids..."
             yield from self._background(reducer.tidy)
-            attempt, attempt_owner, now, ruined = yield from look()
+            attempt, attempt_owner, now, ruined = yield from look(saved)
             if now <= self.detail and not ruined:
                 result, owner, loss = attempt, attempt_owner, now
                 saved = yield from self._background(reducer.save)
@@ -1352,7 +1372,10 @@ class AutoJob:
                 yield from self._background(lambda: reducer.restore(saved))
         step = REDUCE_STEP
         looks = 0
-        while step >= REDUCE_FINEST and looks < MOST_LOOKS:
+        finest, most = (CHORDS_FINEST, CHORDS_LOOKS) if chords else (REDUCE_FINEST, MOST_LOOKS)
+        if not take:  # redraw only: the faces were chosen by something else
+            most = 0
+        while step >= finest and looks < most:
             looks += 1
             before = reducer.alive
             yield from reducer.remove(max(1, int(step * before)))
@@ -1363,7 +1386,7 @@ class AutoJob:
                 yield from reducer.remove(max(1, int(step * before)))
                 if reducer.alive == before:
                     break
-            attempt, attempt_owner, now, ruined = yield from look()
+            attempt, attempt_owner, now, ruined = yield from look(saved)
             if now <= self.detail and not ruined:
                 result, owner, loss = attempt, attempt_owner, now
                 saved = yield from self._background(reducer.save)
@@ -1893,7 +1916,8 @@ class AutoJob:
         self._view = (center, half, reference, reference_shaded, pixel)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
-        allowed = START_SHARE * asked * total_seen
+        start_share, aim, room = CHORDS_START if self.chords and self.collapse else (1.0, AIM, ROOM)
+        allowed = start_share * asked * total_seen
         reducing = self.target_faces > 0
         paired_share = 1.0 if self.output_kind == "TRIS" else PAIRED_SHARE
         best = None
@@ -1963,13 +1987,13 @@ class AutoJob:
             if best is None or rank < best[0]:
                 best = (rank, points, out_faces, out_kinds, loss, shading, soft, picked, tuned, worked)
             if self.collapse:
-                if ROOM * self.detail <= loss <= self.detail:
+                if room * self.detail <= loss <= self.detail:
                     break
                 if round_index + 1 < ROUNDS:
                     yield from self._refine(over, best[7])
                 # What the sizes say they lose differs from what the whole result loses, so go by the last pick.
                 planned = sum(self.levels[i][k].loss for i, k in enumerate(self.picked))
-                allowed = max(planned, 0.01 * asked * total_seen) * min(max(AIM * self.detail / max(loss, 0.01), 0.3), 4.0)
+                allowed = max(planned, 0.01 * asked * total_seen) * min(max(aim * self.detail / max(loss, 0.01), 0.3), 4.0)
             else:
                 if abs(loss - self.detail) <= 0.1 * self.detail:
                     break
@@ -1979,14 +2003,24 @@ class AutoJob:
             self.stage = "Checking the view"
             self.fraction = 0.95
             loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
-        elif self.collapse:
-            before = len(worked.faces)
-            worked, owner, _loss = yield from self._reduce(worked, owner, loss, reference, center, half, pixel)
-            if len(worked.faces) < before:
+        elif self.collapse or (self.chords and self.output_kind == "QUADS"):
+            before = worked
+            worked, owner, _loss = yield from self._reduce(worked, owner, loss, reference, center, half, pixel, take=self.collapse)
+            if worked is not before:
                 full, _back = yield from self._off(lambda: self._with_copies(worked, owner))
                 points, materials = np.asarray(full.vertices, dtype=np.float64), list(full.face_materials)
                 out_faces = yield from self._off(lambda: [tuple(face) for face in full.faces])
                 loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
+            if self.chords and worked is not before:
+                # Redrawn and relaxed corners sit on the planes they were given, not on the source, and smooth shading
+                # shows that: fit them to the source again and keep it if the shading gets closer within what was asked for.
+                self.stage = "Fitting the redrawn quads to the source"
+                fitted = yield from self._off(lambda: self._fit(worked))
+                full, _back = yield from self._off(lambda: self._with_copies(fitted, owner))
+                fitted_points = np.asarray(full.vertices, dtype=np.float64)
+                fit_loss, fit_shading, fit_soft = yield from self._look(fitted_points, out_faces, center, half, reference, reference_shaded, pixel)
+                if fit_loss <= max(self.detail, loss) and fit_shading is not None and (shading is None or fit_shading < shading):
+                    worked, points, loss, shading, soft = fitted, fitted_points, fit_loss, fit_shading, fit_soft
         plain_faces = out_faces
         if self.twins and self.mirror is None:
             self.instances = yield from self._off(lambda: self._instances(worked, owner))

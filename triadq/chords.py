@@ -15,6 +15,7 @@ in all, most of them one huge strip crossing itself thousands of times, so almos
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 
@@ -41,6 +42,8 @@ WALK_SLACK = 6  # a walk may disappoint the corners this much past what each wan
 WRONG_WEIGHT = 1.0  # a quad's area of wrong view counts as this many of `dissolve_limit` when choosing the next collapse
 BEHIND_PIXELS = 6.0  # a quad this far behind the picture is taken to be hidden by something in front of it
 RELAX_PASSES = 2
+RELAX_COS = math.cos(math.radians(15.0))  # corners only relax where their faces are this close to flat
+REDRAW_KEEP = 0.0  # a redrawn patch keeps at least this share of its quads
 TRADE = 0.03  # a redraw may add this many quads' area of wrong view per unit of pole energy it takes away
 POLE_WEIGHT = 0.2  # one unit of pole energy counts as this many of `dissolve_limit` when choosing the next collapse
 REDRAW_EVERY = 0.05  # share of the quads to take away between redraws
@@ -230,6 +233,9 @@ class ChordReducer(QuadReducer):
         self._refused_patches: set[tuple] = set()
         self._seen_stamps: list[int] = []
         self._turned: set[int] = set()
+        self.project = None  # if set, the nearest point on the source, where relaxed corners go back to
+        self.deadline = math.inf  # `time.perf_counter()` past which redrawing and judging stop and plain collapses go on
+        self.messy: set[int] | None = None  # corners of the parts worth redrawing, None for all
         self.home: list[int] = list(range(len(mesh.vertices)))  # per corner, a corner of the mesh it was made from
         self._judged: dict[tuple, float] = {}
         self._unit_area = judge.total / max(len(mesh.faces), 1) if judge is not None else 1.0  # pixels per quad
@@ -255,7 +261,7 @@ class ChordReducer(QuadReducer):
         na, nb, nc, nd = len(users[a]), len(users[b]), len(users[c]), len(users[d])
         change = cost(a, na + nc - 2) - cost(a, na) - cost(c, nc) + cost(b, nb - 1) - cost(b, nb) + cost(d, nd - 1) - cost(d, nd)
         price = POLE_WEIGHT * change
-        if self.judge is not None:
+        if self.judge is not None and time.perf_counter() < self.deadline:
             points, faces = self.points, self.faces
             lost = -self._wrong([points[v] for v in face])
             for f in (users[a] | users[c]) - {index}:
@@ -272,11 +278,12 @@ class ChordReducer(QuadReducer):
         while self.alive > goal:
             before = self.alive
             yield from super().remove(min(self.alive - goal, max(16, int(REDRAW_EVERY * self.alive))), every)
-            near = self._near_changes()
-            self.redraw_all(rounds=1, seeds=near)
-            near = self._near_changes(near)
-            self.turn_poles(seeds=near)
-            self.relax(RELAX_PASSES, seeds=near)
+            if time.perf_counter() < self.deadline:
+                near = self._seeds(self._near_changes())
+                self.redraw_all(rounds=1, seeds=near)
+                near = self._seeds(self._near_changes(near))
+                self.turn_poles(seeds=near)
+                self.relax(RELAX_PASSES, seeds=near)
             yield
             if self.alive >= before:
                 break
@@ -444,7 +451,7 @@ class ChordReducer(QuadReducer):
         if after >= before:
             return 0
         cells = _grid_cells(spots)
-        if not cells or len(cells) > len(region) + slack:
+        if not cells or len(cells) > len(region) + slack or len(cells) < REDRAW_KEEP * len(region):
             return 0
         made = self._place_grid(region, ring, spots, cells, loose, before - after)
         return before - after if made else 0
@@ -588,6 +595,8 @@ class ChordReducer(QuadReducer):
             pool = range(len(self.users)) if seeds is None else seeds
             order = sorted((v for v in pool if self.users[v] and not self.locked[v] and len(self.users[v]) != 4), key=lambda v: -abs(len(self.users[v]) - 4))
             for v in order:
+                if time.perf_counter() > self.deadline:
+                    return total + gained
                 if not self.users[v] or len(self.users[v]) == 4:
                     continue
                 for radius in radii:
@@ -694,10 +703,38 @@ class ChordReducer(QuadReducer):
                 total += gain
         return total
 
+    def _seeds(self, near):
+        return near if self.messy is None else near & self.messy
+
+    def flag_messy(self, share: float) -> int:
+        """Redraw only connected parts where more than `share` of the corners are poles. Returns how many parts that is."""
+
+        users, faces = self.users, self.faces
+        seen: set[int] = set()
+        self.messy = set()
+        flagged = 0
+        for start, around in enumerate(users):
+            if not around or start in seen:
+                continue
+            part, stack = {start}, [start]
+            while stack:
+                for f in users[stack.pop()]:
+                    for w in faces[f]:
+                        if w not in part:
+                            part.add(w)
+                            stack.append(w)
+            seen |= part
+            if sum(1 for v in part if len(users[v]) != 4) > share * len(part):
+                self.messy |= part
+                flagged += 1
+        return flagged
+
     def tidy(self) -> None:
-        self.redraw_all()
-        self.turn_poles()
-        self.relax(2)
+        seeds = None if self.messy is None else sorted(self.messy)
+        self.redraw_all(seeds=seeds)
+        if time.perf_counter() < self.deadline:
+            self.turn_poles(seeds=seeds)
+            self.relax(RELAX_PASSES, seeds=seeds)
 
     # Smoothing
 
@@ -713,6 +750,9 @@ class ChordReducer(QuadReducer):
                 around = users[v]
                 if not around or self.locked[v]:
                     continue
+                normals = [_normal([points[u] for u in faces[g]]) for g in around]
+                if any(_dot(n, m) < RELAX_COS for k, n in enumerate(normals) for m in normals[:k]):
+                    continue  # on a bend: sliding a corner there moves the smooth shading more than it evens the quads
                 q = quadrics[v]
                 mass = q[10]
                 if mass <= 1e-30:
@@ -740,6 +780,9 @@ class ChordReducer(QuadReducer):
                     if _quality(now) < min(_quality(before), MIN_QUALITY) or _dot(_normal(now), _normal(before)) < MOST_TURNED:
                         ok = False
                         break
+                if self.project is not None:  # back onto the source: on the planes alone, smooth shading drifts
+                    x = tuple(self.project(x))
+                    ok = all(_quality([x if u == v else points[u] for u in faces[g]]) >= min(_quality([points[u] for u in faces[g]]), MIN_QUALITY) for g in around)
                 if ok and self.judge is not None:
                     old = sum(self._wrong([points[u] for u in faces[g]]) for g in around)
                     ok = sum(self._wrong([x if u == v else points[u] for u in faces[g]]) for g in around) <= old
