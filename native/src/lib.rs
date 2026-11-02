@@ -4,6 +4,7 @@
 //! (`turbo.py`) converts meshes to flat arrays and falls back to pure Python
 //! whenever this module is missing. All heavy work runs with the GIL released.
 
+mod chords;
 mod close;
 mod geom;
 mod join;
@@ -754,6 +755,35 @@ fn mesh_checks<'py>(py: Python<'py>, indptr: PyReadonlyArray1<'py, i64>, flat: P
     Ok((broken.into_pyarray(py), bad_edges, flipped, dups, holes, pieces.into_pyarray(py), counts.into_pyarray(py)))
 }
 
+/// `chords._closed_walk` up to its turns: (price, turn index per corner), or None.
+#[pyfunction]
+fn closed_walk(py: Python<'_>, costs: Vec<[f64; 3]>, limit: f64) -> Option<(f64, Vec<usize>)> {
+    py.detach(|| chords::closed_walk(&costs, limit))
+}
+
+/// `chords.PictureJudge` with its pictures held natively.
+#[pyclass(frozen)]
+struct PictureJudgeCore(chords::Judge);
+
+#[pymethods]
+impl PictureJudgeCore {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    fn new(hit: PyReadonlyArray1<'_, bool>, normal: PyReadonlyArray1<'_, f64>, depth: PyReadonlyArray1<'_, f64>, center: [f64; 3], half: f64, pixels: usize, cosine: f64, behind: f64) -> PyResult<Self> {
+        let (hit, normal, depth) = (slice(&hit, "hit")?, slice(&normal, "normal")?, slice(&depth, "depth")?);
+        let cells = 6 * pixels * pixels;
+        if hit.len() != cells || depth.len() != cells || normal.len() != 3 * cells || !(half > 0.0) {
+            return Err(PyValueError::new_err("picture arrays are inconsistent"));
+        }
+        Ok(PictureJudgeCore(chords::Judge { hit: hit.to_vec(), normal: normal.to_vec(), depth: depth.to_vec(), center, half, pixels, cosine, behind }))
+    }
+
+    /// Pixels a quad gets wrong.
+    fn wrong(&self, corners: [[f64; 3]; 4]) -> i64 {
+        self.0.wrong(&corners)
+    }
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -777,6 +807,8 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pair_seeds, m)?)?;
     m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
     m.add_function(wrap_pyfunction!(mesh_checks, m)?)?;
+    m.add_function(wrap_pyfunction!(closed_walk, m)?)?;
+    m.add_class::<PictureJudgeCore>()?;
     m.add_class::<StopFlag>()?;
     m.add_class::<PointLookup>()?;
     m.add_class::<FaceLookup>()?;
