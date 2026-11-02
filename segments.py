@@ -750,8 +750,9 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
         if item.piece >= len(seg["parts"]):
             return
         r = seg["parts"][item.piece]
-        row = layout.row(align=True)
+        row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
         row.label(text=name_of(item.piece), icon="CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
+        row = row.split(factor=0.4, align=True)
         row.label(text="?" if r["change"] is None else f"{r['change']:.1f}%")
         row.label(text=f"{r['after']:,} f")
 
@@ -760,7 +761,7 @@ def draw_parts(layout, context, gs) -> None:
     """The Parts panel: switches, bulk selection, the worst-first list, and the selected part's numbers and tries."""
     if not ready():
         box = layout.box()
-        box.label(text="Parts appear when the search is done", icon="INFO")
+        overlay.wrap_label(box, "Parts appear when the search is done", icon="INFO", width=36, limit=2)
         return
     col = layout.column(align=True)
     row = col.row(align=True)

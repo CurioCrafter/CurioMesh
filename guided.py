@@ -3045,7 +3045,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
 
     def _draw_auto(self, layout, context, gs, obj):
         """Auto Segments: one big button that is always the next thing to do, then settings, the result and sub-panels."""
-        layout.row(align=True).prop(gs, "scope", expand=True)
+        layout.prop(gs, "scope", text="")
         base = state["auto_base"]
         searching = progress_info("AUTO")
         redoing = progress_info("BOOL")
@@ -3090,9 +3090,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.enabled = not searching
         col.prop(gs, "auto_profile")
         col.row(align=True).prop(gs, "auto_aim", expand=True)
-        row = col.row(align=True)
-        row.label(text="Mirror", icon="MOD_MIRROR")
-        row.prop(gs, "sym_axis", expand=True)
+        col.prop(gs, "sym_axis", icon="MOD_MIRROR")
         if REGION_READY:
             col.prop(gs, "region_use", text="Selected Faces Only", toggle=True, icon="FACESEL")
         if gs.region_use:
@@ -3100,14 +3098,13 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.prop(gs, "loop_use", text="Edge Loops", toggle=True, icon="MESH_CIRCLE")
         if gs.loop_use:
             row = col.row(align=True)
-            row.operator("curiomesh.guided_draw_guide", text="Draw Edge Loops", icon="GREASEPENCIL").kind = "LOOP"
+            row.operator("curiomesh.guided_draw_guide", text="Draw Loops", icon="GREASEPENCIL").kind = "LOOP"
             row.operator("curiomesh.guided_add_guide", text="Add Selected", icon="ADD").kind = "LOOP"
             row = col.row(align=True)
             row.prop(gs, "loop_count")
             row.prop(gs, "loop_gap")
             if not any(g.kind == "LOOP" for g in gs.guide_curves):
-                col.label(text="Draw a ring round an eye or the mouth,", icon="INFO")
-                col.label(text="or a line along the way the flow should go")
+                overlay.wrap_label(col, "Draw a ring round an eye or the mouth, or a line along the way the flow should go", icon="INFO", width=36, limit=3)
         col.prop(gs, "guide_use", text="Guide Curves", toggle=True, icon="CURVE_DATA")
         if gs.guide_use:
             row = col.row(align=True)
@@ -3116,8 +3113,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.prop(gs, "bend_use", text="Deformation Lines", toggle=True, icon="MOD_SIMPLEDEFORM")
         if gs.bend_use:
             if gs.preset == "ANIMATION" and not any(g.kind == "BEND" for g in gs.guide_curves):
-                col.label(text="Animation: draw a line across each joint", icon="INFO")
-                col.label(text="(elbow, knee, mouth corner, eyelid)")
+                overlay.wrap_label(col, "Animation: draw a line across each joint (elbow, knee, mouth corner, eyelid)", icon="INFO", width=36, limit=3)
             row = col.row(align=True)
             row.operator("curiomesh.guided_draw_guide", text="Draw Bend", icon="GREASEPENCIL").kind = "BEND"
             row.operator("curiomesh.guided_add_guide", text="Add Selected", icon="ADD").kind = "BEND"
@@ -3141,7 +3137,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row.operator("curiomesh.guided_clear_density", icon="X")
             col.prop(gs, "density_strength")
             if obj is not None and obj.vertex_groups.get(gs.density_group) is None:
-                col.label(text="Press Paint, colour the parts that need more quads red", icon="INFO")
+                overlay.wrap_label(col, "Press Paint, colour the parts that need more quads red", icon="INFO", width=36, limit=3)
         if gs.auto_aim == "KEEP":
             col.prop(gs, "auto_detail")
             overlay.wrap_label(col, profiles.detail_words(gs.auto_detail), icon="INFO", width=36, limit=2)
@@ -3164,18 +3160,18 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             col.label(text=f"{before:,} to {after:,} faces ({100.0 * (1.0 - after / max(before, 1)):.0f}% fewer)", icon="CHECKMARK")
             col.label(text=f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1")
             if report.get("shading") is not None:
-                col.label(text=f"Smooth shading turned on {report['shading']:.1f}% of it", icon="BLANK1")
+                col.label(text=f"Smooth shading differs by {report['shading']:.1f}%", icon="BLANK1")
             if report.get("topology") is not None:
-                overlay.wrap_label(col, f"Tidiness {report['topology']:.0f}/100: 100 is as tidy as hand-made meshes. It says nothing about shape, so read it with the view change.", icon="BLANK1", width=36, limit=3)
+                overlay.wrap_label(col, f"Tidiness {report['topology']:.0f}/100: 100 is as tidy as hand-made meshes. It says nothing about shape, so read it with the view change.", icon="BLANK1", width=36, limit=5)
             if report["asked"]:
                 col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
             follows = report.get("guides")
             if follows:
-                col.label(text=f"Guides: {follows['strokes']} strokes, the nearest edge is {100.0 * follows['mean']:.2f}% of the size away on average", icon="BLANK1")
+                overlay.wrap_label(col, f"Guides: {follows['strokes']} strokes, the nearest edge is {100.0 * follows['mean']:.2f}% of the size away on average", icon="BLANK1", width=36, limit=3)
             bend = report.get("bend")
             if bend:
-                col.label(text=f"Deformation lines: {bend['found']} of {bend['loops']} loops found, {bend['poles']} poles on {bend['verts']} vertices", icon="BLANK1")
-                col.label(text=f"Loop gap {100.0 * bend['gap']:.0f}% of asked, uneven by {100.0 * bend['uneven']:.0f}%", icon="BLANK1")
+                overlay.wrap_label(col, f"Deformation lines: {bend['found']} of {bend['loops']} loops found, {bend['poles']} poles on {bend['verts']} vertices", icon="BLANK1", width=36, limit=3)
+                overlay.wrap_label(col, f"Loop gap {100.0 * bend['gap']:.0f}% of asked, uneven by {100.0 * bend['uneven']:.0f}%", icon="BLANK1", width=36, limit=2)
 
         box = layout.box()
         box.label(text="Show it how (optional)", icon="MODIFIER")
@@ -3184,10 +3180,10 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if not done:
             col.label(text="Available once the search has finished")
         else:
-            col.label(text="Fix a spot by hand on the preview, then:")
+            overlay.wrap_label(col, "Fix a spot by hand on the preview, then:", width=36, limit=2)
             row = col.row(align=True)
             row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
-            row.operator("curiomesh.teach_remember", icon="BOOKMARKS")
+            row.operator("curiomesh.teach_remember", text="Remember", icon="BOOKMARKS")
             known = len(teach.load(library_path()))
             col.label(text=f"{known} fix(es) remembered on this PC")
             if state["found"]:
@@ -3213,15 +3209,14 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row.operator("curiomesh.guided_auto_start", text="Start Again", icon="FILE_REFRESH")
             row.operator("curiomesh.guided_stop", text="Cancel", icon="X")
             layout.prop(gs, "apply_mode", text="Write to")
-            row = layout.row(align=True)
-            row.prop(gs, "bake_detail")
+            layout.prop(gs, "bake_detail")
             if gs.bake_detail != "OFF":
-                row.prop(gs, "bake_size", text="")
+                layout.prop(gs, "bake_size", text="")
             elif obj.data.uv_layers:
-                layout.label(text="For textured game assets, Normal + Color is recommended", icon="INFO")
+                overlay.wrap_label(layout, "For textured game assets, Normal + Color is recommended", icon="INFO", width=36, limit=2)
         elif not searching:
             layout.operator("curiomesh.guided_stop", text="Cancel", icon="X")
-            layout.label(text="Nothing changes until you press Apply.", icon="LOCKED")
+            overlay.wrap_label(layout, "Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
 
     def draw(self, context):
         layout = self.layout
@@ -3270,7 +3265,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
 
         layout.label(text="2. Watch the live preview", icon="HIDE_OFF")
         layout.prop(gs, "enabled", toggle=True, text="Live Preview & Cage", icon="HIDE_OFF" if gs.enabled else "HIDE_ON")
-        layout.row(align=True).prop(gs, "scope", expand=True)
+        layout.prop(gs, "scope", text="")
         layout.row(align=True).prop(gs, "strategy", expand=True)
         layout.prop(gs, "base_faces")
         row = layout.row(align=True)
@@ -3309,12 +3304,11 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         sub.operator("curiomesh.guided_apply", icon="CHECKMARK")
         row.operator("curiomesh.guided_stop", icon="X")
         layout.prop(gs, "apply_mode", text="")
-        row = layout.row(align=True)
-        row.prop(gs, "bake_detail")
+        layout.prop(gs, "bake_detail")
         if gs.bake_detail != "OFF":
-            row.prop(gs, "bake_size", text="")
+            layout.prop(gs, "bake_size", text="")
         if not previewing and not compact:
-            layout.label(text="Nothing changes until you press Apply.", icon="LOCKED")
+            overlay.wrap_label(layout, "Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
 
 
 class _AutoSub:
@@ -3375,7 +3369,7 @@ class CURIOMESH_PT_guided_shapes(_AutoSub, bpy.types.Panel):
                 draw_progress(col, *redoing)
                 col.operator("curiomesh.guided_stop_work", icon="CANCEL")
         else:
-            col.label(text="Union, Subtract and Intersect combine them")
+            overlay.wrap_label(col, "Union, Subtract and Intersect combine them", width=36, limit=2)
         if len(gs.bool_shapes):
             col.operator("curiomesh.seg_from_shapes", icon="MOD_BOOLEAN")
 
@@ -3394,8 +3388,6 @@ class CURIOMESH_PT_guided_advanced(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
         gs = context.scene.curiomesh_guided
         layout.prop(gs, "show_cage")
         layout.prop(gs, "feature_angle")
