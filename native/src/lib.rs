@@ -6,6 +6,7 @@
 
 mod chords;
 mod close;
+mod field;
 mod geom;
 mod join;
 mod matching;
@@ -784,6 +785,56 @@ impl PictureJudgeCore {
     }
 }
 
+fn field_arrays(count: usize, arrays: &[(&[f64], usize)], ids: &[&[i64]], a: &[i64], b: &[i64]) -> PyResult<()> {
+    let ok = arrays.iter().all(|(x, w)| x.len() == count * w) && ids.iter().all(|x| x.len() == count) && a.len() == b.len() && a.iter().chain(b).all(|&v| v >= 0 && (v as usize) < count);
+    if ok {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err("field arrays are inconsistent"))
+    }
+}
+
+/// `fieldmesh._orient_sweep`, in place on `q` (3N,), with the colors drawn in Python.
+#[pyfunction]
+fn field_orient_sweep(py: Python<'_>, mut q: PyReadwriteArray1<'_, f64>, normals: PyReadonlyArray1<'_, f64>, pinned: PyReadonlyArray1<'_, i64>, a: PyReadonlyArray1<'_, i64>, b: PyReadonlyArray1<'_, i64>, colors: PyReadonlyArray1<'_, i64>) -> PyResult<()> {
+    let (normals, pinned, a, b, colors) = (slice(&normals, "normals")?, slice(&pinned, "pinned")?, slice(&a, "a")?, slice(&b, "b")?, slice(&colors, "colors")?);
+    let q = q.as_slice_mut().map_err(|_| PyValueError::new_err("q must be C-contiguous"))?;
+    field_arrays(colors.len(), &[(q, 3), (normals, 3)], &[pinned], a, b)?;
+    py.detach(|| field::orient_sweep(q, normals, pinned, a, b, colors));
+    Ok(())
+}
+
+/// `fieldmesh._position_sweep`, in place on `o` (3N,) and `misfit` (N,, or empty for None).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn field_position_sweep(py: Python<'_>, points: PyReadonlyArray1<'_, f64>, normals: PyReadonlyArray1<'_, f64>, q: PyReadonlyArray1<'_, f64>, sizes: PyReadonlyArray1<'_, f64>, pinned: PyReadonlyArray1<'_, i64>, mut o: PyReadwriteArray1<'_, f64>, mut misfit: PyReadwriteArray1<'_, f64>, a: PyReadonlyArray1<'_, i64>, b: PyReadonlyArray1<'_, i64>, colors: PyReadonlyArray1<'_, i64>, robust: bool, settled: f64, give: f64, confidence: bool) -> PyResult<()> {
+    let (points, normals, q, sizes, pinned) = (slice(&points, "points")?, slice(&normals, "normals")?, slice(&q, "q")?, slice(&sizes, "sizes")?, slice(&pinned, "pinned")?);
+    let (a, b, colors) = (slice(&a, "a")?, slice(&b, "b")?, slice(&colors, "colors")?);
+    let o = o.as_slice_mut().map_err(|_| PyValueError::new_err("o must be C-contiguous"))?;
+    let misfit = misfit.as_slice_mut().map_err(|_| PyValueError::new_err("misfit must be C-contiguous"))?;
+    let count = colors.len();
+    field_arrays(count, &[(points, 3), (normals, 3), (q, 3), (sizes, 1), (o, 3)], &[pinned], a, b)?;
+    if !misfit.is_empty() && misfit.len() != count {
+        return Err(PyValueError::new_err("field arrays are inconsistent"));
+    }
+    let level = field::Level { points, normals, q, sizes, pinned };
+    py.detach(|| field::position_sweep(&level, o, misfit, a, b, colors, robust, settled, give, confidence));
+    Ok(())
+}
+
+/// `fieldmesh.nearest_points`' loop over the asks (the grid is made in Python).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn field_nearest_points<'py>(py: Python<'py>, points: PyReadonlyArray1<'py, f64>, normals: PyReadonlyArray1<'py, f64>, sorted_keys: PyReadonlyArray1<'py, i64>, order: PyReadonlyArray1<'py, i64>, centre: PyReadonlyArray1<'py, i64>, around: PyReadonlyArray1<'py, i64>, asks: PyReadonlyArray1<'py, f64>, ask_normals: PyReadonlyArray1<'py, f64>, far_side: f64) -> PyResult<I64Array<'py>> {
+    let (points, normals, sorted_keys, order) = (slice(&points, "points")?, slice(&normals, "normals")?, slice(&sorted_keys, "sorted_keys")?, slice(&order, "order")?);
+    let (centre, around, asks, ask_normals) = (slice(&centre, "centre")?, slice(&around, "around")?, slice(&asks, "asks")?, slice(&ask_normals, "ask_normals")?);
+    let count = points.len() / 3;
+    if points.len() != normals.len() || sorted_keys.len() != count || order.len() != count || asks.len() != 3 * centre.len() || ask_normals.len() != asks.len() || order.iter().any(|&f| f < 0 || f as usize >= count) || count == 0 {
+        return Err(PyValueError::new_err("nearest point arrays are inconsistent"));
+    }
+    Ok(py.detach(|| field::nearest_points(points, normals, sorted_keys, order, centre, around, asks, ask_normals, far_side)).into_pyarray(py))
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -808,6 +859,9 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
     m.add_function(wrap_pyfunction!(mesh_checks, m)?)?;
     m.add_function(wrap_pyfunction!(closed_walk, m)?)?;
+    m.add_function(wrap_pyfunction!(field_orient_sweep, m)?)?;
+    m.add_function(wrap_pyfunction!(field_nearest_points, m)?)?;
+    m.add_function(wrap_pyfunction!(field_position_sweep, m)?)?;
     m.add_class::<PictureJudgeCore>()?;
     m.add_class::<StopFlag>()?;
     m.add_class::<PointLookup>()?;

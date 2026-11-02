@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .patch import _labels, quad_quality
+from .topology import _turbo
 
 SHARP_DEG = 60.0
 CREASE_DEG = 20.0  # faces this far apart may be a feature line
@@ -361,9 +362,24 @@ def _tangent(v: np.ndarray, n: np.ndarray) -> np.ndarray:
     return v - (v * n).sum(axis=1, keepdims=True) * n
 
 
+def _native(name: str):
+    module = _turbo.native() if _turbo is not None else None
+    return getattr(module, name, None)
+
+
+def _flat(values: np.ndarray, dtype=np.float64) -> np.ndarray:
+    return np.ascontiguousarray(values, dtype=dtype).reshape(-1)
+
+
 def _orient_sweep(level: _Level, rng: np.random.Generator) -> None:
     q, n = level.q, level.normals
     colors = rng.integers(0, 3, len(q))
+    fast = _native("field_orient_sweep")
+    if fast is not None:  # the same sums in the same order, on all cores
+        out = _flat(q).copy()
+        fast(out, _flat(n), _flat(level.pinned, np.int64), _flat(level.a, np.int64), _flat(level.b, np.int64), _flat(colors, np.int64))
+        q[:] = out.reshape(-1, 3)
+        return
     head = np.concatenate((level.a, level.b))
     tail = np.concatenate((level.b, level.a))
     for color in range(3):
@@ -401,6 +417,14 @@ def _place(level: _Level, o: np.ndarray, ids: np.ndarray | None = None) -> np.nd
 def _position_sweep(level: _Level, rng: np.random.Generator, robust: bool = False) -> None:
     o, q, n, p = level.o, level.q, level.normals, level.points
     colors = rng.integers(0, 3, len(o))
+    fast = _native("field_position_sweep")
+    if fast is not None:  # the same sums in the same order, on all cores
+        out, misfit = _flat(o).copy(), np.zeros(0) if level.misfit is None else _flat(level.misfit).copy()
+        fast(_flat(p), _flat(n), _flat(q), _flat(level.sizes), _flat(level.pinned, np.int64), out, misfit, _flat(level.a, np.int64), _flat(level.b, np.int64), _flat(colors, np.int64), bool(robust), float(SETTLED), float(ROBUST), bool(CONFIDENCE))
+        o[:] = out.reshape(-1, 3)
+        if level.misfit is not None:
+            level.misfit[:] = misfit
+        return
     head = np.concatenate((level.a, level.b))
     tail = np.concatenate((level.b, level.a))
     settled = None
@@ -1181,6 +1205,9 @@ def nearest_points(points: np.ndarray, asks: np.ndarray, cell: float, normals: n
     around = np.array([(x * span + y) * span + z for x in (-1, 0, 1) for y in (-1, 0, 1) for z in (-1, 0, 1)], dtype=np.int64)
     cells = np.floor((asks - low) / size).astype(np.int64)
     centre = ((cells[:, 0] + 1) * span + cells[:, 1] + 1) * span + cells[:, 2] + 1
+    fast = _native("field_nearest_points")
+    if fast is not None and len(points):
+        return fast(_flat(points), _flat(normals), _flat(sorted_keys, np.int64), _flat(order, np.int64), _flat(centre, np.int64), around, _flat(asks), _flat(ask_normals), float(FAR_SIDE))
     out = np.zeros(len(asks), dtype=np.int64)
     for index, (ask, key, facing) in enumerate(zip(asks, centre.tolist(), ask_normals)):
         wanted = key + around

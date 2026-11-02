@@ -9,6 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import turbo  # noqa: E402
 from triadq.fieldmesh import field_quads, is_clean, long_creases  # noqa: E402
 from triadq.patterns import measure  # noqa: E402
 
@@ -33,6 +34,18 @@ def capsule(rows: int = 40, around: int = 60):
 
 
 class FieldMeshTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(turbo.native(), "field_position_sweep"), "native module without the field sweeps")
+    def test_native_sweeps_give_the_same_mesh(self) -> None:
+        points, faces = capsule(24, 36)
+        out, quads = field_quads(points, faces, 200)
+        turbo.set_enabled(False)
+        try:
+            slow, slow_quads = field_quads(points, faces, 200)
+        finally:
+            turbo.set_enabled(True)
+        self.assertEqual(quads, slow_quads)
+        np.testing.assert_array_equal(out, slow)
+
     def test_rows_on_a_smooth_tube(self) -> None:
         points, faces = capsule()
         out, quads = field_quads(points, faces, 400)
