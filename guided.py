@@ -3377,21 +3377,6 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
 
         draw_auto_button(layout, context, gs)
 
-        # The one primary action
-        if searching:
-            draw_progress(layout, *searching)
-            layout.operator("curiomesh.guided_stop_work", icon="CANCEL")
-        elif done:
-            row = layout.row()
-            row.scale_y = 1.9
-            row.enabled = not redoing and progress_info() is None
-            row.operator("curiomesh.guided_apply", text="5. Apply Result", icon="CHECKMARK")
-            layout.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if segments.seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(segments.seg.get("reviewing")))
-        else:
-            row = layout.row()
-            row.scale_y = 1.9
-            row.operator("curiomesh.guided_auto_start", text="3. Start", icon="PLAY")
-
         # Settings, read-only while the search runs
         layout.label(text="2. Choose what it's for")
         col = layout.column(align=True)
@@ -3497,6 +3482,20 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         row.operator("curiomesh.guided_export_job", text="Export Job", icon="EXPORT")
         row.operator("curiomesh.guided_import_result", text="Import Result", icon="IMPORT")
 
+        # Step 3: the big button while there is nothing yet; once there is a result the big button is Apply, below
+        if searching:
+            draw_progress(layout, *searching)
+            layout.operator("curiomesh.guided_stop_work", icon="CANCEL")
+        elif done:
+            row = layout.row(align=True)
+            row.enabled = not redoing and progress_info() is None
+            row.operator("curiomesh.guided_auto_start", text="3. Start Again", icon="FILE_REFRESH")
+            layout.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if segments.seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(segments.seg.get("reviewing")))
+        else:
+            row = layout.row()
+            row.scale_y = 1.9
+            row.operator("curiomesh.guided_auto_start", text="3. Start", icon="PLAY")
+
         # The result
         if done:
             report = base["report"]
@@ -3550,20 +3549,6 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             box.alert = _is_problem(message)
             for i, chunk in enumerate(message.split(" | ")[:2]):
                 overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=32, limit=4)
-
-        if done:
-            row = layout.row(align=True)
-            row.operator("curiomesh.guided_auto_start", text="Start Again", icon="FILE_REFRESH")
-            row.operator("curiomesh.guided_stop", text="Cancel", icon="X")
-            layout.prop(gs, "apply_mode", text="Write to")
-            layout.prop(gs, "bake_detail", text="Bake")
-            if gs.bake_detail != "OFF":
-                layout.prop(gs, "bake_size", text="")
-            elif obj.data.uv_layers:
-                overlay.wrap_label(layout, "For textured game assets, Normal + Color is recommended", icon="INFO", width=36, limit=2)
-        elif not searching:
-            layout.operator("curiomesh.guided_stop", text="Cancel", icon="X")
-            overlay.wrap_label(layout, "Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
 
     def draw(self, context):
         layout = self.layout
@@ -3690,6 +3675,34 @@ class CURIOMESH_PT_guided_parts(_AutoSub, bpy.types.Panel):
         segments.draw_parts(self.layout, context, context.scene.curiomesh_guided)
 
 
+class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
+    bl_label = "5. Apply"
+    bl_idname = "CURIOMESH_PT_guided_apply"
+
+    def draw_header(self, context):
+        self.layout.label(icon="CHECKMARK")
+
+    def draw(self, context):
+        layout, gs = self.layout, context.scene.curiomesh_guided
+        obj = _source_mesh(context)
+        done = state["auto_base"] is not None and state["res"] is not None
+        busy = progress_info() is not None
+        row = layout.row()
+        row.scale_y = 1.9
+        row.enabled = done and not busy
+        row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
+        if not done:
+            overlay.wrap_label(layout, "Available once the search has finished. Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
+        if not busy:
+            layout.operator("curiomesh.guided_stop", text="Cancel", icon="X")
+        layout.prop(gs, "apply_mode", text="Write to")
+        layout.prop(gs, "bake_detail", text="Bake")
+        if gs.bake_detail != "OFF":
+            layout.prop(gs, "bake_size", text="")
+        elif obj is not None and obj.data.uv_layers:
+            overlay.wrap_label(layout, "For textured game assets, Normal + Color is recommended", icon="INFO", width=36, limit=2)
+
+
 class CURIOMESH_PT_guided_shapes(_AutoSub, bpy.types.Panel):
     bl_label = "4. Fix Inside Shapes (optional)"
     bl_idname = "CURIOMESH_PT_guided_shapes"
@@ -3753,7 +3766,7 @@ class CURIOMESH_PT_guided_advanced(bpy.types.Panel):
         layout.prop(gs, "suggest_count")
 
 
-PANEL_CLASSES = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_parts, CURIOMESH_PT_guided_shapes, CURIOMESH_PT_guided_advanced)
+PANEL_CLASSES = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_parts, CURIOMESH_PT_guided_shapes, CURIOMESH_PT_guided_apply, CURIOMESH_PT_guided_advanced)
 
 CLASSES = (
     CURIOMESH_PG_guided_point,
