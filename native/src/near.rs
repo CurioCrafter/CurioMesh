@@ -20,6 +20,25 @@ const LEAF_TRIS: usize = 4;
 
 type V3 = [f64; 3];
 
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// For the older kernels that take no stop flag: calls running when `stop_running` is called see `stopped()`, later ones don't.
+pub struct Watch(u64);
+
+impl Watch {
+    pub fn now() -> Self {
+        Watch(GENERATION.load(Ordering::Relaxed))
+    }
+
+    pub fn stopped(&self) -> bool {
+        GENERATION.load(Ordering::Relaxed) != self.0
+    }
+}
+
+pub fn stop_running() {
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Run `one(index, row)` for each row of `out` (rows of `width`), all cores. False when stopped: the output is then incomplete.
 pub fn each_row<T: Send>(out: &mut [T], width: usize, stop: &AtomicBool, one: impl Fn(usize, &mut [T]) + Sync) -> bool {
     let run = |(block, rows): (usize, &mut [T])| {

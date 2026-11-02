@@ -392,6 +392,8 @@ def close_pieces(paired, warp_cosine: float):
         return None
     try:
         vertices, indptr, flat, owner, counts = module.close_pieces(*parts, float(warp_cosine))
+    except InterruptedError:  # the job was stopped
+        raise _cancelled() from None
     except ValueError:
         return None
     return _built(paired, vertices, indptr, flat, owner), tuple(int(c) for c in counts)
@@ -538,6 +540,16 @@ def stop_native() -> None:
     if _stop is not None:
         _stop.set()
         _stop = _module.StopFlag()
+    if _module is not None and hasattr(_module, "stop_running"):
+        _module.stop_running()
+
+
+def _cancelled():
+    try:
+        from .triadq.types import Cancelled
+    except ImportError:
+        from triadq.types import Cancelled
+    return Cancelled()
 
 
 def _stoppable(call, *args):
@@ -549,11 +561,7 @@ def _stoppable(call, *args):
     try:
         return call(*args, _stop)
     except InterruptedError:
-        try:
-            from .triadq.types import Cancelled
-        except ImportError:
-            from triadq.types import Cancelled
-        raise Cancelled() from None
+        raise _cancelled() from None
 
 
 def _query(points) -> np.ndarray:

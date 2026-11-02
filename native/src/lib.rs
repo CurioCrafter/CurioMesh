@@ -474,7 +474,7 @@ fn close_pieces<'py>(
     }
     let (out, counts) = py
         .detach(|| close::close_pieces(&topo::Faces { indptr, flat }, vertices, warp_cosine))
-        .map_err(PyValueError::new_err)?;
+        .map_err(|e| if e == close::STOPPED { pyo3::exceptions::PyInterruptedError::new_err(e) } else { PyValueError::new_err(e) })?;
     Ok((out.vertices.into_pyarray(py), out.indptr.into_pyarray(py), out.flat.into_pyarray(py), out.origin.into_pyarray(py), counts))
 }
 
@@ -886,6 +886,12 @@ fn corner_normals<'py>(py: Python<'py>, points: PyReadonlyArray1<'py, f64>, indp
     Ok(py.detach(|| geom::corner_normals(points, indptr, flat, limit)).into_pyarray(py))
 }
 
+/// Every native call running now that watches for it (reductions, closing pieces) ends early.
+#[pyfunction]
+fn stop_running() {
+    near::stop_running();
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -910,6 +916,7 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
     m.add_function(wrap_pyfunction!(mesh_checks, m)?)?;
     m.add_function(wrap_pyfunction!(closed_walk, m)?)?;
+    m.add_function(wrap_pyfunction!(stop_running, m)?)?;
     m.add_function(wrap_pyfunction!(corner_normals, m)?)?;
     m.add_function(wrap_pyfunction!(shifted_faces, m)?)?;
     m.add_function(wrap_pyfunction!(segment_merges, m)?)?;

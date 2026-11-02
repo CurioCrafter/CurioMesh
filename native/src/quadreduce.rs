@@ -412,7 +412,13 @@ impl Reducer {
     /// `remove`: take away up to `count` quads, cheapest first.
     pub fn remove(&mut self, count: usize) {
         let goal = self.s.alive.saturating_sub(count);
+        let watch = crate::near::Watch::now();
+        let mut steps = 0u32;
         while self.s.alive > goal {
+            steps = steps.wrapping_add(1);
+            if steps % 4096 == 0 && watch.stopped() {
+                break; // the job was stopped
+            }
             let Some(entry) = self.s.heap.pop() else {
                 break;
             };

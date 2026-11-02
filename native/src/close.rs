@@ -516,7 +516,11 @@ fn close_piece(piece: Mesh, warp_cosine: f64) -> Result<(Mesh, usize), String> {
 
 /// `_close_pieces`: every edge-connected piece closed on its own, in order of their first faces. Pieces run side by
 /// side; each result is complete before they are joined, so the output doesn't depend on the number of threads.
+/// The error of a call the job's stop ended.
+pub const STOPPED: &str = "stopped";
+
 pub fn close_pieces(faces: &Faces, vertices: &[f64], warp_cosine: f64) -> Result<(Mesh, [i64; 4]), String> {
+    let watch = crate::near::Watch::now();
     let nf = faces.count();
     let h = topo::halves(faces);
     let e = topo::edges(&h);
@@ -567,6 +571,7 @@ pub fn close_pieces(faces: &Faces, vertices: &[f64], warp_cosine: f64) -> Result
         }
         close_piece(piece, warp_cosine)
     };
+    let close_group = |ids| if watch.stopped() { Err(STOPPED.to_string()) } else { close_group(ids) };
     let closed: Vec<Result<(Mesh, usize), String>> = if nf >= topo::PARALLEL_MIN {
         members.par_iter().map(close_group).collect()
     } else {

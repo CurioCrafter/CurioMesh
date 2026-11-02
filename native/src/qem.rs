@@ -309,6 +309,7 @@ impl State {
 
 /// Run everything down to `least` triangles. `locked` vertices (may be empty) never move or go.
 pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
+    let watch = crate::near::Watch::now(); // from the moment the call starts
     let nv = points.len() / 3;
     let nf = tris.len() / 3;
     let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
@@ -404,6 +405,9 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
     let mut collapses = Vec::with_capacity(nf / 2);
     let mut alive = nf as u32;
     while alive > least {
+        if collapses.len() % 4096 == 4095 && watch.stopped() {
+            break; // the job was stopped: what is reduced so far is all there is
+        }
         let Some(entry) = s.heap.pop() else {
             break;
         };
