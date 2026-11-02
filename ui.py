@@ -197,12 +197,13 @@ def _draw_result(layout, settings, compact: bool) -> None:
 
 
 class CURIOMESH_PT_panel(bpy.types.Panel):
-    bl_label = "Quick Start"
+    bl_label = "Classic Remesh"
     bl_idname = "CURIOMESH_PT_panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "CurioMesh"
     bl_order = 10  # below Guided, the main path
+    bl_options = {"DEFAULT_CLOSED"}  # the one-pass remesher from before Auto Segments, kept whole
 
     def draw_header(self, context: bpy.types.Context):
         self.layout.label(icon="MOD_REMESH")
@@ -235,18 +236,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
             if not compact:
                 box.label(text="Click your own mesh to remesh it.", icon="BLANK1")
 
-        guided.draw_auto_button(layout, context, context.scene.curiomesh_guided)
-        if guided.state["res"] is not None and guided.progress_info() is None:
-            row = layout.row()
-            row.scale_y = 1.6
-            row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
-            if not compact and context.scene.curiomesh_guided.scope == "AUTO":
-                layout.label(text="Check the parts first: Guided, step 4", icon="FORWARD")
-        elif guided.progress_info() is not None:
-            guided.draw_progress(layout, *guided.progress_info())
-
-        # The one-pass remesh: second to Auto, so it is a size smaller.
-        layout.separator()
+        # The one-pass whole-mesh remesher. Auto and its Apply live in Guided only: one main path for a newcomer.
         big = layout.column(align=True)
         big.enabled = usable
         big.scale_y = 1.4
@@ -652,7 +642,7 @@ PANEL_CLASSES = (
 
 
 def panel_classes() -> list:
-    """Every CurioMesh sidebar panel in display order (Quick Start and its folds, then Regions)."""
+    """Every CurioMesh sidebar panel in display order (Classic Remesh and its folds, then Regions)."""
     return [cls for cls in (*PANEL_CLASSES, *region.PANEL_CLASSES, *guided.PANEL_CLASSES) if issubclass(cls, bpy.types.Panel)]
 
 

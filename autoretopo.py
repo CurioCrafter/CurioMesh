@@ -1029,7 +1029,10 @@ class AutoJob:
             reduced = sizes[len(order) - 1] if triangles < NATIVE_FROM else None  # the native reducer keeps its own sizes
             while reduced is not None and len(reduced[1]) * STEP >= 12.0:
                 yield
+                before = len(reduced[1])
                 reduced = _decimate(self.context, *reduced, STEP)
+                if len(reduced[1]) >= before:  # Decimate can't take this piece further: stepping again would never end (30 GB on a ship)
+                    break
                 view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
                 sizes.append(reduced)
                 levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))

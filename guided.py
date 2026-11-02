@@ -3825,7 +3825,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
 
 
 def draw_auto_button(layout, context, gs) -> None:
-    """The one button that chooses everything, and in plain words what it chose. Used by the Guided and Quick Start panels."""
+    """The one button that chooses everything, and in plain words what it chose. Used by the Guided panel."""
     row = layout.row()
     row.scale_y = 2.0
     row.enabled = progress_info() is None

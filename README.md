@@ -349,7 +349,7 @@ Versions up to 0.5.1 were released under MIT. From 0.6.0 on, CurioMesh is GPL-3.
 Blocks to switch on when the branches are merged. Do not publish them before:
 
 ## Auto button (branch `multires`, not in `next`)
-One Auto button at the top of Quick Start and Auto Segments looks at the mesh and the free memory, picks the Use and the settings, says why, and starts.
+One Auto button at the top of Auto Segments looks at the mesh and the free memory, picks the Use and the settings, says why, and starts.
 Nothing changes until Apply.
 
 ## Multires Detail (branch `multires`, not in `next`)

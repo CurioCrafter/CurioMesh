@@ -564,7 +564,7 @@ def hud_model(context) -> dict:
         model["info"] = info
     if showing_result:
         auto = getattr(getattr(context.scene, "curiomesh_guided", None), "scope", "") == "AUTO"
-        model["target"] = 0  # Quick Start's Target Faces is not what this result aimed for
+        model["target"] = 0  # Classic Remesh's Target Faces is not what this result aimed for
         model["hint"] = "Check the parts, then press Apply" if auto else "Press Apply when it looks right"
     else:
         model["hint"] = next_step_hint(obj, stats, settings)
