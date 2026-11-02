@@ -28,6 +28,17 @@
   the result holds up.
 - **Keep UV Seams** is now an option, off by default, because it can nearly double the
   faces. For textured game assets, Bake Detail Normal + Color is the recommended route.
+- **Segments inside a connected mesh** (Auto Segments, Parts panel). When the search is done, big
+  loose pieces split along concave creases, necks and thick-to-thin steps: a bust into head,
+  torso and the rings of its plinth, a horse into body, legs, tail and mane. Segment Detail chooses
+  how many. Click to select, merge, split with a drawn line, paint one, make one from the shapes,
+  rename it; all of that is saved with the object. Give a selected segment its own Use (Keep as
+  Is, Reduce, Low Poly, Animation, Subdivision, Tris) and detail, and only it is remade, with the
+  progress bar and tries to go back to. Its seam stays where it is, so it joins its neighbours with
+  no gap or T-junction, and a redo that would open an edge is refused. Each segment shows its camera
+  check and topology score; an Animation segment is ranked by its topology score. Animation lays
+  rows round the part with a small grid at the far end; a seam keeps the vertices it has, so a
+  segment far denser or coarser than its neighbours tapers towards the seam.
 - **Segment view** (Auto Segments, new Parts panel). The whole result is drawn with every part
   in its own colour. Hover a part (Inspect Parts) to see its faces before and after, how much of
   its view changed and its method; click to select, Shift+click to add. Pick another method for

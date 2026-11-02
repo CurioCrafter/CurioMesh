@@ -714,6 +714,7 @@ def parity_path_quad_closure(
     frozen_midpoints: dict[tuple[int, int], int] | None = None,
     validation_vertices: np.ndarray | None = None,
     validation_required: bool = True,
+    allow_invalid: bool = False,
 ) -> MeshData:
     """Convert a triangle/quad mesh with a sparse parity-path closure.
 
@@ -730,7 +731,9 @@ def parity_path_quad_closure(
     of a patch built in a planar domain. With `validation_required=False`
     that second geometry only ranks templates: a face whose templates are
     all invalid there takes its first template valid in `mesh.vertices`
-    (a later optimiser is expected to repair it) instead of failing.
+    (a later optimiser is expected to repair it) instead of failing. With
+    `allow_invalid` that goes for `mesh.vertices` too: a face with no valid
+    template takes its first one, and the caller repairs the shape.
     """
 
     if not mesh.faces:
@@ -794,6 +797,9 @@ def parity_path_quad_closure(
         template_results = both if validation_required else [
             row_both if any(row_both) else row for row_both, row in zip(both, template_results)
         ]
+
+    if allow_invalid:
+        template_results = [row if any(row) else [True] * len(row) for row in template_results]
 
     for face_index, face in enumerate(mesh.faces):
         # Results arrive in the same order the templates are tried below.
@@ -924,7 +930,8 @@ def parity_path_quad_closure(
         name=name or f"{mesh.name}_parity_path_closure",
     )
     summary = topology_summary(result)
-    if not summary.all_quads:
+    bent_only = allow_invalid and summary.quads == summary.faces and not (summary.degenerate_faces or summary.non_manifold_edges)
+    if not summary.all_quads and not bent_only:
         raise ValueError(
             "ParityPath closure failed validation: "
             f"quads={summary.quads}/{summary.faces}, degenerate={summary.degenerate_faces}, "

@@ -1438,6 +1438,73 @@ def run_guided_case(module):
     gs.seg_heat = True
     print(f"PASS guided segment view: two parts ({', '.join(kinds)}), redo and back, {first_faces} faces")
     bpy.data.objects.remove(duo)
+
+    # Segments inside one connected mesh: two balls on a thin bar.
+    rings, sides = 44, 24
+    bar = lambda t: max(max(0.0, 1.0 - ((t - 0.2) / 0.2) ** 2) ** 0.5, max(0.0, 1.0 - ((t - 0.8) / 0.2) ** 2) ** 0.5, 0.12)  # noqa: E731
+    spots = [(float(np.cos(2 * np.pi * i / sides)) * bar(r / rings) * 0.4, float(np.sin(2 * np.pi * i / sides)) * bar(r / rings) * 0.4, 2.0 * r / rings) for r in range(rings + 1) for i in range(sides)]
+    spots += [(0.0, 0.0, 0.0), (0.0, 0.0, 2.0)]
+    tris = []
+    for r in range(rings):
+        for i in range(sides):
+            a, b, c, d = r * sides + i, r * sides + (i + 1) % sides, (r + 1) * sides + (i + 1) % sides, (r + 1) * sides + i
+            tris += [(a, b, c), (a, c, d)]
+    for i in range(sides):
+        tris += [(len(spots) - 2, (i + 1) % sides, i), (len(spots) - 1, rings * sides + i, rings * sides + (i + 1) % sides)]
+    bell_mesh = bpy.data.meshes.new("CurioSmoke_Bell")
+    bell_mesh.from_pydata(spots, [], tris)
+    bell_mesh.update()
+    bell = bpy.data.objects.new("CurioSmoke_Bell", bell_mesh)
+    bpy.context.scene.collection.objects.link(bell)
+    reset_selection(bell)
+    guided.stop_work()
+    guided.remove_preview()
+    guided.state["auto_base"] = None
+    guided.state["source"] = bell.name
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    goals = segments.segment_goals
+    SEG = goals.S
+    if segments.seg["src"] is None or len(segments.seg["parts"]) < 2:
+        raise AssertionError(f"segments: found no segments in a connected mesh: {guided.status()}")
+    found = len(segments.seg["parts"])
+    start_open = SEG.open_edges(guided.state["auto_base"]["out"]["faces"])
+    for use in ("ANIMATION", "REDUCE", "KEEP", "TRIS", "LOWPOLY", "SUBD"):
+        segments.select([0])
+        gs.seg_goal = use
+        gs.seg_goal_detail = 0.5
+        if "FINISHED" not in bpy.ops.curiomesh.seg_goal():
+            raise AssertionError(f"segments: {use} did not start")
+        guided.finish_work(bpy.context)
+        made = guided.state["auto_base"]["out"]
+        record = segments.seg["parts"][0]
+        if record["method"] != use or SEG.open_edges(made["faces"]) != start_open:
+            raise AssertionError(f"segments: {use} left {SEG.open_edges(made['faces'])} open edges, method {record['method']}: {guided.status()}")
+    other = segments.seg["parts"][1]["after"]
+    if "FINISHED" not in bpy.ops.curiomesh.seg_try(index=0):
+        raise AssertionError("segments: could not go back to the first try")
+    guided.finish_work(bpy.context)
+    if SEG.open_edges(guided.state["auto_base"]["out"]["faces"]) != start_open or segments.seg["parts"][1]["after"] != other:
+        raise AssertionError("segments: going back opened a seam or changed a neighbour")
+    centres_src, centres_res = goals._centres()
+    if goals.split(0, centres_src[:, 0] > 0.0, centres_res[:, 0] > 0.0) or len(segments.seg["parts"]) != found + 1:
+        raise AssertionError("segments: split")
+    segments.select([0, found])
+    if "FINISHED" not in bpy.ops.curiomesh.seg_merge() or len(segments.seg["parts"]) != found:
+        raise AssertionError("segments: merge")
+    if goals.claim(np.linalg.norm(centres_src - centres_src[0], axis=1) < 0.3, np.linalg.norm(centres_res - centres_src[0], axis=1) < 0.3):
+        raise AssertionError("segments: making one from a mask")
+    segments.select([0])
+    if "FINISHED" not in bpy.ops.curiomesh.seg_rename(name="Ball"):
+        raise AssertionError("segments: rename")
+    saved, names = goals.load(bell, guided.state["src"], len(guided.state["src"]["faces"]))
+    if saved is None or not np.array_equal(saved, segments.seg["src"]) or names["names"][0] != "Ball":
+        raise AssertionError("segments: did not come back from the object")
+    print(f"PASS guided segments: {found} found in one connected mesh, every Use closed on its seams, split, merge, paint mask, rename, saved")
+    guided.stop_work()
+    guided.state["auto_base"] = None
+    guided.remove_preview()
+    bpy.data.objects.remove(bell)
     guided.state["source"] = sphere.name
     # a drawn edge loop becomes a real strip, and a hand fix on the result is remembered and found again
     import math

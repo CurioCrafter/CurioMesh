@@ -7,7 +7,7 @@ Hover or click a part to see its numbers, pick another method for it and watch o
 progress bar as the search), flip between the methods you tried, or select parts in bulk by kind. Colours, a wireframe,
 the original laid over the result and a heat map of each part's camera check are overlays you switch on and off.
 
-A part is one loose piece of your mesh. Per-part choices live in `job.methods` ({piece: method}) when the job has it, so
+A part is a segment: one loose piece of your mesh, or a piece of it found by `segment_goals`. Per-part choices live in `job.methods` ({piece: method}) when the job has it, so
 the Method setting and this view agree on the names. Everything here works on `guided.state["auto_base"]`.
 """
 
@@ -22,10 +22,12 @@ from mathutils.kdtree import KDTree
 
 from . import autoretopo, overlay
 from .triadq import parts as P
+from .triadq import segment as S
 
 from .profiles import METHOD_ITEMS
 
 METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
+METHOD_NAMES.update(KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
 KIND_ITEMS = [(k, P.KIND_WORDS[k], "") for k in P.KINDS]
 MAX_TRIES = 6  # results kept per part
 LIST_ROWS = 300  # parts shown in the worst-first list
@@ -46,6 +48,11 @@ seg = {
     "tris": None,
     "lines": None,
     "lines_key": None,
+    "src": None,  # per face of your mesh: its segment, once segments are found
+    "surface": False,  # parts share seams, so putting one back has to weld it
+    "tree": None,  # the merge tree, kept so Segment Detail is instant
+    "tree_job": None,
+    "painted": None,
 }
 
 
@@ -56,7 +63,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, tris=None, lines=None, lines_key=None)
+    seg.update(base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None)
 
 
 def ready() -> bool:
@@ -66,7 +73,24 @@ def ready() -> bool:
 
 
 def name_of(piece: int) -> str:
+    if piece < len(seg["parts"]) and seg["parts"][piece].get("name"):
+        return seg["parts"][piece]["name"]
     return f"Part {piece + 1}"
+
+
+def judged(record: dict):
+    """What says how good a part is. An Animation part is there for its topology, so that counts, scaled like a percent of change."""
+    if record.get("goal") == "ANIMATION" and record["method"] == "ANIMATION" and record.get("topology") is not None:
+        return 0.2 * (100.0 - record["topology"])
+    return record["change"]
+
+
+def splice(co, faces, mat, face_piece, builds):
+    """`parts.splice`, and where parts share seams their seam vertices join again."""
+    co, faces, mat, face_piece = P.splice(co, faces, mat, face_piece, builds)
+    if seg["surface"]:
+        co, faces = S.weld_border(co, faces)
+    return co, faces, mat, face_piece
 
 
 def method_name(key: str) -> str:
@@ -125,7 +149,7 @@ def build_table(base: dict) -> None:
             "id": index, "kind": P.classify(points, polys), "before": len(ids), "after": int(counts[index]) if index < len(counts) else 0,
             "change": change, "method": method, "tries": [{"method": method, "after": int(counts[index]), "change": change, "build": None}], "cur": 0,
         })
-    seg.update(base=base["id"], piece=piece, parts=records, ref={}, whole=None, batch_key=None, tris=None, hover=None)
+    seg.update(base=base["id"], piece=piece, parts=records, ref={}, whole=None, batch_key=None, tris=None, hover=None, src=None, surface=False)
     seg["sel"] = {p for p in seg["sel"] if p < len(records)}
     refresh_list()
 
@@ -155,7 +179,7 @@ def refresh_list() -> None:
         if gs is None:
             continue
         gs.seg_parts.clear()
-        for index in P.worst_first([r["change"] for r in seg["parts"]], LIST_ROWS):
+        for index in P.worst_first([judged(r) for r in seg["parts"]], LIST_ROWS):
             item = gs.seg_parts.add()
             item.piece = index
         gs["seg_index"] = -1
@@ -165,6 +189,7 @@ def select(pieces, extend: bool = False) -> None:
     pieces = {int(p) for p in pieces if 0 <= int(p) < len(seg["parts"])}
     seg["sel"] = (seg["sel"] ^ pieces) if extend else pieces
     seg["batch_key"] = None
+    segment_goals.on_selected(bpy.context.scene.curiomesh_guided)
     overlay.tag_redraw()
 
 
@@ -198,12 +223,15 @@ def info_lines(piece: int) -> list[str]:
     r = seg["parts"][piece]
     fewer = 100.0 * (1.0 - r["after"] / max(r["before"], 1))
     change = "not measured" if r["change"] is None else f"{r['change']:.1f}%"
-    return [
+    lines = [
         f"{name_of(piece)}  ({P.KIND_WORDS[r['kind']]})",
         f"Faces: {r['before']:,} to {r['after']:,} ({fewer:.0f}% fewer)",
         f"View changed: {change}",
         f"Method: {method_name(r['method'])}",
     ]
+    if r.get("topology") is not None:
+        lines.insert(3, f"Topology score: {r['topology']:.0f} of 100")
+    return lines
 
 
 # --------------------------------------------------------------------------- redoing parts
@@ -286,7 +314,7 @@ class PartJob:
     def _change(self, piece: int, points, faces):
         """Generator: percent of the part's view that differs from the original part."""
         job = self.job
-        pts, polys, _kinds = job._piece_arrays(job.pieces[piece])
+        pts, polys, _kinds = job._piece_arrays(seg["parts"][piece]["source"] if "source" in seg["parts"][piece] else job.pieces[piece])
         low, high = pts.min(axis=0), pts.max(axis=0)
         center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
         extent = float(np.ptp(job.co, axis=0).max()) or 1.0
@@ -295,6 +323,7 @@ class PartJob:
             seg["ref"][piece] = yield from self._pictures_of(pts, polys, center, half, pixels)
         view = yield from self._pictures_of(points, faces, center, half, pixels)
         wrong, shown = autoretopo.picture_counts(seg["ref"][piece], view, 2.0 * half / pixels)
+        self.last_look = (seg["ref"][piece], view, center, half, pixels)
         return 100.0 * wrong / max(shown, 1)
 
     def _whole_loss(self, co, faces):
@@ -325,13 +354,14 @@ class PartJob:
             current = record["tries"][record["cur"]]
             if current["build"] is None:
                 current["build"] = P.cut(co, faces, mat, piece, p)
-            if p in job.tuned:
-                points, polys, kinds = job.tuned[p]
+            loose = record.get("loose", p)
+            if loose in job.tuned:
+                points, polys, kinds = job.tuned[loose]
             else:
-                at = job.picked[p]
-                if job.ready[p][at]:  # a rebuilt turned part: start from the triangles nearest its size
-                    at = next((k for k in range(at, len(job.sizes[p])) if not job.ready[p][k]), at)
-                points, polys, kinds = job.sizes[p][at]
+                at = job.picked[loose]
+                if job.ready[loose][at]:  # a rebuilt turned part: start from the triangles nearest its size
+                    at = next((k for k in range(at, len(job.sizes[loose])) if not job.ready[loose][k]), at)
+                points, polys, kinds = job.sizes[loose][at]
             made = yield from _faces_for(job, self.method, points, polys, kinds)
             if made is None:
                 continue
@@ -342,7 +372,7 @@ class PartJob:
         self.stage = "Looking at the whole object"
         self.fraction = 0.85
         if builds:
-            co, faces, mat, piece = P.splice(co, faces, mat, piece, {p: self.new_tries[p]["build"] for p in builds})
+            co, faces, mat, piece = splice(co, faces, mat, piece, {p: self.new_tries[p]["build"] for p in builds})
         loss = yield from self._whole_loss(co, faces)
         count = len(faces)
         self.output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
@@ -355,14 +385,18 @@ class PartJob:
 def commit(runner: PartJob) -> None:
     """A part job finished: the new result becomes the one Apply writes, and the tries are remembered."""
     guided = _g()
-    runner.committed = True
     base = guided.state["auto_base"]
+    if isinstance(runner, segment_goals.FindJob):  # it put its result in place when it had one
+        runner.committed = True
+        guided.state["message"] = runner.status()
+        return
+    runner.committed = True
     if base is None or base is not runner.base or runner.report is None:
         guided.state["message"] = runner.status()
         return
     for p, new in runner.new_tries.items():
         record = seg["parts"][p]
-        same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"]), None)
+        same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"] and t.get("detail") == new.get("detail")), None)
         if same is None:
             record["tries"].append(new)
             same = len(record["tries"]) - 1
@@ -372,9 +406,9 @@ def commit(runner: PartJob) -> None:
             drop = next(i for i in range(len(record["tries"])) if i != same)
             record["tries"].pop(drop)
             same -= drop < same
-        record.update(cur=same, method=new["method"], after=new["after"], change=new["change"])
+        record.update(cur=same, method=new["method"], after=new["after"], change=new["change"], topology=new.get("topology"))
         methods = getattr(runner.job, "methods", None)
-        if methods is not None:
+        if methods is not None and "loose" not in record:
             methods[p] = new["method"]
     base["out"] = dict(runner.output)
     base["report"] = runner.report
@@ -412,10 +446,10 @@ def use_try(context, piece: int, index: int) -> bool:
     out = base["out"]
     if record["tries"][record["cur"]]["build"] is None:
         record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
-    co, faces, mat, face_piece = P.splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], {piece: chosen["build"]})
+    co, faces, mat, face_piece = splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], {piece: chosen["build"]})
     count = len(faces)
     new = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": mat, "parts": face_piece, "piece": face_piece}
-    record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"])
+    record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"], topology=chosen.get("topology"))
     methods = getattr(base["job"], "methods", None)
     if methods is not None:
         methods[piece] = chosen["method"]
@@ -449,7 +483,7 @@ def part_colours(gs, count: int):
     if not (gs.seg_colors or gs.seg_heat or selected or hover is not None):
         return None
     if gs.seg_heat:
-        changes = [r["change"] for r in seg["parts"]]
+        changes = [judged(r) for r in seg["parts"]]
         top = max([3.0 * gs.auto_detail] + [c for c in changes if c is not None])
         rgb = np.asarray([P.heat_colour(c, top) for c in changes])
     else:
@@ -457,6 +491,9 @@ def part_colours(gs, count: int):
     alpha = np.full(count, 0.42 if (gs.seg_colors or gs.seg_heat) else 0.0)
     if gs.seg_heat:
         alpha[:] = 0.6
+    if seg["painted"] is not None:  # the segment being painted has no number yet
+        rgb = np.vstack((rgb, [[1.0, 0.85, 0.1]]))
+        alpha = np.concatenate((alpha, [0.9]))
     for p in selected:
         rgb[p] = rgb[p] * 0.5 + 0.5
         alpha[p] = 0.85
@@ -783,6 +820,8 @@ def draw_parts(layout, context, gs) -> None:
     col.row(align=True).prop(gs, "seg_compare", expand=True)
     if gs.seg_heat:
         layout.label(text="Heat: red parts changed most in the camera check", icon="INFO")
+    if seg["src"] is not None:
+        segment_goals.draw_tools(layout, gs)
 
     layout.label(text=f"{len(seg['parts']):,} parts, {len(seg['sel'])} selected")
     row = layout.row(align=True)
@@ -812,12 +851,15 @@ def draw_parts(layout, context, gs) -> None:
         box.label(text=f"{len(selected)} parts, {after:,} faces now", icon="OBJECT_DATA")
         if known:
             box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
-    row = box.row(align=True)
-    row.prop(gs, "seg_method", text="")
     if mirrored():
         layout.label(text="Redo is off with Mirror on: start again without it", icon="INFO")
-    layout.operator("curiomesh.guided_pick_part", icon="RESTRICT_SELECT_OFF")
-    row.operator("curiomesh.seg_redo", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
+    if seg["src"] is not None:
+        segment_goals.draw_goal(box, gs, len(selected) > 1)
+    if all(seg["parts"][p].get("whole", True) for p in selected):  # another method rebuilds a whole loose piece, which has no seam to keep
+        layout.operator("curiomesh.guided_pick_part", icon="RESTRICT_SELECT_OFF")
+        row = box.row(align=True)
+        row.prop(gs, "seg_method", text="")
+        row.operator("curiomesh.seg_redo", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
     if busy:
         guided.draw_progress(box, *guided.progress_info())
         box.operator("curiomesh.guided_stop_work", icon="CANCEL")
@@ -828,11 +870,14 @@ def draw_parts(layout, context, gs) -> None:
         col = box.column(align=True)
         for i, t in enumerate(record["tries"]):
             change = "?" if t["change"] is None else f"{t['change']:.1f}%"
-            op = col.operator("curiomesh.seg_try", text=f"{method_name(t['method'])}: {t['after']:,} faces, {change}", depress=i == record["cur"])
+            score = "" if t.get("topology") is None else f", topology {t['topology']:.0f}"
+            op = col.operator("curiomesh.seg_try", text=f"{method_name(t['method'])}: {t['after']:,} faces, {change}{score}", depress=i == record["cur"])
             op.index = i
 
 
 # --------------------------------------------------------------------------- registration
+
+from . import segment_goals  # noqa: E402  (it builds on PartJob above)
 
 PRE_CLASSES = (CURIOMESH_PG_segpart,)
 CLASSES = (
@@ -842,6 +887,7 @@ CLASSES = (
     CURIOMESH_OT_seg_redo,
     CURIOMESH_OT_seg_try,
     CURIOMESH_OT_seg_frame,
+    *segment_goals.CLASSES,
 )
 _handles: list = []
 
