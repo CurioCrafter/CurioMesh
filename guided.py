@@ -22,7 +22,7 @@ import bmesh
 import bpy
 import numpy as np
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
@@ -291,6 +291,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_index: bpy.props.IntProperty(default=0)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
+    auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Auto Segments: Apply writes one mesh per repeated part, placed as linked objects, so a copy costs no geometry. Each object is a draw call unless your engine instances it, and copies share the first one's UVs. Off: one merged mesh", default=False)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
     auto_tidy: bpy.props.BoolProperty(name="Tidy Quads", description="Auto Segments: after the search, try to make the quads tidier, like hand-made meshes. Slow, and the view changes a little more, so it is off unless you want it", default=False)
     keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Auto Segments: quads stay inside one UV island, so textures land where they did. Costs faces, nearly double on a model cut into many islands. Bake Detail Normal + Color is the better route for most game assets, as it needs no old seams", default=False)
@@ -2614,6 +2615,27 @@ def _bake_result(source, out, gs, new_uvs: bool) -> str:
     return f", {len(images)} textures baked at {gs.bake_size} (a Triangulate modifier keeps the bake's triangles on export)"
 
 
+def _write_instances(out, source, instances) -> int:
+    """Under `out`, link one object per placed copy of each repeated part. Returns how many objects that made."""
+    made = 0
+    for number, group in enumerate(instances["groups"]):
+        mesh = _make_mesh(f"{source.name}_Part_{number}", source, group)
+        _shade_by_angle(mesh)
+        mesh.transform(Matrix.Translation(-Vector(group["centre"].tolist())))  # UVs come from the source, so read them in place first
+        for k, matrix in enumerate(group["matrices"]):
+            child = bpy.data.objects.new(f"{mesh.name}.{k}", mesh)
+            for collection in out.users_collection:
+                collection.objects.link(child)
+            child.parent = out
+            child.matrix_local = Matrix(matrix.tolist())
+            for slot, copy in zip(source.material_slots, child.material_slots):
+                if slot.link == "OBJECT":
+                    copy.link = "OBJECT"
+                    copy.material = slot.material
+            made += 1
+    return made
+
+
 class CURIOMESH_OT_guided_apply(bpy.types.Operator):
     bl_idname = "curiomesh.guided_apply"
     bl_label = "Apply"
@@ -2635,9 +2657,14 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         if res is None:
             self.report({"WARNING"}, "Nothing to apply")
             return {"CANCELLED"}
-        mesh = _make_mesh(source.name + "_Retopo", source, res)
+        # Keep Copies as Instances: one mesh per repeated part. Not with a bake or kept UV seams, which work on one mesh.
+        instances = res.get("instances") if gs.scope == "AUTO" and gs.auto_instances and gs.bake_detail == "OFF" and res.get("chart") is None else None
+        if gs.auto_instances and gs.scope == "AUTO" and instances is None:
+            self.report({"INFO"}, "Keep Copies as Instances was not used: this result has no exact copies, or it is baked, mirrored, tidied or repaired")
+        written = instances["rest"] if instances else res
+        mesh = _make_mesh(source.name + "_Retopo", source, written)
         _shade_by_angle(mesh)
-        _transfer_normals(mesh, _source_data(source), res)
+        _transfer_normals(mesh, _source_data(source), written)
         if gs.bend_crease or gs.bend_sharp:
             _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
         out = bpy.data.objects.new(source.name + "_Retopo", mesh)
@@ -2665,6 +2692,10 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         bpy.ops.object.select_all(action="DESELECT")
         out.select_set(True)
         context.view_layer.objects.active = out
+        placed = _write_instances(out, source, instances) if instances else 0
+        if instances:
+            count += sum(len(group["faces"]) for group in instances["groups"])
+            baked = f", in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes"
         self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, f"{count:,} faces written to {out.name}{baked}")
         return {"FINISHED"}
 
@@ -3305,6 +3336,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
             col.prop(gs, "keep_uvs", toggle=True, icon="UV")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
+        col.prop(gs, "auto_instances", toggle=True, icon="LINKED")
         col.prop(gs, "auto_style")
         col.prop(gs, "auto_method")
         col.row(align=True).prop(gs, "auto_output", expand=True)
