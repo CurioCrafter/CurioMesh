@@ -755,9 +755,9 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
         if item.piece >= len(seg["parts"]):
             return
         r = seg["parts"][item.piece]
-        row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
+        row = layout.split(factor=0.4, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
         row.label(text=name_of(item.piece), icon="CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
-        row = row.split(factor=0.4, align=True)
+        row = row.split(factor=0.5, align=True)
         row.label(text="?" if r["change"] is None else f"{r['change']:.1f}%")
         row.label(text=f"{r['after']:,} f")
 

@@ -1019,6 +1019,7 @@ def draw_tools(layout, gs) -> None:
     row = col.row(align=True)
     row.operator("curiomesh.seg_merge", icon="AUTOMERGE_ON")
     row.operator("curiomesh.seg_split", icon="SCULPTMODE_HLT")
+    row = col.row(align=True)  # two by two: four buttons in one row were cut to "Ren..." in a narrow sidebar
     row.operator("curiomesh.seg_paint", icon="BRUSH_DATA")
     row.operator("curiomesh.seg_rename", text="Rename", icon="GREASEPENCIL")
 
