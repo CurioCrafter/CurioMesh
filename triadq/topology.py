@@ -247,6 +247,9 @@ def _quad_points_valid(points: np.ndarray, epsilon: float | np.ndarray) -> np.nd
     if count == 0:
         return np.zeros(0, dtype=bool)
     epsilon = np.broadcast_to(np.asarray(epsilon, dtype=np.float64), (count,))
+    fast = _turbo.quad_points_valid(points, epsilon, math.cos(math.radians(MAX_QUAD_WARP_DEGREES))) if _turbo is not None else None
+    if fast is not None:
+        return fast
     valid = np.all(np.isfinite(points), axis=(1, 2))
     with np.errstate(all="ignore"):
         following_points = np.roll(points, -1, axis=1)
@@ -641,6 +644,13 @@ def _parity_template_validity(
     corners, as `quad_is_locally_valid` does on a local coordinate array.
     """
 
+    fast = (
+        _turbo.parity_template_validity(mesh.faces, vertices, base_coordinates, selected_edges, midpoint_indices, math.cos(math.radians(MAX_QUAD_WARP_DEGREES)))
+        if _turbo is not None
+        else None
+    )
+    if fast is not None:
+        return fast
     center_offset = len(base_coordinates)
     centers = [vertices[list(face)].mean(axis=0) for face in mesh.faces]
     quads: list[tuple[int, int, int, int]] = []

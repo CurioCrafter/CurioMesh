@@ -32,7 +32,7 @@ from .triadq.quadreduce import QuadReducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
-from . import guides, loops, symmetry
+from . import guides, loops, symmetry, turbo
 from .triadq.types import Cancelled, MeshData
 from .triadq.uvs import simplify_borders
 
@@ -78,8 +78,12 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
     """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth, face)] when exhausted.
 
     `tree` is the BVH of this very mesh when the caller already has one (building it is a fifth of a picture set).
+    The native core makes the same pictures in one quick call, with no BVH; these rays are the fallback.
     """
 
+    fast = turbo.pictures(points, polys, center, half, pixels)
+    if fast is not None:
+        return fast
     if tree is None:
         tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
     grid = (((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half).tolist()
