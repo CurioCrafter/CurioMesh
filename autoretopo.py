@@ -787,7 +787,7 @@ class AutoJob:
             if found:
                 return
             self.reps.append((len(self.sizes), points, polys))
-        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips))
+        key = ("piece", ids.tobytes(), (None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips), self.rough, self.baked))  # sizes judged another way are no use
         file = None
         if self.checkpoint is not None:
             file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
