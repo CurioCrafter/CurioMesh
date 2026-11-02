@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .topology import _turbo
+
 
 SMOOTH_DEG = 60.0  # faces meeting at more than this shade as a hard edge, on the output and in the check
 
@@ -15,8 +17,11 @@ def corner_normals(points: np.ndarray, polys, degrees: float = SMOOTH_DEG) -> np
     """Unit normal per polygon corner, in the order of `polys`. Faces at the corner's vertex count if they're within
     `degrees` of the corner's own face, weighted by their angle at it, as Blender does."""
 
-    sizes = np.fromiter((len(p) for p in polys), dtype=np.int64, count=len(polys))
-    flat = np.fromiter((v for p in polys for v in p), dtype=np.int64, count=int(sizes.sum()))
+    flat, starts, sizes = corner_table(polys)
+    module = _turbo.native() if _turbo is not None else None
+    if module is not None and hasattr(module, "corner_normals") and len(sizes) and sizes.min() > 0:
+        indptr = np.append(starts, len(flat))
+        return module.corner_normals(np.ascontiguousarray(points, dtype=np.float64).reshape(-1), indptr, flat, float(np.cos(np.radians(degrees)))).reshape(-1, 3)
     ends = np.cumsum(sizes)
     following = np.arange(1, len(flat) + 1)
     following[ends - 1] = ends - sizes
@@ -59,6 +64,8 @@ def sharp_edges(edge_of_corner: np.ndarray, face_of_corner: np.ndarray, normals:
 def corner_table(polys) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(every corner's vertex, where each polygon's corners start, corner counts), so many hits need no Python loop."""
 
+    if hasattr(polys, "indptr"):  # types.FlatFaces
+        return polys.flat, polys.indptr[:-1], np.diff(polys.indptr)
     sizes = np.fromiter((len(p) for p in polys), dtype=np.int64, count=len(polys))
     flat = np.fromiter((v for p in polys for v in p), dtype=np.int64, count=int(sizes.sum()))
     return flat, np.concatenate(([0], np.cumsum(sizes)[:-1])), sizes

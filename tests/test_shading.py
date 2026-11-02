@@ -9,10 +9,30 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import turbo  # noqa: E402
 from triadq.shading import blended_normals, corner_normals, corner_table, sharp_edges  # noqa: E402
 
 
 class ShadingTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(turbo.native(), "corner_normals"), "native module without corner normals")
+    def test_native_normals_are_numpy_s(self):
+        rng = np.random.default_rng(3)
+        n = 14
+        x, y = np.meshgrid(np.arange(n + 1.0), np.arange(n + 1.0), indexing="ij")
+        points = np.column_stack((x.ravel(), y.ravel(), rng.normal(0.0, 0.6, (n + 1) ** 2)))
+        faces = []
+        for i in range(n):
+            for j in range(n):
+                a, b, c, d = i * (n + 1) + j, (i + 1) * (n + 1) + j, (i + 1) * (n + 1) + j + 1, i * (n + 1) + j + 1
+                faces += [(a, b, c, d)] if (i + j) % 3 else [(a, b, c), (a, c, d)]
+        fast = corner_normals(points, faces, 30.0)
+        turbo.set_enabled(False)
+        try:
+            slow = corner_normals(points, faces, 30.0)
+        finally:
+            turbo.set_enabled(True)
+        np.testing.assert_allclose(fast, slow, rtol=0, atol=1e-12)
+
     def test_flat_quad_shades_flat(self):
         points = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=np.float64)
         self.assertTrue(np.allclose(corner_normals(points, [(0, 1, 2, 3)]), [0, 0, 1]))

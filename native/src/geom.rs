@@ -485,3 +485,68 @@ pub fn leader_clusters(values: &[f64], tol: f64) -> Vec<i64> {
     }
     ids
 }
+
+/// `shading.corner_normals`: each corner's normal, from the faces at its vertex within `limit` (a cosine) of its own face,
+/// weighted by their angle there. The same steps as the NumPy code; only the order of the last sums differs.
+pub fn corner_normals(points: &[f64], indptr: &[i64], flat: &[i64], limit: f64) -> Vec<f64> {
+    let corners = flat.len();
+    let faces = indptr.len() - 1;
+    let p = |v: i64| [points[3 * v as usize], points[3 * v as usize + 1], points[3 * v as usize + 2]];
+    let face_of: Vec<u32> = (0..faces).flat_map(|f| std::iter::repeat_n(f as u32, (indptr[f + 1] - indptr[f]) as usize)).collect();
+    let facing: Vec<[f64; 3]> = crate::topo::collect(faces, |f| {
+        let (s, e) = (indptr[f] as usize, indptr[f + 1] as usize);
+        let mut area = [0.0; 3];
+        for c in s..e {
+            let next = if c + 1 == e { s } else { c + 1 };
+            let x = cross(p(flat[c]), p(flat[next]));
+            area = [area[0] + x[0], area[1] + x[1], area[2] + x[2]];
+        }
+        let length = dot(area, area).sqrt().max(1e-30);
+        [area[0] / length, area[1] / length, area[2] / length]
+    });
+    let weighted: Vec<[f64; 3]> = crate::topo::collect(corners, |c| {
+        let f = face_of[c] as usize;
+        let (s, e) = (indptr[f] as usize, indptr[f + 1] as usize);
+        let next = if c + 1 == e { s } else { c + 1 };
+        let before = if c == s { e - 1 } else { c - 1 };
+        let here = p(flat[c]);
+        let (out, back) = (minus(p(flat[next]), here), minus(p(flat[before]), here));
+        let cosine = dot(out, back) / (dot(out, out).sqrt() * dot(back, back).sqrt()).max(1e-30);
+        let angle = cosine.clamp(-1.0, 1.0).acos();
+        let n = facing[f];
+        [n[0] * angle, n[1] * angle, n[2] * angle]
+    });
+    let mut order: Vec<u32> = (0..corners as u32).collect();
+    order.sort_by_key(|&c| flat[c as usize]);
+    let mut groups = Vec::new();
+    let mut start = 0;
+    for k in 1..=corners {
+        if k == corners || flat[order[k] as usize] != flat[order[start] as usize] {
+            groups.push((start, k));
+            start = k;
+        }
+    }
+    let per_group: Vec<Vec<(u32, [f64; 3])>> = crate::topo::collect(groups.len(), |g| {
+        let members = &order[groups[g].0..groups[g].1];
+        members
+            .iter()
+            .map(|&c| {
+                let mine = facing[face_of[c as usize] as usize];
+                let mut total = [0.0; 3];
+                for &d in members {
+                    if dot(mine, facing[face_of[d as usize] as usize]) >= limit {
+                        let w = weighted[d as usize];
+                        total = [total[0] + w[0], total[1] + w[1], total[2] + w[2]];
+                    }
+                }
+                let length = dot(total, total).sqrt().max(1e-30);
+                (c, [total[0] / length, total[1] / length, total[2] / length])
+            })
+            .collect()
+    });
+    let mut out = vec![0.0; 3 * corners];
+    for (c, n) in per_group.into_iter().flatten() {
+        out[3 * c as usize..3 * c as usize + 3].copy_from_slice(&n);
+    }
+    out
+}

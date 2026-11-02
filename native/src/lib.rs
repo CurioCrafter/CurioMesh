@@ -875,6 +875,17 @@ fn shifted_faces<'py>(py: Python<'py>, polys: &Bound<'py, PyAny>, offset: i64, i
     Ok(out)
 }
 
+/// `shading.corner_normals`: a unit smooth-shading normal per corner (3C,), on all cores.
+#[pyfunction]
+fn corner_normals<'py>(py: Python<'py>, points: PyReadonlyArray1<'py, f64>, indptr: PyReadonlyArray1<'py, i64>, flat: PyReadonlyArray1<'py, i64>, limit: f64) -> PyResult<F64Array<'py>> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    check_faces(indptr, flat)?;
+    if !vertex_ids_ok(flat, points.len()) || indptr.windows(2).any(|w| w[0] == w[1]) {
+        return Err(PyValueError::new_err("vertex index out of range"));
+    }
+    Ok(py.detach(|| geom::corner_normals(points, indptr, flat, limit)).into_pyarray(py))
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -899,6 +910,7 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
     m.add_function(wrap_pyfunction!(mesh_checks, m)?)?;
     m.add_function(wrap_pyfunction!(closed_walk, m)?)?;
+    m.add_function(wrap_pyfunction!(corner_normals, m)?)?;
     m.add_function(wrap_pyfunction!(shifted_faces, m)?)?;
     m.add_function(wrap_pyfunction!(segment_merges, m)?)?;
     m.add_function(wrap_pyfunction!(field_orient_sweep, m)?)?;
