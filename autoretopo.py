@@ -48,10 +48,10 @@ ROWS_MOST = 0.8  # Clean Rows: most faces, as a share of the source's triangles
 ROWS_SECONDS = 30.0  # Clean Rows: QuadriFlow's time limit per piece, plus...
 ROWS_SECONDS_PER_QUAD = 0.01  # ...this much for each quad asked for
 FLAT_SNAP_SHARE = 0.015  # Balanced: a face whose new vertices would move less than this share of its size stays whole
-ROWS_TIME = 300.0  # Clean Rows: a denser layout is only asked for if it should finish within this many seconds
+ROWS_TIME = 600.0  # Clean Rows: a denser layout is only asked for if it should finish within this many seconds
 ROWS_SECONDS_ESTIMATE = 0.003  # Clean Rows: rough QuadriFlow time per quad, measured on a 74,000 quad rock
 ROWS_SHARP_INPUT = 6  # Clean Rows: source triangles per quad needed before vertices seek creases
-ROWS_BAD = 0.01  # Clean Rows: a piece with more than this share of its quads folded before repair gets paired instead
+ROWS_BAD = 0.01  # Clean Rows: a piece where repair leaves more than this many triangles per quad gets paired instead
 NARROW_TRIES = 2  # extra tries with a new size in between, when the sizes on offer land well short of it
 TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
@@ -477,7 +477,8 @@ class AutoJob:
                 if self._stopped:
                     return None
                 moved, quads = done if done is not None else (None, [])
-                if len(quads) < (1.0 - ROWS_BAD) * len(faces):  # repair had to remove too much: QuadriFlow doesn't suit this piece
+                # Repair had to give up on too many quads: QuadriFlow doesn't suit this piece.
+                if done is None or sum(1 for q in quads if len(q) != 4) > ROWS_BAD * len(faces):
                     triangles_in = sum(len(p) - 2 for p in polys)
                     want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
                     if triangles_in > want:
