@@ -205,11 +205,13 @@ def _quadriflow(context, points, polys, kinds, goal):
     mesh.update()
     obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
     context.scene.collection.objects.link(obj)
+    layer = context.view_layer
+    was_selected, was_active = list(layer.objects.selected), layer.objects.active
     try:
-        for other in context.view_layer.objects:
+        for other in was_selected:
             other.select_set(False)
         obj.select_set(True)
-        context.view_layer.objects.active = obj
+        layer.objects.active = obj
         if "FINISHED" not in bpy.ops.object.quadriflow_remesh(mode="FACES", target_faces=max(4, int(goal)), seed=0) or not len(obj.data.polygons):
             raise ValueError("QuadriFlow made nothing")
         done = obj.data
@@ -220,6 +222,9 @@ def _quadriflow(context, points, polys, kinds, goal):
         data = obj.data
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(data)
+        for other in was_selected:
+            other.select_set(True)
+        layer.objects.active = was_active
 
 
 def _fill(points, polys, kinds, strategy, goal):
