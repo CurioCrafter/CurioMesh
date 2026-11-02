@@ -14,8 +14,8 @@ import numpy as np
 from .topology import topology_summary
 from .types import MeshData
 
-SELF_LIMIT = 400_000  # faces: above this the self-intersection test is skipped and the summary says so
 CHUNK = 50_000
+TILE = 20_000  # faces tested per slice, so a big mesh never blocks Blender for long
 
 
 @dataclass
@@ -26,9 +26,11 @@ class Inspect:
     dups: int = 0
     holes: int = 0  # boundary loops
     selfx: int | None = None  # face pairs passing through each other; None = not measured
+    pairs: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.int64))  # those pairs
     broken: np.ndarray = field(default_factory=lambda: np.zeros(0, bool))  # face on a bad edge, flipped or duplicate
     crossing: np.ndarray = field(default_factory=lambda: np.zeros(0, bool))  # face that passes through another
     per_piece: dict[int, tuple[int, int, int]] = field(default_factory=dict)  # piece -> (broken faces, holes, crossing faces)
+    new_cross: dict[int, int] | None = None  # piece -> crossings the source did not have there, once that is worked out
 
 
 def edge_flags(faces) -> tuple[np.ndarray, int, int, int]:
@@ -95,26 +97,84 @@ def drop_shared(faces, pairs: np.ndarray) -> np.ndarray:
     """Keep the face pairs that share no vertex: neighbours that merely touch are not crossings."""
     if not len(pairs):
         return pairs
-    width = max(len(f) for f in faces)
-    pad = np.full((len(faces), width), -1, dtype=np.int64)
-    for i, face in enumerate(faces):
-        pad[i, : len(face)] = face
+    pad = faces if isinstance(faces, np.ndarray) else corner_table(faces)
     keep = np.ones(len(pairs), bool)
     for s in range(0, len(pairs), CHUNK):
         a, b = pad[pairs[s : s + CHUNK, 0]], pad[pairs[s : s + CHUNK, 1]]
-        keep[s : s + CHUNK] = ~(((a[:, :, None] == b[:, None, :]) & (a[:, :, None] >= 0)).any(axis=(1, 2)))
+        keep[s : s + CHUNK] = ~(a[:, :, None] == b[:, None, :]).any(axis=(1, 2))
     return pairs[keep]
 
 
-def crossing_pairs(co, faces) -> np.ndarray | None:
-    """Face pairs of this mesh that pass through each other, or None when it is too big to test."""
+def tiles(centers: np.ndarray, most: int = TILE) -> list[np.ndarray]:
+    """Face ids cut into tiles of at most `most` faces, each cut at the middle of the widest axis."""
+    out, stack = [], [np.arange(len(centers))]
+    while stack:
+        ids = stack.pop()
+        if len(ids) <= most:
+            out.append(ids)
+            continue
+        axis = int(np.ptp(centers[ids], axis=0).argmax())
+        half = len(ids) // 2
+        order = np.argpartition(centers[ids, axis], half)
+        stack += [ids[order[:half]], ids[order[half:]]]
+    return out
+
+
+def face_boxes(co: np.ndarray, pad: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Low and high corner of each face's box, from a table of corners (see `corner_table`)."""
+    corners = co[pad]
+    return corners.min(axis=1), corners.max(axis=1)
+
+
+def corner_table(faces) -> np.ndarray:
+    """Faces as a rectangular table, short faces padded with their own first corner."""
+    width = max((len(f) for f in faces), default=3)
+    return np.asarray([tuple(f) + (f[0],) * (width - len(f)) for f in faces], dtype=np.int64).reshape(-1, width)
+
+
+def tree_of(co: np.ndarray, faces, ids: np.ndarray):
+    """A search tree of just these faces, whose numbers are positions in `ids`."""
     from mathutils.bvhtree import BVHTree  # only inside Blender
 
-    if len(faces) > SELF_LIMIT:
-        return None
-    tree = BVHTree.FromPolygons(np.asarray(co).tolist(), [list(f) for f in faces], epsilon=0.0)
-    pairs = np.asarray(tree.overlap(tree), dtype=np.int64).reshape(-1, 2)
-    return drop_shared(faces, pairs[pairs[:, 0] < pairs[:, 1]])
+    corners = np.fromiter((v for f in ids.tolist() for v in faces[f]), dtype=np.int64)
+    used, flat = np.unique(corners, return_inverse=True)
+    polys, at = [], 0
+    for f in ids.tolist():
+        size = len(faces[f])
+        polys.append(flat[at : at + size].tolist())
+        at += size
+    return BVHTree.FromPolygons(co[used].tolist(), polys, epsilon=0.0)
+
+
+def crossing_slices(co, faces):
+    """Generator: face pairs that pass through each other, one tile per step. Returns the pairs when exhausted."""
+    co = np.asarray(co, dtype=np.float64)
+    if not len(faces):
+        return np.zeros((0, 2), dtype=np.int64)
+    pad = corner_table(faces)
+    low, high = face_boxes(co, pad)
+    found = []
+    for ids in tiles((low + high) / 2.0):
+        near = np.flatnonzero(((low <= high[ids].max(axis=0)) & (high >= low[ids].min(axis=0))).all(axis=1))
+        hits = tree_of(co, faces, ids).overlap(tree_of(co, faces, near))
+        if hits:
+            hits = np.asarray(hits, dtype=np.int64)
+            pairs = np.column_stack((ids[hits[:, 0]], near[hits[:, 1]]))
+            found.append(pairs[pairs[:, 0] != pairs[:, 1]])
+        yield
+    if not found:
+        return np.zeros((0, 2), dtype=np.int64)
+    return drop_shared(pad, np.unique(np.sort(np.vstack(found), axis=1), axis=0))
+
+
+def crossing_pairs(co, faces) -> np.ndarray:
+    """Face pairs of this mesh that pass through each other, all at once."""
+    slices = crossing_slices(co, faces)
+    while True:
+        try:
+            next(slices)
+        except StopIteration as done:
+            return done.value
 
 
 def inspect(co, faces, piece, pairs=...) -> Inspect:
@@ -129,7 +189,7 @@ def inspect(co, faces, piece, pairs=...) -> Inspect:
     crossing = np.zeros(len(faces), bool)
     if pairs is not None and len(pairs):
         crossing[pairs.ravel()] = True
-    out = Inspect(nm, summary.non_manifold_vertices, flipped, dups, holes, None if pairs is None else len(pairs), broken, crossing)
+    out = Inspect(nm, summary.non_manifold_vertices, flipped, dups, holes, None if pairs is None else len(pairs), np.zeros((0, 2), np.int64) if pairs is None else pairs, broken, crossing)
     # Crossing, per piece: pairs inside the piece plus the other pieces it crosses (a part passing through a
     # neighbour counts once for each of the two, however many faces meet).
     inside: dict[int, int] = {}
@@ -152,7 +212,10 @@ def new_spots(before: Inspect, after: Inspect) -> list[int]:
     """Pieces of the result with more broken faces, holes or crossings than the same piece of the source, worst first."""
     bad = {}
     for p, mine in after.per_piece.items():
-        extra = sum(max(0, a - b) for a, b in zip(mine, before.per_piece.get(p, (0, 0, 0))))
+        theirs = before.per_piece.get(p, (0, 0, 0))
+        extra = sum(max(0, a - b) for a, b in zip(mine, theirs))
+        if after.new_cross is not None:
+            extra += after.new_cross.get(p, 0) - max(0, mine[2] - theirs[2])
         if extra:
             bad[p] = extra
     return sorted(bad, key=lambda p: (-bad[p], p))
@@ -166,10 +229,10 @@ def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
         "flipped edges": max(0, after.flipped - before.flipped),
         "duplicate faces": max(0, after.dups - before.dups),
         "holes opened": max(0, after.holes - before.holes),
-        "self-intersections": max(0, (after.selfx or 0) - (before.selfx or 0)),
+        "self-intersections": sum(after.new_cross.values()) if after.new_cross is not None else max(0, (after.selfx or 0) - (before.selfx or 0)),
     }
     found = ", ".join(f"{n:,} {name}" for name, n in new.items() if n)
-    note = "" if after.selfx is not None else " (self-intersections not tested: too many faces)"
+    note = "" if after.selfx is not None else " (self-intersections not tested)"
     if left:
         return f"{left} spot{'s' if left != 1 else ''} could not be fixed and {'are' if left != 1 else 'is'} selected for you: {found or 'they cross or break more than your mesh did there'}{note}"
     if fixed:

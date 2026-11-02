@@ -11,6 +11,15 @@
   Decimate. `flatquad.pair_and_close(chunk_faces=...)` pairs per region for half the pairing memory; it is off unless
   `autoretopo.PAIR_CHUNK_FACES` is set. Closure stays global, so seams always weld.
 
+- **Faces that pass through each other are now repaired on the spot** (Auto Segments), in parts
+  of any size. Each spot gets the cheapest thing that clears it: corners back on your surface,
+  evening out a knot, a small push along the normal, taking one quad away, then filling the
+  spot again with a welded seam. Face counts hardly change. Only what the source did not have
+  counts: a knot your mesh already has is left alone, and what can't be cleared stays selected.
+  Measured at Detail 6: spinning wheel 7 spots to 0, moss rocks 3 to 1, air compressor 38 to 23
+  (its big low-poly parts are still the hard case).
+- **The crossing test now runs on meshes of any size**, tile by tile, so Blender stays usable:
+  a million faces takes about 20 seconds with no long stop. It used to be skipped above 400,000.
 - **Part cases** (Auto Segments). Each part now gets a named case from a few cheap
   measurements: tiny part, flat plate, thin sheet, box, tube, dome, rough scan, ornament or
   organic smooth. A small table, built from camera results on nine models, says which
