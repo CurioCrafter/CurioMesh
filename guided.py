@@ -28,8 +28,8 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, hardware, jobpack, profiles, teach, turbo
-from .triadq import areas, fit, patch
+from . import autoretopo, hardware, jobpack, multires, profiles, teach, turbo
+from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
@@ -210,12 +210,35 @@ def _profile_update(self, context):
                 self.bend_use = True  # Animation asks for Deformation Lines across the joints
         finally:
             _applying = False
+    if self.multires_on != (self.auto_profile == "ANIMATION"):  # Animation's route: a QuadriFlow cage, with the detail in Multires levels
+        self.multires_on = self.auto_profile == "ANIMATION"
+    _redraw_update(self, context)
+
+
+def _multires_update(self, context):
+    """Multires Detail brings the shape back, so the mesh itself can go for clean rows: QuadriFlow, to a low face count."""
+    global _applying
+    values = profiles.preset(self.auto_profile)
+    _applying = True
+    try:
+        if self.multires_on:
+            obj = _source_mesh(context)
+            self.auto_method = "QUADRIFLOW"
+            self.auto_output = "QUADS"
+            self.auto_aim, self.auto_reduce_by = "REDUCE", "COUNT"
+            if obj is not None:
+                self.auto_reduce_count = profiles.cage_faces(len(obj.data.polygons))
+        elif values is not None:
+            self.auto_detail, self.auto_method, self.auto_output = values
+            self.auto_aim = "KEEP"
+    finally:
+        _applying = False
     _redraw_update(self, context)
 
 
 def _custom_update(self, context):
     """Changing Detail, Method or Output by hand leaves the preset."""
-    if not _applying and self.auto_profile != "CUSTOM":
+    if not _applying and self.auto_profile != "CUSTOM" and not self.multires_on:
         if profiles.preset(self.auto_profile) != (self.auto_detail, self.auto_method, self.auto_output):
             self.auto_profile = "CUSTOM"
     _redraw_update(self, context)
@@ -254,6 +277,9 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_profile: bpy.props.EnumProperty(name="Use", description="What the result is for. Each use sets Detail, Method and Output for you; change any of them and it becomes Custom", items=profiles.PROFILE_ITEMS, default="GAME", update=_profile_update)
+    multires_on: bpy.props.BoolProperty(name="Multires Detail", description="Make clean, low quads, and on Apply add a Multires modifier whose levels follow your mesh. Level 0 is what you animate or put in the game; the shape comes back in the levels above it. Your mesh is only read", default=False, update=_multires_update)
+    multires_levels: bpy.props.IntProperty(name="Levels", description="Multires levels to add. Each one has four times the faces of the one below", default=2, min=1, max=5, update=_redraw_update)
+    auto_why: bpy.props.StringProperty(name="Why", description="What the Auto button chose and why", default="")
     auto_detail: bpy.props.FloatProperty(name="Detail", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces; very high gives a rough, very low-poly shape", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
     auto_effort: bpy.props.EnumProperty(name="Effort", description="How hard Auto Segments works on this computer. Light leaves it usable and works in small steps; Full finishes soonest; Auto picks from your cores and free memory", items=hardware.EFFORT_ITEMS, default="AUTO", update=_redraw_update)
     auto_style: bpy.props.EnumProperty(name="Style", description="Auto Segments: what comes first when the two disagree", items=(("DETAIL", "Keep Detail", "Holds the amount of change you allow, with the fewest faces. Quads follow the shape, so they can look slanted"), ("BALANCED", "Balanced", "Holds the same change with far fewer irregular vertices, by splitting every quad. Costs more faces"), ("ROWS", "Clean Rows", "Even, square quads in long rows. Costs more visible change, and small sharp detail softens")), default="DETAIL", update=_redraw_update)
@@ -2693,7 +2719,7 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
             self.report({"WARNING"}, "Nothing to apply")
             return {"CANCELLED"}
         # Keep Copies as Instances: one mesh per repeated part. Not with a bake or kept UV seams, which work on one mesh.
-        instances = res.get("instances") if gs.scope == "AUTO" and gs.auto_instances and gs.bake_detail == "OFF" and res.get("chart") is None else None
+        instances = res.get("instances") if gs.scope == "AUTO" and gs.auto_instances and gs.bake_detail == "OFF" and res.get("chart") is None and not gs.multires_on else None
         if gs.auto_instances and gs.scope == "AUTO" and instances is None:
             self.report({"INFO"}, "Keep Copies as Instances was not used: this result has no exact copies, or it is baked, mirrored, tidied or repaired")
         written = instances["rest"] if instances else res
@@ -2710,7 +2736,13 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
                 copy.link = "OBJECT"
                 copy.material = slot.material
         baked = ""
-        if gs.bake_detail != "OFF":
+        multires_on = gs.multires_on and (gs.scope == "AUTO")
+        flat_faces = None
+        tree = multires.source_tree(source) if multires_on else None  # before Replace takes the source's mesh away
+        if multires_on:
+            _mark_edges(mesh, multires.hard_edges(mesh), True, False)
+            flat_faces = segments.segment_goals.faces_without_detail(res)
+        if gs.bake_detail != "OFF":  # first, while level 0 is all there is: a bake reads the levels too
             baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
         flag = res.get("flag")
         if flag is not None and len(flag) == len(mesh.polygons) and flag.any():
@@ -2723,6 +2755,9 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
                 for slot in out.material_slots:
                     slot.link = "DATA"
         count = len(mesh.polygons)
+        levels = ""
+        if multires_on:
+            levels = multires.add_to_result(context, out, tree, gs.multires_levels, flat_faces)
         gs.enabled = False  # removes the preview, stops the timer
         bpy.ops.object.select_all(action="DESELECT")
         out.select_set(True)
@@ -2731,7 +2766,7 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         if instances:
             count += sum(len(group["faces"]) for group in instances["groups"])
             baked = f", in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes"
-        self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, f"{count:,} faces written to {out.name}{baked}")
+        self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, f"{count:,} faces written to {out.name}{baked}{levels}")
         return {"FINISHED"}
 
 
@@ -3250,6 +3285,54 @@ def _is_problem(message: str) -> bool:
     return any(w in message for w in ("skipped", "error", "Error", "failed", "Would make")) or message.startswith(("Select", "Place", "Nothing", "Points Only"))
 
 
+class CURIOMESH_OT_multires_detail(bpy.types.Operator):
+    bl_idname = "curiomesh.multires_detail"
+    bl_label = "Add Multires Detail"
+    bl_description = "Give the active mesh (your cage, from any tool or by hand) Multires levels that follow the other selected mesh. The selected mesh is only read"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        active = context.active_object
+        return active is not None and active.type == "MESH" and active.mode == "OBJECT" and any(o is not active and o.type == "MESH" for o in context.selected_objects)
+
+    def execute(self, context):
+        cage = context.active_object
+        source = next(o for o in context.selected_objects if o is not cage and o.type == "MESH")
+        tree = multires.source_tree(source, cage.matrix_world.inverted() @ source.matrix_world)
+        words = multires.add_to_result(context, cage, tree, _gs(context).multires_levels)
+        self.report({"WARNING"} if "failed" in words else {"INFO"}, f"{cage.name}{words}, read from {source.name}")
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_auto_all(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_auto_all"
+    bl_label = "Auto"
+    bl_description = "Look at the selected mesh and this computer, pick the Use and every setting, and start. It says what it chose and why. Nothing changes until you press Apply"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return _source_mesh(context) is not None
+
+    def execute(self, context):
+        if context.object is not None and context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        gs = _gs(context)
+        src = _source_data(_source_mesh(context))
+        facts = detail.mesh_facts(src["co"], src["tris"])
+        choice = profiles.choose(facts, profiles.free_memory_gb())
+        gs.multires_on = False
+        gs.auto_profile = choice["use"]
+        gs.region_use, gs.sym_axis = False, "OFF"
+        if choice["levels"]:
+            gs.multires_levels = choice["levels"]
+            gs.multires_on = True
+        gs.bake_detail, gs.bake_size = choice["bake"], choice["bake_size"]
+        gs.auto_why = choice["why"]
+        return bpy.ops.curiomesh.guided_auto_start()
+
+
 class CURIOMESH_PT_guided(bpy.types.Panel):
     bl_label = "Guided"
     bl_idname = "CURIOMESH_PT_guided"
@@ -3292,6 +3375,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             layout.box().label(text="This mesh has no faces to reduce", icon="ERROR")
             return
 
+        draw_auto_button(layout, context, gs)
+
         # The one primary action
         if searching:
             draw_progress(layout, *searching)
@@ -3312,6 +3397,16 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col = layout.column(align=True)
         col.enabled = not searching
         col.prop(gs, "auto_profile")
+        if gs.auto_profile in profiles.MULTIRES_USES or gs.multires_on:
+            col.prop(gs, "multires_on", toggle=True, icon="MOD_MULTIRES")
+            if gs.multires_on:
+                col.prop(gs, "multires_levels")
+                cage = len(res["faces"]) if done else gs.auto_reduce_count
+                overlay.wrap_label(col, profiles.multires_words(cage, gs.multires_levels), icon="INFO", width=36, limit=4)
+                row = col.row(align=True)
+                row.prop(gs, "bake_detail", text="Bake")
+                if gs.bake_detail != "OFF":
+                    row.prop(gs, "bake_size", text="")
         col.row(align=True).prop(gs, "auto_aim", expand=True)
         col.prop(gs, "sym_axis", icon="MOD_MIRROR")
         if REGION_READY:
@@ -3563,6 +3658,16 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             overlay.wrap_label(layout, "Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
 
 
+def draw_auto_button(layout, context, gs) -> None:
+    """The one button that chooses everything, and in plain words what it chose. Used by the Guided and Quick Start panels."""
+    row = layout.row()
+    row.scale_y = 2.0
+    row.enabled = progress_info() is None
+    row.operator("curiomesh.guided_auto_all", text="Auto", icon="SHADERFX")
+    if gs.auto_why:
+        overlay.wrap_label(layout.box(), gs.auto_why, icon="INFO", width=36, limit=5)
+
+
 class _AutoSub:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -3674,6 +3779,8 @@ CLASSES = (
     CURIOMESH_OT_guided_check_pc,
     CURIOMESH_OT_guided_export_job,
     CURIOMESH_OT_guided_import_result,
+    CURIOMESH_OT_guided_auto_all,
+    CURIOMESH_OT_multires_detail,
     CURIOMESH_OT_guided_stop_work,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,

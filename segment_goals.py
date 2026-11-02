@@ -88,6 +88,7 @@ def save() -> None:
         "goals": [r["goal"] for r in view.seg["parts"]],
         "details": [r["goal_detail"] for r in view.seg["parts"]],
         "methods": [r.get("choice", "AUTO") for r in view.seg["parts"]],
+        "multires": [r.get("multires", True) for r in view.seg["parts"]],
         "sel": sorted(view.seg["sel"]),
     })
 
@@ -137,7 +138,7 @@ def _record(job, label: int, ids: np.ndarray, count: int, saved=None) -> dict:
     pick = lambda key, default: saved[key][label] if label < len(saved.get(key, ())) else default  # noqa: E731
     return {
         "id": label, "name": pick("names", f"Segment {label + 1}"), "kind": P.classify(points, polys), "before": len(ids), "after": count,
-        "change": change, "topology": None, "method": "AUTO", "goal": pick("goals", "REDUCE"), "goal_detail": pick("details", 0.5),
+        "change": change, "topology": None, "method": "AUTO", "goal": pick("goals", "REDUCE"), "goal_detail": pick("details", 0.5), "multires": pick("multires", True),
         "loose": loose, "whole": whole, "source": ids, "choice": pick("methods", "AUTO"),
         "tries": [{"method": "AUTO", "after": count, "change": change, "topology": None, "detail": None, "build": None}], "cur": 0,
     }
@@ -1093,6 +1094,34 @@ def on_selected(gs) -> None:
             gs["seg_method"] = method
 
 
+def faces_without_detail(res):
+    """Per result face: True where its segment has Multires Detail off. None when every face gets it."""
+    records = view.seg["parts"]
+    piece = view.seg.get("piece")
+    if view.seg.get("src") is None or piece is None or len(piece) != len(res["faces"]) or all(r.get("multires", True) for r in records):
+        return None
+    return ~np.asarray([r.get("multires", True) for r in records], dtype=bool)[np.asarray(piece)]
+
+
+class CURIOMESH_OT_seg_multires(bpy.types.Operator):
+    bl_idname = "curiomesh.seg_multires"
+    bl_label = "Multires Detail"
+    bl_description = "On Apply, the selected segments follow your mesh in the Multires levels. Off, they keep the shape of their own quads at every level"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return view.ready() and view.seg.get("src") is not None and bool(view.seg["sel"])
+
+    def execute(self, context):
+        records = [view.seg["parts"][p] for p in view.seg["sel"]]
+        on = not all(r.get("multires", True) for r in records)
+        for r in records:
+            r["multires"] = on
+        save()
+        return {"FINISHED"}
+
+
 def draw_tools(layout, gs) -> None:
     """Segment Detail and the hand tools, for the top of the Parts panel."""
     if view.seg["src"] is None:
@@ -1140,6 +1169,9 @@ def draw_selected(layout, gs) -> None:
     method.enabled = gs.seg_goal in {"REDUCE", "LOWPOLY"}
     method.prop(gs, "seg_method", text="Method")
     col.prop(gs, "seg_goal_detail", text="Detail", slider=True)
+    if gs.multires_on:
+        on = all(view.seg["parts"][p].get("multires", True) for p in view.seg["sel"])
+        col.operator("curiomesh.seg_multires", text="Multires Detail: follows your mesh" if on else "Multires Detail: off here", icon="MOD_MULTIRES", depress=on)
     row = box.row(align=True)
     row.scale_y = 1.3
     row.operator("curiomesh.seg_goal", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
@@ -1352,4 +1384,5 @@ CLASSES = (
     CURIOMESH_OT_seg_walk,
     CURIOMESH_OT_seg_review,
     CURIOMESH_PT_seg_review,
+    CURIOMESH_OT_seg_multires,
 )
