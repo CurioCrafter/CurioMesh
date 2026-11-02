@@ -31,6 +31,17 @@ class CheckTests(unittest.TestCase):
         opened = checks.inspect(POINTS, CUBE[:5], np.zeros(5, int), pairs=np.zeros((0, 2), int))
         self.assertEqual(opened.holes, 1)
 
+    def test_a_quad_bent_round_an_edge_counts_as_broken(self):
+        co = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [5, 0, 0], [6, 0, 0], [6, 0, 1], [5, 1, 0]], float)
+        flat, bent = (0, 1, 2, 3), (4, 5, 6, 7)  # the second turns 90 degrees across its diagonal
+        result = checks.inspect(co, [flat, bent], np.array([0, 1]), pairs=np.zeros((0, 2), int))
+        self.assertEqual((result.folded, result.broken.tolist()), (1, [False, True]))
+        level = co.copy()
+        level[6] = (6, 1, 0)  # the same quad lying flat, as the source had it
+        source = checks.inspect(level, [flat, bent], np.array([0, 1]), pairs=np.zeros((0, 2), int))
+        self.assertEqual(checks.new_spots(source, result), [1])
+        self.assertIn("1 folded quads", checks.describe(source, result, 0, 0))
+
     def test_neighbours_that_share_a_vertex_are_not_crossings(self):
         pairs = np.array([[0, 2], [0, 1]])
         self.assertEqual(checks.drop_shared(CUBE, pairs).tolist(), [[0, 1]])

@@ -26,10 +26,12 @@ class Inspect:
     dups: int = 0
     holes: int = 0  # boundary loops
     selfx: int | None = None  # face pairs passing through each other; None = not measured
+    folded: int = 0  # quads bent past 60 degrees or concave (patch.quad_quality <= 0)
     pairs: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.int64))  # those pairs
-    broken: np.ndarray = field(default_factory=lambda: np.zeros(0, bool))  # face on a bad edge, flipped or duplicate
+    broken: np.ndarray = field(default_factory=lambda: np.zeros(0, bool))  # face on a bad edge, flipped, duplicate or a folded quad
     crossing: np.ndarray = field(default_factory=lambda: np.zeros(0, bool))  # face that passes through another
     per_piece: dict[int, tuple[int, int, int]] = field(default_factory=dict)  # piece -> (broken faces, holes, crossing faces)
+    bent: np.ndarray = field(default_factory=lambda: np.zeros(0, bool))  # the folded quads among `broken`
     new_cross: dict[int, int] | None = None  # piece -> crossings the source did not have there, once that is worked out
 
 
@@ -180,6 +182,19 @@ def crossing_pairs(co, faces) -> np.ndarray:
             return done.value
 
 
+def folded_quads(co, faces) -> np.ndarray:
+    """Per face: a quad bent past 60 degrees across a diagonal, or concave. A thin part cut to too few faces wraps its edges so."""
+    from .patch import quad_quality
+
+    sizes = np.fromiter((len(f) for f in faces), dtype=np.int64, count=len(faces))
+    out = np.zeros(len(faces), bool)
+    quads = np.flatnonzero(sizes == 4)
+    if len(quads):
+        corners = np.asarray([faces[k] for k in quads.tolist()], dtype=np.int64)
+        out[quads] = quad_quality(np.asarray(co, dtype=np.float64)[corners]) <= 0.0
+    return out
+
+
 def inspect(co, faces, piece, pairs=...) -> Inspect:
     """All the numbers for one mesh. `piece` gives each face's piece. `pairs` defaults to a BVH test (Blender only)."""
     faces = [tuple(f) for f in faces]
@@ -190,13 +205,16 @@ def inspect(co, faces, piece, pairs=...) -> Inspect:
     else:
         broken, nm, flipped, dups = edge_flags(faces)
         holes, holes_by = hole_counts(faces, piece)
+    folded = folded_quads(co, faces)
+    broken = np.asarray(broken, dtype=bool) | folded  # a folded quad is a new problem like a flipped one: its part goes a size up
     summary = topology_summary(MeshData(co, faces))
     if pairs is ...:
         pairs = crossing_pairs(co, faces)
     crossing = np.zeros(len(faces), bool)
     if pairs is not None and len(pairs):
         crossing[pairs.ravel()] = True
-    out = Inspect(nm, summary.non_manifold_vertices, flipped, dups, holes, None if pairs is None else len(pairs), np.zeros((0, 2), np.int64) if pairs is None else pairs, broken, crossing)
+    out = Inspect(nm, summary.non_manifold_vertices, flipped, dups, holes, None if pairs is None else len(pairs), int(folded.sum()), np.zeros((0, 2), np.int64) if pairs is None else pairs, broken, crossing)
+    out.bent = folded
     # Crossing, per piece: pairs inside the piece plus the other pieces it crosses (a part passing through a
     # neighbour counts once for each of the two, however many faces meet).
     inside: dict[int, int] = {}
@@ -235,6 +253,7 @@ def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
         "non-manifold vertices": max(0, after.nm_verts - before.nm_verts),
         "flipped edges": max(0, after.flipped - before.flipped),
         "duplicate faces": max(0, after.dups - before.dups),
+        "folded quads": max(0, after.folded - before.folded),
         "holes opened": max(0, after.holes - before.holes),
         "self-intersections": sum(after.new_cross.values()) if after.new_cross is not None else max(0, (after.selfx or 0) - (before.selfx or 0)),
     }

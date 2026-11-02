@@ -1712,7 +1712,7 @@ class AutoJob:
         if not numbers["pushed"] and not numbers["filled"]:
             return same
         now = yield from self._inspected(fixed[0], fixed[1], fixed[3])
-        if any(getattr(now, k) > getattr(after, k) for k in ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx")):
+        if any(getattr(now, k) > getattr(after, k) for k in ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")):
             return same
         seen = yield from self._look(fixed[0], fixed[1], *self._view)
         if seen[0] > max(1.1 * self.detail, 1.02 * view[0]):
@@ -1745,12 +1745,15 @@ class AutoJob:
             self._known = repair.Known(self.co, self.faces, source_piece, self._src_check.pairs)
         before = self._src_check
         after = yield from self._inspected(points, faces, piece)
-        keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx")
+        keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
         first = {k: getattr(after, k) for k in keys}
         start_faces = len(faces)
         points, faces, mats, piece, view, after, fixed = yield from self._fix_locally(points, faces, mats, piece, view, after)
         for attempt in range(0 if self.chunks else FIX_TRIES):  # a cut piece's parts are one surface: they can't be remade alone
-            bad = self._affordable([p for p in checks.new_spots(before, after)[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES], start_faces)
+            spots = checks.new_spots(before, after)
+            bent = set(np.unique(piece[after.bent]).tolist()) if len(after.bent) == len(piece) else set()
+            spots = sorted(spots, key=lambda p: p not in bent)  # folded quads first: small thin parts, cheap to remake a size up
+            bad = self._affordable([p for p in spots[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES], start_faces)
             if not bad or self._stopped or time.perf_counter() > self._repair_until:
                 break
             self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
