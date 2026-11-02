@@ -3158,7 +3158,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             after, before = len(res["faces"]), report["before"]
             col = layout.box().column(align=True)
             col.label(text=f"{before:,} to {after:,} faces ({100.0 * (1.0 - after / max(before, 1)):.0f}% fewer)", icon="CHECKMARK")
-            col.label(text=f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1")
+            overlay.wrap_label(col, f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1", width=32, limit=2)
             if report.get("shading") is not None:
                 col.label(text=f"Smooth shading differs by {report['shading']:.1f}%", icon="BLANK1")
             if report.get("topology") is not None:
@@ -3202,7 +3202,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             box = layout.box()
             box.alert = _is_problem(message)
             for i, chunk in enumerate(message.split(" | ")[:2]):
-                overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=36, limit=2)
+                overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=32, limit=4)
 
         if done:
             row = layout.row(align=True)
@@ -3281,7 +3281,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             box = layout.box()
             box.alert = _is_problem(message)
             for i, chunk in enumerate(message.split(" | ")[:2]):
-                overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=36, limit=2)
+                overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=32, limit=4)
         if state["spot"] is not None:
             box = layout.box()
             box.label(text="Next spot to fix", icon="ZOOM_ALL")
