@@ -31,7 +31,7 @@ from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from .triadq import bakescore, cases, checks, parts, patch, patterns, repair, special, views
+from .triadq import bakescore, cases, checks, detail, parts, patch, patterns, repair, special, views
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
@@ -51,7 +51,7 @@ KEEP_TRIANGLES = 24  # pieces this small stay as they are: there's nothing to ga
 MEASURE_SHARE = 0.6  # of the progress bar, spent looking at the pieces
 LEVELS = (0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 BAKED_LEVELS = (0.0025, 0.005, 0.01) + LEVELS  # a normal map takes over the bumps, so far smaller sizes have a chance
-BAKED_ROUGH_SHARE = 0.8  # Judge After Baking is only for rough models: this share of the faces has to look rough
+BAKED_MOST_FLAT = 0.06  # Judge After Baking is only for scans: at most this share of flat edges, as the Auto button tells a scan
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 HOPELESS = 1.5  # a rebuild this many times over the limit for a piece won't get picked, so smaller ones aren't tried
 KEEP_SHARE = 0.25  # a piece with over this share of the faces is the body of the model, and always stays
@@ -1881,15 +1881,13 @@ class AutoJob:
         self.pieces = kept
 
     def _baked_suits(self) -> bool:
-        """Judge After Baking damages hard-surface models and its own score misses that, so it only runs on models that look rough."""
-        extent = float(np.ptp(self.co, axis=0).max()) or 1.0
-        rough = 0
-        for ids in self.pieces:
-            points, polys, _kinds = self._piece_arrays(ids)
-            rough += len(ids) if cases.classify(cases.features(points, polys, extent)) == "rough scan" else 0
-        suits = rough >= BAKED_ROUGH_SHARE * max(len(self.faces), 1)
+        """Judge After Baking damages hard-surface models and its own score misses that, so it only runs on scans: almost
+        no flat edges, as the Auto button tells a scan."""
+        tris = np.asarray([(f[0], f[k], f[k + 1]) for f in self.faces for k in range(1, len(f) - 1)], dtype=np.int64)
+        flat = detail.mesh_facts(self.co, tris)["flat"]
+        suits = flat < BAKED_MOST_FLAT
         if not suits:
-            self.notes.append(f"Judge After Baking was not used: only {100.0 * rough / max(len(self.faces), 1):.0f}% of the faces look like rough scan, and it damages hard surfaces")
+            self.notes.append(f"Judge After Baking was not used: {100.0 * flat:.0f}% of the edges are flat, so this isn't a scan, and it damages hard surfaces")
         return suits
 
     def _split_pieces(self) -> np.ndarray:
