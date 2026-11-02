@@ -135,6 +135,7 @@ state = {
     "found": [],  # (fix, match) pairs of remembered fixes that fit the result, best first
     "lod": None,  # the LOD set being made: {"made": [(name, faces, view change, bake text)]}
     "lod_report": "",
+    "applied": "",  # what the last Apply wrote, shown in step 5 until the next search
     "region": None,  # faces of the source (a boolean each) that Selected Faces Only redoes, taken when Start was pressed
     "curve_sig": None,  # what the drawn curves looked like when the search last started: a change restarts it
     "curve_at": 0.0,
@@ -208,8 +209,7 @@ def _profile_update(self, context):
         _applying = True
         try:
             self.auto_detail, self.auto_method, self.auto_output = values
-            if self.auto_profile == "ANIMATION":
-                self.bend_use = True  # Animation asks for Deformation Lines across the joints
+            self.bend_use = self.auto_profile == "ANIMATION"  # Deformation Lines are for joints: on with Animation, off again with any other use
         finally:
             _applying = False
     if self.multires_on != (self.auto_profile == "ANIMATION"):  # Animation's route: a QuadriFlow cage, with the detail in Multires levels
@@ -297,7 +297,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_reduce_percent: bpy.props.FloatProperty(name="Faces Left", description="Reduce To: how many faces to end up with, as a share of the faces your mesh has now. 25% turns 40,000 faces into about 10,000", default=25.0, min=0.1, max=100.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
     auto_reduce_count: bpy.props.IntProperty(name="Faces", description="Reduce To: the number of faces to end up with. The result lands within about 10% of it, unless the pieces can't go that low", default=5000, min=12, soft_max=500000, update=_redraw_update)
     seg_colors: bpy.props.BoolProperty(name="Part Colors", description="Tint every part of the result in its own colour", default=True, update=segments.on_view)
-    seg_heat: bpy.props.BoolProperty(name="Heat Map", description="Colour each part by how much the camera check says its view changed: green for none, red for the most", default=False, update=segments.on_view)
+    seg_heat: bpy.props.BoolProperty(name="Heat Map", description="Colour each part by how much the camera check says its view changed: dark purple for none, yellow for the most (viridis, readable with colour blindness)", default=False, update=segments.on_view)
     seg_wire: bpy.props.BoolProperty(name="Wireframe", description="Show the edges of the result", default=True, update=segments.on_view)
     seg_compare: bpy.props.EnumProperty(name="Original", description="Where your original mesh is shown", items=[("BESIDE", "Beside", "The result sits next to your mesh"), ("OVER", "Over", "The result sits on your mesh, which is drawn over it as a white wireframe")], default="BESIDE", update=segments.on_view)
     seg_detail: bpy.props.FloatProperty(name="Segment Detail", description="How many segments a connected mesh splits into. Left finds only the big parts, right also the smaller ones. Changing it starts the segments over, with their tries and hand changes", default=0.65, min=0.0, max=1.0, subtype="FACTOR", update=segments.segment_goals.on_detail)
@@ -1566,7 +1566,8 @@ def job_rating(gs, faces: int, sig=None) -> tuple[str, str, hardware.Settings]:
     machine = state["machine"]
     settings = hardware.settings_for(gs.auto_effort, machine)
     parts = state["parts"][1] if state["parts"] is not None and state["parts"][0] == sig else None
-    level, text = hardware.rate(machine, hardware.estimate(faces, parts, settings, state["rays"]), settings)
+    slow = gs.auto_style == "ROWS" or gs.auto_method in {"FIELD", "QUADRIFLOW"} or gs.multires_on
+    level, text = hardware.rate(machine, hardware.estimate(faces, parts, settings, state["rays"]), settings, slow)
     return level, text, settings
 
 
@@ -1584,6 +1585,7 @@ def _solve_inputs(gs, src, lines, paint):
 def _start_segments(context, gs, src, target: int | None = None) -> bool:
     """Start the search, to land on `target` faces if given. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
     target = auto_target(gs, len(src["faces"])) if target is None else target
+    state["applied"] = ""
     lines = _guide_lines(context, gs, src)
     drawn = {kind: _guide_lines(context, gs, src, kind) for kind in ("LOOP", "BEND")}
     paint = _painted(state_source(), gs, src)
@@ -2858,6 +2860,9 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         levels = ""
         if multires_on:
             levels = multires.add_to_result(context, out, tree, gs.multires_levels, flat_faces)
+        if segments.seg.get("reviewing"):  # Review Segments ends with the preview: its hover card and popup have nothing left to show
+            segments.seg.update(reviewing=False, hover=None)
+            context.workspace.status_text_set(None)
         gs.enabled = False  # removes the preview, stops the timer
         bpy.ops.object.select_all(action="DESELECT")
         out.select_set(True)
@@ -2866,7 +2871,8 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         if instances:
             count += sum(len(group["faces"]) for group in instances["groups"])
             baked = f", in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes"
-        self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, f"{count:,} faces written to {out.name}{baked}{levels}")
+        state["applied"] = f"{count:,} faces written to {out.name}{baked}{levels}"
+        self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, state["applied"])
         return {"FINISHED"}
 
 
@@ -3846,7 +3852,9 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
         row.scale_y = 1.9
         row.enabled = done and not busy
         row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
-        if not done:
+        if not done and state["applied"]:
+            overlay.wrap_label(layout, f"Applied: {state['applied']}. Select a mesh and Start for another.", icon="CHECKMARK", width=30, limit=4)
+        elif not done:
             overlay.wrap_label(layout, "Available once the search has finished. Nothing changes until you press Apply.", icon="LOCKED", width=30, limit=3)
         elif not busy:
             layout.operator("curiomesh.guided_stop", text="Discard Result", icon="X")

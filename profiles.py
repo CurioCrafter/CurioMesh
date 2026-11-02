@@ -110,7 +110,7 @@ def detail_words(detail: float) -> str:
         (0.5, "Almost nothing may change: very many faces"),
         (2.0, "High detail: many faces, small bumps are kept"),
         (5.0, "Good detail: fine features are kept, thin parts survive"),
-        (10.0, "Moderate: small features may soften"),
+        (10.0, "Shape kept; only the smallest bumps may soften"),
         (20.0, "Low: small parts and thin edges start to vanish"),
         (35.0, "Very low: only the large shapes remain"),
     ):

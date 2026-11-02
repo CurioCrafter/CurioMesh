@@ -79,11 +79,14 @@ def name_of(piece: int) -> str:
     return f"Part {piece + 1}"
 
 
+def by_topology(record: dict) -> bool:
+    """An Animation part is there for its topology, so its Tidiness ranks it, not its look."""
+    return record.get("goal") == "ANIMATION" and record["method"] == "ANIMATION" and record.get("topology") is not None
+
+
 def judged(record: dict):
-    """What says how good a part is. An Animation part is there for its topology, so that counts, scaled like a percent of change."""
-    if record.get("goal") == "ANIMATION" and record["method"] == "ANIMATION" and record.get("topology") is not None:
-        return 0.2 * (100.0 - record["topology"])
-    return record["change"]
+    """What says how good a part is, scaled like a percent of change."""
+    return 0.2 * (100.0 - record["topology"]) if by_topology(record) else record["change"]
 
 
 def splice(co, faces, mat, face_piece, builds):
@@ -236,7 +239,7 @@ def info_lines(piece: int) -> list[str]:
         f"Method: {method_name(r['method'])}",
     ]
     if r.get("topology") is not None:
-        lines.insert(3, f"Tidiness {r['topology']:.0f}/100")
+        lines.insert(3, f"Tidiness {r['topology']:.0f}/100" + (" (ranks this Animation part)" if by_topology(r) else ""))
     return lines
 
 
@@ -569,9 +572,48 @@ def _draw_view() -> None:
         overlay.LAST_DRAW_ERROR = repr(exc)
 
 
-def _draw_text() -> None:
-    """The numbers of the part under the mouse, next to the mouse."""
+def _draw_legend() -> None:
+    """With Heat on: the colour bar and what its ends mean, bottom left of the viewport."""
+    gs = getattr(bpy.context.scene, "curiomesh_guided", None)
+    if gs is None or not gs.seg_heat or not seg["parts"]:
+        return
+    import blf
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    ui = overlay._ui_scale()
+    left, bottom, wide, high = 20 * ui, 40 * ui, 160 * ui, 10 * ui
+    top = max([3.0 * gs.auto_detail] + [c for c in (judged(r) for r in seg["parts"]) if c is not None])
+    steps = 16
+    pos, col, idx = [], [], []
+    for i in range(steps + 1):
+        x = left + wide * i / steps
+        c = (*P.heat_colour(top * i / steps, top), 1.0)
+        pos += [(x, bottom), (x, bottom + high)]
+        col += [c, c]
+        if i:
+            k = 2 * i
+            idx += [(k - 2, k - 1, k), (k - 1, k + 1, k)]
+    shader = gpu.shader.from_builtin("SMOOTH_COLOR")
+    batch_for_shader(shader, "TRIS", {"pos": pos, "color": col}, indices=idx).draw(shader)
     try:
+        blf.size(0, 12.0 * ui)
+    except TypeError:  # before Blender 4.0 the size also takes a dpi
+        blf.size(0, int(12 * ui), 72)
+    blf.color(0, 1.0, 1.0, 1.0, 1.0)
+    blf.position(0, left, bottom + high + 6 * ui, 0)
+    blf.draw(0, "View change per part")
+    blf.position(0, left, bottom - 16 * ui, 0)
+    blf.draw(0, "0%")
+    text = f"{top:.0f}%+"
+    blf.position(0, left + wide - blf.dimensions(0, text)[0], bottom - 16 * ui, 0)
+    blf.draw(0, text)
+
+
+def _draw_text() -> None:
+    """The numbers of the part under the mouse, next to the mouse, and the Heat legend."""
+    try:
+        _draw_legend()  # every 3D view: the tint shows in each
         hover = seg["hover"]
         if hover is None or not seg["parts"] or hover >= len(seg["parts"]) or bpy.context.region is None or bpy.context.region.as_pointer() != seg["region"]:
             return
@@ -772,7 +814,8 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
         row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
         row.label(text=name_of(item.piece), icon="CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
         row = row.split(factor=0.42, align=True)  # "92%" is short; the face count needs the room ("1,65...")
-        row.label(text="?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
+        # the number the list is sorted by: the look, or Tidiness for an Animation part (a 98% look ranked low read as a mistake)
+        row.label(text=f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
         row.label(text=f"{r['after']:,} f")
 
 
@@ -792,7 +835,7 @@ def draw_parts(layout, context, gs) -> None:
     row.prop(gs, "seg_wire", text="Wire", toggle=True, icon="SHADING_WIRE")
     col.row(align=True).prop(gs, "seg_compare", expand=True)
     if gs.seg_heat:
-        layout.label(text="Heat: red parts look least alike", icon="INFO")
+        layout.label(text="Heat: purple same, yellow changed most", icon="INFO")
     segment_goals.draw_tools(layout, gs)
 
     layout.label(text=f"{len(seg['parts']):,} parts, {len(seg['sel'])} selected")

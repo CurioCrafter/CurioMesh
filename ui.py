@@ -202,6 +202,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "CurioMesh"
+    bl_order = 10  # below Guided, the main path
 
     def draw_header(self, context: bpy.types.Context):
         self.layout.label(icon="MOD_REMESH")

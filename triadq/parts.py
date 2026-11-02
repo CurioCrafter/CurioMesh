@@ -91,13 +91,19 @@ def worst_first(changes, count: int | None = None) -> list[int]:
     return order if count is None else order[:count]
 
 
+# viridis: readable with every common kind of colour blindness, and in grey
+VIRIDIS = ((0.267, 0.005, 0.329), (0.229, 0.322, 0.546), (0.128, 0.567, 0.551), (0.369, 0.789, 0.383), (0.993, 0.906, 0.144))
+
+
 def heat_colour(value: float | None, top: float) -> tuple[float, float, float]:
-    """Green for no change through yellow to red at `top` percent or more. Grey when unknown."""
+    """Dark purple for no change through teal to yellow at `top` percent or more (viridis). Grey when unknown."""
 
     if value is None:
         return 0.55, 0.55, 0.55
-    t = min(max(value / max(top, 1e-9), 0.0), 1.0)
-    return (min(2.0 * t, 1.0), min(2.0 * (1.0 - t), 1.0) * 0.85 + 0.1, 0.15)
+    t = min(max(value / max(top, 1e-9), 0.0), 1.0) * (len(VIRIDIS) - 1)
+    k = min(int(t), len(VIRIDIS) - 2)
+    a, b, f = VIRIDIS[k], VIRIDIS[k + 1], t - k
+    return tuple(x + (y - x) * f for x, y in zip(a, b))
 
 
 CLUSTER = 0.004  # vertices closer than this (share of the piece's diagonal) in (radius, height) are one ring

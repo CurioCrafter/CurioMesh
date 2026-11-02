@@ -238,15 +238,25 @@ def clock(seconds: float) -> str:
     return f"about {seconds / 3600.0:.1f} hours"
 
 
-def rate(machine: dict, est: dict, settings: Settings) -> tuple[str, str]:
-    """(level, sentence) for the panel. Level is OK, LARGE or TOO_BIG."""
+SLOW_SPREAD = 4.0  # timed runs took 1.3x to 4x the estimate with Auto; Clean Rows, Field Rows and QuadriFlow far longer
+SLOW_METHODS_SPREAD = 20.0
+
+
+def span(seconds: float, slow: bool = False) -> str:
+    """The estimate as a range: from it to a few times it (many times with the slow methods)."""
+    low, high = clock(seconds), clock(seconds * (SLOW_METHODS_SPREAD if slow else SLOW_SPREAD))
+    return low if low == high else f"{low} to {high.removeprefix('about ')}"
+
+
+def rate(machine: dict, est: dict, settings: Settings, slow: bool = False) -> tuple[str, str]:
+    """(level, sentence) for the panel. Level is OK, LARGE or TOO_BIG. `slow`: Clean Rows, Field Rows or QuadriFlow."""
     free = machine.get("free_gb")
     level = "OK"
     if est["seconds"] > 600 or (free and est["gb"] > 0.25 * free):
         level = "LARGE"
     if est["seconds"] > 4 * 3600 or (free and est["gb"] > 0.7 * free):
         level = "TOO_BIG"
-    when = clock(est["seconds"])
+    when = span(est["seconds"], slow)
     steps = ", working in small steps" if settings.name == "Light" or level != "OK" else ""
     if level == "OK":
         return level, f"This mesh suits this PC: {when}{steps}"

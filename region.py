@@ -1021,6 +1021,7 @@ class CURIOMESH_PT_regions(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "CurioMesh"
+    bl_order = 11  # below Guided and Quick Start
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod

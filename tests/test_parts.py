@@ -67,10 +67,12 @@ class WorstTests(unittest.TestCase):
         self.assertEqual(parts.worst_first([1.0, None, 9.0, 4.0]), [2, 3, 0, 1])
         self.assertEqual(parts.worst_first([1.0, None, 9.0, 4.0], 2), [2, 3])
 
-    def test_heat_runs_green_to_red(self):
-        low, high = parts.heat_colour(0.0, 10.0), parts.heat_colour(10.0, 10.0)
-        self.assertGreater(low[1], low[0])
-        self.assertGreater(high[0], high[1])
+    def test_heat_runs_dark_to_bright(self):
+        low, mid, high = parts.heat_colour(0.0, 10.0), parts.heat_colour(5.0, 10.0), parts.heat_colour(10.0, 10.0)
+        brightness = [0.3 * r + 0.59 * g + 0.11 * b for r, g, b in (low, mid, high)]
+        self.assertLess(brightness[0], brightness[1])
+        self.assertLess(brightness[1], brightness[2])  # readable in grey, so without red-green
+        self.assertEqual(parts.heat_colour(None, 10.0), (0.55, 0.55, 0.55))
 
 
 
