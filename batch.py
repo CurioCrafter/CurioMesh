@@ -124,7 +124,8 @@ class BatchRunner:
             "objects": self.rows,
         }
         try:
-            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            with open(path, "x", encoding="utf-8") as handle:  # a new file only: never follow a name planted in a shared temp folder
+                handle.write(json.dumps(payload, indent=2))
             self.settings.batch_report_path = str(path)
         except OSError:
             path = None
