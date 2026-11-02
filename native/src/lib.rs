@@ -7,6 +7,7 @@ mod close;
 mod geom;
 mod join;
 mod matching;
+mod near;
 mod pairing;
 mod qem;
 mod quadreduce;
@@ -633,6 +634,125 @@ fn leader_clusters<'py>(py: Python<'py>, values: PyReadonlyArray1<'py, f64>, tol
     Ok(py.detach(|| geom::leader_clusters(values, tol)).into_pyarray(py))
 }
 
+/// Set to end the calls that were given it early, with `InterruptedError`.
+#[pyclass(frozen)]
+struct StopFlag(std::sync::atomic::AtomicBool);
+
+#[pymethods]
+impl StopFlag {
+    #[new]
+    fn new() -> Self {
+        StopFlag(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn finished(done: bool) -> PyResult<()> {
+    if done {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyInterruptedError::new_err("stopped"))
+    }
+}
+
+fn check_queries(queries: &[f64]) -> PyResult<()> {
+    if queries.len() % 3 != 0 || queries.iter().any(|x| x.is_nan()) {
+        return Err(PyValueError::new_err("queries must be finite points"));
+    }
+    Ok(())
+}
+
+/// Nearest points, a whole array at a time.
+#[pyclass(frozen)]
+struct PointLookup(near::PointTree);
+
+#[pymethods]
+impl PointLookup {
+    #[new]
+    fn new(py: Python<'_>, points: PyReadonlyArray1<'_, f64>) -> PyResult<Self> {
+        let points = slice(&points, "points")?;
+        check_queries(points)?;
+        Ok(PointLookup(py.detach(|| near::PointTree::new(points))))
+    }
+
+    /// (index, distance) per query.
+    fn nearest<'py>(&self, py: Python<'py>, queries: PyReadonlyArray1<'py, f64>, stop: &StopFlag) -> PyResult<(I64Array<'py>, F64Array<'py>)> {
+        let queries = slice(&queries, "queries")?;
+        check_queries(queries)?;
+        let (done, rows) = py.detach(|| near::nearest_points(&self.0, queries, &stop.0));
+        finished(done)?;
+        let (ids, away): (Vec<i64>, Vec<f64>) = rows.into_iter().unzip();
+        Ok((ids.into_pyarray(py), away.into_pyarray(py)))
+    }
+
+    /// For each query, the closest of its `count` nearest points of the same kind, or -1.
+    fn first_of_kind<'py>(&self, py: Python<'py>, queries: PyReadonlyArray1<'py, f64>, query_kind: PyReadonlyArray1<'py, i64>, point_kind: PyReadonlyArray1<'py, i64>, count: usize, stop: &StopFlag) -> PyResult<I64Array<'py>> {
+        let (queries, query_kind, point_kind) = (slice(&queries, "queries")?, slice(&query_kind, "query_kind")?, slice(&point_kind, "point_kind")?);
+        check_queries(queries)?;
+        if query_kind.len() != queries.len() / 3 || point_kind.len() != self.0.len() {
+            return Err(PyValueError::new_err("kinds don't match the points"));
+        }
+        let (done, out) = py.detach(|| near::first_of_kind(&self.0, queries, query_kind, point_kind, count, &stop.0));
+        finished(done)?;
+        Ok(out.into_pyarray(py))
+    }
+}
+
+/// Nearest faces and faces passing through each other, a whole array at a time.
+#[pyclass(frozen)]
+struct FaceLookup(near::FaceTree);
+
+#[pymethods]
+impl FaceLookup {
+    #[new]
+    fn new(py: Python<'_>, points: PyReadonlyArray1<'_, f64>, indptr: PyReadonlyArray1<'_, i64>, flat: PyReadonlyArray1<'_, i64>) -> PyResult<Self> {
+        let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+        check_queries(points)?;
+        check_faces(indptr, flat)?;
+        if !vertex_ids_ok(flat, points.len()) {
+            return Err(PyValueError::new_err("vertex index out of range"));
+        }
+        Ok(FaceLookup(py.detach(|| near::FaceTree::new(points, indptr, flat))))
+    }
+
+    /// (closest points (3N,), polygon, distance) per query.
+    fn nearest<'py>(&self, py: Python<'py>, queries: PyReadonlyArray1<'py, f64>, stop: &StopFlag) -> PyResult<(F64Array<'py>, I64Array<'py>, F64Array<'py>)> {
+        let queries = slice(&queries, "queries")?;
+        check_queries(queries)?;
+        let (done, rows) = py.detach(|| near::nearest_faces(&self.0, queries, &stop.0));
+        finished(done)?;
+        let at: Vec<f64> = rows.iter().flat_map(|row| row.0).collect();
+        let face: Vec<i64> = rows.iter().map(|row| row.1).collect();
+        let away: Vec<f64> = rows.iter().map(|row| row.2).collect();
+        Ok((at.into_pyarray(py), face.into_pyarray(py), away.into_pyarray(py)))
+    }
+
+    /// Polygon pairs (2M,) that pass through each other and share no vertex.
+    fn crossing_pairs<'py>(&self, py: Python<'py>, stop: &StopFlag) -> PyResult<I64Array<'py>> {
+        let found = py.detach(|| self.0.crossing_pairs(&stop.0));
+        finished(found.is_some())?;
+        let flat: Vec<i64> = found.unwrap_or_default().iter().flat_map(|p| [p.0 as i64, p.1 as i64]).collect();
+        Ok(flat.into_pyarray(py))
+    }
+}
+
+/// `checks.edge_flags` and `checks.hole_counts`: (broken per face, non-manifold edges, flipped edges, duplicate faces, holes, pieces, holes per piece).
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn mesh_checks<'py>(py: Python<'py>, indptr: PyReadonlyArray1<'py, i64>, flat: PyReadonlyArray1<'py, i64>, piece: PyReadonlyArray1<'py, i64>) -> PyResult<(Bound<'py, PyArray1<bool>>, i64, i64, i64, i64, I64Array<'py>, I64Array<'py>)> {
+    let (indptr, flat, piece) = (slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&piece, "piece")?);
+    check_faces(indptr, flat)?;
+    if piece.len() != indptr.len() - 1 || flat.iter().any(|&v| v < 0) {
+        return Err(PyValueError::new_err("check arrays are inconsistent"));
+    }
+    let (broken, bad_edges, flipped, dups, holes, per) = py.detach(|| near::mesh_checks(&topo::Faces { indptr, flat }, piece));
+    let (pieces, counts): (Vec<i64>, Vec<i64>) = per.into_iter().unzip();
+    Ok((broken.into_pyarray(py), bad_edges, flipped, dups, holes, pieces.into_pyarray(py), counts.into_pyarray(py)))
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -655,6 +775,10 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shuffled, m)?)?;
     m.add_function(wrap_pyfunction!(pair_seeds, m)?)?;
     m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
+    m.add_function(wrap_pyfunction!(mesh_checks, m)?)?;
+    m.add_class::<StopFlag>()?;
+    m.add_class::<PointLookup>()?;
+    m.add_class::<FaceLookup>()?;
     m.add_class::<Reducer>()?;
     m.add_class::<QuadReducer>()?;
     m.add_class::<QuadSaved>()?;
