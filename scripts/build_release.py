@@ -189,8 +189,9 @@ def listing_overrides(root: Path) -> dict[str, bytes]:
     if "[permissions]" not in manifest:  # the main manifest declares it already; a second table is invalid TOML
         manifest = manifest.rstrip("\n") + '\n\n[permissions]\nfiles = "Save job files and exports next to the .blend"\n'
     readme = (root / "README.md").read_text(encoding="utf-8").replace("\r\n", "\n")
-    readme = re.sub(r"Credits for the CC-BY works.*?\n\n(?=The models in the results)", "", readme, flags=re.S)
-    readme = re.sub(r"The triangle intersection test in the native core.*?THIRD_PARTY_NOTICES\.md\)\.\n\n", "", readme, flags=re.S)
+    readme = re.sub(r"- Credits for the CC-BY works.*?Security Bot Rig[^\n]*\n", "", readme, flags=re.S)
+    readme = re.sub(r"- The triangle intersection test in the native core.*?THIRD_PARTY_NOTICES\.md\)\.\n", "", readme, flags=re.S)
+    readme = re.sub(r" ?[^.\n]*flowtool[^.\n]*\.", "", readme)  # the QuadWild script needs an outside program
     readme = readme.replace("\n## ", "\n" + LISTING_NOTE + "## ", 1)
     sources = (root / "docs" / "PATTERN_SOURCES.md").read_text(encoding="utf-8")
     sources = "".join(line for line in sources.splitlines(True) if "CC-BY" not in line)

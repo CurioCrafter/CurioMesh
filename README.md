@@ -1,313 +1,242 @@
-# CurioMesh: Free Quad Retopology for Blender, for the Whole Mesh or Just One Part
+# CurioMesh: free automatic retopology for Blender
+
+**Turn a dense sculpt, scan or high-poly game asset into a clean all-quad, low-poly mesh. Free and open source.**
+
+[![Download CurioMesh](https://img.shields.io/badge/Download-free%20add--on-2ea44f?style=for-the-badge&logo=blender&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
+[![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-24292f?style=for-the-badge&logo=github&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 
 [![Latest release](https://img.shields.io/github/v/release/CurioCrafter/CurioMesh?label=release)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
 [![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/CurioCrafter/CurioMesh?style=flat)](https://github.com/CurioCrafter/CurioMesh/stargazers)
-[![Discussions](https://img.shields.io/github/discussions/CurioCrafter/CurioMesh)](https://github.com/CurioCrafter/CurioMesh/discussions)
 
-**Turn sculpts, photogrammetry scans and dense game assets into all-quad meshes
-inside Blender, then redo only the part that still looks wrong.** CurioMesh is a
-free, open source (GPLv3) automatic retopology add-on. Press one button and it
-reduces a model part by part, checking each one with a camera. Or drop a box or
-lattice cage over a face, a hand or a damaged panel, preview the new quads, and
-apply. The rest of the mesh stays exactly as it was, and the new patch joins it
-with no gaps. Tested on every Blender release from 3.6 to 5.2.
+![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 16,317 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
 
-![Regions panel: a box cage over Suzanne's brow and eyes, new quads tinted blue, the kept seam in orange](docs/images/panel_regions.png)
+*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model): 79,042 faces to 16,317 quads, 5.3% of the view changed. Wire shown on both sides.*
 
-**[Download for your Blender version](https://github.com/CurioCrafter/CurioMesh/releases/latest)** ·
-**[Ask a question or show your results](https://github.com/CurioCrafter/CurioMesh/discussions)** ·
-A star helps other Blender artists find CurioMesh.
+CurioMesh is an automatic quad retopology add-on for Blender 3.6 to 5.2. Say what the mesh is for, press one button, and it reduces
+the model part by part. A camera check compares the result with your original from six sides and tells you how much of the view
+changed. Then you redo only the part that still looks wrong. It runs on your PC and uploads nothing.
 
-## What You Can Do With It
+**Try it in three steps:** [install the zip](#download-and-install), pick a **Use** (Game Asset, Animation, Scan Cleanup and more) and press **Start**,
+then check parts in **Review Segments** and press **Apply**.
 
-**Remesh a whole object in one click.** Pick Draft, Balanced or Hero, set a
-face count and press the button. CurioMesh tries several solvers, measures each
-result against your original, and keeps the best one that passes its quad and
-topology checks. UVs and materials carry over.
+## Contents
 
-**Redo just the part you choose.** Select faces, use a face set or vertex
-group, or place cages. Stack cages as Union, Subtract or Intersect to carve out
-exactly the area you mean, then press Preview. Faces outside the region are not
-touched, and the seam keeps its original vertices, so there are no T-junctions
-or holes to fix by hand.
+[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install) · [FAQ](#frequently-asked-questions) · [Limits](#known-limits) · [All features](#all-features)
 
-**See problems before you export.** A dashboard in the viewport shows your quad
-percentage, leftover triangles and poles, and tells you the next step. One click
-paints leftover triangles, n-gons and poles right on the mesh.
+## What it does
 
-## New in 0.8: Auto Segments
-
-![Wireframes side by side: the original air compressor at 79,042 faces and the result at 24,222 quads, whole object and close-up](docs/images/auto_compressor.png)
-
-Choose **Auto Segments** as the Remesh mode in the Guided panel and press Update.
-There are no points to place and no face count to guess. You set **Detail**,
-how much of the view may look different, and it works out the rest:
-
-1. **Split the model into its loose parts** and make each one at several sizes.
-2. **Look at every size from six sides**, using one pixel size for the whole
-   object, so a small bolt is judged by how big it looks on the object.
-3. **Give faces to the parts where they remove the most visible change.** No single
-   part may be given up to save a few faces.
-4. **Make all quads, look at the whole result, and adjust** until it lands on the
-   amount you asked for.
-
-These are free [Poly Haven](https://polyhaven.com) models (CC0), so you can download
-them and check these numbers yourself. All ran at 6% Detail and finished with
-no triangles and no folded quads. They took from 15 seconds to about 24 minutes.
-
-| Model | Original faces | Result quads | Size | View changed |
-|---|---:|---:|---:|---:|
-| [Concrete road barrier](https://polyhaven.com/a/concrete_road_barrier) | 60,928 | 1,384 | 2% | 5.7% |
-| [Treasure chest](https://polyhaven.com/a/treasure_chest) | 103,330 | 27,121 | 26% | 4.0% |
-| [Old military compressor](https://polyhaven.com/a/old_military_compressor) | 79,042 | 24,222 | 31% | 5.7% |
-| [Modular wooden pier](https://polyhaven.com/a/modular_wooden_pier) | 84,780 | 29,995 | 35% | 6.0% |
-| [Fire hydrant](https://polyhaven.com/a/fire_hydrant) | 86,316 | 37,552 | 44% | 6.1% |
-| [Overhead crane](https://polyhaven.com/a/overhead_crane) | 89,964 | 42,451 | 47% | 5.3% |
-| [Moss rocks](https://polyhaven.com/a/rock_moss_set_01) | 63,127 | 30,938 | 49% | 5.8% |
-| [Ship pinnace](https://polyhaven.com/a/ship_pinnace) | 168,317 | 82,687 | 49% | 5.0% |
-| [Dutch ship](https://polyhaven.com/a/dutch_ship_large_01) | 110,616 | 58,536 | 53% | 6.1% |
-| [Coastal cliff](https://polyhaven.com/a/coastal_cliff_04) | 1,537,926 | 548,482 | 36% | 5.6% |
-| [Namaqualand boulder](https://polyhaven.com/a/namaqualand_boulder_02) | 97,964 | 80,332 | 82% | 5.7% |
-
-Rough rock needs the most faces to hold its look. Hard-surface models with big smooth
-areas gain the most.
-
-![Fire hydrant wireframes, 86,316 faces to 37,552 quads](docs/images/auto_hydrant.png)
-
-![Six moss rocks wireframes, 63,127 faces to 30,938 quads](docs/images/auto_rocks.png)
-
-![Dutch ship wireframes, 110,616 faces to 58,536 quads, with the sail's cloth folds simplified in the close-up](docs/images/auto_ship.png)
-
-The close-up above shows the current weak spot: at 6% the sail loses its fine cloth
-folds. Lower Detail to keep more. See [Known Limits](#known-limits).
-
-## Flat Quads: Huge Quads On Flat Areas, Density Only Where It's Needed
-
-Pick **Flat Quads** as the Method. Instead of giving a whole mesh one density,
-it finds the flattest areas, turns each into as few quads as its outline allows,
-and grades density back up only next to real detail. It works best on
-hard-surface panels and architecture.
-
-![A test deck with two hatches and jagged damage: 52,576 faces become 2,752 all-quad faces, with big quads on the flat deck and dense quads only around the damage](docs/images/flat_quads_deck.png)
-
-A generated test deck: **52,576 faces become 2,752 quads.** Both hatches stay
-open, and the faces go to the damage. A plain flat plate becomes **one quad**,
-and a subdivided box of 9,600 faces becomes **six**.
-
-How it works:
-
-1. **Grow flat regions**, largest faces first, and merge neighbours whose shared
-   plane still fits every vertex, so scan noise can't break up a plate.
-2. **Simplify each border once**, so the two regions sharing it always agree and
-   no gaps can open.
-3. **Rebuild each region from its outline**, keeping holes. A border next to kept
-   detail stays dense, and density falls off with distance from it.
-4. **Pair and close.** Every valid pair is accepted, because a leftover triangle
-   costs three or more quads. Each loose piece closes on its own, so one bad
-   fragment can't make the rest of the mesh pay.
-
-**Flatness** sets how far a surface may bump away from flat, as a percent of the
-mesh size. The face target is a limit for what's left after the flat areas: a flat
-plate stays one quad whatever the target is. On very dirty scans the result can
-land above the target.
-
-It also opens non-manifold edges, flipped normals and bow-ties into borders
-without moving any geometry, so dirty meshes that fail in Atlas-Q and PairClosure
-can still finish all quads.
-
-## New in 0.7: Guided Retopo
-
-![Detail, Loop and Calm points on Suzanne with their reach and outline, and the adaptive quad preview beside it](docs/images/guided_points.png)
-
-Tell CurioMesh where shape matters and watch the quads follow. Open the
-**Guided** panel in the CurioMesh tab:
-
-1. **Choose a preset and place points.** Pick Character, Hard-Surface Prop,
-   Scan or Game LOD, press **Place Points** and click the mesh. Scroll sets the
-   radius, Shift+scroll the strength, keys 1-4 the type, Ctrl+click removes a
-   point, Enter or Esc finishes. **Auto-suggest** places points at high
-   curvature, hard edges and small holes for you.
-2. **Watch the live preview.** Each point's reach and the combined outline are
-   drawn on the mesh, and a preview beside it updates as you edit. **Whole
-   Mesh** remeshes everything with the points changing the quad size; **Points
-   Only** rebuilds just the inside of the point spheres and leaves the rest
-   exactly as it is.
-3. **Lock, redraw, apply.** Lock faces you like, rebuild a selected strip with
-   **Redraw Strip**, and follow **Next spot** to the weakest area. Nothing
-   changes until you press **Apply**, which writes a new `_Retopo` object or
-   replaces your mesh (Undo restores it).
-
-| Point | What it asks for |
+| Feature | What it does |
 |---|---|
-| Detail | More, smaller quads around the point |
-| Loop | Edge loops that ring around the point: eyes, mouths, elbows |
-| Sharp | Smaller quads and hard edges kept |
-| Calm | Fewer, bigger quads; also cuts a hole in a Points Only region |
+| **Auto Segments** | Reduces the whole object to all quads, one loose part at a time, and checks every size from six sides. |
+| **Presets by use** | Low Poly, Game Asset, Animation, Subdivision, Scan Cleanup, Sculpt Base. |
+| **Three layout styles** | Keep Detail (fewest faces), Balanced, Clean Rows (even quads in rows). |
+| **Reduce To** | Aim at a percentage of your faces or a face count, within about 10%. |
+| **Review Segments** | Every part in its own colour, numbers on hover, redo one part with another method, go back to any try. |
+| **Segments inside one mesh** | Splits a connected model along necks and creases (head, torso, plinth). Merge, split, paint, rename. |
+| **Draw Edge Loops and Deformation Lines** | Loops round eyes and mouths, lines across joints. The quads follow. |
+| **Mirror, Guide Curves, Paint Density** | Symmetric results, strokes the quads follow, and more faces where you paint. |
 
-Points can also be sphere Empties you move and scale like any object. Good to
-know:
+More below: [all features](#all-features).
 
-- Whole Mesh results are all quads by default. **Pure Quads** in Advanced turns
-  that off for a faster preview of big meshes; a few triangles then stay.
-- UV layers and materials carry over from your mesh in both modes. A quad
-  crossing a UV seam takes its UVs from one side, so it does not stretch across
-  the atlas. **Keep UV Seams** in Auto Segments goes further: quads stay inside one
-  UV island, and seams stay in place, straightened only slightly. It's off by default
-  because a model cut into many islands needs more faces for this, up to about twice
-  as many on our test models. For textured game assets, Bake Detail **Normal + Color**
-  is the recommended route.
-- **Bake Detail**, next to Apply, bakes your mesh onto the result. **Normal Map**
-  keeps your materials and adds a normal map. **Normal + Color** makes one new
-  material and new UVs. Press Update after choosing it: seams then cost no faces.
-  Your mesh is only read. Baking blocks Blender until it's done, and it reads the
-  surface nearest to each texel, so parts that touch can bleed into each other.
-  Only the normal map and base color are baked, not roughness or metal. If your
-  UVs overlap themselves, Normal Map adds a second UV map for the normal map, and
-  most game engines need to be told to read it.
-- Applied results keep edges sharper than 60 degrees hard. Baking also makes UV
-  seams hard and adds a Triangulate modifier, so the exported triangles match the
-  bake. Export with modifiers applied, which glTF doesn't do by default. Your
-  quads stay underneath: turn the modifier off to export them to FBX.
-- A Points Only region that wraps a limb or surrounds an open hole is cut into
-  pieces that are each rebuilt, so the whole ring gets new quads. The cut stays
-  as a line of kept edges between the pieces.
-- Points Only keeps your mesh's edges on the region's border, so a very dense
-  mesh gets a dense band of quads along that border.
-- A preview that takes more than 4 seconds stops updating by itself until you
-  press **Update**, so Blender stays usable on big meshes.
+## Examples: before and after, wire on both sides
 
-### Work Live: retopo area by area, next to the algorithm
+Every example below ran the real add-on on a free [Poly Haven](https://polyhaven.com) model (CC0) with the default Game
+Asset settings: Keep Detail, **Detail 6%**. Detail is how much of the view may look different from your mesh. You can
+download the same models and check the numbers. Each picture shows the original (left) and the result (right), the whole
+object on top and a close-up below.
 
-![Your mesh on the left and the result on the right: a dense area, a coarse Grid area and a painted stroke](docs/images/guided_work_live.png)
+![Chess set (33 pieces): 76,832 faces become 10,834 quads, wire on both, whole object and close-up](docs/images/chess_set.jpg)
 
-Press **Work Live** in the Guided panel and work over the mesh while it
-remeshes in the background. Blender stays yours between steps, and the result
-beside your mesh fills in one finished piece at a time.
+*Chess set (33 pieces), [Poly Haven](https://polyhaven.com/a/chess_set), CC0.*
 
-| Do this | Over your mesh or the result |
+![Overhead crane: 89,964 faces become 25,090 quads, wire on both, whole object and close-up](docs/images/overhead_crane.jpg)
+
+*Overhead crane, [Poly Haven](https://polyhaven.com/a/overhead_crane), CC0.*
+
+![Concrete road barrier: 60,928 faces become 987 quads, wire on both, whole object and close-up](docs/images/concrete_road_barrier.jpg)
+
+*Concrete road barrier, [Poly Haven](https://polyhaven.com/a/concrete_road_barrier), CC0.*
+
+| Model | Original faces | CurioMesh quads | Size | View changed | Wire pictures |
+|---|---:|---:|---:|---:|---|
+| [Marble bust](https://polyhaven.com/a/marble_bust_01) | 17,456 | 2,632 | 15% | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
+| [Concrete road barrier](https://polyhaven.com/a/concrete_road_barrier) | 60,928 | 987 | 2% | 5.9% | [before and after](docs/images/concrete_road_barrier.jpg) |
+| [Old military compressor](https://polyhaven.com/a/old_military_compressor) | 79,042 | 16,317 | 21% | 5.3% | [before and after](docs/images/old_military_compressor.jpg) |
+| [Fire hydrant](https://polyhaven.com/a/fire_hydrant) | 86,316 | 27,795 | 32% | 5.0% | [before and after](docs/images/fire_hydrant.jpg) |
+| [Treasure chest](https://polyhaven.com/a/treasure_chest) | 103,330 | 10,789 | 10% | 4.5% | [before and after](docs/images/treasure_chest.jpg) |
+| [Gothic statue](https://polyhaven.com/a/gothic_statue) | 27,739 | 18,184 | 66% | 5.9% | [before and after](docs/images/gothic_statue.jpg) |
+| [Lion head](https://polyhaven.com/a/lion_head) | 47,214 | 7,995 | 17% | 6.0% | [before and after](docs/images/lion_head.jpg) |
+| [Horse statue](https://polyhaven.com/a/horse_statue_01) | 22,388 | 5,623 | 25% | 5.9% | [before and after](docs/images/horse_statue_01.jpg) |
+| [Chess set (33 pieces)](https://polyhaven.com/a/chess_set) | 76,832 | 10,834 | 14% | 3.4% | [before and after](docs/images/chess_set.jpg) |
+| [Spinning wheel](https://polyhaven.com/a/spinning_wheel_01) | 52,023 | 14,810 | 28% | 5.4% | [before and after](docs/images/spinning_wheel_01.jpg) |
+| [Sofa (already low poly)](https://polyhaven.com/a/Sofa_01) | 4,101 | 1,658 | 40% | 3.8% | [before and after](docs/images/Sofa_01.jpg) |
+| [Drill press](https://polyhaven.com/a/drill_press_01) | 58,511 | 18,103 | 31% | 5.5% | [before and after](docs/images/drill_press_01.jpg) |
+| [Overhead crane](https://polyhaven.com/a/overhead_crane) | 89,964 | 25,090 | 28% | 6.4% | [before and after](docs/images/overhead_crane.jpg) |
+| [Modular wooden pier](https://polyhaven.com/a/modular_wooden_pier) | 84,780 | 22,411 | 26% | 6.0% | [before and after](docs/images/modular_wooden_pier.jpg) |
+| [Moss rocks (6 pieces)](https://polyhaven.com/a/rock_moss_set_01) | 63,127 | 21,142 | 33% | 6.0% | [before and after](docs/images/rock_moss_set_01.jpg) |
+| [Namaqualand boulder](https://polyhaven.com/a/namaqualand_boulder_02) | 97,964 | 52,789 | 54% | 6.0% | [before and after](docs/images/namaqualand_boulder_02.jpg) |
+| [Ship pinnace](https://polyhaven.com/a/ship_pinnace) | 168,317 | 63,889 | 38% | 6.4% | [before and after](docs/images/ship_pinnace.jpg) |
+| [Dutch ship](https://polyhaven.com/a/dutch_ship_large_01) | 110,616 | 36,591 | 33% | 5.5% | [before and after](docs/images/dutch_ship_large_01.jpg) |
+| [Coast rocks (scan)](https://polyhaven.com/a/coast_rocks_02) | 1,260,423 | 434,995 | 35% | 5.9% | [before and after](docs/images/coast_rocks_02.jpg) |
+| [Coastal cliff (scan)](https://polyhaven.com/a/coastal_cliff_04) | 1,537,926 | 362,292 | 24% | 6.0% | [before and after](docs/images/coastal_cliff_04.jpg) |
+
+
+*View changed* is the share of the picture that differs from your original, seen from six sides. CurioMesh measures it
+itself. It is not a quality score, and it says nothing about how tidy the quads are. *Size* is the result as a share of the
+original's faces. Folded quads (a quad that is folded or flipped) are rare but not zero: the treasure chest has 1 of 10,789; the ship pinnace has 26 of 63,889. Numbers are from
+commit `77d913d`, run on Blender 5.2.3 LTS.
+
+Rough rock and fine detail need the most faces to keep their look. Hard-surface models with big smooth areas gain the most.
+The sofa starts small, at 4,101 faces, and still ends at 1,658.
+
+## Pick what it is for
+
+Open the **Guided** panel in the CurioMesh tab (`3D View > N-panel > CurioMesh`), choose **Auto Segments**, pick a **Use**,
+and press **Start**. Nothing changes in your scene until you press **Apply**.
+
+Each Use sets Detail, Method and Output for you. Change any of them and the Use becomes Custom. The same bust with each Use:
+
+| Use | CurioMesh faces | Triangles left | View changed | Wire pictures |
+|---|---:|---:|---:|---|
+| Low Poly | 1,396 | 1,396 | 10.4% | [before and after](docs/images/bust_low_poly.jpg) |
+| Game Asset (default) | 2,632 | 0 | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
+| Animation | 7,042 | 0 | 2.0% | [before and after](docs/images/bust_animation.jpg) |
+| Subdivision | 6,967 | 0 | 2.1% | [before and after](docs/images/bust_subdiv.jpg) |
+| Scan Cleanup | 5,478 | 0 | 2.0% | [before and after](docs/images/bust_scan.jpg) |
+| Sculpt Base | 3,194 | 0 | 6.4% | [before and after](docs/images/bust_sculpt.jpg) |
+
+
+| Use | What it is for |
 |---|---|
-| Click or drag | Add an area. A drag paints one stroke |
-| Scroll | Size of the area under the mouse, or of the next one |
-| Shift+scroll | Density: up is more quads. Below the base density Detail turns into Calm |
-| F | Fill style of that area: Flow or Grid |
-| Ctrl+click | Remove the area |
-| Enter, Esc or right-click | Finish. **Apply** writes the result |
+| Low Poly | The fewest faces for a game prop or a background object. Flat areas collapse into big polygons, then triangles. Small parts may vanish. |
+| Game Asset | All quads, few faces. The default. |
+| Animation | All quads in even sizes, with more faces so the mesh bends cleanly. Check eyes, mouth and joints by hand. |
+| Subdivision | All quads, with flat panels kept as single large quads so smoothing keeps the shape. |
+| Scan Cleanup | Keeps more detail of a dirty scan. Scans have few truly flat areas, so no flat merging. |
+| Sculpt Base | Even, smooth quads to sculpt on. Smoothness over detail. |
 
-- A pulsing ring shows which area the algorithm is on. The area you touched last
-  goes first.
-- Only what changed is redone: the other areas stay on screen, a change stops
-  work that is already out of date, and going back to an earlier setting is
-  instant.
-- Each area has its own density and fill style, and overlapping areas with the
-  same settings become one. Where different areas overlap, the newest wins, and
-  a line of your mesh's edges stays between them.
-- Everything outside the areas stays as it was. For a full retopo, cover the
-  mesh with areas or use Whole Mesh.
-- Very large areas still take a while to finish, but you can keep working while
-  they run. The Whole Mesh and Points Only modes work as before.
+Under the Use you can pick a **Method** (Auto, Pairing, Flat Quads, QuadriFlow, Grid Fill, Flow Fill, Tris Only) and an
+**Output** of triangles, quads or mixed. The tooltips explain hard edges, UV seams and Surface Fit.
 
-## New in 0.6
+## Choose a layout style
 
-| | 0.5 | 0.6 |
-|---|---|---|
-| What gets remeshed | The whole object | The whole object, or any region you pick |
-| Picking a region | n/a | Edit-mode selection, face set, vertex group, box cage, lattice cage, any closed mesh as a volume |
-| Combining regions | n/a | Union, Subtract and Intersect, applied top to bottom |
-| Joining the patch back | n/a | Seam vertices are kept exactly; the patch is all quads inside |
-| Fixing holes | By hand | **Fill Loop** fills a closed hole with quads that follow the surrounding curve |
-| Snapping to the original | Shrinkwrap at the end of a run | **Fit to Surface**: relax and snap any mesh or selection back onto the source |
-| Panels | One long Quick Start list | Numbered steps, one main button per panel, a Last Result box, plain-language tooltips on every option |
-| Look and layout | Fixed | Preferences for tab name, compact mode, hidden panels, HUD corner/size/opacity and every overlay colour |
-| Speed | Python and NumPy | **Turbo core in Rust** on all CPU cores: topology checks and quad closing about 30x faster, a 50k-face all-quad remesh 4.5x faster |
-| Downloads | Two zips | A zip for each Blender version from 3.6 to 5.2, plus two all-in-one zips |
+Quads can follow the shape, or they can run in rows. Pick what comes first when the two disagree:
 
-### Region retopology
+- **Keep Detail** holds the amount of change you allow with the fewest faces. The quads follow the shape, so on smooth surfaces they can look slanted.
+- **Balanced** holds the same change with far fewer irregular vertices, by splitting every quad. It costs more faces.
+- **Clean Rows** makes even, square quads in long rows. It costs more visible change, and small sharp detail softens.
 
-![A box cage over the brow and eyes, preview tinted blue with the kept seam in orange](docs/images/region_cage_preview.png)
+| Style | Model | CurioMesh quads | View changed | Tidiness | Wire pictures |
+|---|---|---:|---:|---:|---|
+| Keep Detail | Marble bust | 2,632 | 6.0% | 28 | [before and after](docs/images/marble_bust_01.jpg) |
+| Balanced | Marble bust | 5,708 | 5.2% | 69 | [before and after](docs/images/bust_balanced.jpg) |
+| Clean Rows | Marble bust | 14,147 | 5.7% | 97 | [before and after](docs/images/bust_rows.jpg) |
+| Keep Detail | Concrete road barrier | 987 | 5.9% | 16 | [before and after](docs/images/concrete_road_barrier.jpg) |
+| Balanced | Concrete road barrier | 1,195 | 6.1% | 51 | [before and after](docs/images/barrier_balanced.jpg) |
+| Clean Rows | Concrete road barrier | 910 | 6.4% | 22 | [before and after](docs/images/barrier_rows.jpg) |
 
-Open the **Regions** panel in the CurioMesh tab and work through its three
-steps:
 
-1. **Pick the part to redo.** Selection, Face Set, Vertex Group or Cages. Add a
-   Box Cage or a Lattice Cage and move, scale or bend it like any object. A
-   lattice can follow a curved limb. Any closed mesh also works as a volume.
-2. **Choose the new quads.** *Flow* follows the shape. *Grid* lays a tidy grid
-   and is best on four-sided patches such as panels and strips. Set the quad
-   size.
-3. **Preview, then apply.** New faces show tinted blue and the kept seam in
-   orange. With Auto-Update on, the preview follows the cage as you move it.
-   Apply writes into the mesh or into a copy, and it can be undone.
+![Blender quad retopology with the Keep Detail style on a marble bust, wireframe before and after](docs/images/marble_bust_01.jpg)
+![Quad retopology with the Balanced style on a marble bust, wireframe before and after](docs/images/bust_balanced.jpg)
+![Quad remesh with the Clean Rows style on a marble bust, even quads in rows, wireframe before and after](docs/images/bust_rows.jpg)
 
-**Fit to Surface** relaxes and snaps vertices back onto the original surface;
-in Edit Mode it only moves your selection. **Fill Loop** turns a selected hole
-border into an all-quad patch.
+*Tidiness* is a number from 0 to 100 for how close the quads' layout is to hand-made meshes. Higher is tidier. Credits and limits are in
+[`docs/PATTERN_SOURCES.md`](docs/PATTERN_SOURCES.md). Read it next to View changed, because a tidy grid can still miss the surface.
 
-How the region tools work:
+## Reduce To a number of faces
 
-- An all-quad patch needs an even number of seam edges. CurioMesh checks this
-  and grows or shrinks the region by one face when the count is odd.
-- Cages and mesh volumes use the generalized winding number (Jacobson et al.
-  2013), so the inside test still works on meshes with holes or overlaps.
-- The patch is laid out with a Tutte embedding, filled with a Coons grid for
-  four-sided regions or with the TRIAD-Q engine for everything else, and closed
-  to all quads with ParityPath while the seam vertices stay fixed.
-- Quad size blends from the seam's edge length to your target over a falloff
-  distance, so the patch does not jump in density at the border.
-- On jagged borders a **Border Ring** of quads runs along the seam, and an
-  untangling pass reshapes any bent quad with the seam held still. On a whale
-  region this cut bent or caved-in quads from about 5% to 0.5%, and on a noisy
-  scan from about 31% to 2.8%.
-- **Flow: Follow Curvature** (Advanced) lines quads up with the surface's main
-  bending directions as well as its sharp edges. The same option is in the
-  PairClosure settings for whole-mesh runs.
+Set **Aim** to Reduce To and give a percentage of your faces or a face count. The result lands within about 10% of it unless the parts
+cannot go that low, and the summary tells you how much of the view changed. On the bust, asking for 1,500 faces gave 1,586
+with 11.4% of the view changed.
 
-### Turbo core
+![Reduce polygon count in Blender: marble bust reduced to about 1,500 quad faces, wireframe before and after](docs/images/bust_reduce.jpg)
 
-The slowest steps now run in native Rust code on every CPU core: topology
-checks, quad closing, ParityPath search, cross-field smoothing and the cage
-inside test. Every zip carries the Turbo core for Windows, Linux, macOS Intel
-and macOS Apple Silicon, and it gives the same results as the Python code
-(checked by tests on every release).
+## Review Segments: find the part that is wrong, and redo only that
 
-| Step | Python | Turbo |
-|---|---|---|
-| Topology check, 500k faces | 49 s | 1.9 s |
-| Quad closing, 500k faces | 527 s | 16 s |
-| Cage inside test, 20k points | 11 s | 0.08 s |
-| Whole remesh, 50k faces, all quads, 8 seeds | 587 s | 129 s |
+After a run, press **Review Segments**. The result is drawn with every part in its own colour. Hover a part to see its faces before
+and after, how much of the view it changed, and its method. Click a part (Shift+click for several), pick a Use, Method or Detail for
+it, and press Redo. Only that part is remade, while Blender stays usable. Its seam stays where it was, so it joins its neighbours with
+no gap. **Next** and **Previous** jump to the parts that changed the most. Every try is kept, so you can go back to any earlier one at once.
 
-If the Turbo core cannot load (an antivirus blocks it, or an unusual
-platform), CurioMesh falls back to Python automatically. Set the environment
-variable `CURIOMESH_TURBO=0` to force Python.
+Big loose pieces are also split along necks and creases, so a bust can become head, torso and plinth. You can merge, split with a
+drawn line, paint or rename segments. Part kinds (tube, flat plate, rough scan) are a rough guess from the shape, and the guess can be wrong.
+The [CHANGELOG](CHANGELOG.md) has the full list.
 
-### A friendlier panel you can adjust
+## Draw edge loops, mirror, guide curves, paint density
 
-![Quick Start panel with the big Remesh button, Last Result box and heatmap legend](docs/images/panel_quickstart.png)
+- **Draw Edge Loops.** Draw a closed loop around an eye or the mouth, or an open line. Each becomes a strip of regular quads with the
+  poles pushed outside it. **Deformation Lines** across an elbow, knee or mouth corner become three or more evenly spaced loops. Move or redraw
+  a curve and the result updates. In our test, a ring across a bent neck cut collapsed quads there from 6.2% to 4.0%. A broad bend saw no
+  difference, so it helps tight joints and little else.
+- **Mirror** (Auto, X, Y or Z). Solves one half and mirrors it, so both sides match and the seam is exact. Auto uses the plane only when 90% of the surface matches.
+- **Guide Curves.** Draw strokes on the mesh, or add curves, Grease Pencil drawings or edge-only meshes. The quads follow them.
+- **Paint Density.** Paint a vertex group red where you want more quads. It works best with Reduce To.
+- **Show it how.** Fix a spot by hand, press **Remember This Fix**, and CurioMesh can find the same quad pattern in later results. It is stored on your PC.
 
-Every setting now has a plain name and a tooltip that explains it. After each
-run the **Last result** box shows quad percentage, faces, leftovers and time,
-or tells you why a run failed. Open the gear in the Quick Start header for the
-preferences:
+## Redo inside shapes (Live Boolean)
 
-![CurioMesh preferences: sidebar tab, compact panels, HUD placement and overlay colours](docs/images/preferences.png)
+Put boxes, spheres or any closed mesh over parts of the result and combine them with Union, Subtract or Intersect. Only the faces inside
+are redone as you move the shapes. A slider from Organized to Detailed sets the new quad size. Everything outside stays as it was.
+A redo is refused when it would make more faces than it replaces, and the panel says so.
 
-### The viewport dashboard and heatmap
+## Bake detail, UVs and game engines
 
-![HUD dashboard and triangle/pole heatmap on a remeshed Suzanne](docs/images/hud_heatmap.png)
+- **Bake Detail** sits next to Apply. Choose Off, **Normal Map** or **Normal + Color**, at 512 to 4096 pixels. Your mesh is only read. Normal + Color makes one new material with new UVs and is the recommended route for textured game assets.
+- **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces.
+- Apply marks edges sharper than 60 degrees as hard, and the result takes its shading from the nearest source points, so flat sides stay flat.
+- Baking was tested through FBX and glTF export and re-import in Blender. It has not been tested in a game engine yet.
+- Baking blocks Blender until it finishes and reads the surface nearest to each texel, so parts that touch can bleed into each other. Only the normal map and base colour are baked, not roughness or metal.
 
-The HUD shows quad percentage with a 95% goal mark, faces against your target,
-leftover triangles and poles, and a status word (ALL QUADS, CLEAN, FAIR or
-NEEDS WORK), so you can read it without relying on colour. The heatmap colours
-leftover triangles, n-gons and poles on the mesh without touching its materials;
-5+ poles draw larger as well as in a different colour.
+## Big scans, small PCs, and a cloud job
 
-![Leftover triangles in red: greedy pairing alone vs maximum pairing](docs/images/rescue_before_after.png)
+The **This computer** box reads your cores, free memory and graphics card and says in words how big the job is for this PC.
+**Effort** (Auto, Light, Normal, Full) trades speed for a usable Blender. Pieces too big for the effort are cut into regions with their borders kept
+exactly. Each region appears when it is done, and finished regions are saved so a stopped job resumes.
 
-Older release notes are in [CHANGELOG.md](CHANGELOG.md).
+**Export Job** writes a folder you can run on any computer that has Blender (`blender --background --python run_job.py`).
+**Import Result** brings the answer back. CurioMesh never uploads anything and has no accounts or keys.
+See [docs/CLOUD_WORKFLOW.md](docs/CLOUD_WORKFLOW.md).
 
-## Download and Install
+At the default settings, the coast rocks scan went from 1,260,423 faces to 434,995 quads (5.9% of the view changed) in 20 min and the coastal cliff scan went from 1,537,926 faces to 362,292 quads (6.0% of the view changed) in 19 min, on a PC that was also doing other work. Both stayed all quads.
+
+Two options help on rough scans of rock, terrain or sea floor, and both are off by default. **Rough As Texture** judges rough
+surfaces by their average direction instead of every pixel, so far fewer faces are kept (bumps smaller than a few pixels are lost).
+**Leave Out Hidden Pieces** drops loose pieces that no outside camera can see.
+
+## All features
+
+<details>
+<summary>The rest of the feature list (click to open)</summary>
+
+| Feature | What it does |
+|---|---|
+| **Show it how** | Fix a spot by hand once, and CurioMesh finds the same pattern in later results. |
+| **Redo inside shapes (Live Boolean)** | Union, Subtract or Intersect boxes and spheres, and only what is inside is redone, live. |
+| **Bake Detail** | Normal map, or normal map and colour, onto the new mesh. Your mesh is only read. |
+| **UV and shading care** | Keep UV Seams, hard edges past 60 degrees, shading read from your source. |
+| **Checks and repair** | Non-manifold edges, flipped faces, duplicates, holes, crossing faces. What cannot be fixed is selected. |
+| **Tidiness score** | A 0 to 100 number for how close the quad layout is to hand-made meshes. |
+| **Part cases** | Each part is named (tube, flat plate, rough scan and so on) so the search starts at sensible sizes. |
+| **Rough As Texture, Leave Out Hidden Pieces** | Off by default. Far fewer faces on rough scans. Drops loose pieces no camera can see. |
+| **Keep Copies as Instances** | Repeated parts become linked objects, so a copy costs no geometry. |
+| **Effort levels, This computer, Export Job** | Work in small steps, or run the job on a stronger computer and import the result. |
+| **Regions** | Redo any selection, face set, vertex group or cage with an exact seam. [More.](docs/OLDER_FEATURES.md) |
+| **Flat Quads** | Flat areas become one big quad each. [More.](docs/OLDER_FEATURES.md) |
+| **Guided points and Work Live** | Click where detail matters, and retopo area by area in the background. [More.](docs/OLDER_FEATURES.md) |
+| **Whole-mesh Atlas-Q, Fill Loop, Fit to Surface** | The older whole-mesh remesher and its helpers. [More.](docs/ATLAS_Q_REFERENCE.md) |
+| **HUD and heatmap** | Quad percentage, leftover triangles and poles, shown in the viewport. |
+| **Native Turbo core** | Rust code on all cores for the slow steps, with a Python fallback. |
+
+</details>
+
+## Older features
+
+Whole-mesh Atlas-Q, **Regions** (redo any selection or cage with an exact seam), **Flat Quads**, **Guided points** and **Work Live** are all still in
+CurioMesh. They are described in [docs/OLDER_FEATURES.md](docs/OLDER_FEATURES.md). The solvers, controls and maths of the whole-mesh remesher
+are in [docs/ATLAS_Q_REFERENCE.md](docs/ATLAS_Q_REFERENCE.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+
+## Download and install
 
 Each release has a zip for your exact Blender version, plus two all-in-one zips.
 Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest).
@@ -319,384 +248,111 @@ Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/rel
 | Not sure | `...-blender-4.2-plus-extension.zip` (4.2 and newer) or `...-blender-3.6-plus-addon.zip` (any version from 3.6) | as above |
 | 3.5 and older | not supported | |
 
-Then enable **CurioMesh**, select a mesh, and open
-`3D View > N-panel > CurioMesh`.
+Then enable **CurioMesh**, select a mesh, and open `3D View > N-panel > CurioMesh`.
 
 The version on extensions.blender.org is Python-only (the site allows no compiled code), so it is slower on big
 meshes, and its tidiness score uses CC0 reference meshes only. The GitHub zips include the fast native Turbo core.
-`python scriptsuild_release.py --blender-listing` builds that zip.
+`python scripts/build_release.py --blender-listing` builds that zip.
 
-Every release runs the full test suite and an install test on Blender 3.6 LTS,
-4.0, 4.1, 4.2 LTS, 4.3, 4.4, 4.5 LTS, 5.0, 5.1 and 5.2 LTS. The HUD and heatmap
-draw with Blender's GPU module; if a build cannot draw them, the rest of the
-add-on keeps working.
+The last full test on every Blender version from 3.6 to 5.2 was for 0.8.0. The checks for this version ran on 3.6 LTS, 4.2 LTS and 5.2 LTS, and most of the work on Auto Segments
+was done on 5.2. The viewport overlays draw with Blender's GPU module. If a build cannot draw them, the rest of the add-on keeps working.
 
-### Auto Segments: Mirror, Guide Curves, Paint Density
+## Frequently asked questions
 
-Three optional helpers sit in step 2 of the Auto Segments panel.
+**Is there a free automatic retopology add-on for Blender?**
+Yes. CurioMesh is free and open source (GPL-3.0-or-later), works in Blender 3.6 to 5.2, and needs no account. Paid retopology tools exist too. This README makes no quality comparison with them.
 
-- **Mirror** (Auto, X, Y or Z). Solves one half of the mesh and mirrors it, so
-  both sides are identical and the seam is exact. Auto finds the plane and only
-  uses it when 90% of the surface matches its mirror (70% when you pick the axis);
-  otherwise it solves the whole mesh and tells you how well the mesh matched.
-- **Guide Curves.** Draw strokes on the mesh (**Draw Guide**) or add curves, Grease
-  Pencil drawings or edge-only meshes (**Add Selected**). The strokes become hard
-  edges the quads follow, like an edge loop round an eye or a line along a panel.
-  The result reports how far the nearest edge is from the strokes.
-- **Paint Density.** **Paint** opens Weight Paint on a vertex group; colour red the
-  parts that need more quads. Works best with **Reduce To**.
+**How do I retopologize a scan in Blender?**
+Install CurioMesh, select the scan, open the CurioMesh tab, choose Auto Segments, pick the Scan Cleanup Use, and press Start. Check the result in Review Segments, redo any part that looks wrong, then press Apply. For scans over a million faces, set Effort to Light or use Export Job.
 
-### Auto Segments on a small PC, or on a bigger one
+**How do I make a low poly game asset from a high poly mesh?**
+Pick the Game Asset or Low Poly Use and press Start. Turn on Bake Detail with Normal + Color to carry the surface detail over as a normal map. Triangulate before you export to your engine.
 
-The **This computer** box in the Auto Segments panel reads your cores, free memory and
-graphics card, times a short test, and says in words how big the job is for this PC
-("This mesh is large for this PC: about 40 minutes, working in small steps").
+**Can I get all quads from an automatic quad remesh?**
+Yes. Output defaults to Quads, and the summary reports leftover triangles, which are normally zero. Quads can still be slanted on smooth surfaces with Keep Detail. Balanced and Clean Rows give tidier layouts for more faces.
 
-- **Effort** (Auto, Light, Normal, Full). Light uses short slices with long gaps, fewer
-  camera rays, one Turbo thread and smaller pieces in memory, so the PC stays usable.
-  Full finishes soonest. Auto picks from your cores and free memory.
-- A piece with more faces than the effort allows is cut into regions. The border of each
-  region is kept exactly where it was, so neighbours join with no gap. The progress bar
-  names the region being done ("Part 3 of 12: upper left") and each one appears in the
-  viewport when it finishes. Finished regions are saved to disk, so a stopped or crashed
-  job resumes where it was.
-- **Export Job** writes a folder you can run on any computer with Blender
-  (`blender --background --python run_job.py`), and **Import Result** brings
-  `result.npz` back onto your mesh. See [docs/CLOUD_WORKFLOW.md](docs/CLOUD_WORKFLOW.md).
+**Can I redo just one part of a retopology?**
+Yes. Review Segments redoes one part with its own method and detail while the seam to its neighbours stays closed. Redo Inside Shapes does the same for any area you cover with a box or sphere.
 
-## Known Limits
+**How is it different from Blender's Quad Remesh?**
+Blender's Quad Remesh works on the whole object in one pass. CurioMesh works part by part, measures each result against your original, and lets you redo single parts. QuadriFlow is also one of its Methods, for smooth organic parts.
 
-- Auto Segments gets the shape right before it gets the quads tidy. About half of its
-  vertices don't have the ideal four quads around them, so quads on smooth surfaces
-  can look slanted or scattered rather than in clean rows. This is the top item for
-  the next version.
-- Auto Segments reduces, but it isn't a hand-made low-poly yet: most results are 25% to
-  55% of the original at 6%. Fine detail such as cloth folds and small rounded ends is
-  simplified first. It can take many minutes on models with hundreds of parts, and
-  Blender can pause for up to about 30 seconds at a time on meshes over a million faces.
-- **By default Auto Segments ignores UV seams while reducing,** so its quads can span several
-  UV islands and textures smear there. Measured on real models, those quads cover 6% of
-  the road barrier, 27% of the compressor and 36% of the treasure chest. Turn on **Keep
-  UV Seams** for up to about twice the faces, or bake with **Normal + Color** instead.
-- Auto Segments was mainly tested on Blender 5.2.
-- Keep Detail spends everything Detail allows, so its quads don't run in rows: use Clean
-  Rows for that, which takes more faces and loses detail on rough scans. Quads are taken
-  away only in the Auto method, with no Mirror, strokes or paint.
-- Live Boolean refuses a redo that would make more faces than it replaces, and says so.
-  On a mesh already reduced hard, that can be most redos: slide towards Organized.
-- There is no way yet to redo only selected faces with a seam that stays closed. Use Redo
-  Inside Shapes.
-- Grid Fill and Flow Fill work only on a part with one open edge loop and an even number of
-  edges around it; otherwise Auto is used and the summary says so.
-- Repair undoes a fix that the camera dislikes or that adds over a tenth more faces, so a few
-  spots can stay. They are selected on the applied mesh and named in the summary.
-- Region patches are always all quads with an exact seam. On noisy scans a few
-  quads next to the seam can still come out bent (about 3% in our noisy scan
-  test); a slightly larger cage or a bigger Quad Size usually helps.
-- In the Regions panel, regions must be disk-shaped. Rings, regions around an
-  open hole and handles are skipped with a message. Guided Retopo's Points Only
-  cuts them into pieces instead.
-- Very large, dirty scans can still fail in Atlas-Q and PairClosure, with
-  **Topology: Repair** on or off. Use **Flat Quads** for these. It can land well
-  above the target on them, and a scan that noisy has few truly flat areas, so fine
-  detail is lost.
-- Flat Quads pays off on genuinely flat surfaces. Reduced hard to a low target, an
-  already low-poly prop still loses small details such as straps and rivets. Keep
-  the target higher on those. Long, thin faces can also appear across a big flat
-  area where closure has to route through it.
-- Atlas-Q can run for a long time on some large scans, where PairClosure is much
-  faster.
-- Live preview runs on meshes up to 8,000 faces so Blender stays responsive.
-- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a
-  Grease Pencil object are read in Blender 4.3 and later (the older data model is untested).
-  Stop is felt between steps: one Decimate on a piece of several hundred thousand faces
-  cannot be interrupted.
+**Does it keep my UVs?**
+Turn on Keep UV Seams and each quad stays inside one UV island, at the cost of more faces on models with many islands. Or bake with Normal + Color, which makes new UVs and does not need the old seams.
 
-## What's Planned
+**Does it upload my model?**
+No. Everything runs on your PC. Export Job writes a folder that you move yourself.
 
-- **GPU compute** through Blender's own GPU module for the parallel parts
-  (inside tests, field smoothing, surface fitting), on NVIDIA, AMD, Intel and
-  Apple graphics.
-- **Cleaner quad rows** on smooth surfaces, and a setting to choose between keeping
-  detail and keeping quads organized.
-- **More density in tight areas**, found automatically, with a smooth-shading check.
-- **Reduce To** a percent or face count, progress bars, and detail baking for game assets.
-- A listing on extensions.blender.org.
+**Does it work in Blender 4.x and 5.x?**
+Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-install) for which versions were tested for this release.
 
-Have a use case we should cover? Tell us in
-[Ideas](https://github.com/CurioCrafter/CurioMesh/discussions/categories/ideas).
+## Known limits
 
-## Thank You
+- **Keep Detail quads are not always tidy.** It spends everything Detail allows, so on smooth surfaces quads can look slanted or scattered instead of running in rows. Use Balanced or Clean Rows for that, at the cost of more faces. Clean Rows also loses small sharp detail, and on some models it lands over the amount you asked for.
+- **Soft faces and fine detail go first.** At 6%, cloth folds, small rounded ends and fine ornaments are simplified. Lower Detail to keep more. CurioMesh does not give you a hand-made low poly yet.
+- **UV seams.** By default quads may span several UV islands, so textures can smear there. Turn on Keep UV Seams (up to about twice the faces) or bake with Normal + Color.
+- **Big scans are slow.** A scan of over a million faces can take a long time on a busy PC, and Blender can pause for a few seconds at a time. Use Effort, or Export Job.
+- **Grid Fill and Flow Fill** only work on a part with one open edge loop and an even number of edges around it. Otherwise Auto is used, and the summary says so.
+- **Repair is cautious.** A fix that the camera dislikes, or that adds over a tenth more faces, is undone, so a few spots can stay. They are selected on the applied mesh and named in the summary.
+- **Selected Faces Only** for Draw Edge Loops does not close its seam yet and is switched off. Use Redo Inside Shapes.
+- **Live Boolean** refuses a redo that would make more faces than it replaces. On a mesh already reduced hard, that can be most redos.
+- **No global patch layout.** CurioMesh has none, and it does not promise exact loops round eyes, mouths or joints without your help. An optional script, `scripts/flowtool.py`, can use QuadWild if you install it separately. It is not in the panel, it covers organic parts only, and it is untested on Linux and macOS.
+- **Windows first.** The native Turbo core is built for Windows only today. On other systems CurioMesh falls back to slower Python code, which is much slower on big meshes. The release workflow is meant to add the other platforms.
+- **CPU only.** There is no GPU compute.
+- **No LOD set button yet.** Run Reduce To several times to make levels.
+- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
+- Stop is felt between steps. One reduction of a piece with several hundred thousand faces cannot be interrupted.
 
-Thank you to everyone who starred CurioMesh. Every star helps another Blender
-artist find a free retopology tool.
+## Community
+
+- **Questions and help:** [Q&A](https://github.com/CurioCrafter/CurioMesh/discussions/categories/q-a)
+- **Show your retopology:** [Show and tell](https://github.com/CurioCrafter/CurioMesh/discussions/categories/show-and-tell). Before and after screenshots and the settings you used help everyone.
+- **Ideas and feature requests:** [Ideas](https://github.com/CurioCrafter/CurioMesh/discussions/categories/ideas)
+- **Bugs:** [open an issue](https://github.com/CurioCrafter/CurioMesh/issues/new) with your Blender version, your CurioMesh settings and, if you can share it, the mesh or a small `.blend`.
+
+Pull requests are welcome. Run the tests first:
+
+```powershell
+python -m unittest discover -s tests -v
+ruff check .
+python scripts\build_release.py
+```
+
+`python scripts\test_blender_matrix.py` runs the smoke and install tests on every Blender build it finds.
+
+If CurioMesh saved you time, a [star on GitHub](https://github.com/CurioCrafter/CurioMesh/stargazers) helps other Blender artists find a free retopology tool.
 
 [![Star History Chart](https://api.star-history.com/svg?repos=CurioCrafter/CurioMesh&type=Date)](https://star-history.com/#CurioCrafter/CurioMesh&Date)
 
 ## Credits
 
-The tidiness score is based on statistics measured from hand-made meshes. It holds
-no geometry. Sources and licenses are in [docs/PATTERN_SOURCES.md](docs/PATTERN_SOURCES.md).
-Credits for the CC-BY works, changed by reducing them to statistics
-([CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)):
-
-- [Sprite Rig](https://studio.blender.org/characters/sprite/v1/) (CC-BY) Blender Foundation | studio.blender.org
-- [Rain Rig](https://studio.blender.org/characters/rain/v3/) (CC) Blender Foundation | studio.blender.org
-- [Pack Bot Rig](https://studio.blender.org/characters/pack-bot/v1/) (CC-BY) Blender Foundation | studio.blender.org
-- [Security Bot Rig](https://studio.blender.org/characters/security-bot/v1/) (CC-BY) Blender Foundation | studio.blender.org
-
-The models in the results table and screenshots are from [Poly Haven](https://polyhaven.com)
-(CC0). Thank you to Poly Haven for making them free for everyone.
-
-The triangle intersection test in the native core is ported from Blender's
-`isect_tri_tri_v3_ex` (GPL-2.0-or-later, Blender authors). Rust crates in the
-native core and their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-Feature ideas from [cav3dw3ll3r](https://github.com/cav3dw3ll3r) (see the CHANGELOG).
-
-## Solver Portfolio
-
-| Strategy | Use it for | Implementation and expectation |
-|---|---|---|
-| `Auto` | Default for most assets | Measures the scan and routes to the strongest applicable path. |
-| `Organic / General` | Statues, rocks, terrain pieces, creatures, clean scans | Target-scale QEM proxy plus a deterministic multi-seed QuadriFlow ensemble. |
-| `Mechanical / Feature` | Props, architecture, machinery, crisp archaeology | Preserves sharp, seam, material, and boundary evidence while comparing flow candidates. |
-| `Dirty Closed Scan` | Noisy closed photogrammetry with broken connectivity | May voxel-repair one candidate. It can close holes and erase thin sheets, so it requires `Repair` topology policy. |
-| `Open Fragment` | Intentional sheets, excavation fragments, partial scans | Preserves boundary loops and avoids automatic voxel closure. |
-| `Exact PairClosure` | Robust fallback or simple/open triangulated surfaces | Guarantees conforming quads after validation, but can create more poles and may miss an aggressive face target. |
-
-Atlas-Q accepts a candidate only after measured checks. `Require Locally Valid
-Quads` is enabled by default. A solver process finishing successfully is not
-enough. “Locally valid” deliberately does not claim a global face-to-face
-self-intersection proof.
-
-## Recommended Photogrammetry Workflow
-
-1. Keep `Output` set to `New Object`.
-2. Set the desired **Target Faces**. This is a soft geometric budget: topology,
-   features, and valid quads take precedence over an impossible exact count.
-3. Click **Analyze Without Changing Mesh**.
-4. Leave `Scan Strategy` on `Auto` unless the report misclassifies known intent.
-5. Use `Preserve` topology for open fragments, intentional holes, thin shells,
-   mechanical parts, and most clean meshes.
-6. Use `Repair` only for a closed scan whose holes and broken connectivity are
-   known defects.
-7. Run Atlas-Q and inspect local quad-manifold status, topology proof, p95/max
-   source error, minimum scaled Jacobian, p95 aspect ratio, boundary loops, and
-   silhouette.
-8. Keep UV projection or bake base color. Bake normal/displacement detail in a
-   dedicated external baking step; CurioMesh does not expose those maps.
-   A low-poly mesh cannot encode scan-frequency detail in geometry alone.
-
-For multi-million-face scans, Atlas-Q samples the full source, then performs
-exact topology accounting on the reduced proxy. The result explicitly says
-`PROXY_PRESERVED_SOURCE_UNVERIFIED`; it does not present proxy preservation as
-proof about every full-resolution source edge. See
-[docs/PHOTOGRAMMETRY_WORKFLOW.md](docs/PHOTOGRAMMETRY_WORKFLOW.md) for recovery
-steps and expectations by scan type.
-
-## Mathematical Design
-
-Atlas-Q uses an error-budgeted solver selection rather than claiming one
-algorithm wins on every mesh.
-
-The initial target edge scale is
-
-```text
-h0 = sqrt(A / Nq)
-```
-
-where `A` is sampled surface area and `Nq` is the desired quad count. The
-Balanced QEM proxy budget is approximately
-
-```text
-Fproxy = min(Fsource, clamp(12 Nq, 2,000, 400,000)).
-```
-
-Each valid candidate is scored from measured symmetric source distance, scaled
-Jacobian, aspect ratio, target-count error, pole ratio, and quad ratio. Topology
-violations are rejection conditions rather than small score penalties.
-
-PairClosure starts with feature-aware triangle pairing. It then processes every
-residual triangle with shared edge midpoints. ParityPath keeps unaffected valid
-quads unchanged and solves odd quad transitions as a T-join on the quad-only
-face-dual graph. Affected faces use locally validated two-, three-, or
-four-quad templates with shared geometric midpoints and face-local UVs.
-
-The conservative target closure processes every base face
-`f = (v0 ... vk-1)` using a globally shared edge midpoint `mi` and a face
-center `cf`:
-
-```text
-qi = (vi, mi, cf, m(i-1)).
-```
-
-This produces `Fglobal = 3T + 4Q`. ParityPath instead has
-`Fparity = 3T + Q0 + 2Q2d + 3Q2c + 4Q4`, where the `Q` terms classify
-unaffected, direct two-split, center-filled two-split, and four-split quads.
-Both paths are conforming, preserve Euler characteristic when the base is
-manifold, guarantee four-corner faces, and preserve face-local UV seams.
-
-If Blender's collapse decimator stalls above a closure budget, PairClosure can
-rotate a deterministic face-independent set of interior triangle diagonals and
-retry QEM. Every round is transactional: it is retained only when manifold,
-degeneracy, component, Euler, and per-component boundary-signature gates remain
-exact. The final quad count and source-error gates still decide acceptance.
-
-For a vertex-only bow-tie, incident faces around vertex `v` are partitioned by
-edge adjacency into fans `F0 ... Fk`. `F0` keeps `v`; each later fan receives a
-coincident duplicate `v_i`. This is an exact combinatorial normalization:
-coordinates, faces, materials, and corner UV indices are unchanged. True
-edge-non-manifolds remain rejected.
-
-For a closed all-quad manifold, poles are mathematically necessary:
-
-```text
-sum_v (4 - valence(v)) = 4 chi.
-```
-
-A sphere therefore has total defect charge eight; "no extraordinary vertices"
-is not a valid universal requirement. CurioMesh measures and minimizes excess
-poles instead.
-
-The detailed implemented objective, gates, and roadmap are in
-[docs/ALGORITHM.md](docs/ALGORITHM.md).
-
-## Controls
-
-- `Target Faces`: approximate final quad budget.
-- `Engine`: Atlas-Q Auto, direct QuadriFlow, PairClosure, or the v0.3 Auto alias.
-- `Quality`: Draft uses one candidate; Balanced uses the configured budget;
-  Hero uses at least five candidates and stricter acceptance gates.
-- `Scan Strategy`: solver-family override.
-- `Topology`: `Preserve` rejects changed Euler characteristic, boundary-cycle
-  count, connected-component count, or open/closed state against an exact
-  source or proxy reference. It also compares a sorted `(Euler, boundary
-  cycles)` signature per component, so cycles cannot silently move between
-  equal-Euler components;
-  `Repair` permits change. Proxy-only proof is prominently labeled.
-- `Require Locally Valid Quads`: rejects non-quads, repeated/zero-area faces,
-  concave/crossed/inverted quads, edge/vertex non-manifolds, branched
-  boundaries, duplicate faces, inconsistent winding, and quads warped more
-  than 60 degrees across either diagonal. Gates are measured in world space,
-  including non-uniform object scale. Global self-intersection remains
-  unverified.
-- `Candidate Budget`: one to eight deterministic candidates.
-- `Preserve Sharp`, `Preserve Boundary`, `Treat UV Seams As Sharp`: feature
-  constraints passed into proxy/remeshing stages.
-- `Voxel Repair Fallback`: available for direct QuadriFlow and controlled by
-  Atlas-Q's dirty-scan strategy.
-- `Project Details`: projects the accepted topology back to the preserved
-  evaluated source.
-- `Texture Preservation`: UV projection/transfer, base-color bake, or none.
-- `Output`: create a new object or replace the selected object's mesh after all
-  mandatory checks pass.
-
-## Standalone PairClosure CLI
-
-The dependency-light TRIAD-Q/PairClosure path can still process OBJ files
-outside Blender:
-
-```powershell
-python -m triadq input.obj output.obj --target-faces 4000 --mode auto --seed-count 8 --pure-quads
-```
-
-The Blender PairClosure engine now builds a target-scale QEM proxy before the
-Python pairing stage. The standalone CLI performs mode-tuned field pairing and
-exact quad closure but does **not** have Blender's QEM or QuadriFlow backend, so
-`target-faces` remains a scoring target outside Blender.
-
-## What Is Implemented Versus Research
-
-Implemented now:
-
-- Bounded scan classification and explicit uncertainty.
-- Target-scale native QEM proxy construction.
-- Multi-candidate QuadriFlow, feature-flow, open-flow, and dirty-flow routing.
-- Exact conforming PairClosure.
-- Sparse ParityPath transitions plus topology-gated edge-rotation/QEM unlock.
-- Area-, spatial-, and component-stratified symmetric distance scoring with
-  RMS, p95, and maximum-error gates.
-- Immutable-source projection, UV/material transfer, and baking.
-
-Not claimed or implemented:
-
-- A proof that Atlas-Q is globally novel or universally better.
-- Full mixed-integer global patch-layout optimization comparable to MIQ,
-  Integer-Grid Maps, or QuadWild.
-- Semantic animation loops around eyes, mouths, joints, handles, or cloth.
-- Guaranteed exact face count, minimum pole count, or excellent quad shape for
-  every topology and budget.
-- A global triangle/quad self-intersection proof or semantic deformation loops.
-- Out-of-core cancellation during Blender's synchronous QuadriFlow operation.
-
-The new contribution is a clean-room CurioMesh synthesis: confidence-aware scan
-routing, error-budgeted proxy construction, measured candidate selection, and
-an exact closure/validation contract. Benchmark superiority remains unproven
-until real scan comparisons are published.
-
-## Research Basis
-
-CurioMesh's implementation and roadmap are grounded in primary sources:
-
-- [Instant Field-Aligned Meshes](https://igl.ethz.ch/projects/instant-meshes/)
-  for scalable local orientation/position fields.
-- [QuadriFlow](https://onlinelibrary.wiley.com/doi/10.1111/cgf.13498) for
-  scalable global consistency and lower singularity counts.
-- [Mixed-Integer Quadrangulation](https://www.graphics.rwth-aachen.de/publication/0344/)
-  and [Integer-Grid Maps](https://www.graphics.rwth-aachen.de/publication/03197/)
-  for seamless parameterization and reliable quad extraction.
-- [Reliable Feature-Line Driven Quad Remeshing](https://www.quadmesh.cloud/ReliableQuad.pdf)
-  for feature-aware patch layouts and global quantization.
-- [Pattern-Based Quadrangulation](https://igl.ethz.ch/projects/patch-quad/) for
-  valid patch filling.
-- [Garland-Heckbert QEM](https://www.cs.princeton.edu/courses/archive/fall03/cs526/papers/garland97.pdf)
-  for target-scale proxy simplification.
-- [Quasi-structured quad meshing with midpoint subdivision](https://arxiv.org/abs/2103.04652)
-  for the robust all-quad closure pattern.
-- [Blossom-Quad](https://orbi.uliege.be/handle/2268/113152) for graph matching
-  formulations of indirect quadrangulation.
-- [Practical Quad Mesh Simplification](https://vcg-legacy.isti.cnr.it/Publications/2010/TPCPP10/Tarini%20Pietroni%20Cignoni%20Panozzo%20Puppo%20-%20Practical%20Quad%20Semplification%20-%20EG%202010.pdf)
-  and [Quadrilateral Mesh Simplification](https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Daniels08.pdf)
-  for topology-preserving local connectivity operations and quad LOD design.
-
-CurioMesh is licensed GPL-3.0-or-later. Its solvers are its own implementations
-of the published papers above; no QuadWild/BiMDF source is copied or vendored.
-
-## Development, Tests, And Packaging
-
-```powershell
-python -m unittest discover -s tests -v
-python tests\triadq_smoke.py
-python -m compileall -q __init__.py atlasq.py bridge.py metrics.py operators.py textures.py ui.py triadq tests scripts
-ruff check .
-tests\run_blender_tests.ps1
-python scripts\build_release.py
-```
-
-`python scripts\build_release.py --per-version` also writes one zip per Blender
-version (3.6 to 5.2) next to the two all-in-one zips in `dist/`, then validates
-every archive entry. `python scripts\test_blender_matrix.py` runs the smoke and
-install tests on every Blender build it finds, one at a time, and writes a
-pass/fail table.
-
-## Community
-
-- **Questions and help:** [Q&A](https://github.com/CurioCrafter/CurioMesh/discussions/categories/q-a)
-- **Show your retopology:** [Show and tell](https://github.com/CurioCrafter/CurioMesh/discussions/categories/show-and-tell),
-  before/after screenshots and the settings you used help everyone.
-- **Ideas and feature requests:** [Ideas](https://github.com/CurioCrafter/CurioMesh/discussions/categories/ideas)
-- **Bugs:** [open an issue](https://github.com/CurioCrafter/CurioMesh/issues/new) with your Blender version,
-  CurioMesh settings and, if you can share it, the mesh or a small `.blend`.
-
-Pull requests are welcome. Run the tests listed above before opening one.
+- Test models are free CC0 models from [Poly Haven](https://polyhaven.com); thank you to Poly Haven for making them free for everyone. Models by: Marble bust: Rico Cilliers; Concrete road barrier: Amal Kumar; Old military compressor: Brian Speight; Fire hydrant: Goncalo Felicio; Treasure chest: Rico Cilliers; Gothic statue: Benny Weimer; Lion head: Tina; Horse statue: Rico Cilliers; Chess set: Riley Queen; Spinning wheel: Sofia Pahaoja; Sofa: Kirill Sannikov; Drill press: Viktor; Overhead crane: Timothy3D; Modular wooden pier: Rico Cilliers; Moss rocks: Kless Gyzen; Namaqualand boulder: Greg Zaal, Rico Cilliers; Ship pinnace: James Ray Cock, Rico Cilliers, Nicolo Zubbini, Yann Kervran; Dutch ship: James Ray Cock, Rico Cilliers, Nicolo Zubbini; Coast rocks: Rob Tuytel, Rico Cilliers; Coastal cliff: Rob Tuytel, Rico Cilliers.
+- Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r): fitting each source point to its nearest vertex, shading read from the nearest source points, and the finite test cases.
+- The tidiness score is based on statistics measured from hand-made meshes. It holds no geometry. Sources and licenses are in
+  [docs/PATTERN_SOURCES.md](docs/PATTERN_SOURCES.md).
+- Credits for the CC-BY works, changed by reducing them to statistics ([CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)):
+  - [Sprite Rig](https://studio.blender.org/characters/sprite/v1/) (CC-BY) Blender Foundation, studio.blender.org
+  - [Rain Rig](https://studio.blender.org/characters/rain/v3/) (CC) Blender Foundation, studio.blender.org
+  - [Pack Bot Rig](https://studio.blender.org/characters/pack-bot/v1/) (CC-BY) Blender Foundation, studio.blender.org
+  - [Security Bot Rig](https://studio.blender.org/characters/security-bot/v1/) (CC-BY) Blender Foundation, studio.blender.org
+- The triangle intersection test in the native core is ported from Blender's `isect_tri_tri_v3_ex` (GPL-2.0-or-later, Blender authors). Rust crates in the native core and their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- The whole-mesh solvers are CurioMesh's own implementations of published papers, listed in [docs/ATLAS_Q_REFERENCE.md](docs/ATLAS_Q_REFERENCE.md). No QuadWild source is copied or included.
 
 ## License
 
-CurioMesh is free software: you can redistribute it and/or modify it under the
-terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version. See [LICENSE](LICENSE).
+CurioMesh is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your option) any later version. See [LICENSE](LICENSE).
 
-Versions up to 0.5.1 were released under MIT. From 0.6.0 on, CurioMesh is
-GPL-3.0-or-later, the same family of licence Blender itself uses.
+Versions up to 0.5.1 were released under MIT. From 0.6.0 on, CurioMesh is GPL-3.0-or-later, the same family of licence Blender itself uses.
+
+<!--
+Blocks to switch on when the branches are merged. Do not publish them before:
+
+## Auto button (branch `multires`, not in `next`)
+One Auto button at the top of Quick Start and Auto Segments looks at the mesh and the free memory, picks the Use and the settings, says why, and starts.
+Nothing changes until Apply.
+
+## Multires Detail (branch `multires`, not in `next`)
+A clean, low cage keeps its faces at level 0 and the shape of your mesh comes back as Multires levels (Blender's Subdivide and Reshape; your mesh is only read).
+Offered for Animation, Subdivision and Sculpt Base. Needs wire pictures of the bust at level 0, 1 and 2: run regen.py on the merged commit.
+-->
