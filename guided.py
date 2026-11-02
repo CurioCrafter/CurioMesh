@@ -3198,7 +3198,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 col.operator("curiomesh.teach_forget_kept", text=f"Forget {len(_kept(obj))} Kept Fix(es)", icon="X")
 
         message = status()
-        if message and not (done and message == base["summary"]):
+        if message and not searching and not (done and message == base["summary"]):  # while searching the bar already says it
             box = layout.box()
             box.alert = _is_problem(message)
             for i, chunk in enumerate(message.split(" | ")[:2]):

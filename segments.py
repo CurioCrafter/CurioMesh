@@ -761,7 +761,7 @@ def draw_parts(layout, context, gs) -> None:
     """The Parts panel: switches, bulk selection, the worst-first list, and the selected part's numbers and tries."""
     if not ready():
         box = layout.box()
-        overlay.wrap_label(box, "Parts appear when the search is done", icon="INFO", width=36, limit=2)
+        overlay.wrap_label(box, "Parts appear when the search is done", icon="INFO", width=30, limit=2)
         return
     col = layout.column(align=True)
     row = col.row(align=True)
