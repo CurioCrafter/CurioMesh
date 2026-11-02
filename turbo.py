@@ -485,7 +485,8 @@ def pair_seeds(face_count: int, face_a, face_b, quads, scores, minimum, seeds) -
     module = native()
     if module is None or not hasattr(module, "pair_seeds") or np.isnan(scores).any():
         return None
-    rows = module.pair_seeds(
+    rows = _uninterrupted(
+        module.pair_seeds,
         int(face_count),
         np.ascontiguousarray(face_a, dtype=np.int64),
         np.ascontiguousarray(face_b, dtype=np.int64),
@@ -521,7 +522,7 @@ def augment_matching(mate: dict, allowed: dict, order: list) -> int | None:
     if mate:
         mate_array[np.fromiter(mate.keys(), np.int64)] = np.fromiter(mate.values(), np.int64)
     before = mate_array.copy()
-    rescued = module.augment_matching(indptr, indices, np.asarray(order, dtype=np.int64), mate_array)
+    rescued = _uninterrupted(module.augment_matching, indptr, indices, np.asarray(order, dtype=np.int64), mate_array)
     for face in np.flatnonzero(mate_array != before).tolist():
         mate[face] = int(mate_array[face])
     return int(rescued)
@@ -550,6 +551,15 @@ def _cancelled():
     except ImportError:
         from triadq.types import Cancelled
     return Cancelled()
+
+
+def _uninterrupted(call, *args):
+    """`call(*args)` for the kernels a stop ends by itself (see `stop_native`), turning that into `Cancelled`."""
+
+    try:
+        return call(*args)
+    except InterruptedError:
+        raise _cancelled() from None
 
 
 def _stoppable(call, *args):

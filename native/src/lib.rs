@@ -245,7 +245,8 @@ fn augment_matching(
     if bad {
         return Err(PyValueError::new_err("matching arrays are inconsistent"));
     }
-    Ok(py.detach(|| matching::augment(indptr, indices, order, mate)))
+    let watch = near::Watch::now();
+    py.detach(|| matching::augment(indptr, indices, order, mate, &watch)).ok_or_else(|| pyo3::exceptions::PyInterruptedError::new_err("stopped"))
 }
 
 #[pyfunction]
@@ -527,10 +528,12 @@ fn pair_seeds<'py>(
     if !ok {
         return Err(PyValueError::new_err("pairing arrays are inconsistent"));
     }
+    let watch = near::Watch::now();
     let rows = py.detach(|| {
         let graph = pairing::allowed(faces, fa, fb, scores, minimum);
-        pairing::pair_seeds(&graph, quads, &seeds)
+        pairing::pair_seeds(&graph, quads, &seeds, &watch)
     });
+    let rows = rows.ok_or_else(|| pyo3::exceptions::PyInterruptedError::new_err("stopped"))?;
     Ok(rows
         .into_iter()
         .map(|p| (p.quads.into_pyarray(py), p.tris.into_pyarray(py), p.owner.into_pyarray(py), p.rescued))

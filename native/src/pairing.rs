@@ -136,7 +136,7 @@ pub struct Paired {
 }
 
 /// `_pair_triangles` for one seed, without UVs.
-pub fn pair(graph: &Allowed, candidates: &[i64], seed: u32) -> Paired {
+pub fn pair(graph: &Allowed, candidates: &[i64], seed: u32, watch: &crate::near::Watch) -> Option<Paired> {
     let faces = graph.indptr.len() - 1;
     let order = shuffled(faces, seed);
     let mut mate = vec![-1i64; faces];
@@ -153,7 +153,10 @@ pub fn pair(graph: &Allowed, candidates: &[i64], seed: u32) -> Paired {
             }
         }
     }
-    let rescued = matching::augment(&graph.indptr, &graph.other, &order, &mut mate);
+    if watch.stopped() {
+        return None;
+    }
+    let rescued = matching::augment(&graph.indptr, &graph.other, &order, &mut mate, watch)?;
     let mut used = vec![false; faces];
     let mut out = Paired {
         quads: Vec::with_capacity(faces * 2),
@@ -181,9 +184,10 @@ pub fn pair(graph: &Allowed, candidates: &[i64], seed: u32) -> Paired {
             out.owner.push(f as i64);
         }
     }
-    out
+    Some(out)
 }
 
-pub fn pair_seeds(graph: &Allowed, candidates: &[i64], seeds: &[u32]) -> Vec<Paired> {
-    seeds.par_iter().map(|&seed| pair(graph, candidates, seed)).collect()
+/// One pairing per seed, side by side; None when the job was stopped.
+pub fn pair_seeds(graph: &Allowed, candidates: &[i64], seeds: &[u32], watch: &crate::near::Watch) -> Option<Vec<Paired>> {
+    seeds.par_iter().map(|&seed| pair(graph, candidates, seed, watch)).collect()
 }
