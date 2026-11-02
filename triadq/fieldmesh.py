@@ -107,8 +107,8 @@ def edge_turn(tris: np.ndarray, normals: np.ndarray, edge_of: np.ndarray, edge_c
     return out
 
 
-def size_limits(points: np.ndarray, tris: np.ndarray, even: float, turn: float) -> np.ndarray:
-    """Per vertex, the largest cell that keeps the surface's turn across it to `turn` radians, read at about an even cell's scale."""
+def size_limits(points: np.ndarray, tris: np.ndarray, even: float, most_turn: float) -> np.ndarray:
+    """Per vertex, the largest cell that keeps the surface's turn across it to `most_turn` radians, read at about an even cell's scale."""
 
     normals, areas, _vertex = _normals_areas(points, tris)
     a, b, edge_of, _uses = _edges(tris, len(points))
@@ -119,7 +119,7 @@ def size_limits(points: np.ndarray, tris: np.ndarray, even: float, turn: float) 
     area = np.bincount(tris.reshape(-1), np.repeat(areas / 3.0, 3), len(points))
     rounds = int(np.clip(SMOOTH_REACH * (even / max(float(np.median(length)), 1e-30)) ** 2, 2, 40))
     curvature = _smooth(bend, a, b, rounds) / np.maximum(_smooth(area, a, b, rounds), 1e-30)  # radians per unit length
-    return turn / np.maximum(curvature, 1e-12)
+    return most_turn / np.maximum(curvature, 1e-12)
 
 
 def fit_sizes(limits: np.ndarray, area: np.ndarray, target: float, shape: np.ndarray | None = None) -> np.ndarray:
@@ -1111,7 +1111,9 @@ def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, fa
 def field_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0) -> tuple[np.ndarray, list[tuple[int, ...]]]:
     """Quads in rows on one loose piece, about `target` of them. May leave a few triangles.
 
-    Raises ValueError on a piece too small for a grid: there the usual reduction and pairing does better.
+    Best on large, smooth or simply shaped pieces. Busy machined parts, thin walls and sculpts with fine limbs lose far
+    more shape than the usual reduction and pairing, so a caller should judge the result and keep the better one.
+    Raises ValueError on a piece too small for a grid.
     """
 
     if target < SMALLEST_TARGET:

@@ -43,6 +43,10 @@ class FieldMeshTests(unittest.TestCase):
         away = np.linalg.norm(out[:, :2], axis=1)
         self.assertLess(float(away.max()), 1.05)  # stays on the surface
 
+    def test_cells_can_follow_bends(self) -> None:
+        points, faces = capsule()
+        self.assertGreater(len(field_quads(points, faces, 400, 1.5)[1]), 200)
+
     def test_refuses_a_grid_too_small_to_lay(self) -> None:
         points, faces = capsule(8, 8)
         with self.assertRaises(ValueError):
