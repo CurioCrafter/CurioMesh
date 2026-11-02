@@ -9,33 +9,34 @@
 [![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
-![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 16,317 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
+![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 15,881 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
 
-*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model): 79,042 faces to 16,317 quads, 5.3% of the view changed. Wire shown on both sides.*
+*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model): 79,042 faces to 15,881 quads, 5.6% of the view changed. Wire shown on both sides.*
 
 CurioMesh is an automatic quad retopology add-on for Blender 3.6 to 5.2. Say what the mesh is for, press one button, and it reduces
 the model part by part. A camera check compares the result with your original from six sides and tells you how much of the view
 changed. Then you redo only the part that still looks wrong. It runs on your PC and uploads nothing.
 
-**Try it in three steps:** [install the zip](#download-and-install), pick a **Use** (Game Asset, Animation, Scan Cleanup and more) and press **Start**,
-then check parts in **Review Segments** and press **Apply**.
+**Try it:** [install the zip](#download-and-install), select a mesh, and press **Auto** in the Guided panel. CurioMesh picks the Use and settings from
+your mesh and free memory, says why, and starts. Or follow the numbered steps yourself: choose what it is for, **Start**, fix parts in
+**Review Segments**, then **Apply**. Nothing changes in your scene until Apply.
 
 ## Contents
 
-[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install) · [FAQ](#frequently-asked-questions) · [Limits](#known-limits) · [All features](#all-features)
+[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install) · [FAQ](#frequently-asked-questions) · [Limits](#known-limits) · [All features](#all-features)
 
 ## What it does
 
 | Feature | What it does |
 |---|---|
-| **Auto Segments** | Reduces the whole object to all quads, one loose part at a time, and checks every size from six sides. |
+| **Auto Segments and the Auto button** | Reduces the whole object to all quads, one loose part at a time, and checks every size from six sides. **Auto** picks the Use and settings for you. |
 | **Presets by use** | Low Poly, Game Asset, Animation, Subdivision, Scan Cleanup, Sculpt Base. |
 | **Three layout styles** | Keep Detail (fewest faces), Balanced, Clean Rows (even quads in rows). |
 | **Reduce To** | Aim at a percentage of your faces or a face count, within about 10%. |
 | **Review Segments** | Every part in its own colour, numbers on hover, redo one part with another method, go back to any try. |
-| **Segments inside one mesh** | Splits a connected model along necks and creases (head, torso, plinth). Merge, split, paint, rename. |
-| **Draw Edge Loops and Deformation Lines** | Loops round eyes and mouths, lines across joints. The quads follow. |
-| **Mirror, Guide Curves, Paint Density** | Symmetric results, strokes the quads follow, and more faces where you paint. |
+| **Multires Detail** | A clean low cage at level 0, with the shape of your mesh back in the Multires levels above it. |
+| **Make LOD Set** | Three objects named `_LOD0`, `_LOD1` and `_LOD2`, at percents you choose. |
+| **Bake Detail** | Normal map, or normal map and colour, onto the new mesh. Your mesh is only read. |
 
 More below: [all features](#all-features).
 
@@ -46,11 +47,11 @@ Asset settings: Keep Detail, **Detail 6%**. Detail is how much of the view may l
 download the same models and check the numbers. Each picture shows the original (left) and the result (right), the whole
 object on top and a close-up below.
 
-![Chess set (33 pieces): 76,832 faces become 10,834 quads, wire on both, whole object and close-up](docs/images/chess_set.jpg)
+![Chess set (33 pieces): 76,832 faces become 10,110 quads, wire on both, whole object and close-up](docs/images/chess_set.jpg)
 
 *Chess set (33 pieces), [Poly Haven](https://polyhaven.com/a/chess_set), CC0.*
 
-![Overhead crane: 89,964 faces become 25,090 quads, wire on both, whole object and close-up](docs/images/overhead_crane.jpg)
+![Overhead crane: 89,964 faces become 22,541 quads, wire on both, whole object and close-up](docs/images/overhead_crane.jpg)
 
 *Overhead crane, [Poly Haven](https://polyhaven.com/a/overhead_crane), CC0.*
 
@@ -60,63 +61,69 @@ object on top and a close-up below.
 
 | Model | Original faces | CurioMesh quads | Size | View changed | Wire pictures |
 |---|---:|---:|---:|---:|---|
-| [Marble bust](https://polyhaven.com/a/marble_bust_01) | 17,456 | 2,632 | 15% | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
+| [Marble bust](https://polyhaven.com/a/marble_bust_01) | 17,456 | 2,508 | 14% | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
 | [Concrete road barrier](https://polyhaven.com/a/concrete_road_barrier) | 60,928 | 987 | 2% | 5.9% | [before and after](docs/images/concrete_road_barrier.jpg) |
-| [Old military compressor](https://polyhaven.com/a/old_military_compressor) | 79,042 | 16,317 | 21% | 5.3% | [before and after](docs/images/old_military_compressor.jpg) |
-| [Fire hydrant](https://polyhaven.com/a/fire_hydrant) | 86,316 | 27,795 | 32% | 5.0% | [before and after](docs/images/fire_hydrant.jpg) |
-| [Treasure chest](https://polyhaven.com/a/treasure_chest) | 103,330 | 10,789 | 10% | 4.5% | [before and after](docs/images/treasure_chest.jpg) |
-| [Gothic statue](https://polyhaven.com/a/gothic_statue) | 27,739 | 18,184 | 66% | 5.9% | [before and after](docs/images/gothic_statue.jpg) |
-| [Lion head](https://polyhaven.com/a/lion_head) | 47,214 | 7,995 | 17% | 6.0% | [before and after](docs/images/lion_head.jpg) |
-| [Horse statue](https://polyhaven.com/a/horse_statue_01) | 22,388 | 5,623 | 25% | 5.9% | [before and after](docs/images/horse_statue_01.jpg) |
-| [Chess set (33 pieces)](https://polyhaven.com/a/chess_set) | 76,832 | 10,834 | 14% | 3.4% | [before and after](docs/images/chess_set.jpg) |
-| [Spinning wheel](https://polyhaven.com/a/spinning_wheel_01) | 52,023 | 14,810 | 28% | 5.4% | [before and after](docs/images/spinning_wheel_01.jpg) |
-| [Sofa (already low poly)](https://polyhaven.com/a/Sofa_01) | 4,101 | 1,658 | 40% | 3.8% | [before and after](docs/images/Sofa_01.jpg) |
-| [Drill press](https://polyhaven.com/a/drill_press_01) | 58,511 | 18,103 | 31% | 5.5% | [before and after](docs/images/drill_press_01.jpg) |
-| [Overhead crane](https://polyhaven.com/a/overhead_crane) | 89,964 | 25,090 | 28% | 6.4% | [before and after](docs/images/overhead_crane.jpg) |
-| [Modular wooden pier](https://polyhaven.com/a/modular_wooden_pier) | 84,780 | 22,411 | 26% | 6.0% | [before and after](docs/images/modular_wooden_pier.jpg) |
-| [Moss rocks (6 pieces)](https://polyhaven.com/a/rock_moss_set_01) | 63,127 | 21,142 | 33% | 6.0% | [before and after](docs/images/rock_moss_set_01.jpg) |
+| [Old military compressor](https://polyhaven.com/a/old_military_compressor) | 79,042 | 15,881 | 20% | 5.6% | [before and after](docs/images/old_military_compressor.jpg) |
+| [Fire hydrant](https://polyhaven.com/a/fire_hydrant) | 86,316 | 26,771 | 31% | 4.9% | [before and after](docs/images/fire_hydrant.jpg) |
+| [Treasure chest](https://polyhaven.com/a/treasure_chest) | 103,330 | 10,423 | 10% | 4.8% | [before and after](docs/images/treasure_chest.jpg) |
+| [Gothic statue](https://polyhaven.com/a/gothic_statue) | 27,739 | 16,586 | 60% | 5.9% | [before and after](docs/images/gothic_statue.jpg) |
+| [Lion head](https://polyhaven.com/a/lion_head) | 47,214 | 7,940 | 17% | 5.9% | [before and after](docs/images/lion_head.jpg) |
+| [Horse statue](https://polyhaven.com/a/horse_statue_01) | 22,388 | 5,609 | 25% | 5.9% | [before and after](docs/images/horse_statue_01.jpg) |
+| [Chess set (33 pieces)](https://polyhaven.com/a/chess_set) | 76,832 | 10,110 | 13% | 3.6% | [before and after](docs/images/chess_set.jpg) |
+| [Spinning wheel](https://polyhaven.com/a/spinning_wheel_01) | 52,023 | 16,644 | 32% | 3.7% | [before and after](docs/images/spinning_wheel_01.jpg) |
+| [Sofa (already low poly)](https://polyhaven.com/a/Sofa_01) | 4,101 | 1,571 | 38% | 5.9% | [before and after](docs/images/Sofa_01.jpg) |
+| [Drill press](https://polyhaven.com/a/drill_press_01) | 58,511 | 16,809 | 29% | 5.8% | [before and after](docs/images/drill_press_01.jpg) |
+| [Overhead crane](https://polyhaven.com/a/overhead_crane) | 89,964 | 22,541 | 25% | 5.4% | [before and after](docs/images/overhead_crane.jpg) |
+| [Modular wooden pier](https://polyhaven.com/a/modular_wooden_pier) | 84,780 | 25,906 | 31% | 6.0% | [before and after](docs/images/modular_wooden_pier.jpg) |
+| [Moss rocks (6 pieces)](https://polyhaven.com/a/rock_moss_set_01) | 63,127 | 20,425 | 32% | 5.9% | [before and after](docs/images/rock_moss_set_01.jpg) |
 | [Namaqualand boulder](https://polyhaven.com/a/namaqualand_boulder_02) | 97,964 | 52,789 | 54% | 6.0% | [before and after](docs/images/namaqualand_boulder_02.jpg) |
-| [Ship pinnace](https://polyhaven.com/a/ship_pinnace) | 168,317 | 63,889 | 38% | 6.4% | [before and after](docs/images/ship_pinnace.jpg) |
-| [Dutch ship](https://polyhaven.com/a/dutch_ship_large_01) | 110,616 | 36,591 | 33% | 5.5% | [before and after](docs/images/dutch_ship_large_01.jpg) |
+| [Ship pinnace](https://polyhaven.com/a/ship_pinnace) | 168,317 | 59,904 | 36% | 5.8% | [before and after](docs/images/ship_pinnace.jpg) |
+| [Dutch ship](https://polyhaven.com/a/dutch_ship_large_01) | 110,616 | 36,115 | 33% | 6.4% | [before and after](docs/images/dutch_ship_large_01.jpg) |
 | [Coast rocks (scan)](https://polyhaven.com/a/coast_rocks_02) | 1,260,423 | 434,995 | 35% | 5.9% | [before and after](docs/images/coast_rocks_02.jpg) |
 | [Coastal cliff (scan)](https://polyhaven.com/a/coastal_cliff_04) | 1,537,926 | 362,292 | 24% | 6.0% | [before and after](docs/images/coastal_cliff_04.jpg) |
 
 
 *View changed* is the share of the picture that differs from your original, seen from six sides. CurioMesh measures it
 itself. It is not a quality score, and it says nothing about how tidy the quads are. *Size* is the result as a share of the
-original's faces. Folded quads (a quad that is folded or flipped) are rare but not zero: the treasure chest has 1 of 10,789; the ship pinnace has 26 of 63,889. Numbers are from
-commit `77d913d`, run on Blender 5.2.3 LTS.
+original's faces. Folded quads (a quad that is folded or flipped) are rare but not zero: the drill press has 1 of 16,809; the treasure chest has 1 of 10,423; the ship pinnace has 40 of 59,904. Numbers are from
+commit `7f94ff8`, run on Blender 5.2.3 LTS.
 
 Rough rock and fine detail need the most faces to keep their look. Hard-surface models with big smooth areas gain the most.
-The sofa starts small, at 4,101 faces, and still ends at 1,658.
+The sofa starts small, at 4,101 faces, and still ends at 1,571.
 
 ## Pick what it is for
 
-Open the **Guided** panel in the CurioMesh tab (`3D View > N-panel > CurioMesh`), choose **Auto Segments**, pick a **Use**,
-and press **Start**. Nothing changes in your scene until you press **Apply**.
+Open the **Guided** panel in the CurioMesh tab (`3D View > N-panel > CurioMesh`) and follow the numbered steps: **1.** click a mesh,
+**2.** choose what it is for, **3.** press **Start**, **4.** fix parts if you want (optional), **5.** press **Apply**. Nothing changes in your scene
+until Apply. The older one-pass remesher is still there as **Classic Remesh**, closed by default.
+
+Not sure which Use to pick? Press **Auto** at the top of the panel. It looks at your mesh and the free memory on this PC, picks the Use and
+settings, says in plain words why it chose them, and starts. You can still change anything before you press Apply.
 
 Each Use sets Detail, Method and Output for you. Change any of them and the Use becomes Custom. The same bust with each Use:
 
 | Use | CurioMesh faces | Triangles left | View changed | Wire pictures |
 |---|---:|---:|---:|---|
-| Low Poly | 1,396 | 1,396 | 10.4% | [before and after](docs/images/bust_low_poly.jpg) |
-| Game Asset (default) | 2,632 | 0 | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
-| Animation | 7,042 | 0 | 2.0% | [before and after](docs/images/bust_animation.jpg) |
-| Subdivision | 6,967 | 0 | 2.1% | [before and after](docs/images/bust_subdiv.jpg) |
-| Scan Cleanup | 5,478 | 0 | 2.0% | [before and after](docs/images/bust_scan.jpg) |
-| Sculpt Base | 3,194 | 0 | 6.4% | [before and after](docs/images/bust_sculpt.jpg) |
+| Low Poly | 1,492 | 1,492 | 9.4% | [before and after](docs/images/bust_low_poly.jpg) |
+| Game Asset (default) | 2,508 | 0 | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
+| Animation | 4,228 | 0 | 10.7% | [before and after](docs/images/bust_animation.jpg) |
+| Subdivision | 7,932 | 0 | 1.4% | [before and after](docs/images/bust_subdiv.jpg) |
+| Scan Cleanup | 5,638 | 0 | 1.9% | [before and after](docs/images/bust_scan.jpg) |
+| Sculpt Base | 3,402 | 0 | 5.9% | [before and after](docs/images/bust_sculpt.jpg) |
 
+
+The Animation row shows a higher View changed (10.7%) because its level 0 is a clean cage that keeps its own rough outline, and the Multires levels bring the shape back. That cage has 38 folded quads out of 4,228. Low Poly leaves every face a triangle, as it should, and changes 9.4% of the view.
 
 | Use | What it is for |
 |---|---|
 | Low Poly | The fewest faces for a game prop or a background object. Flat areas collapse into big polygons, then triangles. Small parts may vanish. |
 | Game Asset | All quads, few faces. The default. |
-| Animation | All quads in even sizes, with more faces so the mesh bends cleanly. Check eyes, mouth and joints by hand. |
-| Subdivision | All quads, with flat panels kept as single large quads so smoothing keeps the shape. |
+| Animation | All quads in even sizes, with more faces so the mesh bends cleanly. Uses a clean cage with the detail in Multires levels, and Redraw Messy Quads. Check eyes, mouth and joints by hand. |
+| Subdivision | All quads, with flat panels kept as single large quads so smoothing keeps the shape. Redraw Messy Quads is on. |
 | Scan Cleanup | Keeps more detail of a dirty scan. Scans have few truly flat areas, so no flat merging. |
 | Sculpt Base | Even, smooth quads to sculpt on. Smoothness over detail. |
 
-Under the Use you can pick a **Method** (Auto, Pairing, Flat Quads, QuadriFlow, Grid Fill, Flow Fill, Tris Only) and an
+Under the Use you can pick a **Method** (Auto, Pairing, Flat Quads, QuadriFlow, Grid Fill, Flow Fill, Field Rows, Tris Only) and an
 **Output** of triangles, quads or mixed. The tooltips explain hard edges, UV seams and Surface Fit.
 
 ## Choose a layout style
@@ -129,12 +136,12 @@ Quads can follow the shape, or they can run in rows. Pick what comes first when 
 
 | Style | Model | CurioMesh quads | View changed | Tidiness | Wire pictures |
 |---|---|---:|---:|---:|---|
-| Keep Detail | Marble bust | 2,632 | 6.0% | 28 | [before and after](docs/images/marble_bust_01.jpg) |
-| Balanced | Marble bust | 5,708 | 5.2% | 69 | [before and after](docs/images/bust_balanced.jpg) |
+| Keep Detail | Marble bust | 2,508 | 6.0% | 27 | [before and after](docs/images/marble_bust_01.jpg) |
+| Balanced | Marble bust | 3,920 | 6.0% | 68 | [before and after](docs/images/bust_balanced.jpg) |
 | Clean Rows | Marble bust | 14,147 | 5.7% | 97 | [before and after](docs/images/bust_rows.jpg) |
 | Keep Detail | Concrete road barrier | 987 | 5.9% | 16 | [before and after](docs/images/concrete_road_barrier.jpg) |
 | Balanced | Concrete road barrier | 1,195 | 6.1% | 51 | [before and after](docs/images/barrier_balanced.jpg) |
-| Clean Rows | Concrete road barrier | 910 | 6.4% | 22 | [before and after](docs/images/barrier_rows.jpg) |
+| Clean Rows | Concrete road barrier | 2,486 | 6.2% | 99 | [before and after](docs/images/barrier_rows.jpg) |
 
 
 ![Blender quad retopology with the Keep Detail style on a marble bust, wireframe before and after](docs/images/marble_bust_01.jpg)
@@ -147,10 +154,21 @@ Quads can follow the shape, or they can run in rows. Pick what comes first when 
 ## Reduce To a number of faces
 
 Set **Aim** to Reduce To and give a percentage of your faces or a face count. The result lands within about 10% of it unless the parts
-cannot go that low, and the summary tells you how much of the view changed. On the bust, asking for 1,500 faces gave 1,586
-with 11.4% of the view changed.
+cannot go that low, and the summary tells you how much of the view changed. On the bust, asking for 1,500 faces gave 1,491
+with 11.2% of the view changed.
 
 ![Reduce polygon count in Blender: marble bust reduced to about 1,500 quad faces, wireframe before and after](docs/images/bust_reduce.jpg)
+
+## Multires Detail: a clean cage with your shape in the levels
+
+Turn on **Multires Detail** (it is Animation's default route, and offered for Subdivision and Sculpt Base) and CurioMesh makes a clean, low quad cage.
+On Apply, the cage keeps its faces at level 0 and gets a Multires modifier whose levels bring your mesh's shape back, using Blender's own Subdivide and
+Reshape. Animate or export level 0, and sculpt or bake from the levels above it. Your mesh is only read. On the bust, the cage has 4,228 quads at level 0, 16,912 at level 1 and 67,648 at level 2.
+
+![Multires levels on a marble bust in Blender: the original, then the clean quad cage at level 0 and the detail restored at levels 1 and 2, wire on every mesh](docs/images/bust_multires.jpg)
+
+Level 0 keeps its own rough outline, so a normal map changes its shading only. For any cage you made yourself, select it and your source mesh and press
+**Add Multires Detail**.
 
 ## Review Segments: find the part that is wrong, and redo only that
 
@@ -183,6 +201,7 @@ A redo is refused when it would make more faces than it replaces, and the panel 
 ## Bake detail, UVs and game engines
 
 - **Bake Detail** sits next to Apply. Choose Off, **Normal Map** or **Normal + Color**, at 512 to 4096 pixels. Your mesh is only read. Normal + Color makes one new material with new UVs and is the recommended route for textured game assets.
+- **Make LOD Set** makes three new objects named `_LOD0`, `_LOD1` and `_LOD2` for game engines, each a Reduce To of your mesh at percents you choose (50, 25 and 12.5% by default). Only the first runs the full search.
 - **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces.
 - Apply marks edges sharper than 60 degrees as hard, and the result takes its shading from the nearest source points, so flat sides stay flat.
 - Baking was tested through FBX and glTF export and re-import in Blender. It has not been tested in a game engine yet.
@@ -198,7 +217,7 @@ exactly. Each region appears when it is done, and finished regions are saved so 
 **Import Result** brings the answer back. CurioMesh never uploads anything and has no accounts or keys.
 See [docs/CLOUD_WORKFLOW.md](docs/CLOUD_WORKFLOW.md).
 
-At the default settings, the coast rocks scan went from 1,260,423 faces to 434,995 quads (5.9% of the view changed) in 20 min and the coastal cliff scan went from 1,537,926 faces to 362,292 quads (6.0% of the view changed) in 19 min, on a PC that was also doing other work. Both stayed all quads.
+At the default settings, the coast rocks scan went from 1,260,423 faces to 434,995 quads (5.9% of the view changed) in 5 min and the coastal cliff scan went from 1,537,926 faces to 362,292 quads (6.0% of the view changed) in 7 min, on a PC that was also doing other work. Both stayed all quads.
 
 Two options help on rough scans of rock, terrain or sea floor, and both are off by default. **Rough As Texture** judges rough
 surfaces by their average direction instead of every pixel, so far fewer faces are kept (bumps smaller than a few pixels are lost).
@@ -211,9 +230,12 @@ surfaces by their average direction instead of every pixel, so far fewer faces a
 
 | Feature | What it does |
 |---|---|
+| **Redraw Messy Quads** | Parts with many irregular vertices are redrawn as pole-free grids. On for Animation and Subdivision, and left off on models of many loose parts. |
+| **Segments inside one mesh** | Splits a connected model along necks and creases (head, torso, plinth). Merge, split, paint, rename. |
+| **Draw Edge Loops and Deformation Lines** | Loops round eyes and mouths, lines across joints. The quads follow. |
+| **Mirror, Guide Curves, Paint Density** | Symmetric results, strokes the quads follow, and more faces where you paint. |
 | **Show it how** | Fix a spot by hand once, and CurioMesh finds the same pattern in later results. |
 | **Redo inside shapes (Live Boolean)** | Union, Subtract or Intersect boxes and spheres, and only what is inside is redone, live. |
-| **Bake Detail** | Normal map, or normal map and colour, onto the new mesh. Your mesh is only read. |
 | **UV and shading care** | Keep UV Seams, hard edges past 60 degrees, shading read from your source. |
 | **Checks and repair** | Non-manifold edges, flipped faces, duplicates, holes, crossing faces. What cannot be fixed is selected. |
 | **Tidiness score** | A 0 to 100 number for how close the quad layout is to hand-made meshes. |
@@ -224,7 +246,7 @@ surfaces by their average direction instead of every pixel, so far fewer faces a
 | **Regions** | Redo any selection, face set, vertex group or cage with an exact seam. [More.](docs/OLDER_FEATURES.md) |
 | **Flat Quads** | Flat areas become one big quad each. [More.](docs/OLDER_FEATURES.md) |
 | **Guided points and Work Live** | Click where detail matters, and retopo area by area in the background. [More.](docs/OLDER_FEATURES.md) |
-| **Whole-mesh Atlas-Q, Fill Loop, Fit to Surface** | The older whole-mesh remesher and its helpers. [More.](docs/ATLAS_Q_REFERENCE.md) |
+| **Classic Remesh** | The older whole-mesh remesher (Atlas-Q, Fill Loop, Fit to Surface), folded away under the Guided panel. [More.](docs/ATLAS_Q_REFERENCE.md) |
 | **HUD and heatmap** | Quad percentage, leftover triangles and poles, shown in the viewport. |
 | **Native Turbo core** | Rust code on all cores for the slow steps, with a Python fallback. |
 
@@ -250,9 +272,9 @@ Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/rel
 
 Then enable **CurioMesh**, select a mesh, and open `3D View > N-panel > CurioMesh`.
 
-The version on extensions.blender.org is Python-only (the site allows no compiled code), so it is slower on big
-meshes, and its tidiness score uses CC0 reference meshes only. The GitHub zips include the fast native Turbo core.
-`python scripts/build_release.py --blender-listing` builds that zip.
+The version on extensions.blender.org is Python-only (the site allows no compiled code), so it is slower on big meshes, and its tidiness score uses CC0
+reference meshes only. The GitHub zips include the fast native Turbo core. `python scripts/build_release.py --blender-listing` builds that zip. Releases are built
+by the release workflow from the tag, and each comes with `SHA256SUMS.txt` so you can check your download.
 
 The last full test on every Blender version from 3.6 to 5.2 was for 0.8.0. The checks for this version ran on 3.6 LTS, 4.2 LTS and 5.2 LTS, and most of the work on Auto Segments
 was done on 5.2. The viewport overlays draw with Blender's GPU module. If a build cannot draw them, the rest of the add-on keeps working.
@@ -277,6 +299,12 @@ Yes. Review Segments redoes one part with its own method and detail while the se
 **How is it different from Blender's Quad Remesh?**
 Blender's Quad Remesh works on the whole object in one pass. CurioMesh works part by part, measures each result against your original, and lets you redo single parts. QuadriFlow is also one of its Methods, for smooth organic parts.
 
+**How do I make LODs for a game asset in Blender?**
+Select the mesh, set the three percents in Make LOD Set (50, 25 and 12.5% by default) and press it. You get `_LOD0`, `_LOD1` and `_LOD2` as new objects, and only the first runs the full search.
+
+**Can I get a clean low-poly cage with the detail in Multires levels?**
+Yes. Multires Detail makes the cage and puts your mesh's shape in the levels above level 0. It is the default route for the Animation Use.
+
 **Does it keep my UVs?**
 Turn on Keep UV Seams and each quad stays inside one UV island, at the cost of more faces on models with many islands. Or bake with Normal + Color, which makes new UVs and does not need the old seams.
 
@@ -297,11 +325,12 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-in
 - **Selected Faces Only** for Draw Edge Loops does not close its seam yet and is switched off. Use Redo Inside Shapes.
 - **Live Boolean** refuses a redo that would make more faces than it replaces. On a mesh already reduced hard, that can be most redos.
 - **No global patch layout.** CurioMesh has none, and it does not promise exact loops round eyes, mouths or joints without your help. An optional script, `scripts/flowtool.py`, can use QuadWild if you install it separately. It is not in the panel, it covers organic parts only, and it is untested on Linux and macOS.
-- **Native core builds.** The release workflow builds the Turbo core for Windows, Linux and macOS (Intel and Apple Silicon). The Intel Mac build is compiled but not run in CI, and the developers tried only Windows by hand. Without the core, CurioMesh falls back to Python, which is much slower on big meshes.
+- **Native core builds.** The release workflow builds the Turbo core for Windows, Linux and macOS (Intel and Apple Silicon). The Intel Mac build is compiled but not run in CI, and the developers tried only Windows by hand. Without the core, CurioMesh falls back to Python code, which is much slower on big meshes.
 - **CPU only.** There is no GPU compute.
-- **Folded slivers on some small thin parts.** A quad can come out bent about 90 degrees round an edge of a thin part (ship pinnace: 40 of 59,900 quads; treasure chest: 1). They are named in the summary and selected on Apply, so you can fix them by hand.
-- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
+- **Folded slivers on some small thin parts.** A quad can come out bent about 90 degrees round an edge of a thin part. They are named in the summary and selected on Apply, so you can fix them by hand.
 - **Judge After Baking is experimental.** On big flat areas of a scan it can leave long thin slivers, which bake badly, and its score misses them. It is off by default.
+- **Redraw Messy Quads costs time.** On some models it roughly doubles the tidiness score for 7 to 50% more faces and 2 to 5 times the time, and it is left off on models of more than 40 loose pieces.
+- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
 
 ## Community
 
@@ -344,15 +373,3 @@ CurioMesh is free software: you can redistribute it and/or modify it under the t
 the Free Software Foundation, either version 3 of the License, or (at your option) any later version. See [LICENSE](LICENSE).
 
 Versions up to 0.5.1 were released under MIT. From 0.6.0 on, CurioMesh is GPL-3.0-or-later, the same family of licence Blender itself uses.
-
-<!--
-Blocks to switch on when the branches are merged. Do not publish them before:
-
-## Auto button (branch `multires`, not in `next`)
-One Auto button at the top of Auto Segments looks at the mesh and the free memory, picks the Use and the settings, says why, and starts.
-Nothing changes until Apply.
-
-## Multires Detail (branch `multires`, not in `next`)
-A clean, low cage keeps its faces at level 0 and the shape of your mesh comes back as Multires levels (Blender's Subdivide and Reshape; your mesh is only read).
-Offered for Animation, Subdivision and Sculpt Base. Needs wire pictures of the bust at level 0, 1 and 2: run regen.py on the merged commit.
--->
