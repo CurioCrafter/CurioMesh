@@ -640,6 +640,46 @@ def _frame(a: np.ndarray, b: np.ndarray) -> np.ndarray | None:
     return np.stack([x, np.cross(z, x), z], axis=1)
 
 
+def vertex_owners(points: np.ndarray, faces, known_points: np.ndarray, known_faces, known_parts: np.ndarray) -> np.ndarray:
+    """Which part each vertex of a processed mesh belongs to, from the parts of the mesh it was made from.
+
+    A connected stretch of faces goes by what most of its vertices were; a new vertex (from closing a stretch) follows it.
+    """
+
+    size = max(float(np.ptp(known_points, axis=0).max()), 1e-30) if len(known_points) else 1.0
+    known_owner = np.zeros(len(known_points), dtype=np.int64)
+    for f, part in zip(known_faces, np.asarray(known_parts).tolist()):
+        known_owner[list(f)] = part
+    table = {tuple(key): part for key, part in zip(np.rint(known_points / (1e-9 * size)).astype(np.int64).tolist(), known_owner.tolist())}
+    keys = np.rint(points / (1e-9 * size)).astype(np.int64).tolist()
+    parent = list(range(len(points)))
+
+    def find(v: int) -> int:
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
+
+    for f in faces:
+        first = find(f[0])
+        for v in f[1:]:
+            parent[find(v)] = first
+    votes: dict[int, dict[int, int]] = {}
+    for v, key in enumerate(keys):
+        part = table.get(tuple(key))
+        if part is not None:
+            count = votes.setdefault(find(v), {})
+            count[part] = count.get(part, 0) + 1
+    owner = np.zeros(len(points), dtype=np.int64)
+    for v in range(len(points)):
+        count = votes.get(find(v))
+        if count:
+            owner[v] = max(count, key=count.get)
+        else:
+            owner[v] = known_owner[int(np.argmin(((known_points - points[v]) ** 2).sum(axis=1)))]
+    return owner
+
+
 def moved(points: np.ndarray, move: tuple) -> np.ndarray:
     turn, centre_a, centre_b, _mirror = move
     return (points - centre_a) @ turn.T + centre_b

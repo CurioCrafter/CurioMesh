@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import bmesh
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 from . import overlay, region
@@ -154,6 +154,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_detail: bpy.props.FloatProperty(name="Change Allowed", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces", default=6.0, min=0.5, soft_max=30.0, precision=1, subtype="PERCENTAGE", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
+    auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Auto Segments: Apply writes one mesh per repeated part, placed as linked objects, so a copy costs no geometry. Each object is a draw call unless your engine instances it, and copies share the first one's UVs. Off: one merged mesh", default=False)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Relax-and-project passes that settle the new quads onto your original surface", default=2, min=0, max=30)
     feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Edges sharper than this (degrees) count as hard edges and are kept", default=40.0, min=5.0, max=170.0)
@@ -848,6 +849,28 @@ def _make_mesh(name, source, res, uvs=True):
     if uvs:
         _transfer_uvs(mesh, source, _source_data(source), res)
     return mesh
+
+
+def _write_instances(out, source, instances) -> int:
+    """Under `out`, link one object per placed copy of each repeated part. Returns how many objects that made."""
+    made = 0
+    for number, group in enumerate(instances["groups"]):
+        mesh = _make_mesh(f"{source.name}_Part_{number}", source, group)
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+        mesh.transform(Matrix.Translation(-Vector(group["centre"].tolist())))  # UVs come from the source, so read them in place first
+        for k, matrix in enumerate(group["matrices"]):
+            child = bpy.data.objects.new(f"{mesh.name}.{k}", mesh)
+            for collection in out.users_collection:
+                collection.objects.link(child)
+            child.parent = out
+            child.matrix_local = Matrix(matrix.tolist())
+            for slot, copy in zip(source.material_slots, child.material_slots):
+                if slot.link == "OBJECT":
+                    copy.link = "OBJECT"
+                    copy.material = slot.material
+            made += 1
+    return made
 
 
 def _build_preview(context, source, res, uvs=True) -> None:
@@ -1900,7 +1923,8 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         if res is None:
             self.report({"WARNING"}, "Nothing to apply")
             return {"CANCELLED"}
-        mesh = _make_mesh(source.name + "_Retopo", source, res)
+        instances = res.get("instances") if gs.scope == "AUTO" and gs.auto_instances else None
+        mesh = _make_mesh(source.name + "_Retopo", source, instances["rest"] if instances else res)
         for poly in mesh.polygons:
             poly.use_smooth = True
         if gs.apply_mode == "REPLACE":
@@ -1915,11 +1939,16 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
                     copy.link = "OBJECT"
                     copy.material = slot.material
         count = len(mesh.polygons)
+        placed = _write_instances(out, source, instances) if instances else 0
         gs.enabled = False  # removes the preview, stops the timer
         bpy.ops.object.select_all(action="DESELECT")
         out.select_set(True)
         context.view_layer.objects.active = out
-        self.report({"INFO"}, f"{count:,} faces written to {out.name}")
+        if instances:
+            count += sum(len(group["faces"]) for group in instances["groups"])
+            self.report({"INFO"}, f"{count:,} faces written to {out.name}, in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes")
+        else:
+            self.report({"INFO"}, f"{count:,} faces written to {out.name}")
         return {"FINISHED"}
 
 
@@ -2016,6 +2045,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         row.prop(gs, "strategy", expand=True)
         if gs.scope == "AUTO":
             layout.prop(gs, "auto_detail")
+            layout.prop(gs, "auto_instances")
         else:
             layout.prop(gs, "base_faces")
         row = layout.row(align=True)

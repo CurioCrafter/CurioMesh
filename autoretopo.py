@@ -189,6 +189,7 @@ class AutoJob:
         self.picture_sizes: list[int] = []
         self.seen: list[float] = []
         self.picked: list[int] = []
+        self.instances: dict | None = None
         self._search = self._run()
 
     def stop(self) -> None:
@@ -228,8 +229,10 @@ class AutoJob:
 
     def _copy_of(self, index: int, points: np.ndarray, polys, kinds) -> bool:
         """If this piece is a copy of one already worked out, take that one's sizes, moved over. True if it was."""
+        if len(set(kinds)) > 1:
+            return False  # faces of copies don't correspond one to one, so materials could land on the wrong ones
         for rep, rep_points, rep_polys in self.reps:
-            if len(rep_polys) != len(polys) or len(rep_points) != len(points):
+            if len(rep_polys) != len(polys) or len(rep_points) != len(points) or self.sizes[rep][-1][2][0] != kinds[0]:
                 continue
             move = special.match_copy(rep_points, points)
             if move is None:
@@ -308,11 +311,13 @@ class AutoJob:
         self.ready.append([ready[k] for k in order])
         self.seen.append(seen)
 
-    def _combined(self, rebuilt: bool | None = None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
-        """Every piece at its picked size, and any not measured yet as it is. `rebuilt` True or False keeps only those."""
+    def _combined(self, rebuilt: bool | None = None, firsts: bool = False) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
+        """Every piece at its picked size, and any not measured yet as it is. `rebuilt` True or False keeps only those; `firsts` leaves out copies."""
         all_points, all_faces, all_kinds, parts = [], [], [], []
         offset = 0
         for index, ids in enumerate(self.pieces):
+            if firsts and index in self.twins:
+                continue
             if index < len(self.sizes):
                 at = self.picked[index] if index < len(self.picked) else 0
                 if rebuilt is not None and self.ready[index][at] != rebuilt:
@@ -338,16 +343,89 @@ class AutoJob:
             co, faces, kinds, parts = final
             count = len(faces)
             new = np.ones(count, bool)
-        self.output = {"co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
+        self.output = {"instances": self.instances if final is not None else None, "co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
-    def _join_rebuilt(self, paired: MeshData) -> MeshData:
-        """The paired pieces with the rebuilt ones, which are already quads."""
+    def _join_rebuilt(self, paired: MeshData, pair_points: np.ndarray, pair_faces, pair_parts: np.ndarray) -> tuple[MeshData, np.ndarray]:
+        """The paired pieces with the rebuilt ones, which are already quads, and the piece each vertex belongs to."""
         points = np.asarray(paired.vertices, dtype=np.float64).reshape(-1, 3)
-        co, faces, kinds, _parts = self._combined(True)
+        owner = special.vertex_owners(points, paired.faces, pair_points, pair_faces, pair_parts) if len(points) else np.zeros(0, dtype=np.int64)
+        co, faces, kinds, parts = self._combined(True, firsts=True)
+        rebuilt_owner = np.zeros(len(co), dtype=np.int64)
+        for f, part in zip(faces, parts.tolist()):
+            rebuilt_owner[list(f)] = part
         joined = [tuple(face) for face in paired.faces] + [tuple(v + len(points) for v in f) for f in faces]
-        return MeshData(np.vstack([points, co]), joined, list(paired.face_materials) + kinds)
+        return MeshData(np.vstack([points, co]), joined, list(paired.face_materials) + kinds), np.concatenate([owner, rebuilt_owner])
+
+    def _with_copies(self, mesh: MeshData, owner: np.ndarray) -> tuple[MeshData, np.ndarray]:
+        """The worked-out pieces with every copy added, exactly alike, and which worked-out vertex each vertex came from."""
+        points = np.asarray(mesh.vertices, dtype=np.float64).reshape(-1, 3)
+        back = np.arange(len(points))
+        if not self.twins:
+            return mesh, back
+        of_piece: dict[int, list[int]] = {}
+        for k, face in enumerate(mesh.faces):
+            of_piece.setdefault(int(owner[face[0]]), []).append(k)
+        all_points, all_back = [points], [back]
+        faces = [tuple(face) for face in mesh.faces]
+        kinds = list(mesh.face_materials)
+        offset = len(points)
+        for rep, move in self.twins.values():
+            ids = of_piece.get(rep, [])
+            if not ids:
+                continue
+            used, inverse = np.unique(np.fromiter((v for k in ids for v in mesh.faces[k]), dtype=np.int64), return_inverse=True)
+            local, at = [], 0
+            for k in ids:
+                size = len(mesh.faces[k])
+                local.append(tuple(int(v) + offset for v in inverse[at : at + size]))
+                at += size
+                kinds.append(mesh.face_materials[k])
+            faces += special.wound(local, move)
+            all_points.append(special.moved(points[used], move))
+            all_back.append(used)
+            offset += len(used)
+        return MeshData(np.vstack(all_points), faces, kinds), np.concatenate(all_back)
+
+    def _instances(self, mesh: MeshData, owner: np.ndarray) -> dict:
+        """The result as one mesh per repeated piece with where each goes, and one mesh for everything else."""
+        points = np.asarray(mesh.vertices, dtype=np.float64).reshape(-1, 3)
+        repeated: dict[int, list] = {}
+        for rep, move in self.twins.values():
+            repeated.setdefault(rep, []).append(move)
+        of_piece: dict[int, list[int]] = {}
+        for k, face in enumerate(mesh.faces):
+            part = int(owner[face[0]])
+            of_piece.setdefault(part if part in repeated else -1, []).append(k)
+
+        def part_mesh(ids):
+            used, inverse = np.unique(np.fromiter((v for k in ids for v in mesh.faces[k]), dtype=np.int64), return_inverse=True)
+            faces, at = [], 0
+            for k in ids:
+                size = len(mesh.faces[k])
+                faces.append(tuple(int(v) for v in inverse[at : at + size]))
+                at += size
+            return {"co": points[used], "faces": faces, "mat": np.asarray([int(mesh.face_materials[k]) if str(mesh.face_materials[k]).isdigit() else 0 for k in ids], dtype=np.int32)}
+
+        groups = []
+        for rep, moves in repeated.items():
+            if rep not in of_piece:
+                continue
+            group = part_mesh(of_piece[rep])
+            centre = moves[0][1]
+            place = np.eye(4)
+            place[:3, 3] = centre
+            matrices = [place]
+            for turn, _from, to, _mirror in moves:
+                matrix = np.eye(4)
+                matrix[:3, :3] = turn
+                matrix[:3, 3] = to
+                matrices.append(matrix)
+            group.update(centre=centre, matrices=matrices)
+            groups.append(group)
+        rest = part_mesh(of_piece[-1]) if -1 in of_piece else {"co": np.zeros((0, 3)), "faces": [], "mat": np.zeros(0, dtype=np.int32)}
+        return {"rest": rest, "groups": groups}
 
     def _pair(self, co, faces, kinds) -> None:
         try:
@@ -420,11 +498,18 @@ class AutoJob:
                     self.ready[twin].insert(where, False)
                     self.shares[twin].insert(where, share)
 
-    def _reduce(self, result, loss, reference, center, half, pixel):
-        """Generator: take quads away until the view has changed by the amount asked for. Returns (mesh, loss)."""
+    def _reduce(self, result, owner, loss, reference, center, half, pixel):
+        """Generator: take quads away until the view has changed by the amount asked for. Returns (mesh, its vertices' pieces, loss).
+
+        Quads only come off the worked-out pieces, so copies stay exact; each look is at them all.
+        """
         if loss > self.detail:
-            return result, loss
+            return result, owner, loss
         reducer = yield from self._background(lambda: QuadReducer(result))
+        start_owner = owner
+        # A rebuilt part is as few rows as it can hold. Its long flat quads look cheap to take away, but each one shows.
+        rebuilt = [i for i, k in enumerate(self.picked) if self.ready[i][k]]
+        reducer.freeze(np.flatnonzero(np.isin(owner, rebuilt)).tolist())
         limit = PIECE_LIMIT * self.detail / 100.0
 
         def over_limit(mesh, view):
@@ -432,10 +517,11 @@ class AutoJob:
             labels = np.unique(patch._labels(len(mesh.faces), fa, fb), return_inverse=True)[1]
             parts = parts_changed_too_much(reference, view, pixel, labels, limit)
             kept = np.isin(labels, parts)
-            return sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]})
+            return np.asarray(sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]}), dtype=np.int64)
 
-        view = yield from pictures(np.asarray(result.vertices), result.faces, center, half, MAX_PIXELS)
-        reducer.freeze(over_limit(result, view))  # whatever is already at its limit stays as it is
+        full, back = yield from self._background(lambda: self._with_copies(result, owner))
+        view = yield from pictures(np.asarray(full.vertices), full.faces, center, half, MAX_PIXELS)
+        reducer.freeze(sorted(set(back[over_limit(full, view)].tolist())))  # whatever is already at its limit stays as it is
         saved = yield from self._background(reducer.save)
         step = REDUCE_STEP
         looks = 0
@@ -451,13 +537,15 @@ class AutoJob:
                 if reducer.alive == before:
                     break
             attempt = yield from self._background(reducer.result)
-            self.stage = f"Taking away quads: {len(attempt.faces):,}"
-            view = yield from pictures(np.asarray(attempt.vertices), attempt.faces, center, half, MAX_PIXELS)
+            attempt_owner = start_owner[np.asarray(reducer.original_ids(range(len(attempt.vertices))), dtype=np.int64)]
+            full, back = yield from self._background(lambda: self._with_copies(attempt, attempt_owner))
+            self.stage = f"Taking away quads: {len(full.faces):,}"
+            view = yield from pictures(np.asarray(full.vertices), full.faces, center, half, MAX_PIXELS)
             wrong, shown = picture_counts(reference, view, pixel)
             now = 100.0 * wrong / max(shown, 1)
-            ruined = over_limit(attempt, view)
+            ruined = sorted(set(back[over_limit(full, view)].tolist()))
             if now <= self.detail and not ruined:
-                result, loss = attempt, now
+                result, owner, loss = attempt, attempt_owner, now
                 saved = yield from self._background(reducer.save)
                 continue
             names = reducer.original_ids(ruined)
@@ -466,7 +554,7 @@ class AutoJob:
                 reducer.freeze(names, renamed=True)
             else:
                 step *= 0.5
-        return result, loss
+        return result, owner, loss
 
     def _run(self):
         fa, fb = patch.face_adjacency(self.faces)
@@ -504,7 +592,7 @@ class AutoJob:
                 break
             tried.add(pick)
             self.stage = f"Pairing into quads, try {round_index + 1}..."
-            co, faces, kinds, _parts = self._combined(False)
+            co, faces, kinds, parts = self._combined(False, firsts=True)
             self._paired = MeshData(np.zeros((0, 3)), [], [])
             if faces:
                 self._paired = None
@@ -517,18 +605,19 @@ class AutoJob:
                     yield
                 if self._paired is None:
                     return
-            result = self._join_rebuilt(self._paired)
-            points = np.asarray(result.vertices, dtype=np.float64)
-            out_faces = [tuple(face) for face in result.faces]
+            result, owner = self._join_rebuilt(self._paired, co, faces, parts)
+            full, _back = self._with_copies(result, owner)
+            points = np.asarray(full.vertices, dtype=np.float64)
+            out_faces = [tuple(face) for face in full.faces]
             self.stage = f"Checking the result, try {round_index + 1}..."
             view = yield from pictures(points, out_faces, center, half, MAX_PIXELS)
             wrong, shown = picture_counts(reference, view, pixel)
             unreduced = 100.0 * wrong / max(shown, 1)
             # Prefer anything at or under the amount asked for, then the fewest faces. With nothing fitting, the least change.
             over = unreduced > self.detail
-            rank = (unreduced > 1.1 * self.detail, over, len(result.faces) if unreduced <= 1.1 * self.detail else unreduced)
+            rank = (unreduced > 1.1 * self.detail, over, len(out_faces) if unreduced <= 1.1 * self.detail else unreduced)
             if best is None or rank < best[0]:
-                best = (rank, result, unreduced)
+                best = (rank, result, owner, unreduced)
             if ROOM * self.detail <= unreduced <= self.detail:
                 break
             if round_index + 1 < ROUNDS:
@@ -536,16 +625,17 @@ class AutoJob:
             # What the sizes say they lose differs from what the whole result loses, so go by the last pick.
             planned = sum(self.levels[i][k].loss for i, k in enumerate(self.picked))
             allowed = max(planned, 0.01 * asked * total_seen) * min(max(AIM * self.detail / max(unreduced, 0.01), 0.3), 4.0)
-        result, loss = yield from self._reduce(best[1], best[2], reference, center, half, pixel)
+        worked, owner, loss = yield from self._reduce(best[1], best[2], best[3], reference, center, half, pixel)
+        result, _back = self._with_copies(worked, owner)
+        self.instances = self._instances(worked, owner)
         points = np.asarray(result.vertices, dtype=np.float64)
         out_faces = [tuple(face) for face in result.faces]
         materials = list(result.face_materials)
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         quads = sum(1 for face in out_faces if len(face) == 4)
-        self.unique_faces = sum(self.levels[i][k].faces for i, k in enumerate(self.picked) if i not in self.twins)
-        self.copies = len(self.twins)
-        self.report = {"faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
+        placed = sum(len(group["matrices"]) for group in self.instances["groups"])
+        self.report = {"unique_faces": len(worked.faces), "copies": len(self.twins), "repeated_parts": len(self.instances["groups"]), "objects": placed + (1 if self.instances["rest"]["faces"] else 0), "faces": len(out_faces), "quads": quads, "tris": sum(1 for face in out_faces if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "seconds": time.perf_counter() - self.started}
         self._show((points, out_faces, materials, parts))
 
     def status(self) -> str:

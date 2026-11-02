@@ -51,6 +51,14 @@ class SpecialPartsTest(unittest.TestCase):
         builds = [special.build_tube(fit, 0.01, 0.1) for fit in special.fit_prisms(points, polys)]
         self.assertTrue(any(len(faces) < len(polys) and np.abs(np.ptp(out, axis=0) - np.ptp(points, axis=0)).max() < 0.02 for out, faces, _kinds in builds))
 
+    def test_processed_vertices_keep_the_part_they_came_from(self):
+        square = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
+        known = np.vstack([square, square + 5.0])
+        known_faces = [(0, 1, 2, 3), (4, 5, 6, 7)]
+        points = np.vstack([known, [[0.5, 0.5, 0.0]]])  # closing added a vertex in the middle of the first
+        faces = [(0, 1, 8), (1, 2, 8), (2, 3, 8), (3, 0, 8), (4, 5, 6, 7)]
+        self.assertEqual(special.vertex_owners(points, faces, known, known_faces, np.array([7, 9])).tolist(), [7, 7, 7, 7, 9, 9, 9, 9, 7])
+
     def test_cloth_rows_follow_the_folds(self):
         points, polys = _cloth()
         out, quads, _kinds = special.build_sheet(special.fit_sheet(points, polys), 60)
