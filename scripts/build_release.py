@@ -157,6 +157,54 @@ def _series_overrides(root: Path, series: str, layout: str) -> dict[str, bytes]:
     return {"__init__.py": text.encode("utf-8")}
 
 
+# extensions.blender.org build: Python only, CC0 data only, no outside programs.
+# Rules read 2026-11-02: https://extensions.blender.org/terms-of-service/ (1.2, 3.6, 5.2).
+LISTING_NOTE = (
+    "> **Python-only build.** This is the extensions.blender.org version. The site allows only Python code, so it has\n"
+    "> no Turbo core and is slower on big meshes. Its tidiness score uses CC0 reference meshes only, so the numbers sit\n"
+    "> a few points higher than in the GitHub zips. The GitHub zips include the fast native core:\n"
+    "> https://github.com/CurioCrafter/CurioMesh/releases/latest\n\n"
+)
+LISTING_NOTICES = """# Third-party notices (extensions.blender.org build)
+
+CurioMesh is GPL-3.0-or-later. This build is Python only and contains no compiled code.
+
+## Data
+
+- `triadq/patterns.json` holds statistics measured on CC0 / public-domain meshes only (Blender Studio Human Base
+  Meshes, MakeHuman base mesh, Keenan Crane's models). Sources are in `docs/PATTERN_SOURCES.md`.
+- `triadq/cases_table.json` holds camera-check results measured on Poly Haven models (CC0 1.0,
+  https://polyhaven.com). No geometry from them is included.
+"""
+
+
+def listing_overrides(root: Path) -> dict[str, bytes]:
+    """Text files rewritten for the listing zip: CC-BY credits, Rust and QuadWild mentions removed, permissions added."""
+    manifest = (root / "blender_manifest.toml").read_text(encoding="utf-8")
+    manifest = "".join(line for line in manifest.splitlines(True) if "native/src" not in line)
+    manifest = manifest.rstrip("\n") + '\n\n[permissions]\nfiles = "Save job files and exports next to the .blend"\n'
+    readme = (root / "README.md").read_text(encoding="utf-8").replace("\r\n", "\n")
+    readme = re.sub(r"Credits for the CC-BY works.*?\n\n(?=The models in the results)", "", readme, flags=re.S)
+    readme = re.sub(r"The triangle intersection test in the native core.*?THIRD_PARTY_NOTICES\.md\)\.\n\n", "", readme, flags=re.S)
+    readme = readme.replace("\n## ", "\n" + LISTING_NOTE + "## ", 1)
+    sources = (root / "docs" / "PATTERN_SOURCES.md").read_text(encoding="utf-8")
+    sources = "".join(line for line in sources.splitlines(True) if "CC-BY" not in line)
+    return {
+        "blender_manifest.toml": manifest.encode("utf-8"),
+        "README.md": readme.encode("utf-8"),
+        "THIRD_PARTY_NOTICES.md": LISTING_NOTICES.encode("utf-8"),
+        "docs/PATTERN_SOURCES.md": sources.encode("utf-8"),
+    }
+
+
+def build_listing(root: Path, output_dir: Path) -> Path:
+    """One zip for extensions.blender.org: no _native, CC0-only patterns.json, nothing that needs outside programs."""
+    package_id, version = release_metadata(root)
+    out = output_dir / f"{package_id}-{version}-blender-4.2-plus-listing.zip"
+    _write_archive(root, out, prefix="", overrides=listing_overrides(root), listing=True)
+    return out
+
+
 def _write_archive(
     root: Path,
     output: Path,
@@ -165,13 +213,18 @@ def _write_archive(
     overrides: dict[str, bytes] | None = None,
     series: str | None = None,
     native: list[tuple[Path, str]] | None = None,
+    listing: bool = False,
 ) -> None:
     overrides = overrides or {}
     files = source_files(root)
+    if listing:
+        files = [root / "triadq" / "patterns_cc0.json" if f.name == "patterns.json" else f for f in files]
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
             relative = PurePosixPath(path.relative_to(root).as_posix())
+            if relative.name == "patterns_cc0.json":
+                relative = relative.with_name("patterns.json")
             arcname = str(PurePosixPath(prefix) / relative) if prefix else str(relative)
             if str(relative) in overrides:
                 archive.writestr(arcname, overrides[str(relative)])
@@ -179,10 +232,10 @@ def _write_archive(
                 archive.write(path, arcname)
         for path, relative in native or ():
             archive.write(path, f"{prefix}/{relative}" if prefix else relative)
-    verify_archive(output, prefix=prefix, series=series)
+    verify_archive(output, prefix=prefix, series=series, listing=listing)
 
 
-def verify_archive(path: Path, *, prefix: str, series: str | None = None) -> None:
+def verify_archive(path: Path, *, prefix: str, series: str | None = None, listing: bool = False) -> None:
     with zipfile.ZipFile(path) as archive:
         entries = archive.namelist()
         required_prefix = f"{prefix}/" if prefix else ""
@@ -225,7 +278,13 @@ def verify_archive(path: Path, *, prefix: str, series: str | None = None) -> Non
         if layout == "extension"
         else _major_minor(_bl_info(init_source, origin=str(path))["blender"])
     )
-    if series is not None:
+    if listing:
+        banned = [e for e in entries if e.startswith(f"{required_prefix}_native") or "patterns_cc0" in e]
+        text = " ".join(zipfile.ZipFile(path).read(e).decode("utf-8", "ignore") for e in entries if e.endswith((".md", ".json", ".toml")))
+        if banned or any(w in text for w in ("CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool")):
+            raise ValueError(f"{path}: listing zip must hold no native code, CC-BY data or outside-program notes: {banned}")
+        expected_name = f"{package_id}-{version}-blender-{minimum}-plus-listing.zip"
+    elif series is not None:
         if minimum != series:
             raise ValueError(f"{path}: minimum Blender {minimum} does not match series {series}")
         expected_name = per_version_name(package_id, version, series, layout)
@@ -285,10 +344,18 @@ def main() -> None:
         help="Folder of prebuilt CurioMesh Turbo binaries (<platform tag>/_curiomesh_turbo.pyd|so) "
         "packed into every zip; without it the zips stay pure Python",
     )
+    parser.add_argument(
+        "--blender-listing",
+        action="store_true",
+        help="Build only the extensions.blender.org zip: Python only (no _native), CC0-only patterns, no CC-BY credits",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     output = args.output.resolve() if args.output else root / "dist"
     native_dir = args.native_dir.resolve() if args.native_dir else None
+    if args.blender_listing:
+        print(build_listing(root, output))
+        return
     archives = list(build_archives(root, output, native_dir))
     if args.per_version:
         archives += build_per_version(root, output, native_dir)

@@ -322,6 +322,10 @@ Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/rel
 Then enable **CurioMesh**, select a mesh, and open
 `3D View > N-panel > CurioMesh`.
 
+The version on extensions.blender.org is Python-only (the site allows no compiled code), so it is slower on big
+meshes, and its tidiness score uses CC0 reference meshes only. The GitHub zips include the fast native Turbo core.
+`python scriptsuild_release.py --blender-listing` builds that zip.
+
 Every release runs the full test suite and an install test on Blender 3.6 LTS,
 4.0, 4.1, 4.2 LTS, 4.3, 4.4, 4.5 LTS, 5.0, 5.1 and 5.2 LTS. The HUD and heatmap
 draw with Blender's GPU module; if a build cannot draw them, the rest of the
