@@ -158,7 +158,7 @@ def triangulate(points, faces, kinds):
     return points, out, mats
 
 
-def make_pure(mesh: MeshData, method, output, **pairing):
+def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
     """The faces for one group of pieces by NumPy alone (runs on a worker thread): (points, faces, materials)."""
     if method == "FLAT":
         if output == "TRIS":
@@ -168,7 +168,9 @@ def make_pure(mesh: MeshData, method, output, **pairing):
     elif output == "TRIS" or method == "TRIS":
         out = mesh
     else:
-        out = pair_and_close(mesh, seed_count=4 if method == "PAIRING" else 2, force_quads=output == "QUADS", **pairing)[0]
+        out, solver = pair_and_close(mesh, seed_count=4 if method == "PAIRING" else 2, force_quads=output == "QUADS", **pairing)
+        if solver.forced_pieces and notes is not None:
+            notes.append(f"{solver.forced_pieces} part(s) only closed by the last-resort split: up to 3-4x the faces and poor quads there, so check them")
     points, out_faces, mats = np.asarray(out.vertices, dtype=np.float64), [tuple(f) for f in out.faces], list(out.face_materials)
     if output == "TRIS" or method == "TRIS":
         points, out_faces, mats = triangulate(points, out_faces, mats)
@@ -787,7 +789,7 @@ class AutoJob:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
                 coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
-            made = make_pure(coarse, method, self.output_kind, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, join_triangles=self.collapse and method == "AUTO")
+            made = make_pure(coarse, method, self.output_kind, self.notes, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, join_triangles=self.collapse and method == "AUTO")
             # Strokes and a mirror seam must stay where they are.
             if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and not self._stopped:
                 made = (self._fit(MeshData(*made)).vertices, made[1], made[2])

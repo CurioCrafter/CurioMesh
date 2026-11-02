@@ -688,8 +688,8 @@ def pair_and_close(
     Sparse ParityPath closure keeps each paired quad whole, so a big flat quad
     stays one face. Corner closure splits every face, so it only runs on a piece
     ParityPath refuses: one loose fragment can't cost the rest of the mesh its
-    quads. A piece neither can close stays quad-dominant. With `keep_quads`, quads
-    in `coarse` (grids already built) stay whole and only the triangles get paired.
+    quads. A piece neither can close is opened along its bad edges or, at the last, split without the validity check.
+    With `keep_quads`, quads in `coarse` (grids already built) stay whole and only the triangles get paired.
     """
 
     cancel_with(cancelled)
@@ -718,7 +718,8 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
         return paired, solver
     if join_triangles:
         paired = join_loose_triangles(paired)[0]
-    closed, sparse, split, open_pieces = _close_pieces(paired)
+    closed, sparse, split, open_pieces, forced = _close_pieces(paired)
+    solver.forced_pieces = forced
     solver.closure_applied = True
     solver.closure_method = "PARITY_PATH" if not split and not open_pieces else "PER_PIECE"
     solver.output_faces = len(closed.faces)
@@ -730,8 +731,27 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
     return closed, solver
 
 
+def _close_piece(piece: MeshData) -> tuple[MeshData, int]:
+    """(all-quad piece, 0 if closed by ParityPath, 1 by corner closure, 2 if it has only quads left as they were, 3 if forced).
+
+    One bad edge must not leave a whole piece in triangles. A piece that won't close is opened along its non-manifold
+    edges and tried again, and in the end split at every corner without the check on how the new quads look.
+    """
+
+    opened, added = make_closable(piece)
+    for attempt in ((piece, opened) if added else (piece,)):
+        for kind, closure in enumerate((parity_path_closure_unpairing, quad_only_closure)):
+            try:
+                return closure(attempt), kind
+            except ValueError:
+                continue
+    if all(len(face) == 4 for face in piece.faces):
+        return piece, 2
+    return quad_only_closure(opened, checked=False), 3
+
+
 def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
-    """(closed mesh, pieces closed by ParityPath, by corner closure, left as they were)."""
+    """(closed mesh, pieces closed by ParityPath, by corner closure, left as all-quad, forced with no check of the quads)."""
 
     fa, fb = face_adjacency(paired.faces)
     labels = _labels(len(paired.faces), fa, fb)
@@ -741,7 +761,7 @@ def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
     faces: list[tuple[int, ...]] = []
     materials: list[str] = []
     offset = 0
-    counts = [0, 0, 0]
+    counts = [0, 0, 0, 0]
     for group in np.split(order, starts[1:]):
         check_cancelled()
         members = group.tolist()
@@ -757,21 +777,14 @@ def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
         if all(len(face) == 4 for face in piece.faces) and topology_summary(piece).all_quads:
             kind = 0
         else:
-            for kind, closure in enumerate((parity_path_closure_unpairing, quad_only_closure)):
-                try:
-                    result = closure(piece)
-                    break
-                except ValueError:
-                    continue
-            else:
-                kind = 2
+            result, kind = _close_piece(piece)
         counts[kind] += 1
         points.append(result.vertices)
         faces.extend(tuple(v + offset for v in face) for face in result.faces)
         materials.extend(result.face_materials)
         offset += len(result.vertices)
     merged = MeshData(vertices=np.vstack(points), faces=faces, face_materials=materials, name=paired.name)
-    return merged, counts[0], counts[1], counts[2]
+    return merged, counts[0], counts[1], counts[2], counts[3]
 
 
 def flat_quad_remesh(

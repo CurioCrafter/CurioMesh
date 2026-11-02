@@ -985,16 +985,20 @@ def quad_only_closure(
     *,
     name: str | None = None,
     frozen_midpoints: dict[tuple[int, int], int] | None = None,
+    checked: bool = True,
 ) -> MeshData:
     """Conformingly split every polygon corner into a quad.
 
     Edge midpoints are shared globally, so adjacent faces receive matching
     topology. UV midpoints remain face-local, which preserves UV seams.
     `frozen_midpoints` reuses existing vertices as the midpoints of those edges.
+    `checked=False` skips validating the result, for a last resort that must be all quads whatever they look like.
     """
 
     fast = (
-        _turbo.quad_only_closure(mesh, name=name, frozen_midpoints=frozen_midpoints) if _turbo is not None else None
+        _turbo.quad_only_closure(mesh, name=name, frozen_midpoints=frozen_midpoints)
+        if _turbo is not None and checked
+        else None
     )
     if fast is not None:
         return fast
@@ -1063,6 +1067,8 @@ def quad_only_closure(
         face_uvs=output_face_uvs,
         name=name or f"{mesh.name}_quad_closure",
     )
+    if not checked:
+        return result
     summary = topology_summary(result)
     if not summary.all_quads:
         raise ValueError(

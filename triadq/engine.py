@@ -47,6 +47,7 @@ class RemeshOptions:
 class RemeshReport:
     success: bool
     mode: str
+    forced_pieces: int = 0  # pieces closed by the last-resort corner split: 3-4x the faces, poor quads
     selected_seed: int = 0
     input_faces: int = 0
     output_faces: int = 0
