@@ -231,7 +231,7 @@ def info_lines(piece: int) -> list[str]:
     fewer = 100.0 * (1.0 - r["after"] / max(r["before"], 1))
     lines = [
         f"{name_of(piece)}  ({P.KIND_WORDS[r['kind']]})",
-        f"{r['after']:,} faces, {fewer:.0f}% fewer than {r['before']:,}",
+        f"{r['after']:,} faces, {fewer:.0f}% fewer",  # as in the summary; "than 11,719" was cut in the box
         f"Looks {alike(r['change'])}" if r["change"] is not None else "Look not measured",
         f"Method: {method_name(r['method'])}",
     ]

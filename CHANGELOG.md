@@ -5,7 +5,8 @@
 - **The panel reads as one path: Auto, check the parts, Apply.** The Guided panel is open and on
   Auto Segments from the first run. Step 2 keeps the everyday choices (Use, Keep Detail or Reduce
   To, Detail, Mirror); guides, paint, clean-up and output fold into More Options, the machine and
-  Export Job into This Computer, Show It How appears once there is a result. The time estimate sits
+  Export Job into This Computer, the LOD Set into its own fold; Show It How appears once there
+  is a result. The time estimate sits
   right above Start. The result reads "2,508 faces, 86% fewer / Looks 94% the same / Tidiness
   27/100", and parts, hover and tries use the same words. Quick Start says what Auto and Remesh
   each do; Remesh is a size smaller. The HUD shows the result preview while it waits for Apply,
