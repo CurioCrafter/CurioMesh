@@ -47,23 +47,33 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
     used = owner >= 0
     who, n = owner[used], sample_nrm[used]
     weight = sample_area[used] * ((n * normal[who]).sum(axis=1) > FACING * np.linalg.norm(normal[who], axis=1))
-    planes = np.zeros((len(points), 3, 3))
-    pull = np.zeros((len(points), 3))
-    np.add.at(planes, who, weight[:, None, None] * n[:, :, None] * n[:, None, :])
-    np.add.at(pull, who, (weight * (n * (sample_pos[used] - points[who])).sum(axis=1))[:, None] * n)
+    # Sums by bincount, which adds in the same order np.add.at does, many times faster on millions of samples.
+    count = len(points)
+    planes = np.empty((count, 3, 3))
+    scaled = weight[:, None] * n
+    for i in range(3):
+        for j in range(3):
+            planes[:, i, j] = np.bincount(who, scaled[:, i] * n[:, j], count)
+    along_normal = weight * (n * (sample_pos[used] - points[who])).sum(axis=1)
+    pull = np.stack([np.bincount(who, along_normal * n[:, k], count) for k in range(3)], axis=1)
     values, vectors = np.linalg.eigh(planes)
     strong = values > DOMINANT * np.maximum(values[:, 2:], 1e-30)
     along = np.where(strong, np.einsum("nij,ni->nj", vectors, pull) / np.maximum(values, 1e-30), 0.0)
     step = np.einsum("nij,nj->ni", vectors, along)
     step *= np.minimum(1.0, MOST_MOVE * reach / np.maximum(np.linalg.norm(step, axis=1), 1e-30))[:, None]
     moved = points + step
-    before = quad_quality(points[quads])
+    limit = np.minimum(quad_quality(points[quads]), MIN_QUALITY)
+    now = quad_quality(moved[quads])
     for _ in range(8):
-        bad = quads[quad_quality(moved[quads]) < np.minimum(before, MIN_QUALITY)]
+        bad = quads[now < limit]
         if not len(bad):
             break
         ids = np.unique(bad)
         moved[ids] = points[ids]
+        given = np.zeros(len(points), dtype=bool)
+        given[ids] = True
+        touched = np.flatnonzero(given[quads].any(axis=1))  # only these quads' corners changed
+        now[touched] = quad_quality(moved[quads[touched]])
     return moved
 
 

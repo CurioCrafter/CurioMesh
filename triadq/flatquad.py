@@ -773,14 +773,38 @@ def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[Me
     return out, report
 
 
+def _flat_mesh(vertices, faces: FlatFaces, materials: list, name: str) -> MeshData:
+    """MeshData holding faces as arrays: no millions of tuples to make and check again."""
+
+    mesh = MeshData(vertices, [], name=name)
+    mesh.faces, mesh.face_materials = (faces if _turbo is not None else list(faces)), materials  # the Python steps edit lists
+    return mesh
+
+
+def _subset(faces: FlatFaces, ids: np.ndarray) -> FlatFaces:
+    sizes = np.diff(faces.indptr)[ids]
+    indptr = np.zeros(len(ids) + 1, dtype=np.int64)
+    np.cumsum(sizes, out=indptr[1:])
+    take = np.repeat(faces.indptr[ids] - indptr[:-1], sizes) + np.arange(int(indptr[-1]))
+    return FlatFaces(indptr, faces.flat[take])
+
+
+def _joined(first: FlatFaces, second: FlatFaces) -> FlatFaces:
+    return FlatFaces(np.concatenate((first.indptr, second.indptr[1:] + first.indptr[-1])), np.concatenate((first.flat, second.flat)))
+
+
 def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces=0, merge_triangles=False):
     repaired, _added = make_closable(coarse)
     check_cancelled()
-    kept: list[tuple[tuple[int, ...], str]] = []
+    kept = None
     if keep_quads:
-        kept = [(face, material) for face, material in zip(repaired.faces, repaired.face_materials) if len(face) == 4]
-        rest = [(face, material) for face, material in zip(repaired.faces, repaired.face_materials) if len(face) != 4]
-        repaired = MeshData(repaired.vertices, [row[0] for row in rest], [row[1] for row in rest], name=repaired.name)
+        flat = FlatFaces.of(repaired.faces)
+        four = np.diff(flat.indptr) == 4
+        materials = repaired.face_materials
+        if four.any():
+            ids, others = np.flatnonzero(four), np.flatnonzero(~four)
+            kept = (_subset(flat, ids), list(map(materials.__getitem__, ids.tolist())))
+            repaired = _flat_mesh(repaired.vertices, _subset(flat, others), list(map(materials.__getitem__, others.tolist())), repaired.name)
     pair = RemeshOptions(
         target_faces=max(1, len(repaired.faces) // 2), seed_count=seed_count, force_quads=False, field_mode=field_mode,
         feature_angle_deg=feature_angle_deg, max_pairing=True, guide_edges=guide_edges,
@@ -789,8 +813,8 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
         paired, solver = _pair_chunks(repaired, pair, chunk_faces)
     else:
         paired, solver = remesh_mesh(repaired, pair)
-    if kept:
-        paired = MeshData(repaired.vertices, list(paired.faces) + [row[0] for row in kept], list(paired.face_materials) + [row[1] for row in kept], name=paired.name)
+    if kept is not None:
+        paired = _flat_mesh(repaired.vertices, _joined(FlatFaces.of(paired.faces), kept[0]), list(paired.face_materials) + kept[1], paired.name)
     if not force_quads or not paired.faces:
         return paired, solver
     if merge_triangles:
@@ -802,8 +826,9 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
     solver.closure_applied = True
     solver.closure_method = "PARITY_PATH" if not split and not open_pieces else "PER_PIECE"
     solver.output_faces = len(closed.faces)
-    solver.quads = sum(1 for face in closed.faces if len(face) == 4)
-    solver.tris = sum(1 for face in closed.faces if len(face) == 3)
+    sizes = np.diff(FlatFaces.of(closed.faces).indptr)
+    solver.quads = int(np.count_nonzero(sizes == 4))
+    solver.tris = int(np.count_nonzero(sizes == 3))
     solver.quad_ratio = solver.quads / max(1, len(closed.faces))
     solver.success = True
     solver.message = f"Closed {sparse} pieces sparsely, {split} by corner splitting, {open_pieces} left open."

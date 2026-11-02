@@ -221,7 +221,7 @@ def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
         out, solver = pair_and_close(mesh, seed_count=4 if method == "PAIRING" else 2, force_quads=output == "QUADS", **pairing)
         if solver.forced_pieces and notes is not None:
             notes.append(f"{solver.forced_pieces} part(s) only closed by the last-resort split: up to 3-4x the faces and poor quads there, so check them")
-    points, out_faces, mats = np.asarray(out.vertices, dtype=np.float64), [tuple(f) for f in out.faces], list(out.face_materials)
+    points, out_faces, mats = np.asarray(out.vertices, dtype=np.float64), turbo.shifted_faces(out.faces, 0), list(out.face_materials)
     if output == "TRIS" or method == "TRIS":
         points, out_faces, mats = triangulate(points, out_faces, mats)
     return points, out_faces, mats

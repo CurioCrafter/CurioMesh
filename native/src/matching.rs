@@ -139,7 +139,8 @@ impl<'a> Search<'a> {
 }
 
 /// Grows `mate` (-1 = free) to a maximum matching; returns the number of augmentations.
-pub fn augment(indptr: &[i64], indices: &[i64], order: &[i64], mate: &mut [i64]) -> i64 {
+/// None when the job was stopped (`watch`); `mate` is then only partly grown.
+pub fn augment(indptr: &[i64], indices: &[i64], order: &[i64], mate: &mut [i64], watch: &crate::near::Watch) -> Option<i64> {
     let n = mate.len();
     let mut frozen = vec![false; n];
     let mut base = vec![-1i64; n];
@@ -148,7 +149,10 @@ pub fn augment(indptr: &[i64], indices: &[i64], order: &[i64], mate: &mut [i64])
     let mut seen = vec![0u32; n];
     let mut seen_gen = 0u32;
     let mut rescued = 0;
-    for &root in order {
+    for (step, &root) in order.iter().enumerate() {
+        if step % 1024 == 1023 && watch.stopped() {
+            return None;
+        }
         let r = root as usize;
         if mate[r] != -1 || frozen[r] || indptr[r] == indptr[r + 1] {
             continue;
@@ -198,5 +202,5 @@ pub fn augment(indptr: &[i64], indices: &[i64], order: &[i64], mate: &mut [i64])
             even[v] = false;
         }
     }
-    rescued
+    Some(rescued)
 }
