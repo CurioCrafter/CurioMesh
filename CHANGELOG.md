@@ -18,7 +18,7 @@
   the mesh or a copy.
 - **Border Ring.** Jagged region borders get a ring of quads along the seam and
   an untangling pass. Bent or caved-in seam quads dropped from about 5% to 0.5%
-  on a whale region and from about 31% to 2.8% on a noisy porthole scan;
+  on a whale region and from about 31% to 2.8% on a noisy scan;
   region remeshing is about 5x faster.
 - **Fill Loop** fills a closed hole with an all-quad patch that follows the
   surrounding curve. **Fit to Surface** relaxes and snaps vertices onto the
