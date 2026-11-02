@@ -777,7 +777,6 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
 
 def draw_parts(layout, context, gs) -> None:
     """The Parts panel: switches, bulk selection, the worst-first list, and the selected part's numbers and tries."""
-    guided = _g()
     if not ready():
         box = layout.box()
         box.label(text="Parts appear when the search is done", icon="INFO")

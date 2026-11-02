@@ -302,6 +302,7 @@ class FindJob(view.PartJob):
         moved = S.settle_seams(co, faces, piece, S.seam_samples(job.co, tree.links, labels))
         project = region._projector(bvh)
         moved = S.straighten_seams(moved, faces, piece, project)
+        moved = moved.astype(np.float32).astype(np.float64)  # what the preview mesh will hold, so comparing it with this later finds no false change
         box.update(labels=labels, piece=piece, co=moved, saved=saved)
 
     def _run(self):
