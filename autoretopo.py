@@ -88,6 +88,7 @@ USE_CASES = True  # let the table of part cases say which size of a part to look
 POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
 MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
+REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots selected: remaking it costs minutes for a few faces
 REPAIR_GROWTH = 1.1  # a repair may not add more than this share of faces to the whole result
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
@@ -1295,7 +1296,7 @@ class AutoJob:
         first = {k: getattr(after, k) for k in keys}
         start_faces = len(faces)
         for attempt in range(0 if self.chunks else FIX_TRIES):  # a cut piece's parts are one surface: they can't be remade alone
-            bad = checks.new_spots(before, after)[:MOST_REPAIRED]
+            bad = [p for p in checks.new_spots(before, after)[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES]
             if not bad or self._stopped:
                 break
             self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
