@@ -97,6 +97,25 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual([p.name for p in folder.glob("*.tmp")], ["x.tmp"])
             self.assertIsNotNone(hardware.load_piece(path))
 
+    def test_nvidia_smi_is_never_taken_from_the_current_folder(self):
+        import os
+        from unittest import mock
+
+        name = "nvidia-smi" + (".exe" if sys.platform == "win32" else "")
+        with tempfile.TemporaryDirectory() as here, tempfile.TemporaryDirectory() as tools:
+            for folder in (here, tools):
+                (Path(folder) / name).write_bytes(b"")
+                os.chmod(Path(folder) / name, 0o755)
+            old = os.getcwd()
+            os.chdir(here)  # the folder of a .blend somebody sent
+            try:
+                with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([".", "", "relative"])}):
+                    self.assertIsNone(hardware._on_path("nvidia-smi"))
+                with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([".", tools])}):
+                    self.assertEqual(Path(hardware._on_path("nvidia-smi")), Path(tools) / name)
+            finally:
+                os.chdir(old)
+
     def test_a_job_folder_name_cannot_leave_the_chosen_folder_and_a_bad_result_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
             folder = jobpack.job_folder(root, "../../evil/..\\x")
