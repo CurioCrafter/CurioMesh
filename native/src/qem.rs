@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! Edge-collapse reduction with Garland and Heckbert's quadrics, for pieces too big for Blender's Decimate to run on the
 //! main thread. It follows Decimate's rules: area-weighted planes, heavy planes along borders, the best point of the
 //! merged quadric, no collapse that flips a face or breaks the surface.

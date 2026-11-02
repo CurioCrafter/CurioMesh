@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! `quadreduce.QuadReducer` on flat arrays, a line-by-line mirror so the same quads go in the same order.
 
 use crate::join::{cross, dot, normal, quality, sub};

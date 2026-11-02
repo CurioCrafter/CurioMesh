@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! CurioMesh Turbo: native kernels for the CurioMesh add-on. The Python side
 //! (`turbo.py`) converts meshes to flat arrays and falls back to pure Python
 //! whenever this module is missing. All heavy work runs with the GIL released.

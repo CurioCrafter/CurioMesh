@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+// `triangles_cross` is ported from Blender's `isect_tri_tri_v3_ex` in source/blender/blenlib/intern/math_geom.cc:
+// SPDX-FileCopyrightText: 2001-2002 NaN Holding BV, and the Blender authors. That file is GPL-2.0-or-later;
+// this port is distributed under GPL-3.0-or-later as that license allows. https://projects.blender.org/blender/blender
 //! Our own lookup trees, in place of Blender's one-call-at-a-time KDTree and BVHTree: nearest points, nearest faces and
 //! faces passing through each other, all cores, a batch at a time, and each batch stops early when the stop flag is set.
 //!
@@ -339,7 +343,7 @@ fn closest_on_triangle(p: V3, a: V3, b: V3, c: V3) -> V3 {
     [a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w]
 }
 
-/// Do two triangles pass through each other? Blender's `isect_tri_tri_v3_ex` (GPL), step for step and with its mix of
+/// Do two triangles pass through each other? Blender's `isect_tri_tri_v3_ex` (GPL-2.0-or-later, see the file header), step for step and with its mix of
 /// single and double precision, so the count matches what Blender's BVH overlap gave: coplanar ones don't cross, and
 /// the pieces along the line where the planes meet must overlap by more than a point.
 fn triangles_cross(ta: &[[f32; 3]; 3], tb: &[[f32; 3]; 3]) -> bool {

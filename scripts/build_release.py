@@ -18,6 +18,7 @@ ROOT_FILES = {
     "LICENSE",
     "README.md",
     "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
 }
 
 

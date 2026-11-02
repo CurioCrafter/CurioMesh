@@ -436,10 +436,19 @@ no geometry. Sources and licenses are in [docs/PATTERN_SOURCES.md](docs/PATTERN_
 Credits for the CC-BY works, changed by reducing them to statistics
 ([CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)):
 
-- Sprite Rig (CC-BY) Blender Foundation, studio.blender.org
-- Rain Rig (CC) Blender Foundation, studio.blender.org
-- Pack Bot Rig (CC-BY) Blender Foundation, studio.blender.org
-- Security Bot Rig (CC-BY) Blender Foundation, studio.blender.org
+- [Sprite Rig](https://studio.blender.org/characters/sprite/v1/) (CC-BY) Blender Foundation | studio.blender.org
+- [Rain Rig](https://studio.blender.org/characters/rain/v3/) (CC) Blender Foundation | studio.blender.org
+- [Pack Bot Rig](https://studio.blender.org/characters/pack-bot/v1/) (CC-BY) Blender Foundation | studio.blender.org
+- [Security Bot Rig](https://studio.blender.org/characters/security-bot/v1/) (CC-BY) Blender Foundation | studio.blender.org
+
+The models in the results table and screenshots are from [Poly Haven](https://polyhaven.com)
+(CC0). Thank you to Poly Haven for making them free for everyone.
+
+The triangle intersection test in the native core is ported from Blender's
+`isect_tri_tri_v3_ex` (GPL-2.0-or-later, Blender authors). Rust crates in the
+native core and their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Feature ideas from [cav3dw3ll3r](https://github.com/cav3dw3ll3r) (see the CHANGELOG).
 
 ## Solver Portfolio
 

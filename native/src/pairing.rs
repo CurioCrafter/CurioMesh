@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! Triangle pairing for one seed: `engine._pair_triangles` on flat arrays, every seed on its own thread. Python's
 //! `random.Random(seed).shuffle` is reproduced exactly, so the pairs are the same as the Python path's.
 
