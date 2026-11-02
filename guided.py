@@ -620,7 +620,7 @@ def _transfer_normals(mesh, src, res) -> None:
     normals, area = _tri_normals(src["co"], src["tris"])[keep], src["tri_area"][keep]
     fa, fb = patch.face_adjacency(src["faces"])
     sample_part = np.unique(patch._labels(len(src["faces"]), fa, fb), return_inverse=True)[1][src["tri_face"]][keep]
-    part, source_of = fit.vertex_parts(points, faces, sample_part, lambda p: tree.find(p)[1])
+    part, source_of = fit.vertex_parts(points, faces, sample_part, lambda at: np.fromiter((tree.find(p)[1] for p in at.tolist()), dtype=np.int64, count=len(at)))
     out = fit.corner_normals(points, faces, normals, area, sample_part, source_of[part], tree.find_n)
     mesh.normals_split_custom_set(out.tolist())
 
