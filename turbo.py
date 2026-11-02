@@ -21,6 +21,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+import threading
 from typing import Any
 
 import numpy as np
@@ -96,6 +97,13 @@ def available() -> bool:
     return native() is not None
 
 
+def thread_count() -> int:
+    """How many threads the native core may use: 1 without it, or on Light."""
+
+    module = native()
+    return 1 if module is None else int(module.threads)
+
+
 def version() -> str | None:
     module = native()
     return None if module is None else str(module.__version__)
@@ -124,6 +132,8 @@ def _topology():
 
 
 def _csr(faces) -> tuple[np.ndarray, np.ndarray]:
+    if hasattr(faces, "indptr"):  # types.FlatFaces
+        return faces.indptr, faces.flat
     sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
     indptr = np.zeros(len(faces) + 1, dtype=np.int64)
     np.cumsum(sizes, out=indptr[1:])
@@ -322,7 +332,155 @@ def parity_template_validity(faces, vertices, base, selected_edges, midpoints, w
     return [valid[end - count : end] for count, end in zip(counts.tolist(), ends)]
 
 
+def _flat_mesh(mesh):
+    """(indptr, flat, vertices) of a mesh the native closure can take, or None for one with NaNs: Python judges those."""
+
+    vertices = np.ascontiguousarray(mesh.vertices, dtype=np.float64)
+    if not np.isfinite(vertices).all():
+        return None
+    indptr, flat = _csr(mesh.faces)
+    if len(flat) and (flat.min() < 0 or flat.max() >= len(vertices)):
+        return None
+    return indptr, flat, vertices.reshape(-1)
+
+
+def _built(mesh, vertices, indptr, flat, owner):
+    """MeshData with `mesh`'s name and each face's material from the input face `owner` names (no re-tupling of the faces)."""
+
+    T = _topology()
+    result = T.MeshData(vertices=vertices.reshape(-1, 3), faces=[], name=mesh.name)
+    result.faces = T.FlatFaces(indptr, flat)
+    materials = mesh.face_materials
+    result.face_materials = list(map(materials.__getitem__, owner.tolist()))
+    return result
+
+
+def make_closable(mesh):
+    """Native `flatquad.make_closable`: (mesh, vertices added), or None for "use Python"."""
+
+    module = native()
+    if module is None or not mesh.faces or not hasattr(module, "make_closable"):
+        return None
+    parts = _flat_mesh(mesh)
+    if parts is None:
+        return None
+    span = float(np.linalg.norm(np.ptp(parts[2].reshape(-1, 3), axis=0))) if len(parts[2]) else 1.0
+    vertices, indptr, flat, kept, added = module.make_closable(*parts, span)
+    return _built(mesh, vertices, indptr, flat, kept), int(added)
+
+
+def close_pieces(paired, warp_cosine: float):
+    """Native `flatquad._close_pieces`, pieces side by side: (mesh, four counts), or None for "use Python" (and its errors)."""
+
+    module = native()
+    if module is None or not paired.faces or not hasattr(module, "close_pieces"):
+        return None
+    parts = _flat_mesh(paired)
+    if parts is None:
+        return None
+    try:
+        vertices, indptr, flat, owner, counts = module.close_pieces(*parts, float(warp_cosine))
+    except ValueError:
+        return None
+    return _built(paired, vertices, indptr, flat, owner), tuple(int(c) for c in counts)
+
+
+def join_loose_triangles(mesh, farthest: int):
+    """Native `quadreduce.join_loose_triangles`: (mesh, triangles joined), or None for "use Python"."""
+
+    module = native()
+    if module is None or not mesh.faces or not hasattr(module, "join_loose_triangles"):
+        return None
+    parts = _flat_mesh(mesh)
+    if parts is None:
+        return None
+    codes: dict = {}
+    material = np.fromiter((codes.setdefault(m, len(codes)) for m in mesh.face_materials), dtype=np.int64, count=len(mesh.faces))
+    vertices, indptr, flat, owner, joined = module.join_loose_triangles(*parts, material, int(farthest))
+    return _built(mesh, vertices, indptr, flat, owner), int(joined)
+
+
+class QuadReducer:
+    """Native `quadreduce.QuadReducer`: the same methods, and `remove` runs off the main thread."""
+
+    def __init__(self, module, mesh, parts, material, dissolve_limit: float, most_turned: float):
+        self._core = module.QuadReducer(*parts, material, float(dissolve_limit), float(most_turned))
+        self._mesh = mesh
+
+    @property
+    def alive(self) -> int:
+        return self._core.alive
+
+    @property
+    def refused(self) -> int:
+        return self._core.refused
+
+    def remove(self, count: int, every: int = 64):
+        """Generator: take away up to `count` quads, cheapest first, yielding so a timer can keep Blender live."""
+
+        thread = threading.Thread(target=self._core.remove, args=(int(count),), daemon=True, name="CurioMeshReduce")
+        thread.start()
+        while thread.is_alive():
+            thread.join(0.02)
+            yield
+
+    def retry_refused(self) -> None:
+        self._core.retry_refused()
+
+    def original_ids(self, vertices) -> list:
+        return self._core.original_ids(np.asarray(vertices, dtype=np.int64).reshape(-1)).tolist()
+
+    def freeze(self, vertices, renamed: bool = False) -> None:
+        ids = vertices if renamed else self.original_ids(vertices)
+        self._core.freeze(np.asarray(ids, dtype=np.int64).reshape(-1))
+
+    def save(self):
+        return self._core.save()
+
+    def restore(self, saved) -> None:
+        self._core.restore(saved)
+
+    def result(self):
+        vertices, indptr, flat, owner = self._core.result()
+        return _built(self._mesh, vertices, indptr, flat, owner)
+
+
+def quad_reducer(mesh, dissolve_limit: float, most_turned: float):
+    """A native `QuadReducer`, or None for "use Python"."""
+
+    module = native()
+    if module is None or not mesh.faces or not hasattr(module, "QuadReducer"):
+        return None
+    parts = _flat_mesh(mesh)
+    if parts is None or int(np.diff(parts[0]).min()) < 3:
+        return None
+    codes: dict = {}
+    material = np.fromiter((codes.setdefault(m, len(codes)) for m in mesh.face_materials), dtype=np.int64, count=len(mesh.faces))
+    return QuadReducer(module, mesh, parts, material, dissolve_limit, most_turned)
+
+
 # --------------------------------------------------------------------------- matching
+
+
+def pair_seeds(face_count: int, face_a, face_b, quads, scores, minimum, seeds) -> list | None:
+    """Native `engine._pair_triangles` for each seed, side by side: rows of (quads (M, 4), leftover triangles, material face per face, rescued).
+
+    `minimum` is the score a candidate must beat, None to take them all. None for NaN scores: Python's sort decides those.
+    """
+
+    module = native()
+    if module is None or not hasattr(module, "pair_seeds") or np.isnan(scores).any():
+        return None
+    rows = module.pair_seeds(
+        int(face_count),
+        np.ascontiguousarray(face_a, dtype=np.int64),
+        np.ascontiguousarray(face_b, dtype=np.int64),
+        np.ascontiguousarray(quads, dtype=np.int64).reshape(-1),
+        np.ascontiguousarray(scores, dtype=np.float64),
+        minimum,
+        [int(seed) for seed in seeds],
+    )
+    return [(found.reshape(-1, 4), tris, owner, int(rescued)) for found, tris, owner, rescued in rows]
 
 
 def augment_matching(mate: dict, allowed: dict, order: list) -> int | None:
@@ -356,6 +514,18 @@ def augment_matching(mate: dict, allowed: dict, order: list) -> int | None:
 
 
 # --------------------------------------------------------------------------- geometry
+
+
+def reducer(points, polys, keep=None, least: int = 0):
+    """A piece of triangles taken all the way down by the native reducer (`.level(faces)` gives any size), or None for "use Decimate"."""
+
+    module = native()
+    if module is None or not hasattr(module, "Reducer"):
+        return None
+    points = np.ascontiguousarray(points, dtype=np.float64)
+    tris = _csr(polys)[1]
+    locked = np.zeros(0 if keep is None else len(points), dtype=bool) if keep is None else np.ascontiguousarray(keep, dtype=bool)
+    return module.Reducer(points.reshape(-1), tris, locked, int(least))
 
 
 def winding_number(points, triangles) -> np.ndarray | None:
@@ -425,6 +595,15 @@ def pictures(points, polys, center, half: float, pixels: int) -> list | None:
     shape = (6, pixels, pixels)
     hit, normal, depth, face = hit.reshape(shape), normal.reshape((*shape, 3)), depth.reshape(shape), face.reshape(shape)
     return [(hit[i], normal[i], depth[i], face[i]) for i in range(6)]
+
+
+def leader_clusters(values, tol: float) -> np.ndarray | None:
+    """Native `parts._cluster`."""
+
+    module = native()
+    if module is None or not hasattr(module, "leader_clusters"):
+        return None
+    return module.leader_clusters(np.ascontiguousarray(values, dtype=np.float64).reshape(-1), float(tol))
 
 
 def cross_field_jacobi(cross, face_a, face_b, transport, pinned, degree, steps: int) -> np.ndarray | None:

@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .types import Face, MeshData
+from .types import Face, FlatFaces, MeshData  # noqa: F401 (FlatFaces: for turbo.py)
 
 
 def _load_turbo():

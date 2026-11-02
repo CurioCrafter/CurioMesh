@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from itertools import chain
 import threading
 from typing import Iterable
 
@@ -12,6 +14,48 @@ import numpy as np
 
 Face = tuple[int, ...]
 UVFace = tuple[int, ...]
+
+
+class FlatFaces(Sequence):
+    """A list of faces held as two arrays: a tenth of the memory of a Python list of tuples, and it reads like one.
+
+    Face `k` is `flat[indptr[k]:indptr[k + 1]]`. Reading one builds its tuple, so loops over a big mesh should use the arrays.
+    """
+
+    __slots__ = ("indptr", "flat")
+
+    def __init__(self, indptr: np.ndarray, flat: np.ndarray):
+        self.indptr = np.ascontiguousarray(indptr, dtype=np.int64)
+        self.flat = np.ascontiguousarray(flat, dtype=np.int64)
+
+    @classmethod
+    def of(cls, faces) -> FlatFaces:
+        if isinstance(faces, cls):
+            return faces
+        sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
+        indptr = np.zeros(len(faces) + 1, dtype=np.int64)
+        np.cumsum(sizes, out=indptr[1:])
+        return cls(indptr, np.fromiter(chain.from_iterable(faces), dtype=np.int64, count=int(indptr[-1])))
+
+    def __len__(self) -> int:
+        return len(self.indptr) - 1
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[k] for k in range(*index.indices(len(self)))]
+        index = index + len(self) if index < 0 else index
+        return tuple(self.flat[self.indptr[index] : self.indptr[index + 1]].tolist())
+
+    def __iter__(self):
+        for start in range(0, len(self), 65536):
+            ends = self.indptr[start : start + 65537].tolist()
+            values = self.flat[ends[0] : ends[-1]].tolist()
+            base = ends[0]
+            for a, b in zip(ends[:-1], ends[1:]):
+                yield tuple(values[a - base : b - base])
+
+    def __eq__(self, other) -> bool:
+        return list(self) == list(other)
 
 
 @dataclass(slots=True)

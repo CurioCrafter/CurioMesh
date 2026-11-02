@@ -158,6 +158,7 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
     best_report: RemeshReport | None = None
     candidate_reports: list[dict[str, Any]] = []
     seed_count = max(1, int(options.seed_count))
+    tri_mesh.cache["paired"] = _pair_natively(tri_mesh, _pairing_prep(tri_mesh, _options_for_mode(options, mode), mode), list(range(seed_count)))
 
     for seed in range(seed_count):
         check_cancelled()
@@ -260,7 +261,8 @@ def _classify_mesh(mesh: _TriMesh, options: RemeshOptions) -> str:
 
 def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int) -> _Candidate:
     prep = _pairing_prep(mesh, _options_for_mode(options, mode), mode)
-    output_mesh, feature_breaks, rescued_pairs = _pair_triangles(mesh, prep, seed)
+    paired = mesh.cache.get("paired")
+    output_mesh, feature_breaks, rescued_pairs = paired.pop(seed) if paired else _pair_triangles(mesh, prep, seed)
     closure_applied = bool(options.force_quads)
     closure_method = ""
     closure_error = ""
@@ -381,8 +383,35 @@ class _PairingPrep:
     """Seed-independent pairing inputs for one (mode, options) combination."""
 
     feature_edge_count: int
-    allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]]
-    quads_by_pair: dict[tuple[int, int], tuple[int, ...]]
+    candidates: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]  # (face_a, face_b, quad, score)
+    minimum: float | None  # the score a candidate must beat, None to take them all
+    table: tuple | None = None  # (allowed, quads_by_pair), built when the Python matching first needs them
+
+    def tables(self) -> tuple[dict, dict]:
+        if self.table is None:
+            allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)
+            quads_by_pair: dict[tuple[int, int], tuple[int, ...]] = {}
+            face_a, face_b, quads, scores = self.candidates
+            for a, b, quad, score in zip(face_a.tolist(), face_b.tolist(), quads.tolist(), scores.tolist()):
+                if self.minimum is not None and not score > self.minimum:
+                    continue
+                quad = tuple(quad)
+                allowed[a].append((score, b, quad))
+                allowed[b].append((score, a, quad))
+                quads_by_pair[(a, b)] = quad
+                quads_by_pair[(b, a)] = quad
+            for linked in allowed.values():
+                linked.sort(key=lambda item: item[0], reverse=True)
+            self.table = (dict(allowed), quads_by_pair)
+        return self.table
+
+    @property
+    def allowed(self) -> dict:
+        return self.tables()[0]
+
+    @property
+    def quads_by_pair(self) -> dict:
+        return self.tables()[1]
 
 
 def _adjacency(mesh: _TriMesh) -> _Adjacency:
@@ -619,21 +648,8 @@ def _pairing_prep(mesh: _TriMesh, options: RemeshOptions, mode: str) -> _Pairing
         cross_field = estimate_field_gl(mesh, adj, feature_mask, options.smooth_field_iters)
     else:
         cross_field = _estimate_field(mesh, adj, feature_mask, options.smooth_field_iters)
-    face_a, face_b, quads, scores = _pair_candidates(mesh, adj, feature_mask, cross_field, weights)
-
-    allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)
-    quads_by_pair: dict[tuple[int, int], tuple[int, ...]] = {}
-    for a, b, quad, score in zip(face_a.tolist(), face_b.tolist(), quads.tolist(), scores.tolist()):
-        if not options.max_pairing and not score > weights.minimum_score:
-            continue
-        quad = tuple(quad)
-        allowed[a].append((score, b, quad))
-        allowed[b].append((score, a, quad))
-        quads_by_pair[(a, b)] = quad
-        quads_by_pair[(b, a)] = quad
-    for linked in allowed.values():
-        linked.sort(key=lambda item: item[0], reverse=True)
-    prep = _PairingPrep(int(np.count_nonzero(feature_mask)), dict(allowed), quads_by_pair)
+    candidates = _pair_candidates(mesh, adj, feature_mask, cross_field, weights)
+    prep = _PairingPrep(int(np.count_nonzero(feature_mask)), candidates, None if options.max_pairing else weights.minimum_score)
     mesh.cache[key] = prep
     return prep
 
@@ -733,6 +749,26 @@ def _min_scaled_jacobians(points: np.ndarray) -> np.ndarray:
     minimum = np.minimum(corners.min(axis=1), 1.0)
     degenerate = (normal_length <= 1e-20) | np.any(denominator <= 1e-20, axis=1)
     return np.where(degenerate, -1.0, minimum)
+
+
+def _pair_natively(mesh: _TriMesh, prep: _PairingPrep, seeds: list[int]) -> dict[int, tuple[MeshData, int, int]] | None:
+    """`_pair_triangles` for these seeds in the native core, side by side. None when Python has to do it."""
+
+    if _turbo is None or (mesh.uvs is not None and mesh.face_uvs is not None):
+        return None
+    face_a, face_b, quads, scores = prep.candidates
+    rows = _turbo.pair_seeds(len(mesh.faces), face_a, face_b, quads, scores, prep.minimum, seeds)
+    if rows is None:
+        return None
+    triangles = np.asarray(mesh.faces, dtype=np.int64).reshape(-1, 3)
+    materials = mesh.face_materials
+    out = {}
+    for seed, (found, tris, owner, rescued) in zip(seeds, rows):
+        result = MeshData(vertices=mesh.vertices.copy(), faces=[], name=f"{mesh.name}_triadq")
+        result.faces = list(map(tuple, found.tolist())) + list(map(tuple, triangles[tris].tolist()))
+        result.face_materials = list(map(materials.__getitem__, owner.tolist()))
+        out[seed] = (result, 0, rescued)
+    return out
 
 
 def _pair_triangles(mesh: _TriMesh, prep: _PairingPrep, seed: int) -> tuple[MeshData, int, int]:

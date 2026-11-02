@@ -38,7 +38,7 @@ import numpy as np
 
 from .engine import RemeshOptions, remesh_mesh
 from .topology import _turbo, parity_path_quad_closure, quad_only_closure, quads_locally_valid
-from .types import MeshData
+from .types import FlatFaces, MeshData
 
 
 # --------------------------------------------------------------------------- mesh tables
@@ -47,9 +47,10 @@ from .types import MeshData
 def _half_edges(faces) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(face id, from vertex, to vertex) for every polygon corner."""
 
-    sizes = np.fromiter((len(face) for face in faces), dtype=np.int64, count=len(faces))
+    faces = FlatFaces.of(faces)
+    sizes = np.diff(faces.indptr)
     total = int(sizes.sum())
-    flat = np.fromiter((vertex for face in faces for vertex in face), dtype=np.int64, count=total)
+    flat = faces.flat
     face_of = np.repeat(np.arange(len(faces), dtype=np.int64), sizes)
     starts = np.concatenate(([0], np.cumsum(sizes)[:-1])).astype(np.int64)
     following = np.arange(total, dtype=np.int64) + 1

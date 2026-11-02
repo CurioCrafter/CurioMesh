@@ -32,7 +32,7 @@ from .triadq import areas, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
-from .triadq.types import MeshData
+from .triadq.types import FlatFaces, MeshData
 from .triadq.uvs import chart_codes
 
 PREVIEW_NAME = "CurioMesh_GuidedPreview"
@@ -422,25 +422,40 @@ def _source_data(obj) -> dict:
     cached = state["src"]
     if cached is not None and cached["sig"] == sig:
         return cached
-    _co, faces, starts, _sizes = region._mesh_arrays(obj)
-    mat = np.zeros(len(faces), dtype=np.int32)
+    starts = np.empty(len(mesh.polygons), dtype=np.int64)
+    sizes = np.empty(len(mesh.polygons), dtype=np.int64)
+    mesh.polygons.foreach_get("loop_start", starts)
+    mesh.polygons.foreach_get("loop_total", sizes)
+    corners = np.empty(len(mesh.loops), dtype=np.int64)
+    mesh.loops.foreach_get("vertex_index", corners)
+    mat = np.zeros(len(starts), dtype=np.int32)
     mesh.polygons.foreach_get("material_index", mat)
     diag = float(np.linalg.norm(co.max(axis=0) - co.min(axis=0))) or 1.0
     key = np.round(co / (diag * 1e-6)).astype(np.int64)
     _u, first, inv = np.unique(key, axis=0, return_index=True, return_inverse=True)
     inv = inv.reshape(-1)
     wco = co[first]
-    keep, wfaces, wloops = [], [], []
-    for i, f in enumerate(faces):
-        first: dict[int, int] = {}
-        for corner, v in enumerate(f):
-            first.setdefault(int(inv[v]), int(starts[i]) + corner)
-        if len(first) >= 3:
-            wfaces.append(tuple(first))
-            wloops.append(tuple(first.values()))
-            keep.append(i)
-    keep = np.asarray(keep, dtype=np.int64)
-    tris = _fan(wfaces)
+    if len(sizes) and (sizes == 3).all():  # a scan: no per-face Python, and the faces stay as arrays
+        rows = inv[corners[starts[:, None] + np.arange(3)]]
+        keep = np.flatnonzero((rows[:, 0] != rows[:, 1]) & (rows[:, 1] != rows[:, 2]) & (rows[:, 0] != rows[:, 2]))
+        edges = np.arange(0, 3 * len(keep) + 1, 3)
+        wfaces = FlatFaces(edges, rows[keep].ravel())
+        wloops = FlatFaces(edges, (starts[keep, None] + np.arange(3)).ravel())
+        tris = wfaces.flat.reshape(-1, 3)
+        tri_loops = wloops.flat.reshape(-1, 3)
+    else:
+        keep, wfaces, wloops = [], [], []
+        for i, (start, size) in enumerate(zip(starts.tolist(), sizes.tolist())):
+            first: dict[int, int] = {}
+            for corner, v in enumerate(corners[start : start + size].tolist()):
+                first.setdefault(int(inv[v]), start + corner)
+            if len(first) >= 3:
+                wfaces.append(tuple(first))
+                wloops.append(tuple(first.values()))
+                keep.append(i)
+        keep = np.asarray(keep, dtype=np.int64)
+        tris = _fan(wfaces)
+        tri_loops = _fan(wloops)
     area = 0.5 * np.linalg.norm(np.cross(wco[tris[:, 1]] - wco[tris[:, 0]], wco[tris[:, 2]] - wco[tris[:, 0]]), axis=1)
     data = {
         "sig": sig,
@@ -450,8 +465,8 @@ def _source_data(obj) -> dict:
         "tris": tris,
         "tri_area": area,
         "tri_cent": wco[tris].mean(axis=1),
-        "tri_face": np.repeat(np.arange(len(wfaces)), [len(f) - 2 for f in wfaces]),
-        "tri_loops": _fan(wloops),
+        "tri_face": np.repeat(np.arange(len(wfaces)), np.diff(FlatFaces.of(wfaces).indptr) - 2),
+        "tri_loops": tri_loops,
         "loops": wloops,
         "mat": mat[keep],
         "bvh": None,

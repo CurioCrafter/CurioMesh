@@ -435,3 +435,52 @@ pub fn parity_templates(
     let counts = rows.iter().map(|row| row.len() as i64).collect();
     (counts, rows.into_iter().flatten().collect())
 }
+
+/// NumPy's `floor_divide` for floats.
+fn floor_div(a: f64, b: f64) -> f64 {
+    let m = a % b;
+    let mut div = (a - m) / b;
+    if m != 0.0 && ((b < 0.0) != (m < 0.0)) {
+        div -= 1.0;
+    }
+    if div == 0.0 {
+        return 0.0f64.copysign(a / b);
+    }
+    let mut floored = div.floor();
+    if div - floored > 0.5 {
+        floored += 1.0;
+    }
+    floored
+}
+
+/// `parts._cluster`: leader clustering. Each point joins the first leader in reach, looking through the nine nearby cells
+/// in order, or becomes a leader itself.
+pub fn leader_clusters(values: &[f64], tol: f64) -> Vec<i64> {
+    let mut cells: std::collections::HashMap<(i64, i64), Vec<u32>, crate::topo::FxBuild> = Default::default();
+    let mut leaders: Vec<(f64, f64)> = Vec::new();
+    let mut ids = Vec::with_capacity(values.len() / 2);
+    for p in values.chunks_exact(2) {
+        let (cx, cy) = (floor_div(p[0], tol) as i64, floor_div(p[1], tol) as i64);
+        let mut hit = -1i64;
+        'look: for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(row) = cells.get(&(cx + dx, cy + dy)) {
+                    for &k in row {
+                        let leader = leaders[k as usize];
+                        if (leader.0 - p[0]).hypot(leader.1 - p[1]) <= tol {
+                            hit = k as i64;
+                            break 'look;
+                        }
+                    }
+                }
+            }
+        }
+        if hit < 0 {
+            hit = leaders.len() as i64;
+            leaders.push((p[0], p[1]));
+            cells.entry((cx, cy)).or_default().push(hit as u32);
+        }
+        ids.push(hit);
+    }
+    ids
+}

@@ -26,7 +26,9 @@ import turbo  # noqa: E402
 from triadq import MeshData  # noqa: E402
 import triadq.engine as E  # noqa: E402
 import triadq.field as F  # noqa: E402
+import triadq.flatquad as FQ  # noqa: E402
 import triadq.patch as P  # noqa: E402
+import triadq.quadreduce as QR  # noqa: E402
 import triadq.topology as T  # noqa: E402
 
 
@@ -490,6 +492,145 @@ class PicturesTests(unittest.TestCase):
                 np.testing.assert_allclose(got_depth[both], depth[both], atol=1e-9)
                 self.assertGreater(float(np.abs((got_normal[both] * normal[both]).sum(axis=1)).min()), 0.999)
                 view += 1
+
+
+def _drained(generator) -> None:
+    for _ in generator:
+        pass
+
+
+@unittest.skipUnless(hasattr(turbo.native(), "pair_seeds"), "native module without the pairing kernels")
+class SpeedPathTests(unittest.TestCase):
+    """The kernels that make a big scan quicker must give what their Python functions give, face for face."""
+
+    def test_shuffle_is_python_s(self) -> None:
+        for count, seed in ((2, 0), (10, 1), (1000, 0), (99_991, 7)):
+            order = list(range(count))
+            random.Random(seed).shuffle(order)
+            self.assertEqual(turbo.native().shuffled(count, seed).tolist(), order)
+
+    def test_pairing_side_by_side(self) -> None:
+        for mesh in meshes():
+            if not all(len(face) == 3 for face in mesh.faces):
+                mesh = MeshData(mesh.vertices, [tri for tri in E._triangulate(mesh).faces])
+            tri = E._triangulate(mesh)
+            for options in (E.RemeshOptions(), E.RemeshOptions(max_pairing=True)):
+                mode = E._classify_mesh(tri, options)
+                prep = E._pairing_prep(tri, E._options_for_mode(options, mode), mode)
+                native = E._pair_natively(tri, prep, [0, 1, 2])
+                for seed in range(3):
+                    slow = py(E._pair_triangles, tri, prep, seed)
+                    _same_mesh(self, native[seed][0], slow[0])
+                    self.assertEqual(native[seed][2], slow[2])
+
+    def test_make_closable(self) -> None:
+        for mesh in meshes():
+            fast, slow = FQ.make_closable(mesh), py(FQ.make_closable, mesh)
+            _same_mesh(self, fast[0], slow[0])
+            self.assertEqual(fast[1], slow[1])
+
+    def test_close_pieces(self) -> None:
+        for mesh in meshes():
+            paired = FQ.make_closable(_pair_stage(mesh))[0]
+            if not paired.faces:
+                continue
+            slow = _outcome(py, FQ._close_pieces, paired)
+            fast = _outcome(FQ._close_pieces, paired)
+            self.assertEqual(fast[0], slow[0])
+            if slow[0] == "ok":
+                _same_mesh(self, fast[1][0], slow[1][0])
+                self.assertEqual(fast[1][1:], slow[1][1:])
+
+    def test_close_pieces_many_parts(self) -> None:
+        parts = [torus(10 + k, 8, seed=k) for k in range(6)]
+        points, faces, offset = [], [], 0
+        for part in parts:
+            points.append(part.vertices + 5.0 * len(points))
+            faces += [tuple(v + offset for v in face) for face in part.faces]
+            offset += len(part.vertices)
+        paired = _pair_stage(MeshData(np.vstack(points), faces))
+        fast, slow = FQ._close_pieces(paired), py(FQ._close_pieces, paired)
+        _same_mesh(self, fast[0], slow[0])
+        self.assertEqual(fast[1:], slow[1:])
+
+    def test_join_loose_triangles(self) -> None:
+        for mesh in meshes():
+            paired = FQ.make_closable(_pair_stage(mesh))[0]
+            if not paired.faces:
+                continue
+            fast, slow = QR.join_loose_triangles(paired), py(QR.join_loose_triangles, paired)
+            _same_mesh(self, fast[0], slow[0])
+            self.assertEqual(fast[1], slow[1])
+
+    def test_quad_reducer(self) -> None:
+        closed = FQ.pair_and_close(torus(40, 24, seed=5))[0]
+        limit = QR.DISSOLVE_SHARE * float(np.linalg.norm(np.ptp(closed.vertices, axis=0)))
+        fast, slow = turbo.quad_reducer(closed, limit, QR.MOST_TURNED), py(QR.QuadReducer, closed)
+        for step in range(2):
+            for reducer in (fast, slow):
+                _drained(reducer.remove(int(0.1 * reducer.alive)))
+            _same_mesh(self, fast.result(), slow.result())
+            self.assertEqual(fast.alive, slow.alive)
+            self.assertEqual(fast.refused, len(slow.refused))
+            if step == 0:
+                saved_fast, saved_slow = fast.save(), slow.save()
+        some = list(fast.result().faces[0])
+        self.assertEqual(fast.original_ids(some), slow.original_ids(some))
+        fast.restore(saved_fast)
+        slow.restore(saved_slow)
+        fast.freeze(some)
+        slow.freeze(some)
+        fast.retry_refused()
+        slow.retry_refused()
+        for reducer in (fast, slow):
+            _drained(reducer.remove(int(0.05 * reducer.alive)))
+        _same_mesh(self, fast.result(), slow.result())
+
+    def test_flat_faces_read_like_a_list(self) -> None:
+        faces = [(0, 1, 2), (3, 4, 5, 6), (7, 8, 9)]
+        flat = T.FlatFaces.of(faces)
+        self.assertEqual(list(flat), faces)
+        self.assertEqual((flat[1], flat[-1], flat[1:], len(flat)), ((3, 4, 5, 6), (7, 8, 9), faces[1:], 3))
+        self.assertEqual(flat, faces)
+        self.assertEqual(P._half_edges(faces)[2].tolist(), P._half_edges(flat)[2].tolist())
+
+    def test_pairing_per_chunk_welds_its_seams(self) -> None:
+        mesh = torus(60, 30, seed=8)
+        whole = FQ.pair_and_close(mesh)[0]
+        chunked, report = FQ.pair_and_close(mesh, chunk_faces=400)
+        again = FQ.pair_and_close(mesh, chunk_faces=400)[0]
+        _same_mesh(self, chunked, again)  # threads don't change it
+        summary = T.topology_summary(MeshData(chunked.vertices, list(chunked.faces)))
+        self.assertTrue(summary.all_quads)
+        self.assertEqual((summary.boundary_edges, summary.non_manifold_edges, summary.connected_components, summary.euler_characteristic), (0, 0, 1, 0))
+        self.assertLess(len(chunked.faces), 1.7 * len(whole.faces))  # small regions on a small mesh: on a real scan, under 1% more
+        slow = py(FQ.pair_and_close, mesh, chunk_faces=400)[0]
+        _same_mesh(self, chunked, slow)
+
+    def test_reducer_sizes_are_one_run(self) -> None:
+        mesh = torus(60, 40, noise=0.2, seed=6)
+        run = turbo.reducer(mesh.vertices, mesh.faces, None, 12)
+        twice = turbo.reducer(mesh.vertices, mesh.faces, None, 12)
+        last = len(mesh.faces) + 1
+        for wanted in (3000, 1000, 200, 40):
+            points, tris = run.level(wanted)
+            again = twice.level(wanted)
+            self.assertTrue(np.array_equal(points, again[0]) and np.array_equal(tris, again[1]))  # the same every time
+            tris = tris.reshape(-1, 3)
+            self.assertLessEqual(len(tris), wanted)
+            self.assertGreaterEqual(len(tris), wanted - 2)
+            self.assertLess(len(tris), last)
+            last = len(tris)
+            counts = T.topology_summary(MeshData(points.reshape(-1, 3), [tuple(t) for t in tris.tolist()]))
+            self.assertEqual((counts.non_manifold_edges, counts.boundary_edges, counts.euler_characteristic), (0, 0, 0))  # still a closed torus
+
+    def test_reducer_keeps_locked_vertices(self) -> None:
+        mesh = torus(40, 24, noise=0.2, seed=7)
+        locked = np.zeros(len(mesh.vertices), dtype=bool)
+        locked[::9] = True
+        points = turbo.reducer(mesh.vertices, mesh.faces, locked, 200).level(200)[0].reshape(-1, 3)
+        found = {tuple(p) for p in points.tolist()}
+        self.assertTrue(all(tuple(p) in found for p in mesh.vertices[locked].tolist()))
 
 
 if __name__ == "__main__":
