@@ -357,6 +357,17 @@ Three optional helpers sit in step 2 of the Auto Segments panel.
   the road barrier, 27% of the compressor and 36% of the treasure chest. Turn on **Keep
   UV Seams** for up to about twice the faces, or bake with **Normal + Color** instead.
 - Auto Segments was mainly tested on Blender 5.2.
+- Keep Detail spends everything Detail allows, so its quads don't run in rows: use Clean
+  Rows for that, which takes more faces and loses detail on rough scans. Quads are taken
+  away only in the Auto method, with no Mirror, strokes or paint.
+- Live Boolean refuses a redo that would make more faces than it replaces, and says so.
+  On a mesh already reduced hard, that can be most redos: slide towards Organized.
+- There is no way yet to redo only selected faces with a seam that stays closed. Use Redo
+  Inside Shapes.
+- Grid Fill and Flow Fill work only on a part with one open edge loop and an even number of
+  edges around it; otherwise Auto is used and the summary says so.
+- Repair undoes a fix that the camera dislikes or that adds over a tenth more faces, so a few
+  spots can stay. They are selected on the applied mesh and named in the summary.
 - Region patches are always all quads with an exact seam. On noisy scans a few
   quads next to the seam can still come out bent (about 3% in our noisy scan
   test); a slightly larger cage or a bigger Quad Size usually helps.
