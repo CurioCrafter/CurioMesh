@@ -3080,11 +3080,11 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 box.label(text=f"{active.name} is a {active.type.title()}, not a mesh", icon="ERROR")
                 overlay.wrap_label(box, "Convert it first: Object menu, Convert, Mesh.", icon="BLANK1", width=36, limit=2)
             else:
-                box.label(text="Click a mesh in the 3D view", icon="RESTRICT_SELECT_OFF")
+                box.label(text="1. Click a mesh in the 3D view", icon="RESTRICT_SELECT_OFF")
                 overlay.wrap_label(box, "Auto Segments keeps the shape and cuts the faces, part by part.", icon="BLANK1", width=36, limit=2)
             return
         row = layout.row(align=True)
-        row.label(text=obj.name, icon="MESH_DATA")
+        row.label(text=f"1. {obj.name}", icon="MESH_DATA")
         row.label(text=f"{faces:,} faces")
         if faces == 0:
             layout.box().label(text="This mesh has no faces to reduce", icon="ERROR")
@@ -3098,14 +3098,15 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row = layout.row()
             row.scale_y = 1.9
             row.enabled = not redoing and progress_info() is None
-            row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
+            row.operator("curiomesh.guided_apply", text="5. Apply Result", icon="CHECKMARK")
             layout.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if segments.seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(segments.seg.get("reviewing")))
         else:
             row = layout.row()
             row.scale_y = 1.9
-            row.operator("curiomesh.guided_auto_start", text="Start", icon="PLAY")
+            row.operator("curiomesh.guided_auto_start", text="3. Start", icon="PLAY")
 
         # Settings, read-only while the search runs
+        layout.label(text="2. Choose what it's for")
         col = layout.column(align=True)
         col.enabled = not searching
         col.prop(gs, "auto_profile")
@@ -3343,7 +3344,7 @@ class _AutoSub:
 
 
 class CURIOMESH_PT_guided_parts(_AutoSub, bpy.types.Panel):
-    bl_label = "Parts"
+    bl_label = "4. Fix Parts (optional)"
     bl_idname = "CURIOMESH_PT_guided_parts"
 
     def draw_header(self, context):
@@ -3354,7 +3355,7 @@ class CURIOMESH_PT_guided_parts(_AutoSub, bpy.types.Panel):
 
 
 class CURIOMESH_PT_guided_shapes(_AutoSub, bpy.types.Panel):
-    bl_label = "Redo Inside Shapes"
+    bl_label = "4. Fix Inside Shapes (optional)"
     bl_idname = "CURIOMESH_PT_guided_shapes"
     bl_options = {"DEFAULT_CLOSED"}
 
