@@ -234,6 +234,7 @@ impl State {
 
     fn apply(&mut self, a: u32, b: u32, at: [f64; 3], collapses: &mut Vec<Collapse>, alive: &mut u32, shared: usize) {
         let (au, bu) = (a as usize, b as usize);
+        let held = self.locked[au]; // a locked vertex stays exactly where it was, to the last digit: chunks join on them
         let moved = std::mem::take(&mut self.around[bu]);
         let mut gone: [u32; 2] = [u32::MAX; 2];
         let mut count = 0;
@@ -273,7 +274,7 @@ impl State {
         collapses.push(Collapse {
             keep: a,
             drop: b,
-            at,
+            at: if held { [f64::NAN; 3] } else { at },
             faces_left: *alive,
         });
         self.generation += 1;
@@ -457,8 +458,10 @@ impl Run {
         let mut points = self.points.clone();
         for c in &self.collapses {
             parent[c.drop as usize] = c.keep;
-            let at = c.keep as usize * 3;
-            points[at..at + 3].copy_from_slice(&c.at);
+            if !c.at[0].is_nan() {
+                let at = c.keep as usize * 3;
+                points[at..at + 3].copy_from_slice(&c.at);
+            }
             if c.faces_left <= wanted {
                 break;
             }

@@ -623,6 +623,16 @@ impl Reducer {
     }
 }
 
+/// `parts._cluster`: a cluster id per 2D point.
+#[pyfunction]
+fn leader_clusters<'py>(py: Python<'py>, values: PyReadonlyArray1<'py, f64>, tol: f64) -> PyResult<I64Array<'py>> {
+    let values = slice(&values, "values")?;
+    if values.len() % 2 != 0 || !(tol > 0.0) {
+        return Err(PyValueError::new_err("cluster arrays are inconsistent"));
+    }
+    Ok(py.detach(|| geom::leader_clusters(values, tol)).into_pyarray(py))
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -644,6 +654,7 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(join_loose_triangles, m)?)?;
     m.add_function(wrap_pyfunction!(shuffled, m)?)?;
     m.add_function(wrap_pyfunction!(pair_seeds, m)?)?;
+    m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
     m.add_class::<Reducer>()?;
     m.add_class::<QuadReducer>()?;
     m.add_class::<QuadSaved>()?;

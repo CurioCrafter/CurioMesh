@@ -596,6 +596,15 @@ def pictures(points, polys, center, half: float, pixels: int) -> list | None:
     return [(hit[i], normal[i], depth[i], face[i]) for i in range(6)]
 
 
+def leader_clusters(values, tol: float) -> np.ndarray | None:
+    """Native `parts._cluster`."""
+
+    module = native()
+    if module is None or not hasattr(module, "leader_clusters"):
+        return None
+    return module.leader_clusters(np.ascontiguousarray(values, dtype=np.float64).reshape(-1), float(tol))
+
+
 def cross_field_jacobi(cross, face_a, face_b, transport, pinned, degree, steps: int) -> np.ndarray | None:
     """The smoothing loop of `engine._estimate_field`; returns the relaxed complex field."""
 

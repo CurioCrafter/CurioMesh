@@ -15,6 +15,8 @@ import math
 
 import numpy as np
 
+from .topology import _turbo
+
 KINDS = ("TUBE", "FLAT", "ROUGH")
 KIND_WORDS = {"TUBE": "Tube", "FLAT": "Flat", "ROUGH": "Rough"}
 
@@ -117,6 +119,12 @@ def _axes(points: np.ndarray) -> list[np.ndarray]:
 def _cluster(values: np.ndarray, tol: float) -> np.ndarray:
     """Leader clustering of 2D points; returns a cluster id per point."""
 
+    fast = _turbo.leader_clusters(values, tol) if _turbo is not None else None
+    if fast is not None:
+        return fast
+    fast = _turbo.leader_clusters(values, tol) if _turbo is not None else None
+    if fast is not None:
+        return fast
     cells: dict[tuple[int, int], list[int]] = {}
     leaders: list[np.ndarray] = []
     ids = np.zeros(len(values), dtype=np.int64)
@@ -388,14 +396,20 @@ def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_pol
     """Flip the new faces together if most of them face against the nearest source faces."""
 
     def frames(p, f):
-        c = np.asarray([p[list(x)].mean(axis=0) for x in f])
-        n = np.asarray([np.cross(p[x[2]] - p[x[0]], p[x[1 if len(x) == 3 else 3]] - p[x[0]]) for x in f])
+        p = np.asarray(p, dtype=np.float64)
+        c, n = np.zeros((len(f), 3)), np.zeros((len(f), 3))
+        sizes = np.fromiter(map(len, f), dtype=np.int64, count=len(f))
+        for size in np.unique(sizes).tolist():
+            at = np.flatnonzero(sizes == size)
+            rows = np.asarray([f[k] for k in at.tolist()], dtype=np.int64)
+            c[at] = p[rows].mean(axis=1)
+            n[at] = np.cross(p[rows[:, 2]] - p[rows[:, 0]], p[rows[:, 1 if size == 3 else 3]] - p[rows[:, 0]])
         return c, n / np.maximum(np.linalg.norm(n, axis=1), 1e-30)[:, None]
 
     c0, n0 = frames(source_points, source_polys)
     c1, n1 = frames(points, polys)
     pick = np.linspace(0, len(c1) - 1, min(len(c1), 64)).astype(int)
-    near = np.argmin(((c1[pick][:, None, :] - c0[None]) ** 2).sum(axis=2), axis=1)
+    near = np.asarray([np.argmin(((c1[k] - c0) ** 2).sum(axis=1)) for k in pick.tolist()])  # one by one: all at once wants gigabytes on a big scan
     vote = float((np.sum(n1[pick] * n0[near], axis=1)).sum())
     return [tuple(reversed(p)) for p in polys] if vote < 0 else list(polys)
 
