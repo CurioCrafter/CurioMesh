@@ -32,6 +32,7 @@ from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
 from .triadq import bakescore, cases, checks, parts, patch, patterns, repair, special, views
+from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
@@ -80,10 +81,13 @@ MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of pa
 RAYS_PER_YIELD = 2000
 OTHER_VERTICES = 8  # how far down a sample's nearest vertices to look for one of its own loose part
 REDUCE_STEP = 0.16  # share of the quads to try taking away between looks; halved on going too far, down to REDUCE_FINEST
-REDUCE_FINEST = 0.015
-MOST_LOOKS = 40
-AIM = 0.9  # share of the amount asked for that a start should reach
-ROOM = 0.5  # a start this close to the amount asked for is good enough: taking quads away uses up the rest
+REDUCE_FINEST = 0.004
+MOST_LOOKS = 60
+NEARLY = 0.7  # when a part passes its limit, parts this close to theirs stop too
+CHORDS_UP_TO = 120_000  # quads: the redrawing Python reducer up to here, the native one past it
+START_SHARE = 0.4  # start well inside what was asked for: quads come away far tidier than pieces get reduced
+AIM = 0.5  # share of the amount asked for that a start should reach
+ROOM = 0.25  # a start this close to the amount asked for is good enough: taking quads away uses up the rest
 PART_PIXELS = 100  # a part showing fewer pixels than this over the six views can't be judged by itself
 REFINE_PIECES = 8
 REFINE_COVER = 0.8  # share of the faces the extra sizes need to cover
@@ -1300,17 +1304,21 @@ class AutoJob:
         """
         if loss > self.detail:
             return result, owner, loss
-        reducer = yield from self._background(lambda: quad_reducer(result))
+        # Up to CHORDS_UP_TO quads, the Python reducer that redraws messy patches as grids and prices collapses by the
+        # pixels they change; past that, the native one, which only counts distance.
+        chords = len(result.faces) <= CHORDS_UP_TO
+        judge = PictureJudge(reference, center, half, self.max_pixels, TURNED_DEG) if chords else None
+        reducer = yield from self._background(lambda: ChordReducer(result, judge) if chords else quad_reducer(result))
         start_owner = owner
         # A rebuilt part is as few rows as it can hold. Its long flat quads look cheap to take away, but each one shows.
         rebuilt = [i for i, k in enumerate(self.picked) if self.ready[i][k]]
         reducer.freeze(np.flatnonzero(np.isin(owner, rebuilt)).tolist())
         limit = PIECE_LIMIT * self.detail / 100.0
 
-        def over_limit(mesh, view):
+        def over_limit(mesh, view, share=1.0):
             fa, fb = patch.face_adjacency(mesh.faces)
             labels = np.unique(patch._labels(len(mesh.faces), fa, fb), return_inverse=True)[1]
-            parts = parts_changed_too_much(reference, view, pixel, labels, limit, self.baked)
+            parts = parts_changed_too_much(reference, view, pixel, labels, share * limit, self.baked)
             kept = np.isin(labels, parts)
             return np.asarray(sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]}), dtype=np.int64)
 
@@ -1318,7 +1326,30 @@ class AutoJob:
         view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
         limited = yield from self._off(lambda: over_limit(full, view))
         reducer.freeze(sorted(set(back[limited].tolist())))  # whatever is at its limit stays as it is
+
+        def look():
+            """Generator: (mesh, its vertices' pieces, change, corners of parts past their limit) as the reducer stands."""
+            attempt = yield from self._background(reducer.result)
+            ids = np.asarray(reducer.original_ids(range(len(attempt.vertices))), dtype=np.int64)
+            attempt_owner = start_owner[np.asarray(reducer.home, dtype=np.int64)[ids]] if chords else start_owner[ids]
+            full, back = yield from self._background(lambda: self._with_copies(attempt, attempt_owner))
+            self.stage = f"Taking away quads: {len(full.faces):,}"
+            view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
+            wrong, shown = self._counts(reference, view, pixel)
+            ruined = yield from self._off(lambda: over_limit(full, view))
+            if len(ruined):  # those close behind would cost a look each, and with hundreds of parts the looks run out
+                ruined = yield from self._off(lambda: over_limit(full, view, NEARLY))
+            return attempt, attempt_owner, 100.0 * wrong / max(shown, 1), sorted(set(back[ruined].tolist()))
         saved = yield from self._background(reducer.save)
+        if chords:
+            self.stage = "Redrawing messy patches as grids..."
+            yield from self._background(reducer.tidy)
+            attempt, attempt_owner, now, ruined = yield from look()
+            if now <= self.detail and not ruined:
+                result, owner, loss = attempt, attempt_owner, now
+                saved = yield from self._background(reducer.save)
+            else:
+                yield from self._background(lambda: reducer.restore(saved))
         step = REDUCE_STEP
         looks = 0
         while step >= REDUCE_FINEST and looks < MOST_LOOKS:
@@ -1332,14 +1363,7 @@ class AutoJob:
                 yield from reducer.remove(max(1, int(step * before)))
                 if reducer.alive == before:
                     break
-            attempt = yield from self._background(reducer.result)
-            attempt_owner = start_owner[np.asarray(reducer.original_ids(range(len(attempt.vertices))), dtype=np.int64)]
-            full, back = yield from self._background(lambda: self._with_copies(attempt, attempt_owner))
-            self.stage = f"Taking away quads: {len(full.faces):,}"
-            view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
-            wrong, shown = self._counts(reference, view, pixel)
-            now = 100.0 * wrong / max(shown, 1)
-            ruined = yield from self._off(lambda: sorted(set(back[over_limit(full, view)].tolist())))
+            attempt, attempt_owner, now, ruined = yield from look()
             if now <= self.detail and not ruined:
                 result, owner, loss = attempt, attempt_owner, now
                 saved = yield from self._background(reducer.save)
@@ -1869,7 +1893,7 @@ class AutoJob:
         self._view = (center, half, reference, reference_shaded, pixel)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
-        allowed = asked * total_seen
+        allowed = START_SHARE * asked * total_seen
         reducing = self.target_faces > 0
         paired_share = 1.0 if self.output_kind == "TRIS" else PAIRED_SHARE
         best = None
