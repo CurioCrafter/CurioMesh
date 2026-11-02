@@ -1495,7 +1495,10 @@ class AutoJob:
 
     def _inspected(self, points, faces, piece):
         """Generator: all the numbers for one mesh, the crossing test in slices and the rest on a worker thread."""
-        pairs = yield from checks.crossing_slices(points, faces)
+        if hasattr(turbo.native(), "FaceLookup"):  # one native call on all cores, off the main thread
+            pairs = yield from self._off(lambda: checks.crossing_pairs(points, faces))
+        else:
+            pairs = yield from checks.crossing_slices(points, faces)
         out = yield from self._background(lambda: checks.inspect(points, faces, piece, pairs=pairs))
         if self._known is not None:
             out.new_cross, new = repair.new_by_piece(self._known, pairs, points, faces, piece)
