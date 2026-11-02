@@ -221,18 +221,22 @@ def place(preview, source, gs) -> None:
     preview.matrix_world = matrix
 
 
+def alike(change) -> str:
+    """The camera check in an artist's words, the same everywhere: "looks 94% the same"."""
+    return "not measured" if change is None else f"{max(0.0, 100.0 - change):.0f}% the same"
+
+
 def info_lines(piece: int) -> list[str]:
     r = seg["parts"][piece]
     fewer = 100.0 * (1.0 - r["after"] / max(r["before"], 1))
-    change = "not measured" if r["change"] is None else f"{r['change']:.1f}%"
     lines = [
         f"{name_of(piece)}  ({P.KIND_WORDS[r['kind']]})",
-        f"Faces: {r['before']:,} to {r['after']:,} ({fewer:.0f}% fewer)",
-        f"View changed: {change}",
+        f"{r['after']:,} faces, {fewer:.0f}% fewer than {r['before']:,}",
+        f"Looks {alike(r['change'])}" if r["change"] is not None else "Look not measured",
         f"Method: {method_name(r['method'])}",
     ]
     if r.get("topology") is not None:
-        lines.insert(3, f"Topology score: {r['topology']:.0f} of 100")
+        lines.insert(3, f"Tidiness {r['topology']:.0f}/100")
     return lines
 
 
@@ -574,22 +578,31 @@ def _draw_text() -> None:
         import blf
 
         x, y = seg["mouse"]
-        lines = info_lines(hover)
+        lines = info_lines(hover) + ["Click: select   Arrows: next   Esc: done"]
+        ui = overlay._ui_scale()
+        size, step, pad = 13.0 * ui, 18.0 * ui, 8.0 * ui
         try:
-            blf.size(0, 14.0)
+            blf.size(0, size)
         except TypeError:  # before Blender 4.0 the size also takes a dpi
-            blf.size(0, 14, 72)
+            blf.size(0, int(size), 72)
         wide = max(blf.dimensions(0, line)[0] for line in lines)
         edge = bpy.context.region.width - overlay._sidebar_inset()  # the N-panel is drawn over the viewport's right side
-        left = x + 18 if x + 18 + wide < edge else max(x - 18 - wide, 4.0)
-        y = max(y, 18 * len(lines) + 24)  # keep the last line above the bottom edge
+        left = x + 22 if x + 22 + wide + pad < edge else max(x - 22 - wide - pad, pad)
+        y = max(y, step * len(lines) + 2 * pad)  # keep the last line above the bottom edge
+        # a dark card behind the words: white on a pale part (or a light mesh) was unreadable
+        import gpu
+
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        gpu.state.blend_set("ALPHA")
+        shader.bind()
+        top, bottom = y - step + size + pad, y - step * len(lines) - pad  # first line's cap height to last line's descender
+        overlay._fill(shader, overlay._rounded_rect(left - pad, bottom, wide + 2 * pad, top - bottom, 6 * ui), (0.07, 0.08, 0.11, 0.88))
+        gpu.state.blend_set("NONE")
         for i, line in enumerate(lines):
-            blf.enable(0, blf.SHADOW)
-            blf.shadow(0, 5, 0.0, 0.0, 0.0, 1.0)
-            blf.color(0, 1.0, 1.0, 1.0 if i else 0.95, 1.0)
-            blf.position(0, left, y - 18 - 18 * i, 0)
+            muted = i == len(lines) - 1
+            blf.color(0, *((0.62, 0.65, 0.75, 1.0) if muted else (1.0, 1.0, 1.0, 1.0) if i else (1.0, 0.86, 0.45, 1.0)))
+            blf.position(0, left, y - step - step * i, 0)
             blf.draw(0, line)
-            blf.disable(0, blf.SHADOW)
     except Exception as exc:
         overlay.LAST_DRAW_ERROR = repr(exc)
 
@@ -758,8 +771,8 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
         r = seg["parts"][item.piece]
         row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
         row.label(text=name_of(item.piece), icon="CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
-        row = row.split(factor=0.55, align=True)
-        row.label(text="?" if r["change"] is None else f"{r['change']:.1f}%")
+        row = row.split(factor=0.42, align=True)  # "92%" is short; the face count needs the room ("1,65...")
+        row.label(text="?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
         row.label(text=f"{r['after']:,} f")
 
 
@@ -779,14 +792,14 @@ def draw_parts(layout, context, gs) -> None:
     row.prop(gs, "seg_wire", text="Wire", toggle=True, icon="SHADING_WIRE")
     col.row(align=True).prop(gs, "seg_compare", expand=True)
     if gs.seg_heat:
-        layout.label(text="Heat: red parts changed most in the camera check", icon="INFO")
+        layout.label(text="Heat: red parts look least alike", icon="INFO")
     segment_goals.draw_tools(layout, gs)
 
     layout.label(text=f"{len(seg['parts']):,} parts, {len(seg['sel'])} selected")
     row = layout.row(align=True)
     for what, text in (("ALL", "All"), ("TUBE", "Tubes"), ("FLAT", "Flat"), ("ROUGH", "Rough"), ("NONE", "None")):
         row.operator("curiomesh.seg_select", text=text).what = what
-    layout.label(text="Parts that changed the most:")
+    layout.label(text="Parts, least alike first:")
     row = layout.row()
     row.template_list("CURIOMESH_UL_segparts", "", gs, "seg_parts", gs, "seg_index", rows=5)
     col = row.column(align=True)

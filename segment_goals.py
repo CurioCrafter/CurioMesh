@@ -1171,7 +1171,7 @@ def draw_selected(layout, gs) -> None:
         known = [r["change"] for r in parts if r["change"] is not None]
         box.label(text=f"{len(selected)} parts, {sum(r['after'] for r in parts):,} faces now", icon="OBJECT_DATA")
         if known:
-            box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
+            box.label(text=f"Least alike looks {view.alike(max(known))}", icon="BLANK1")
     if view.mirrored():
         overlay.wrap_label(box, "Redo is off on this result (Mirror, Clean Rows, a very large piece or an imported job)", icon="INFO", width=32, limit=3)
         return
@@ -1196,8 +1196,8 @@ def draw_selected(layout, gs) -> None:
             box.label(text="Tried (click to go back):")
             col = box.column(align=True)
             for i, t in enumerate(record["tries"]):
-                change = "?" if t["change"] is None else f"{t['change']:.1f}%"
-                score = "" if t.get("topology") is None else f", topology {t['topology']:.0f}"
+                change = "?" if t["change"] is None else view.alike(t["change"]).replace(" the same", " alike")
+                score = "" if t.get("topology") is None else f", tidy {t['topology']:.0f}"
                 col.operator("curiomesh.seg_try", text=f"{view.method_name(t['method'])}: {t['after']:,} faces, {change}{score}", depress=i == record["cur"]).index = i
 
 
@@ -1248,7 +1248,7 @@ HOVER_GAP = 1.0 / 30.0  # seconds between looks under the mouse, stretched when 
 class CURIOMESH_OT_seg_review(bpy.types.Operator):
     bl_idname = "curiomesh.seg_review"
     bl_label = "Review Segments"
-    bl_description = "Go through the parts one by one. The one under the mouse lights up with its outline; click for its numbers and to change it; arrows walk them, worst first, and move the view. Esc leaves and keeps everything"
+    bl_description = "Go through the parts: hover to see one, click for its numbers and options, arrows walk them worst first. Esc leaves and keeps everything"
     bl_options = {"INTERNAL"}
 
     @classmethod
