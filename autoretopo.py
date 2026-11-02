@@ -28,7 +28,7 @@ from .triadq import cases, checks, parts, patch, patterns
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
-from .triadq.quadreduce import QuadReducer
+from .triadq.quadreduce import quad_reducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
@@ -295,6 +295,7 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
     return np.flatnonzero((shown >= PART_PIXELS) & (wrong > limit * shown))
 
 
+NATIVE_FROM = 60_000  # a piece of this many triangles goes to the native reducer: Decimate would hold up Blender for seconds per size
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
 
@@ -341,6 +342,10 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh)
     return co.reshape(-1, 3), faces, materials
+
+
+def _native_reducible(polys, kinds, drop) -> bool:
+    return len(polys) >= NATIVE_FROM and len(set(kinds)) == 1 and (drop is None or not float(drop.max(initial=0.0)) > 0.0) and max(map(len, polys)) == 3
 
 
 def _face_areas(points: np.ndarray, polys) -> np.ndarray:
@@ -463,6 +468,7 @@ class AutoJob:
         self.shown_at = 0.0
         self._stopped = False
         self._pair_thread: threading.Thread | None = None
+        self._runs: dict = {}  # huge piece -> its native reduction, which holds every size of it
         self._paired = None
         self._labels = None
         self._shell = None
@@ -512,6 +518,32 @@ class AutoJob:
             if self._pair_thread is not None and self._pair_thread.is_alive():
                 self._pair_thread.join(0.05)
         return not self.busy
+
+    def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
+        """Generator: this piece reduced to `ratio`. A huge piece goes to the native reducer on a worker thread, anything else to Decimate.
+
+        The first size of a huge piece takes it all the way down, and every other size is then a quick replay. `one_off` doesn't keep that.
+        """
+        started = time.perf_counter()
+        out = None
+        if _native_reducible(polys, kinds, drop) and turbo.available():
+            wanted = max(int(ratio * len(polys)), 1)
+            key = None if keep is not None or one_off else (len(polys), hash(points.tobytes()))
+            run = self._runs.get(key)
+            if run is None:
+                run = yield from self._background(lambda: turbo.reducer(points, polys, keep, wanted if key is None else 12))
+                if key is not None:
+                    self._runs[key] = run
+            if run is not None:
+                def level():
+                    co, flat = run.level(wanted)
+                    return co.reshape(-1, 3), list(map(tuple, flat.reshape(-1, 3).tolist())), [str(int(kinds[0]))] * (len(flat) // 3)
+
+                out = yield from self._background(level)
+        if out is None:
+            out = _decimate(self.context, points, polys, kinds, ratio, drop, keep)
+        self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
+        return out
 
     def _timed(self, name: str, work):
         """Generator: run `work` (a generator) and add the time it really runs to `self.timings[name]`."""
@@ -593,9 +625,7 @@ class AutoJob:
         def look(k: int):
             """Generator: this size measured. Returns the share of its view that changed."""
             yield
-            started = time.perf_counter()
-            reduced = _decimate(self.context, points, polys, kinds, shares[k], self._piece_drop(ids))
-            self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
+            reduced = yield from self._reduced(points, polys, kinds, shares[k], self._piece_drop(ids))
             view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = picture_counts(reference, view, pixel)
             self.looks += 1
@@ -623,7 +653,7 @@ class AutoJob:
                 # A size halfway across the jump, so a piece doesn't get twice the faces to clear a limit.
                 yield
                 faces = math.sqrt(levels[upper - 1].faces * levels[upper].faces)
-                reduced = _decimate(self.context, points, polys, kinds, faces / len(polys))
+                reduced = yield from self._reduced(points, polys, kinds, faces / len(polys))
                 view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
                 sizes.append(reduced)
                 levels.append(Level(len(reduced[1]), picture_counts(reference, view, pixel)[0] * area))
@@ -632,8 +662,8 @@ class AutoJob:
                 for k in (upper - 1, upper, len(levels) - 1):
                     yield
                     keep = hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0)
-                    held = _decimate(self.context, points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep)
-                    reduced = _decimate(self.context, held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1))
+                    held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep)
+                    reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), one_off=True)
                     view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
                     sizes.append(reduced)
                     levels.append(Level(len(reduced[1]), picture_counts(reference, view, pixel)[0] * area))
@@ -886,7 +916,7 @@ class AutoJob:
             self.stage = f"Trying one more size of piece {index + 1}"
             reference = yield from self._reference(center, half, pixels, whole[0], whole[1])
             yield
-            reduced = _decimate(self.context, whole[0], whole[1], whole[2], share)
+            reduced = yield from self._reduced(whole[0], whole[1], whole[2], share)
             view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, _shown = picture_counts(reference, view, pixel)
             where = max(at, other)
@@ -900,7 +930,7 @@ class AutoJob:
         """Generator: take quads away until the view has changed by the amount asked for. Returns (mesh, loss)."""
         if loss > self.detail:
             return result, loss
-        reducer = yield from self._background(lambda: QuadReducer(result))
+        reducer = yield from self._background(lambda: quad_reducer(result))
         limit = PIECE_LIMIT * self.detail / 100.0
 
         def over_limit(mesh, view):
@@ -1126,7 +1156,7 @@ class AutoJob:
             if reducing:
                 want = self.target_faces / paired_share  # faces before pairing that should give the faces asked for
                 self.picked = allocate_to_faces(self.levels, want, 1.0, self.seen)
-                self._tune(want)
+                yield from self._tune(want)
             else:
                 self.picked = allocate(self.levels, allowed, PIECE_LIMIT * asked, self.seen)
             pick = tuple(self.levels[i][k].faces for i, k in enumerate(self.picked))
@@ -1277,8 +1307,8 @@ class AutoJob:
         soft = shading_counts(reference, view, reference_shaded, view_shaded, SOFT_DEG)[0]
         return 100.0 * wrong / max(shown, 1), 100.0 * bad_shade / max(seen_both, 1), 100.0 * soft / max(seen_both, 1)
 
-    def _tune(self, want: float) -> None:
-        """Reduce To: the sizes come in steps of two, so remake the biggest picked piece to land closer on `want`."""
+    def _tune(self, want: float):
+        """Generator. Reduce To: the sizes come in steps of two, so remake the biggest picked piece to land closer on `want`."""
         total = sum(levels[k].faces for levels, k in zip(self.levels, self.picked))
         miss = want - total
         if abs(miss) <= 0.03 * want:
@@ -1290,7 +1320,7 @@ class AutoJob:
         goal = self.levels[index][self.picked[index]].faces + miss
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
             return
-        self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
+        self.tuned[index] = yield from self._reduced(points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
 
     def explain_piece(self, index: int) -> str:
         """In plain words, for the segment view: what this part was taken for and what was kept. Empty before that."""

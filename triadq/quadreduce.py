@@ -19,6 +19,7 @@ import math
 
 import numpy as np
 
+from .topology import _turbo
 from .types import MeshData
 
 MIN_QUALITY = 0.15  # no new quad worse than this, on `patch.quad_quality`'s scale (> 0 means convex and warped < 60 degrees)
@@ -190,7 +191,7 @@ class QuadReducer:
             elif count < 3:
                 return False
             elif count == 3:  # it would be left in two quads: they become one
-                first, second = (f for f in users[side] if f != q)
+                first, second = sorted(f for f in users[side] if f != q)  # sorted, as a set's order isn't one the native core can match
                 if self.locked[side] or first not in moved or second not in moved or len(faces[first]) != 4 or len(faces[second]) != 4:
                     return False
                 one, two = renamed(faces[first]), renamed(faces[second])
@@ -348,6 +349,15 @@ class QuadReducer:
         )
 
 
+def quad_reducer(mesh: MeshData):
+    """A reducer for this mesh: the native one, or else `QuadReducer`."""
+
+    used = np.asarray(mesh.vertices, dtype=np.float64)
+    limit = DISSOLVE_SHARE * float(np.linalg.norm(np.ptp(used, axis=0))) if len(used) else 0.0
+    fast = _turbo.quad_reducer(mesh, limit, MOST_TURNED) if _turbo is not None else None
+    return fast if fast is not None else QuadReducer(mesh)
+
+
 def _cut_hexagon(hexagon: list[int], points, free_chord) -> tuple[list[tuple[int, ...]], list[int]] | None:
     """The best two quads for a six-sided polygon, or three around a new middle corner. (quads, middle's id or [])."""
 
@@ -401,6 +411,9 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
     outside it. What can't be joined this way is left for closure.
     """
 
+    fast = _turbo.join_loose_triangles(mesh, farthest) if _turbo is not None else None
+    if fast is not None:
+        return fast
     points = [tuple(p) for p in np.asarray(mesh.vertices, dtype=np.float64).tolist()]
     faces: list[tuple[int, ...] | None] = list(mesh.faces)
     materials = list(mesh.face_materials)
@@ -537,4 +550,4 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
     return MeshData(vertices=np.asarray(points, dtype=np.float64), faces=[faces[k] for k in kept], face_materials=[materials[k] for k in kept], name=mesh.name), joined
 
 
-__all__ = ["QuadReducer", "join_loose_triangles"]
+__all__ = ["QuadReducer", "join_loose_triangles", "quad_reducer"]

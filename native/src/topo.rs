@@ -6,7 +6,45 @@
 //! messages, tie-breaking), so results are identical, not merely equivalent.
 
 use rayon::prelude::*;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A small multiply-and-rotate hash for vertex ids: much faster than the default, and none of these maps face untrusted keys.
+#[derive(Default, Clone, Copy)]
+pub struct Fx(u64);
+
+impl Fx {
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for Fx {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(word));
+        }
+    }
+    fn write_i64(&mut self, x: i64) {
+        self.add(x as u64);
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.add(x);
+    }
+    fn write_u32(&mut self, x: u32) {
+        self.add(x as u64);
+    }
+    fn write_usize(&mut self, x: usize) {
+        self.add(x as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+}
+
+pub type FxBuild = BuildHasherDefault<Fx>;
 
 /// Polygon faces in CSR form: face `f` is `flat[indptr[f]..indptr[f + 1]]`.
 pub struct Faces<'a> {
@@ -23,9 +61,9 @@ impl<'a> Faces<'a> {
     }
 }
 
-/// Below this many items the rayon pool costs more than it saves (worker wake-up
-/// is ~1 ms on a busy machine, and triadq calls these on many small patches).
-pub const PARALLEL_MIN: usize = 1 << 15;
+/// Below this many items the rayon pool costs more than it saves. On a loaded PC a wake-up of the pool takes far longer
+/// than the ~1 ms of an idle one: pairing a 100k-face mesh took 22 s on 24 threads and 6 s on one, with the same CPU time.
+pub const PARALLEL_MIN: usize = 1 << 18;
 
 pub fn sort<T: Ord + Send>(items: &mut [T]) {
     if items.len() >= PARALLEL_MIN {
@@ -168,6 +206,27 @@ pub struct Summary {
     pub component_detail: Vec<(i64, i64, i64)>,
 }
 
+/// `canonical` for a triangle or a quad, without an allocation per face.
+fn canonical_small(face: &[i64]) -> [i64; 4] {
+    let n = face.len();
+    let mut best = [i64::MIN; 4];
+    let mut first = true;
+    for rev in [false, true] {
+        for s in 0..n {
+            let mut row = [i64::MIN; 4];
+            for (k, cell) in row.iter_mut().enumerate().take(n) {
+                let i = (s + k) % n;
+                *cell = if rev { face[n - 1 - i] } else { face[i] };
+            }
+            if first || row < best {
+                best = row;
+                first = false;
+            }
+        }
+    }
+    best
+}
+
 fn canonical(face: &[i64]) -> Vec<i64> {
     let n = face.len();
     let at = |start: usize, rev: bool, k: usize| {
@@ -268,17 +327,35 @@ pub fn summary(faces: &Faces) -> Summary {
         }
     }
 
-    let mut canon: Vec<Vec<i64>> = collect(fcount, |f| canonical(faces.face(f)));
-    sort(&mut canon);
-    canon.dedup();
-    out.duplicate_faces = (fcount - canon.len()) as i64;
+    let small = (0..fcount).filter(|&f| faces.face(f).len() <= 4).count();
+    if small == fcount {
+        let mut canon: Vec<[i64; 4]> = collect(fcount, |f| canonical_small(faces.face(f)));
+        sort(&mut canon);
+        canon.dedup();
+        out.duplicate_faces = (fcount - canon.len()) as i64;
+    } else {
+        let mut canon: Vec<Vec<i64>> = collect(fcount, |f| canonical(faces.face(f)));
+        sort(&mut canon);
+        canon.dedup();
+        out.duplicate_faces = (fcount - canon.len()) as i64;
+    }
 
     // Distinct (vertex, face) incidences; a vertex is non-manifold when its
     // incident faces split into several fans linked by two-face edges.
     let mut vf: Vec<(i64, u32)> = h.from.iter().zip(&h.face).map(|(&v, &f)| (v, f)).collect();
     sort(&mut vf);
     vf.dedup();
-    let index = |v: i64, f: u32| vf.binary_search(&(v, f)).unwrap() as u32;
+    let mut vf_start = vec![0u32; nv + 1];
+    for &(v, _) in &vf {
+        vf_start[v as usize + 1] += 1;
+    }
+    for v in 0..nv {
+        vf_start[v + 1] += vf_start[v];
+    }
+    let index = |v: i64, f: u32| {
+        let from = vf_start[v as usize] as usize;
+        (from + vf[from..vf_start[v as usize + 1] as usize].iter().position(|row| row.1 == f).unwrap()) as u32
+    };
     let mut fan = Dsu::new(vf.len());
     let mut face_dsu = Dsu::new(fcount);
     let mut linked: Vec<u32> = Vec::new();
@@ -538,7 +615,7 @@ fn key(a: i64, b: i64) -> Edge {
     }
 }
 
-fn toggle(set: &mut HashSet<Edge>, edge: Edge) {
+fn toggle(set: &mut HashSet<Edge, FxBuild>, edge: Edge) {
     if !set.remove(&edge) {
         set.insert(edge);
     }
@@ -549,8 +626,8 @@ pub fn parity_path_edges(faces: &Faces, frozen: &[Edge]) -> Result<Vec<Edge>, St
     let fcount = faces.count();
     let h = halves(faces);
     let e = edges(&h);
-    let frozen: HashSet<Edge> = frozen.iter().copied().collect();
-    let mut selected: HashSet<Edge> = frozen.clone();
+    let frozen: HashSet<Edge, FxBuild> = frozen.iter().copied().collect();
+    let mut selected: HashSet<Edge, FxBuild> = frozen.clone();
     for f in 0..fcount {
         let face = faces.face(f);
         if face.len() == 3 {
@@ -593,9 +670,9 @@ pub fn parity_path_edges(faces: &Faces, frozen: &[Edge]) -> Result<Vec<Edge>, St
     for b in boundary.iter_mut() {
         b.sort_unstable();
     }
-    let mut terminals: BTreeSet<u32> = (0..fcount as u32)
-        .filter(|&f| {
-            let face = faces.face(f as usize);
+    let mut terminal: Vec<bool> = (0..fcount)
+        .map(|f| {
+            let face = faces.face(f);
             face.len() == 4
                 && (0..4)
                     .filter(|&c| selected.contains(&key(face[c], face[(c + 1) % 4])))
@@ -604,6 +681,7 @@ pub fn parity_path_edges(faces: &Faces, frozen: &[Edge]) -> Result<Vec<Edge>, St
                     == 1
         })
         .collect();
+    let mut lowest = 0usize; // no terminal is ever added, so the lowest one left only moves up
 
     let mut dist = vec![0i64; fcount];
     let mut parent: Vec<(u32, Edge)> = vec![(0, (0, 0)); fcount];
@@ -611,7 +689,14 @@ pub fn parity_path_edges(faces: &Faces, frozen: &[Edge]) -> Result<Vec<Edge>, St
     let mut generation = 0u32;
     let mut visited: Vec<u32> = Vec::new();
     let mut queue: VecDeque<u32> = VecDeque::new();
-    while let Some(&start) = terminals.iter().next() {
+    loop {
+        while lowest < fcount && !terminal[lowest] {
+            lowest += 1;
+        }
+        if lowest == fcount {
+            break;
+        }
+        let start = lowest as u32;
         generation += 1;
         visited.clear();
         queue.clear();
@@ -638,7 +723,7 @@ pub fn parity_path_edges(faces: &Faces, frozen: &[Edge]) -> Result<Vec<Edge>, St
                 parent[linked as usize] = (current, edge);
                 queue.push_back(linked);
                 visited.push(linked);
-                if terminals.contains(&linked) {
+                if terminal[linked as usize] {
                     best = best.min(d);
                 } else if !boundary[linked as usize].is_empty() {
                     best = best.min(d + 1);
@@ -649,7 +734,7 @@ pub fn parity_path_edges(faces: &Faces, frozen: &[Edge]) -> Result<Vec<Edge>, St
         let mut choice: Option<(i64, u8, u32, Edge)> = None;
         for &target in &visited {
             let d = dist[target as usize];
-            if target != start && terminals.contains(&target) {
+            if target != start && terminal[target as usize] {
                 let c = (d, 0u8, target, (-1, -1));
                 if choice.map_or(true, |b| c < b) {
                     choice = Some(c);
@@ -672,11 +757,11 @@ pub fn parity_path_edges(faces: &Faces, frozen: &[Edge]) -> Result<Vec<Edge>, St
             toggle(&mut selected, edge);
             current = p;
         }
-        terminals.remove(&start);
+        terminal[start as usize] = false;
         if kind == 1 {
             toggle(&mut selected, exterior);
         } else {
-            terminals.remove(&target);
+            terminal[target as usize] = false;
         }
     }
     for f in 0..fcount {

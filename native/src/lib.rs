@@ -3,8 +3,13 @@
 //! (`turbo.py`) converts meshes to flat arrays and falls back to pure Python
 //! whenever this module is missing. All heavy work runs with the GIL released.
 
+mod close;
 mod geom;
+mod join;
 mod matching;
+mod pairing;
+mod qem;
+mod quadreduce;
 mod topo;
 
 use numpy::{Complex64, IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1};
@@ -416,6 +421,208 @@ fn check_field(n: usize, fa: &[i64], fb: &[i64], links: usize, per_face: &[usize
     }
 }
 
+fn vertex_ids_ok(flat: &[i64], vertices: usize) -> bool {
+    flat.iter().all(|&v| v >= 0 && (v as usize) < vertices / 3)
+}
+
+/// `flatquad.make_closable`: (vertices, indptr, flat, kept input face per face, vertices added).
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn make_closable<'py>(
+    py: Python<'py>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    vertices: PyReadonlyArray1<'py, f64>,
+    span: f64,
+) -> PyResult<(F64Array<'py>, I64Array<'py>, I64Array<'py>, I64Array<'py>, usize)> {
+    let (indptr, flat, vertices) = (slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&vertices, "vertices")?);
+    check_faces(indptr, flat)?;
+    if !vertex_ids_ok(flat, vertices.len()) {
+        return Err(PyValueError::new_err("vertex index out of range"));
+    }
+    let (out, added) = py.detach(|| {
+        let mesh = close::Mesh {
+            vertices: vertices.to_vec(),
+            indptr: indptr.to_vec(),
+            flat: flat.to_vec(),
+            origin: (0..indptr.len() as i64 - 1).collect(),
+        };
+        close::make_closable(&mesh, span)
+    });
+    Ok((out.vertices.into_pyarray(py), out.indptr.into_pyarray(py), out.flat.into_pyarray(py), out.origin.into_pyarray(py), added))
+}
+
+/// `flatquad._close_pieces`: (vertices, indptr, flat, input face per face, how many pieces went each of the four ways).
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn close_pieces<'py>(
+    py: Python<'py>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    vertices: PyReadonlyArray1<'py, f64>,
+    warp_cosine: f64,
+) -> PyResult<(F64Array<'py>, I64Array<'py>, I64Array<'py>, I64Array<'py>, [i64; 4])> {
+    let (indptr, flat, vertices) = (slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&vertices, "vertices")?);
+    check_faces(indptr, flat)?;
+    if !vertex_ids_ok(flat, vertices.len()) {
+        return Err(PyValueError::new_err("vertex index out of range"));
+    }
+    let (out, counts) = py
+        .detach(|| close::close_pieces(&topo::Faces { indptr, flat }, vertices, warp_cosine))
+        .map_err(PyValueError::new_err)?;
+    Ok((out.vertices.into_pyarray(py), out.indptr.into_pyarray(py), out.flat.into_pyarray(py), out.origin.into_pyarray(py), counts))
+}
+
+/// `quadreduce.join_loose_triangles`: (vertices, indptr, flat, input face whose material each face takes, triangles joined).
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn join_loose_triangles<'py>(
+    py: Python<'py>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    vertices: PyReadonlyArray1<'py, f64>,
+    material: PyReadonlyArray1<'py, i64>,
+    farthest: usize,
+) -> PyResult<(F64Array<'py>, I64Array<'py>, I64Array<'py>, I64Array<'py>, i64)> {
+    let (indptr, flat, vertices, material) = (slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&vertices, "vertices")?, slice(&material, "material")?);
+    check_faces(indptr, flat)?;
+    if !vertex_ids_ok(flat, vertices.len()) || material.len() + 1 != indptr.len() {
+        return Err(PyValueError::new_err("join arrays are inconsistent"));
+    }
+    let out = py.detach(|| join::join_loose_triangles(indptr, flat, vertices, material, farthest));
+    Ok((out.vertices.into_pyarray(py), out.indptr.into_pyarray(py), out.flat.into_pyarray(py), out.owner.into_pyarray(py), out.joined))
+}
+
+/// `random.Random(seed).shuffle(list(range(count)))`.
+#[pyfunction]
+fn shuffled<'py>(py: Python<'py>, count: usize, seed: u32) -> I64Array<'py> {
+    py.detach(|| pairing::shuffled(count, seed)).into_pyarray(py)
+}
+
+/// `engine._pair_triangles` for each seed, side by side: a list of (quads, leftover triangles, material face per face, rescued).
+#[pyfunction]
+#[pyo3(signature = (faces, face_a, face_b, quads, scores, minimum, seeds))]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn pair_seeds<'py>(
+    py: Python<'py>,
+    faces: usize,
+    face_a: PyReadonlyArray1<'py, i64>,
+    face_b: PyReadonlyArray1<'py, i64>,
+    quads: PyReadonlyArray1<'py, i64>,
+    scores: PyReadonlyArray1<'py, f64>,
+    minimum: Option<f64>,
+    seeds: Vec<u32>,
+) -> PyResult<Vec<(I64Array<'py>, I64Array<'py>, I64Array<'py>, i64)>> {
+    let (fa, fb, quads, scores) = (slice(&face_a, "face_a")?, slice(&face_b, "face_b")?, slice(&quads, "quads")?, slice(&scores, "scores")?);
+    let ok = fa.len() == fb.len()
+        && fa.len() == scores.len()
+        && quads.len() == fa.len() * 4
+        && fa.iter().chain(fb).all(|&f| f >= 0 && (f as usize) < faces)
+        && !scores.iter().any(|s| s.is_nan());
+    if !ok {
+        return Err(PyValueError::new_err("pairing arrays are inconsistent"));
+    }
+    let rows = py.detach(|| {
+        let graph = pairing::allowed(faces, fa, fb, scores, minimum);
+        pairing::pair_seeds(&graph, quads, &seeds)
+    });
+    Ok(rows
+        .into_iter()
+        .map(|p| (p.quads.into_pyarray(py), p.tris.into_pyarray(py), p.owner.into_pyarray(py), p.rescued))
+        .collect())
+}
+
+/// `QuadReducer.save`.
+#[pyclass(frozen)]
+struct QuadSaved(quadreduce::Saved);
+
+/// `quadreduce.QuadReducer`.
+#[pyclass]
+struct QuadReducer(quadreduce::Reducer);
+
+#[pymethods]
+impl QuadReducer {
+    #[new]
+    fn new(py: Python<'_>, indptr: PyReadonlyArray1<'_, i64>, flat: PyReadonlyArray1<'_, i64>, vertices: PyReadonlyArray1<'_, f64>, material: PyReadonlyArray1<'_, i64>, dissolve_limit: f64, most_turned: f64) -> PyResult<Self> {
+        let (indptr, flat, vertices, material) = (slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&vertices, "vertices")?, slice(&material, "material")?);
+        check_faces(indptr, flat)?;
+        if !vertex_ids_ok(flat, vertices.len()) || material.len() + 1 != indptr.len() || indptr.windows(2).any(|w| w[1] - w[0] < 3) {
+            return Err(PyValueError::new_err("reducer arrays are inconsistent"));
+        }
+        Ok(QuadReducer(py.detach(|| quadreduce::Reducer::new(indptr, flat, vertices, material, dissolve_limit, most_turned))))
+    }
+
+    fn remove(&mut self, py: Python<'_>, count: usize) {
+        py.detach(|| self.0.remove(count));
+    }
+
+    #[getter]
+    fn alive(&self) -> usize {
+        self.0.alive()
+    }
+
+    #[getter]
+    fn refused(&self) -> usize {
+        self.0.refused()
+    }
+
+    fn retry_refused(&mut self) {
+        self.0.retry_refused();
+    }
+
+    fn original_ids<'py>(&self, py: Python<'py>, vertices: PyReadonlyArray1<'py, i64>) -> PyResult<I64Array<'py>> {
+        Ok(self.0.original_ids(slice(&vertices, "vertices")?).into_pyarray(py))
+    }
+
+    fn freeze(&mut self, vertices: PyReadonlyArray1<'_, i64>) -> PyResult<()> {
+        self.0.freeze(slice(&vertices, "vertices")?);
+        Ok(())
+    }
+
+    fn save(&self, py: Python<'_>) -> QuadSaved {
+        QuadSaved(py.detach(|| self.0.save()))
+    }
+
+    fn restore(&mut self, py: Python<'_>, saved: &QuadSaved) {
+        py.detach(|| self.0.restore(&saved.0));
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn result<'py>(&mut self, py: Python<'py>) -> (F64Array<'py>, I64Array<'py>, I64Array<'py>, I64Array<'py>) {
+        let (vertices, indptr, flat, owner) = py.detach(|| self.0.result());
+        (vertices.into_pyarray(py), indptr.into_pyarray(py), flat.into_pyarray(py), owner.into_pyarray(py))
+    }
+}
+
+/// One piece taken all the way down: every size of it is then a quick `level(faces)`.
+#[pyclass(frozen)]
+struct Reducer(qem::Run);
+
+#[pymethods]
+impl Reducer {
+    #[new]
+    fn new(py: Python<'_>, points: PyReadonlyArray1<'_, f64>, tris: PyReadonlyArray1<'_, i64>, locked: PyReadonlyArray1<'_, bool>, least: u32) -> PyResult<Self> {
+        let (points, tris, locked) = (slice(&points, "points")?, slice(&tris, "tris")?, slice(&locked, "locked")?);
+        if tris.len() % 3 != 0 || points.len() % 3 != 0 || !vertex_ids_ok(tris, points.len()) {
+            return Err(PyValueError::new_err("reducer arrays are inconsistent"));
+        }
+        Ok(Reducer(py.detach(|| {
+            let tris: Vec<u32> = tris.iter().map(|&v| v as u32).collect();
+            qem::run(points, &tris, locked, least)
+        })))
+    }
+
+    /// (points, triangles) of the piece at `wanted` triangles, or as near as the run could get.
+    fn level<'py>(&self, py: Python<'py>, wanted: u32) -> (F64Array<'py>, I64Array<'py>) {
+        let (points, tris) = py.detach(|| self.0.level(wanted));
+        (points.into_pyarray(py), tris.into_pyarray(py))
+    }
+
+    fn smallest(&self) -> u32 {
+        self.0.smallest()
+    }
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -432,5 +639,13 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parity_templates, m)?)?;
     m.add_function(wrap_pyfunction!(cross_field_jacobi, m)?)?;
     m.add_function(wrap_pyfunction!(cross_field_gl, m)?)?;
+    m.add_function(wrap_pyfunction!(make_closable, m)?)?;
+    m.add_function(wrap_pyfunction!(close_pieces, m)?)?;
+    m.add_function(wrap_pyfunction!(join_loose_triangles, m)?)?;
+    m.add_function(wrap_pyfunction!(shuffled, m)?)?;
+    m.add_function(wrap_pyfunction!(pair_seeds, m)?)?;
+    m.add_class::<Reducer>()?;
+    m.add_class::<QuadReducer>()?;
+    m.add_class::<QuadSaved>()?;
     Ok(())
 }
