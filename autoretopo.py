@@ -256,8 +256,33 @@ def _quadriflow(context, points, polys, kinds, goal):
         layer.objects.active = was_active
 
 
+def _even_border(points, polys):
+    """(points, polys) with one more vertex on the longest border edge when the part's one border loop is odd.
+
+    Grid and Flow need an even seam. Here the seam is the part's own open border, with no face on the other side,
+    so a midpoint there changes nothing else; how decimation left the border decided it before (it failed at every
+    Detail on a test sheet)."""
+    loops, pinched = patch.boundary_loops(polys, np.arange(len(polys)))
+    if pinched or len(loops) != 1 or len(loops[0]) % 2 == 0:
+        return points, polys
+    loop = loops[0]
+    edges = list(zip(loop, loop[1:] + loop[:1]))
+    a, b = max(edges, key=lambda e: float(np.linalg.norm(points[e[0]] - points[e[1]])))
+    mid = len(points)
+    out = []
+    for poly in polys:
+        poly = list(poly)
+        for k in range(len(poly)):
+            if {poly[k], poly[(k + 1) % len(poly)]} == {a, b}:
+                poly.insert(k + 1, mid)
+                break
+        out.append(tuple(poly))
+    return np.vstack([points, 0.5 * (points[a] + points[b])]), out
+
+
 def _fill(points, polys, kinds, strategy, goal):
     """Grid or Flow fill over a whole part: only works when the part is one open surface with a single edge loop."""
+    points, polys = _even_border(np.asarray(points, dtype=np.float64), polys)
     tris = [t for p in polys for t in ((p[0], p[i], p[i + 1]) for i in range(1, len(p) - 1))]
     t = np.asarray(tris)
     area = 0.5 * float(np.linalg.norm(np.cross(points[t[:, 1]] - points[t[:, 0]], points[t[:, 2]] - points[t[:, 0]]), axis=1).sum())
