@@ -22,7 +22,7 @@ ENGINE = "curiomesh_engine"
 
 RUN_JOB = '''# Runs one CurioMesh Auto Segments job without a window. Made by the CurioMesh add-on.
 #   blender --background --python run_job.py [-- --effort FULL]
-# Stopped or crashed? Run the same command again: parts already finished are in the progress folder and are kept.
+# Stopped or crashed? Run the same command again: parts already finished are in the curiomesh_resume folder and are kept.
 import json
 import sys
 from pathlib import Path
@@ -42,13 +42,24 @@ from curiomesh_engine import autoretopo, hardware, jobpack  # noqa: E402
 data = np.load(HERE / "mesh.npz", allow_pickle=False)
 loops, starts, totals = data["loops"].tolist(), data["start"].tolist(), data["total"].tolist()
 faces = [tuple(loops[a : a + b]) for a, b in zip(starts, totals)]
+mirror = tuple(job["mirror"]) if job.get("mirror") else None  # (axis, plane offset, size, faces of the whole mesh, side solved)
+lines, project = [], None
+if (HERE / "guides.npz").exists():
+    with np.load(HERE / "guides.npz", allow_pickle=False) as guide_file:
+        lines = [guide_file[f"l{i}"] for i in range(int(guide_file["n"]))]
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+
+    surface = BVHTree.FromPolygons(data["co"].tolist(), [list(f) for f in faces])
+    project = lambda p: surface.find_nearest(Vector(p))[0]  # noqa: E731
+drop = data["drop"] if "drop" in data.files else None
 machine = hardware.detect()
 print("Machine:", "; ".join(hardware.describe(machine)), flush=True)
 settings = hardware.settings_for(job["effort"], machine)
 print(f"Working at {settings.name}: {len(faces):,} faces", flush=True)
 runner = autoretopo.AutoJob(
-    bpy.context, data["co"], faces, data["mat"], job["detail"], job["target_faces"],
-    settings=settings, checkpoint=HERE / "progress", keep_progress=True,
+    bpy.context, data["co"], faces, data["mat"], job["detail"], job["target_faces"], mirror=mirror, guide_lines=lines, project=project, drop=drop,
+    settings=settings, checkpoint=hardware.checkpoint_dir(data["co"], len(faces), str(HERE)), keep_progress=True,
 )
 while runner.busy:
     runner.wait(10.0)
@@ -56,7 +67,7 @@ while runner.busy:
 if runner.warnings or runner.report is None:
     print("FAILED:", runner.warnings or "stopped before the end", flush=True)
     raise SystemExit(1)
-jobpack.save_result(HERE / "result.npz", runner.output, runner.report, len(faces), len(data["co"]))
+jobpack.save_result(HERE / "result.npz", runner.output, runner.report, job["source_faces"], job["source_verts"])
 print("Done:", jobpack.summary(runner.report), flush=True)
 print("Result written to", HERE / "result.npz", flush=True)
 '''
@@ -78,11 +89,11 @@ Run it
   5. In Blender, in the CurioMesh panel, press "Import Job Result", pick result.npz, then press Apply.
 
 Stopped, or the machine crashed?
-  Run the same command again. Finished parts are saved in the progress folder and are not done twice.
+  Run the same command again. Finished parts are saved in the curiomesh_resume folder and are not done twice.
 
 Good to know
   - The job uses the same engine as the button in Blender, so the result is the same kind of result.
-  - It solves the whole mesh: guide curves, painted density and Mirror are not part of an exported job.
+  - Mirror, guide curves and painted density are carried in the folder (mesh.npz, guides.npz, job.json).
   - Today the work runs on the CPU. A machine with many CPU cores and plenty of memory finishes soonest; a graphics
     card does not speed it up yet. See docs/CLOUD_WORKFLOW.md in the CurioMesh repository.
   - Keep the mesh private if it is private: nothing in this folder sends anything anywhere.
@@ -107,13 +118,23 @@ def _copy_engine(source: Path, target: Path) -> None:
         shutil.copyfile(name, destination)
 
 
-def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, addon_dir) -> Path:
-    """Write the job folder. `co`/`faces`/`mat` are the (welded) source mesh; returns the folder."""
+def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, addon_dir, mirror=None, lines=(), drop=None, source=None) -> Path:
+    """Write the job folder. `co`/`faces`/`mat` are what the search runs on (the solved half when `mirror` is set).
+
+    `mirror` is (axis, offset, size, faces of the whole mesh, side solved); `lines` the guide strokes already on that half;
+    `drop` the painted density per vertex; `source` the (faces, vertices) of the whole mesh the result must fit. Returns the folder.
+    """
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     sizes = np.fromiter((len(f) for f in faces), dtype=np.int64, count=len(faces))
-    np.savez(folder / "mesh.npz", co=np.asarray(co, dtype=np.float64), loops=np.fromiter((v for f in faces for v in f), dtype=np.int64), start=np.cumsum(sizes) - sizes, total=sizes, mat=np.asarray(mat, dtype=np.int32))
-    (folder / "job.json").write_text(json.dumps({"detail": float(detail), "target_faces": int(target_faces), "effort": effort, "faces": len(faces), "verts": len(co)}, indent=2))
+    extra = {} if drop is None else {"drop": np.asarray(drop, dtype=np.float64)}
+    np.savez(folder / "mesh.npz", co=np.asarray(co, dtype=np.float64), loops=np.fromiter((v for f in faces for v in f), dtype=np.int64), start=np.cumsum(sizes) - sizes, total=sizes, mat=np.asarray(mat, dtype=np.int32), **extra)
+    if len(lines):
+        np.savez(folder / "guides.npz", n=np.int64(len(lines)), **{f"l{i}": np.asarray(line, dtype=np.float64) for i, line in enumerate(lines)})
+    source = source or (len(faces), len(co))
+    settings = {"detail": float(detail), "target_faces": int(target_faces), "effort": effort, "faces": len(faces), "verts": len(co), "source_faces": int(source[0]), "source_verts": int(source[1])}
+    settings["mirror"] = None if mirror is None else [int(mirror[0]), float(mirror[1]), float(mirror[2]), int(mirror[3]), int(mirror[4])]
+    (folder / "job.json").write_text(json.dumps(settings, indent=2))
     _copy_engine(Path(addon_dir), folder / ENGINE)
     (folder / "run_job.py").write_text(RUN_JOB)
     (folder / "README.txt").write_text(README.format(faces=len(faces), name=folder.name, engine=ENGINE, effort=effort))

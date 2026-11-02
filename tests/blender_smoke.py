@@ -1432,6 +1432,27 @@ def run_guided_case(module):
         if "FINISHED" not in bpy.ops.curiomesh.guided_import_result(filepath=str(job / "result.npz")) or guided.state["res"] is None:
             raise AssertionError("hardware: the result did not come back")
     print(f"PASS hardware: {runner.report['chunks']} chunks, no gaps, job folder out and result back")
+
+    # a Mirror job: the exported folder carries the half and the plane, runs on its own, and its result fits the whole mesh
+    import json
+    import subprocess
+
+    gs.sym_axis = "X"
+    reset_selection(sphere)
+    with tempfile.TemporaryDirectory() as folder:
+        bpy.ops.curiomesh.guided_export_job(directory=folder)
+        job = Path(folder) / f"{sphere.name}_curiomesh_job"
+        settings = json.loads((job / "job.json").read_text())
+        if settings["mirror"] is None or settings["faces"] >= settings["source_faces"]:
+            raise AssertionError(f"hardware: the Mirror half was not exported: {settings}")
+        done = subprocess.run([bpy.app.binary_path, "--background", "--factory-startup", "--python", str(job / "run_job.py"), "--", "--effort", "LIGHT"], capture_output=True, text=True, timeout=600)
+        if done.returncode != 0 or not (job / "result.npz").exists():
+            raise AssertionError(f"hardware: the exported job did not run: {done.stdout[-600:]} {done.stderr[-300:]}")
+        res, _report = jobpack.load_result(job / "result.npz", settings["source_faces"], settings["source_verts"])
+        if not len(res["faces"]):
+            raise AssertionError("hardware: the Mirror job gave no faces")
+    gs.sym_axis = "OFF"
+    print("PASS hardware: a Mirror job ran headless and came back")
     gs.auto_effort = "AUTO"
     gs.scope = "WHOLE"
 

@@ -1065,6 +1065,17 @@ def job_rating(gs, faces: int, sig=None) -> tuple[str, str, hardware.Settings]:
     return level, text, settings
 
 
+def _solve_inputs(gs, src, lines, paint):
+    """What the search runs on: (co, faces, mat, mirror, lines, paint, note). With Mirror it is one half, and the strokes and paint follow it."""
+    half, note = _mirror_half(gs, src)
+    co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], src["mat"], None)
+    if paint is not None:
+        paint = paint[half[4]] if half is not None else paint
+    if lines and mirror:
+        lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
+    return co, faces, mat, mirror, lines, paint, note
+
+
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
     target = auto_target(gs, len(src["faces"]))
@@ -1076,12 +1087,7 @@ def _start_segments(context, gs, src) -> bool:
         return True
     stop_work()
     state["auto_base"] = None
-    half, note = _mirror_half(gs, src)
-    co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], src["mat"], None)
-    if paint is not None:
-        paint = paint[half[4]] if half is not None else paint
-    if lines and mirror:
-        lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
+    co, faces, mat, mirror, lines, paint, note = _solve_inputs(gs, src, lines, paint)
     bvh = _bvh(src)
     cache_key = (src["sig"], mirror[:2] if mirror else None)
     if state["auto_cache"][0] != cache_key:
@@ -2253,7 +2259,12 @@ class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
         except ValueError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        jobpack.export_job(folder, src["co"], src["faces"], src["mat"], gs.auto_detail, auto_target(gs, len(src["faces"])), "FULL", Path(__file__).resolve().parent)
+        target = auto_target(gs, len(src["faces"]))
+        co, faces, mat, mirror, lines, paint, _note = _solve_inputs(gs, src, _guide_lines(context, gs, src), _painted(obj, gs, src))
+        jobpack.export_job(
+            folder, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, "FULL", Path(__file__).resolve().parent,
+            mirror=mirror, lines=lines, drop=None if paint is None else density_drop(paint, gs.density_strength), source=(len(src["faces"]), len(src["co"])),
+        )
         state["message"] = f"Job written to {folder}. Copy the folder to the other computer and follow README.txt in it"
         self.report({"INFO"}, state["message"])
         return {"FINISHED"}

@@ -15,8 +15,14 @@
   mesh, settings, engine and `run_job.py` (`blender --background --python run_job.py`);
   **Import Result** brings `result.npz` back. See docs/CLOUD_WORKFLOW.md. On a 1.5M-face
   cliff scan: Light 70 regions, 1217 s, 5.5 GB peak; Full 4 regions, 1524 s, 6.0 GB peak
-  (shared PC, so the times are rough). Memory barely fell: the whole mesh and the pairing
-  step dominate it, not the regions. No step uses a graphics card yet.
+  (shared PC, so the times are rough). A cut mesh now keeps its sizes on disk and rebuilds
+  the whole piece from the mesh instead of holding a second copy, and the big camera
+  reference is built inside Blender: on the cliff the job itself adds 2.5 GB (2056 MB
+  before it starts, 4576 MB peak, all in the one pairing step, which still runs on the
+  whole mesh because pairing each region alone splits seam edges differently on each
+  side). Exported jobs carry Mirror, guide curves and painted density. Checkpoints live
+  in a private per-user folder; imported results are checked before use. No step uses a
+  graphics card yet.
 - **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
   vertex group and colour the parts that need more quads red; the search keeps more
   faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate

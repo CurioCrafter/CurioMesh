@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import math
 import shutil
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 import bpy
 import numpy as np
@@ -143,6 +145,43 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, lock=None) -> tup
     return co.reshape(-1, 3), faces, materials
 
 
+def _native_tree(context, co: np.ndarray, flat: np.ndarray, sizes: np.ndarray) -> BVHTree | None:
+    """The BVH of a big mesh built inside Blender from arrays, with no Python lists of faces. None if this Blender won't take it."""
+    mesh = obj = None
+    try:
+        starts = np.cumsum(sizes) - sizes
+        counts = sizes - 2  # fan-triangulate like BVHTree.FromPolygons does, so a quad is cut the same way and the pictures match
+        face = np.repeat(np.arange(len(sizes)), counts)
+        local = np.arange(int(counts.sum())) - np.repeat(np.cumsum(counts) - counts, counts)
+        base = starts[face]
+        flat = np.stack((flat[base], flat[base + local + 1], flat[base + local + 2]), axis=1).ravel()
+        sizes = np.full(len(face), 3, dtype=np.int64)
+        mesh = bpy.data.meshes.new("CurioMesh_Tree")
+        mesh.vertices.add(len(co))
+        mesh.vertices.foreach_set("co", np.ascontiguousarray(co, dtype=np.float32).ravel())
+        mesh.loops.add(len(flat))
+        mesh.loops.foreach_set("vertex_index", flat.astype(np.int32))
+        mesh.polygons.add(len(sizes))
+        mesh.polygons.foreach_set("loop_start", (np.cumsum(sizes) - sizes).astype(np.int32))
+        try:
+            mesh.polygons.foreach_set("loop_total", sizes.astype(np.int32))  # read-only from Blender 4.0, where the starts are enough
+        except Exception:
+            pass
+        mesh.update()
+        if len(mesh.polygons) != len(sizes) or mesh.polygons[len(sizes) - 1].loop_total != int(sizes[-1]) or mesh.polygons[0].loop_total != int(sizes[0]):
+            return None
+        obj = bpy.data.objects.new("CurioMesh_Tree", mesh)
+        context.scene.collection.objects.link(obj)
+        return BVHTree.FromObject(obj, context.evaluated_depsgraph_get(), epsilon=0.0)
+    except Exception:
+        return None
+    finally:
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh is not None:
+            bpy.data.meshes.remove(mesh)
+
+
 def _picture_sizes(sizes: np.ndarray, most_rays: int = MOST_RAYS, max_pixels: int = MAX_PIXELS) -> np.ndarray:
     """Pixels per side for pieces of these sizes (the whole object is 1.0), coarser for a model with very many parts."""
 
@@ -179,6 +218,11 @@ class AutoJob:
         self.names: list[str] = []  # where each part is, in words
         self.locked: np.ndarray | None = None  # vertices on a chunk border: never moved, so neighbours join without a gap
         self.chunks = 0  # how many regions a huge piece was cut into
+        self.losses: list[float] = []  # the view change measured after each try
+        self.first: list = []  # per piece, its smallest size (what the preview shows before sizes are picked)
+        self.files: list = []  # per piece, the file that holds its sizes when they are kept on disk, not in memory
+        self._tmp: Path | None = None  # where sizes go when there is no checkpoint folder
+        self.mem: dict[str, int] = {"start": round(hardware.peak_memory_mb())}  # the most memory used by the end of each stage, MB
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
@@ -213,6 +257,50 @@ class AutoJob:
     def stop(self) -> None:
         self._stopped = True
         self.busy = False
+        self._drop_tmp()
+
+    def _drop_tmp(self) -> None:
+        if self._tmp is not None:
+            shutil.rmtree(self._tmp, ignore_errors=True)
+            self._tmp = None
+
+    def _mark(self, stage: str) -> None:
+        self.mem[stage] = round(hardware.peak_memory_mb())
+
+    def _size(self, index: int, level: int):
+        """(points, polys, kinds) of a piece at a picked size: from memory, from its file, or rebuilt from the mesh for the whole piece."""
+        sizes = self.sizes[index]
+        if sizes is None:
+            loaded = hardware.load_piece(self.files[index])
+            if loaded is None:
+                raise RuntimeError("a saved part went missing")
+            sizes = loaded[1] + [None]
+        return sizes[level] if sizes[level] is not None else self._piece_arrays(self.pieces[index])
+
+    def _finish_piece(self, key, sizes: list, levels: list, seen: float, file, fresh: bool) -> None:
+        """Keep a measured piece. `sizes` ends with None, the whole piece, which is rebuilt from the mesh when needed.
+
+        A piece of a cut mesh goes to disk and only its numbers stay in memory.
+        """
+        self.levels.append(levels)
+        self.seen.append(seen)
+        self.first.append(sizes[0])
+        pairs = [(lv.faces, lv.loss) for lv in levels]
+        if self.chunks:
+            if file is None:
+                if self._tmp is None:
+                    self._tmp = Path(tempfile.mkdtemp(prefix="curiomesh_"))
+                file = hardware.piece_file(self._tmp, repr(key[2]).encode() + key[1])
+            if fresh:
+                hardware.save_piece(file, self.detail, sizes[:-1], pairs, seen)
+            self.sizes.append(None)
+            self.files.append(file)
+            return
+        self.sizes.append(sizes)
+        self.files.append(None)
+        self.cache[key] = (self.detail, sizes, levels, seen)
+        if file is not None and fresh:
+            hardware.save_piece(file, self.detail, sizes[:-1], pairs, seen)
 
     def step(self, seconds: float | None = None) -> None:
         """Do the next slice of work on this (the main) thread."""
@@ -278,20 +366,25 @@ class AutoJob:
         triangles = sum(len(p) - 2 for p in polys)
         if triangles <= KEEP_TRIANGLES:
             self.sizes.append([whole])
+            self.files.append(None)
+            self.first.append(whole)
             self.levels.append([Level(len(polys), 0.0)])
             self.seen.append(0.0)
             return
         key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()))
-        saved = None
+        file = None
         if self.checkpoint is not None:
             file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
             saved = hardware.load_piece(file) if file.exists() else None
             if saved is not None and saved[0] <= self.detail:  # a stopped run measured this part already
-                self.cache[key] = (saved[0], saved[1], [Level(f, w) for f, w in saved[2]], saved[3])
                 self.resumed += 1
+                self._finish_piece(key, saved[1] + [None], [Level(f, w) for f, w in saved[2]], saved[3], file, False)
+                return
         known = self.cache.get(key)
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
+            self.files.append(None)
+            self.first.append(known[1][0])
             self.levels.append(known[2])
             self.seen.append(known[3])
             return
@@ -315,21 +408,19 @@ class AutoJob:
             levels.append(Level(len(reduced[1]), wrong * area))
             if wrong <= GOOD_ENOUGH * self.detail / 100.0 * shown:
                 break
-        sizes.append(whole)
+        sizes.append(None)  # the whole piece is not kept: it is rebuilt from the mesh
         levels.append(Level(len(polys), 0.0))
-        self.sizes.append(sizes)
-        self.levels.append(levels)
-        self.seen.append(seen)
-        self.cache[key] = (self.detail, sizes, levels, seen)
-        if self.checkpoint is not None:
-            hardware.save_piece(file, self.detail, sizes, [(lv.faces, lv.loss) for lv in levels], seen)
+        self._finish_piece(key, sizes, levels, seen, file, True)
 
-    def _reference(self, center, half, pixels, points, polys):
+    def _reference(self, center, half, pixels, points, polys, tree=None):
         """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
         key = ("view", center.tobytes(), half, pixels, len(polys), hash(points.tobytes()))
-        if key not in self.cache:
-            self.cache[key] = yield from self._timed("pictures", pictures(points, polys, center, half, pixels))
-        return self.cache[key]
+        if key in self.cache:
+            return self.cache[key]
+        views = yield from self._timed("pictures", pictures(points, polys, center, half, pixels, tree))
+        if not self.chunks:  # a cut mesh has a set per region: they are used once, so they are not kept
+            self.cache[key] = views
+        return views
 
     def _combined(self, join: bool = False, only_done: bool = False) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
         """Every piece at its picked size, and any not measured yet as it is (or left out, with `only_done`).
@@ -344,7 +435,10 @@ class AutoJob:
             if index in self.tuned:
                 points, polys, kinds = self.tuned[index]
             elif index < len(self.sizes):
-                points, polys, kinds = self.sizes[index][self.picked[index] if index < len(self.picked) else 0]
+                if index < len(self.picked):
+                    points, polys, kinds = self._size(index, self.picked[index])
+                else:
+                    points, polys, kinds = self.first[index] if self.first[index] is not None else self._piece_arrays(ids)
             else:
                 points, polys, kinds = self._piece_arrays(ids)
             all_points.append(points)
@@ -361,7 +455,7 @@ class AutoJob:
 
     def _show(self, final=None) -> None:
         if final is None:
-            co, faces, kinds, parts = self._combined(only_done=self.cfg.only_done)
+            co, faces, kinds, parts = self._combined(only_done=self.cfg.only_done or bool(self.chunks))
             if not faces:
                 return
         else:
@@ -457,7 +551,10 @@ class AutoJob:
         self.stage = "Looking at the whole object"
         center, half = (low + high) / 2.0, extent * 0.55
         pixel = 2.0 * half / self.max_pixels
-        reference = yield from self._reference(center, half, self.max_pixels, self.co, self.faces)
+        self._mark("measured")
+        tree = _native_tree(self.context, self.co, flat, sizes_f) if self.chunks else None
+        reference = yield from self._reference(center, half, self.max_pixels, self.co, self.faces, tree)
+        del tree
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
         allowed = asked * total_seen
@@ -495,6 +592,7 @@ class AutoJob:
             if self._paired is None:
                 return
             result = self._paired
+            self._mark("paired")
             points = np.asarray(result.vertices, dtype=np.float64)
             out_faces = [tuple(face) for face in result.faces]
             self.fraction += 0.5 * (1.0 - MEASURE_SHARE) / ROUNDS
@@ -508,6 +606,7 @@ class AutoJob:
                 continue
             self.stage = f"Checking the result, try {round_index + 1}"
             loss = yield from self._look(points, out_faces, center, half, reference, pixel)
+            self.losses.append(round(loss, 2))
             fits = loss <= 1.1 * self.detail
             # Prefer anything that fits, then the fewest faces. With nothing fitting yet, the least change.
             rank = (not fits, len(out_faces) if fits else loss)
@@ -533,9 +632,10 @@ class AutoJob:
             follows = {"strokes": len(self.guide_lines), "mean": mean / size, "worst": worst / size}
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows, "effort": self.cfg.name, "chunks": self.chunks, "resumed": self.resumed, "peak_mb": hardware.peak_memory_mb()}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": follows, "effort": self.cfg.name, "chunks": self.chunks, "resumed": self.resumed, "peak_mb": hardware.peak_memory_mb(), "mem": self.mem, "losses": self.losses}
         if self.checkpoint is not None and not self.keep_progress:
             shutil.rmtree(self.checkpoint, ignore_errors=True)  # finished: nothing left to resume
+        self._drop_tmp()
 
     def _look(self, points, out_faces, center, half, reference, pixel):
         """Generator: the percent of the view that differs from the original. Returns it when exhausted."""

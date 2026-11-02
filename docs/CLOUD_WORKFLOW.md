@@ -24,8 +24,8 @@ to put it. You get `<mesh name>_curiomesh_job/`:
 | `run_job.py` | runs the same search the button runs, without a window |
 | `README.txt` | the same steps as below, for whoever runs it |
 
-An exported job solves the whole mesh. Guide curves, painted density and Mirror are not
-included.
+Mirror (the solved half), guide curves and painted density are carried in the folder
+(`guides.npz`, and `drop` inside `mesh.npz`), so the result is the one the button would give.
 
 ## Steps on a generic Linux machine
 
@@ -70,7 +70,7 @@ card.
    press **Apply**. It refuses a result made from a different mesh.
 
 If the job stops or the machine crashes, run the same command again. Finished parts are
-in the `progress` folder and are not done twice.
+in the `curiomesh_resume` folder and are not done twice.
 
 ## How much machine
 
