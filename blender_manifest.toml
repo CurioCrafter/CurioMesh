@@ -14,3 +14,7 @@ website = "https://github.com/CurioCrafter/CurioMesh"
 tags = ["Mesh"]
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
+copyright = [
+  "2025-2026 Andrew Rainsberger and CurioMesh contributors",
+  "2001-2002 NaN Holding BV and the Blender authors (triangle test ported in native/src/near.rs)",
+]
