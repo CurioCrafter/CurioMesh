@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Big scans are much faster, and Blender stays usable** (Turbo). Triangle pairing, closing, joining leftover
+  triangles and taking quads away now run in the native core, each seed and each loose piece on its own core, with
+  the same faces as the Python path. A piece of 60,000 triangles or more is reduced by a native reducer off the main
+  thread instead of Decimate: one run holds every size of it. On a 1.26M-face scan a run went from 47 to 8 minutes on
+  a busy PC, and the longest stall from 199 to about 3 seconds. That scan ends 3% larger (the camera rates the reducer
+  equal to or better than Decimate at equal sizes, but the search lands differently). Small pieces still use
+  Decimate. `flatquad.pair_and_close(chunk_faces=...)` pairs per region for half the pairing memory; it is off unless
+  `autoretopo.PAIR_CHUNK_FACES` is set. Closure stays global, so seams always weld.
+
 - **Part cases** (Auto Segments). Each part now gets a named case from a few cheap
   measurements: tiny part, flat plate, thin sheet, box, tube, dome, rough scan, ornament or
   organic smooth. A small table, built from camera results on nine models, says which
