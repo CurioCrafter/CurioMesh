@@ -20,7 +20,7 @@ mod topo;
 use numpy::{Complex64, IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 type I64Array<'py> = Bound<'py, PyArray1<i64>>;
 type F64Array<'py> = Bound<'py, PyArray1<f64>>;
@@ -853,6 +853,28 @@ fn segment_merges<'py>(py: Python<'py>, count: usize, pa: PyReadonlyArray1<'py, 
     Ok((flat.into_pyarray(py), costs.into_pyarray(py)))
 }
 
+/// Faces as a list of tuples with `offset` added to every vertex: from (indptr, flat), or from any sequence of sequences.
+#[pyfunction]
+#[pyo3(signature = (polys, offset, indptr=None, flat=None))]
+fn shifted_faces<'py>(py: Python<'py>, polys: &Bound<'py, PyAny>, offset: i64, indptr: Option<PyReadonlyArray1<'py, i64>>, flat: Option<PyReadonlyArray1<'py, i64>>) -> PyResult<Bound<'py, PyList>> {
+    if let (Some(indptr), Some(flat)) = (indptr, flat) {
+        let (indptr, flat) = (slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+        check_faces(indptr, flat)?;
+        let rows = indptr.windows(2).map(|w| PyTuple::new(py, flat[w[0] as usize..w[1] as usize].iter().map(|&v| v + offset)));
+        return PyList::new(py, rows.collect::<PyResult<Vec<_>>>()?);
+    }
+    let out = PyList::empty(py);
+    let mut values = Vec::with_capacity(8);
+    for item in polys.try_iter()? {
+        values.clear();
+        for v in item?.try_iter()? {
+            values.push(v?.extract::<i64>()? + offset);
+        }
+        out.append(PyTuple::new(py, &values)?)?;
+    }
+    Ok(out)
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -877,6 +899,7 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
     m.add_function(wrap_pyfunction!(mesh_checks, m)?)?;
     m.add_function(wrap_pyfunction!(closed_walk, m)?)?;
+    m.add_function(wrap_pyfunction!(shifted_faces, m)?)?;
     m.add_function(wrap_pyfunction!(segment_merges, m)?)?;
     m.add_function(wrap_pyfunction!(field_orient_sweep, m)?)?;
     m.add_function(wrap_pyfunction!(field_nearest_points, m)?)?;

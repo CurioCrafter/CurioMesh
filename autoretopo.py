@@ -663,6 +663,7 @@ class AutoJob:
         self.face_piece = np.zeros(0, dtype=np.int64)
         self.flag = np.zeros(0, dtype=bool)
         self._kd = None
+        self._unmeasured: dict = {}  # piece -> its arrays, as `_piece_arrays` gives them, until the piece is measured
         self._kd_owner = None
         self._src_check = None
         self._known = None  # what the source crosses itself
@@ -1106,9 +1107,13 @@ class AutoJob:
             elif rebuilt:
                 continue
             else:
-                points, polys, kinds = self._piece_arrays(ids)
+                if index not in self._unmeasured:  # the preview asks for these again and again while the job runs
+                    self._unmeasured[index] = self._piece_arrays(ids)
+                points, polys, kinds = self._unmeasured[index]
+            if index < len(self.sizes):
+                self._unmeasured.pop(index, None)
             all_points.append(points)
-            all_faces += [tuple(v + offset for v in p) for p in polys]
+            all_faces += turbo.shifted_faces(polys, offset)
             all_kinds += kinds
             owner += [index] * len(polys)
             offset += len(points)
@@ -1141,7 +1146,8 @@ class AutoJob:
             parts = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
         count = len(faces)
         new = np.ones(count, bool) if new is None else new
-        self.output = {"instances": self.instances if final is not None else None, "co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.asarray([int(k) if str(k).isdigit() else 0 for k in kinds], dtype=np.int32), "parts": parts}
+        codes = {k: int(k) if str(k).isdigit() else 0 for k in set(kinds)}
+        self.output = {"instances": self.instances if final is not None else None, "co": co, "faces": faces, "new": new, "locked": np.zeros(count, bool), "mat": np.fromiter(map(codes.__getitem__, kinds), dtype=np.int32, count=len(kinds)), "parts": parts}
         if final is not None and self.mirror is None:
             self.output["piece"] = self.face_piece  # the source piece each face came from
             self.output["flag"] = self.flag  # faces still broken after the repair tries

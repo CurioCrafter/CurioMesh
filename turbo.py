@@ -615,6 +615,17 @@ def face_tree(points, faces) -> FaceTree | None:
     return FaceTree(module, (vertices, indptr, flat))
 
 
+def shifted_faces(polys, offset: int) -> list:
+    """`[tuple(v + offset for v in p) for p in polys]`, natively when it can be."""
+
+    module = native()
+    if module is None or not hasattr(module, "shifted_faces"):
+        return [tuple(v + offset for v in p) for p in polys]
+    if hasattr(polys, "indptr"):  # types.FlatFaces
+        return module.shifted_faces(None, int(offset), polys.indptr, polys.flat)
+    return module.shifted_faces(polys, int(offset))
+
+
 def mesh_checks(faces, piece):
     """Native `checks.edge_flags` and `checks.hole_counts`: (broken per face, non-manifold edges, flipped edges, duplicate faces, holes, holes per piece), or None."""
 
