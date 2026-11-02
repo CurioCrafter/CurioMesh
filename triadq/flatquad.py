@@ -18,7 +18,8 @@ The result is a conforming coarse mesh that TRIAD-Q pairs and closes as usual.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 import math
 
 import numpy as np
@@ -27,7 +28,10 @@ from .engine import RemeshOptions, RemeshReport, remesh_mesh
 from .quadreduce import join_loose_triangles
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
 from .topology import MAX_QUAD_WARP_DEGREES, _turbo, parity_path_closure_unpairing, quad_only_closure, topology_summary
-from .types import MeshData, cancel_with, check_cancelled
+from .types import FlatFaces, MeshData, cancel_with, check_cancelled
+
+
+PAIR_WORKERS = 4  # regions paired at once: more would hold more regions in memory, and Python's share of the work won't go faster
 
 
 @dataclass(slots=True)
@@ -682,7 +686,7 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
 
 def pair_and_close(
     coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
-    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (), keep_quads: bool = False, join_triangles: bool = False,
+    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (), keep_quads: bool = False, join_triangles: bool = False, chunk_faces: int = 0,
 ) -> tuple[MeshData, RemeshReport]:
     """Repair, pair with TRIAD-Q, then close every connected piece on its own.
 
@@ -693,16 +697,83 @@ def pair_and_close(
     ParityPath refuses: one loose fragment can't cost the rest of the mesh its
     quads. A piece neither can close is opened along its bad edges or, at the last, split without the validity check.
     With `keep_quads`, quads in `coarse` (grids already built) stay whole and only the triangles get paired.
+    With `chunk_faces`, pairing runs per region of that size, for less memory on a huge mesh: a few more triangles are left at the seams.
     """
 
     cancel_with(cancelled)
     try:
-        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles)
+        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces)
     finally:
         cancel_with(None)
 
 
-def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles):
+def _chunks(centers: np.ndarray, limit: int) -> list[np.ndarray]:
+    """Cut these face centres into compact regions of at most `limit` faces, by halving along the longest side."""
+
+    out, todo = [], [np.arange(len(centers))]
+    while todo:
+        ids = todo.pop()
+        if len(ids) <= limit:
+            out.append(ids)
+            continue
+        here = centers[ids]
+        order = np.argsort(here[:, int(np.argmax(np.ptp(here, axis=0)))], kind="stable")
+        half = len(ids) // 2
+        todo += [ids[order[half:]], ids[order[:half]]]
+    return out
+
+
+def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[MeshData, RemeshReport]:
+    """Pair triangles one compact region at a time, so the working memory is that of one region, not of the whole mesh.
+
+    Each region is paired on its own and only its faces are kept, as arrays numbered like `mesh`. No pair crosses a seam,
+    and nothing moves or splits here: closure then runs once on the whole result, so both sides of a seam agree by
+    construction. The regions never meet, so the result doesn't depend on the order or the number of threads.
+    """
+
+    faces = FlatFaces.of(mesh.faces)
+    sizes = np.diff(faces.indptr)
+    owner = np.repeat(np.arange(len(faces)), sizes)
+    centers = np.stack([np.bincount(owner, mesh.vertices[faces.flat, axis], len(faces)) for axis in range(3)], axis=1) / sizes[:, None]
+    del owner
+    regions = _chunks(centers, limit)
+    del centers
+    materials = mesh.face_materials
+
+    def one(ids: np.ndarray):
+        ids = np.sort(ids)
+        counts = sizes[ids]
+        corners = np.repeat(faces.indptr[ids], counts) + (np.arange(int(counts.sum())) - np.repeat(np.cumsum(counts) - counts, counts))
+        used, local = np.unique(faces.flat[corners], return_inverse=True)
+        ends = np.zeros(len(ids) + 1, dtype=np.int64)
+        np.cumsum(counts, out=ends[1:])
+        piece = MeshData(mesh.vertices[used], [], name=mesh.name)
+        piece.faces = list(FlatFaces(ends, local.reshape(-1)))
+        piece.face_materials = [materials[k] for k in ids.tolist()]
+        made, report = remesh_mesh(piece, replace(options, target_faces=max(1, len(ids) // 2)))
+        flat = FlatFaces.of(made.faces)
+        return np.diff(flat.indptr).astype(np.int8), used[flat.flat].astype(np.int32), made.face_materials, report
+
+    workers = min(_turbo.thread_count() if _turbo is not None else 1, PAIR_WORKERS)
+    parts = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="CurioMeshPair") as pool:
+        for done in pool.map(one, regions):
+            parts.append(done)
+            check_cancelled()
+    counts = np.concatenate([part[0] for part in parts]).astype(np.int64)
+    indptr = np.zeros(len(counts) + 1, dtype=np.int64)
+    np.cumsum(counts, out=indptr[1:])
+    report = parts[0][3]
+    report.rescued_pairs = sum(part[3].rescued_pairs for part in parts)
+    report.success = all(part[3].success for part in parts)
+    report.candidates = []
+    out = MeshData(mesh.vertices, [], name=f"{mesh.name}_triadq")
+    out.faces = FlatFaces(indptr, np.concatenate([part[1] for part in parts]))
+    out.face_materials = [material for part in parts for material in part[2]]
+    return out, report
+
+
+def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces=0):
     repaired, _added = make_closable(coarse)
     check_cancelled()
     kept: list[tuple[tuple[int, ...], str]] = []
@@ -714,7 +785,10 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
         target_faces=max(1, len(repaired.faces) // 2), seed_count=seed_count, force_quads=False, field_mode=field_mode,
         feature_angle_deg=feature_angle_deg, max_pairing=True, guide_edges=guide_edges,
     )
-    paired, solver = remesh_mesh(repaired, pair)
+    if chunk_faces and not guide_edges and len(repaired.faces) > chunk_faces:
+        paired, solver = _pair_chunks(repaired, pair, chunk_faces)
+    else:
+        paired, solver = remesh_mesh(repaired, pair)
     if kept:
         paired = MeshData(repaired.vertices, list(paired.faces) + [row[0] for row in kept], list(paired.face_materials) + [row[1] for row in kept], name=paired.name)
     if not force_quads or not paired.faces:

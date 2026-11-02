@@ -34,7 +34,7 @@ from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
 from . import guides, loops, symmetry, turbo
-from .triadq.types import Cancelled, MeshData
+from .triadq.types import Cancelled, FlatFaces, MeshData
 from .triadq.uvs import simplify_borders
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -297,6 +297,7 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
 
 
 OFF_MAIN_FROM = 100_000  # with this many faces in a job, its slow Python steps run on a worker thread, so Blender stays usable
+PAIR_CHUNK_FACES = 0  # above 0, pairing works per region of this many faces: less memory on a huge mesh, and a few more triangles at the seams
 NATIVE_FROM = 60_000  # a piece of this many triangles goes to the native reducer: Decimate would hold up Blender for seconds per size
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
@@ -427,7 +428,7 @@ class AutoJob:
         self.tidy = tidy  # try to tidy the finished quads, kept only if the score rises and the camera allows it
         self.context = context
         self.co = np.asarray(co, dtype=np.float64)
-        self.faces = list(faces)
+        self.faces = faces if isinstance(faces, FlatFaces) else list(faces)
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
         self.cache = {} if cache is None else cache  # what was measured on this very mesh before: starting again with another amount skips it
@@ -539,7 +540,7 @@ class AutoJob:
             if run is not None:
                 def level():
                     co, flat = run.level(wanted)
-                    return co.reshape(-1, 3), list(map(tuple, flat.reshape(-1, 3).tolist())), [str(int(kinds[0]))] * (len(flat) // 3)
+                    return co.reshape(-1, 3), FlatFaces(np.arange(0, len(flat) + 1, 3), flat), [str(int(kinds[0]))] * (len(flat) // 3)
 
                 out = yield from self._background(level)
         if out is None:
@@ -568,12 +569,11 @@ class AutoJob:
 
     def _piece_arrays(self, ids: np.ndarray):
         chosen = ids.tolist()
-        used, flat = np.unique(np.fromiter(chain.from_iterable(self.faces[f] for f in chosen), dtype=np.int64), return_inverse=True)
-        flat, polys, at = flat.tolist(), [], 0
-        for f in chosen:
-            size = len(self.faces[f])
-            polys.append(tuple(flat[at : at + size]))
-            at += size
+        sizes = np.fromiter((len(self.faces[f]) for f in chosen), dtype=np.int64, count=len(chosen)) if not isinstance(self.faces, FlatFaces) else np.diff(self.faces.indptr)[ids]
+        used, flat = np.unique(np.fromiter(chain.from_iterable(self.faces[f] for f in chosen), dtype=np.int64, count=int(sizes.sum())), return_inverse=True)
+        ends = np.zeros(len(chosen) + 1, dtype=np.int64)
+        np.cumsum(sizes, out=ends[1:])
+        polys = FlatFaces(ends, flat.reshape(-1))
         return self.co[used], polys, [self.materials[f] for f in ids.tolist()]
 
     def _measure_piece(self, ids: np.ndarray, pixels: int):
@@ -624,7 +624,7 @@ class AutoJob:
         floor = PIECE_LIMIT * self.detail / 100.0
         first, case = 0, None
         if self.table is not None:
-            case = cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0))
+            case = yield from self._off(lambda: cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0)))
             if not self.target_faces:  # Reduce To may want any small size to land on its count
                 first = cases.first_size(case, shares, floor, self.table)
         area = pixel * pixel
@@ -669,7 +669,7 @@ class AutoJob:
                 # Density where the camera saw it go wrong: hold those spots while the rest goes further, then let go.
                 for k in (upper - 1, upper, len(levels) - 1):
                     yield
-                    keep = hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0)
+                    keep = yield from self._off(lambda: hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0))
                     held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep)
                     reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), one_off=True)
                     view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
@@ -856,7 +856,7 @@ class AutoJob:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
                 coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
-            made = make_pure(coarse, method, self.output_kind, self.notes, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, join_triangles=self.collapse and method == "AUTO")
+            made = make_pure(coarse, method, self.output_kind, self.notes, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, join_triangles=self.collapse and method == "AUTO", chunk_faces=PAIR_CHUNK_FACES)
             # Strokes and a mirror seam must stay where they are.
             if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and not self._stopped:
                 made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
@@ -1224,7 +1224,8 @@ class AutoJob:
                     return
             points, out_faces, out_kinds = result
             rebuilt_from = len(points)  # the rebuilt parts' vertices come last
-            out_faces += [tuple(v + len(points) for v in f) for f in rfaces]
+            if rfaces:
+                out_faces += [tuple(v + len(points) for v in f) for f in rfaces]
             out_kinds += rkinds
             points = np.vstack([points, rco])
             self.fraction += 0.5 * (1.0 - MEASURE_SHARE) / ROUNDS
@@ -1263,9 +1264,10 @@ class AutoJob:
             self.fraction = 0.95
             loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
         elif self.collapse:
-            taken, taken_loss = yield from self._reduce(MeshData(points, out_faces, materials), loss, reference, center, half, pixel, rebuilt_from)
+            whole_result = yield from self._off(lambda: MeshData(points, out_faces, materials))
+            taken, taken_loss = yield from self._reduce(whole_result, loss, reference, center, half, pixel, rebuilt_from)
             if len(taken.faces) < len(out_faces):
-                points, out_faces, materials = np.asarray(taken.vertices, dtype=np.float64), [tuple(face) for face in taken.faces], list(taken.face_materials)
+                points, out_faces, materials = np.asarray(taken.vertices, dtype=np.float64), (yield from self._off(lambda: [tuple(face) for face in taken.faces])), list(taken.face_materials)
                 loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
         for level in POLISH_LEVELS if self.tidy and self.output_kind != "TRIS" else ():  # an option: it is slow and the loss goes up a little
             self.stage = "Tidying the quads..."

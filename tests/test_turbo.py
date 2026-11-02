@@ -586,6 +586,48 @@ class SpeedPathTests(unittest.TestCase):
             _drained(reducer.remove(int(0.05 * reducer.alive)))
         _same_mesh(self, fast.result(), slow.result())
 
+    def test_flat_faces_read_like_a_list(self) -> None:
+        faces = [(0, 1, 2), (3, 4, 5, 6), (7, 8, 9)]
+        flat = T.FlatFaces.of(faces)
+        self.assertEqual(list(flat), faces)
+        self.assertEqual((flat[1], flat[-1], flat[1:], len(flat)), ((3, 4, 5, 6), (7, 8, 9), faces[1:], 3))
+        self.assertEqual(flat, faces)
+        self.assertEqual(P._half_edges(faces)[2].tolist(), P._half_edges(flat)[2].tolist())
+
+    def test_pairing_per_chunk_welds_its_seams(self) -> None:
+        mesh = torus(60, 30, seed=8)
+        whole = FQ.pair_and_close(mesh, join_triangles=True)[0]
+        chunked, _report = FQ.pair_and_close(mesh, chunk_faces=1000, join_triangles=True)
+        again = FQ.pair_and_close(mesh, chunk_faces=1000, join_triangles=True)[0]
+        _same_mesh(self, chunked, again)  # threads don't change it
+        summary = T.topology_summary(MeshData(chunked.vertices, list(chunked.faces)))
+        self.assertTrue(summary.all_quads)
+        self.assertEqual((summary.boundary_edges, summary.non_manifold_edges, summary.connected_components, summary.euler_characteristic), (0, 0, 1, 0))
+        self.assertLess(len(chunked.faces), 1.7 * len(whole.faces))  # a small mesh in small regions: on a real one, under 1% more
+        slow = py(FQ.pair_and_close, mesh, chunk_faces=1000, join_triangles=True)[0]
+        _same_mesh(self, chunked, slow)
+
+    def test_flat_faces_read_like_a_list(self) -> None:
+        faces = [(0, 1, 2), (3, 4, 5, 6), (7, 8, 9)]
+        flat = T.FlatFaces.of(faces)
+        self.assertEqual(list(flat), faces)
+        self.assertEqual((flat[1], flat[-1], flat[1:], len(flat)), ((3, 4, 5, 6), (7, 8, 9), faces[1:], 3))
+        self.assertEqual(flat, faces)
+        self.assertEqual(P._half_edges(faces)[2].tolist(), P._half_edges(flat)[2].tolist())
+
+    def test_pairing_per_chunk_welds_its_seams(self) -> None:
+        mesh = torus(60, 30, seed=8)
+        whole = FQ.pair_and_close(mesh)[0]
+        chunked, report = FQ.pair_and_close(mesh, chunk_faces=400)
+        again = FQ.pair_and_close(mesh, chunk_faces=400)[0]
+        _same_mesh(self, chunked, again)  # threads don't change it
+        summary = T.topology_summary(MeshData(chunked.vertices, list(chunked.faces)))
+        self.assertTrue(summary.all_quads)
+        self.assertEqual((summary.boundary_edges, summary.non_manifold_edges, summary.connected_components, summary.euler_characteristic), (0, 0, 1, 0))
+        self.assertLess(len(chunked.faces), 1.7 * len(whole.faces))  # a small mesh in small regions: on a real one, under 1% more
+        slow = py(FQ.pair_and_close, mesh, chunk_faces=400)[0]
+        _same_mesh(self, chunked, slow)
+
     def test_reducer_sizes_are_one_run(self) -> None:
         mesh = torus(60, 40, noise=0.2, seed=6)
         run = turbo.reducer(mesh.vertices, mesh.faces, None, 12)

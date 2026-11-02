@@ -97,6 +97,13 @@ def available() -> bool:
     return native() is not None
 
 
+def thread_count() -> int:
+    """How many threads the native core may use: 1 without it, or on Light."""
+
+    module = native()
+    return 1 if module is None else int(module.threads)
+
+
 def version() -> str | None:
     module = native()
     return None if module is None else str(module.__version__)
@@ -125,6 +132,8 @@ def _topology():
 
 
 def _csr(faces) -> tuple[np.ndarray, np.ndarray]:
+    if hasattr(faces, "indptr"):  # types.FlatFaces
+        return faces.indptr, faces.flat
     sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
     indptr = np.zeros(len(faces) + 1, dtype=np.int64)
     np.cumsum(sizes, out=indptr[1:])
@@ -335,20 +344,12 @@ def _flat_mesh(mesh):
     return indptr, flat, vertices.reshape(-1)
 
 
-def _faces_from(indptr: np.ndarray, flat: np.ndarray) -> list:
-    sizes = np.diff(indptr)
-    if len(sizes) and (sizes == sizes[0]).all():
-        return list(map(tuple, flat.reshape(-1, int(sizes[0])).tolist()))
-    values, ends = flat.tolist(), indptr.tolist()
-    return [tuple(values[a:b]) for a, b in zip(ends[:-1], ends[1:])]
-
-
 def _built(mesh, vertices, indptr, flat, owner):
     """MeshData with `mesh`'s name and each face's material from the input face `owner` names (no re-tupling of the faces)."""
 
     T = _topology()
     result = T.MeshData(vertices=vertices.reshape(-1, 3), faces=[], name=mesh.name)
-    result.faces = _faces_from(indptr, flat)
+    result.faces = T.FlatFaces(indptr, flat)
     materials = mesh.face_materials
     result.face_materials = list(map(materials.__getitem__, owner.tolist()))
     return result
@@ -522,7 +523,7 @@ def reducer(points, polys, keep=None, least: int = 0):
     if module is None or not hasattr(module, "Reducer"):
         return None
     points = np.ascontiguousarray(points, dtype=np.float64)
-    tris = np.fromiter(chain.from_iterable(polys), dtype=np.int64, count=3 * len(polys))
+    tris = _csr(polys)[1]
     locked = np.zeros(0 if keep is None else len(points), dtype=bool) if keep is None else np.ascontiguousarray(keep, dtype=bool)
     return module.Reducer(points.reshape(-1), tris, locked, int(least))
 
