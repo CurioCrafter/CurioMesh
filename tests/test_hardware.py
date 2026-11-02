@@ -97,6 +97,25 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual([p.name for p in folder.glob("*.tmp")], ["x.tmp"])
             self.assertIsNotNone(hardware.load_piece(path))
 
+    def test_nvidia_smi_is_never_taken_from_the_current_folder(self):
+        import os
+        from unittest import mock
+
+        name = "nvidia-smi" + (".exe" if sys.platform == "win32" else "")
+        with tempfile.TemporaryDirectory() as here, tempfile.TemporaryDirectory() as tools:
+            for folder in (here, tools):
+                (Path(folder) / name).write_bytes(b"")
+                os.chmod(Path(folder) / name, 0o755)
+            old = os.getcwd()
+            os.chdir(here)  # the folder of a .blend somebody sent
+            try:
+                with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([".", "", "relative"])}):
+                    self.assertIsNone(hardware._on_path("nvidia-smi"))
+                with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([".", tools])}):
+                    self.assertEqual(Path(hardware._on_path("nvidia-smi")), Path(tools) / name)
+            finally:
+                os.chdir(old)
+
     def test_a_job_folder_name_cannot_leave_the_chosen_folder_and_a_bad_result_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
             folder = jobpack.job_folder(root, "../../evil/..\\x")
@@ -106,6 +125,10 @@ class SafetyTests(unittest.TestCase):
             jobpack.save_result(Path(root) / "ok.npz", out, report, 1, 3)  # vertex 7 does not exist
             with self.assertRaises(ValueError):
                 jobpack.load_result(Path(root) / "ok.npz", 1, 3)
+            report_text = np.asarray('{"faces": 1, "quads": 0, "loss": 0.0, "seconds": 1.0}')
+            np.savez(Path(root) / "float.npz", co=np.zeros((3, 3)), lens=np.array([3.0]), flat=np.array([0.0, 1.0, 2.0]), mat=np.zeros(1, np.int32), parts=np.zeros(1, np.int64), source=np.array([1, 3]), report=report_text)
+            with self.assertRaises(ValueError):  # face sizes as floats would fail later with a TypeError
+                jobpack.load_result(Path(root) / "float.npz", 1, 3)
 
 
 class JobFolderTests(unittest.TestCase):

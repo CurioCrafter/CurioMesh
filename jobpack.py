@@ -97,6 +97,8 @@ Good to know
   - Today the work runs on the CPU. A machine with many CPU cores and plenty of memory finishes soonest; a graphics
     card does not speed it up yet. See docs/CLOUD_WORKFLOW.md in the CurioMesh repository.
   - Keep the mesh private if it is private: nothing in this folder sends anything anywhere.
+  - run_job.py and the {engine}/ folder are Python programs. Only run a job folder you exported yourself or got
+    from someone you trust, the same as any script. Importing a result.npz back runs nothing.
 """
 
 
@@ -169,6 +171,8 @@ def load_result(path, source_faces: int, source_verts: int):
         report = json.loads(str(data["report"]))
     # the file may come from anywhere: check every array before a face is built from it
     count = len(lens)
+    if any(a.dtype.kind not in "iu" for a in (lens, flat, mat, parts)) or co.dtype.kind != "f" or mat.ndim != 1 or parts.ndim != 1:
+        raise ValueError("This result file is damaged (wrong kinds of numbers)")
     if co.ndim != 2 or co.shape[1] != 3 or not np.isfinite(co).all() or lens.ndim != 1 or count == 0 or lens.min() < 3 or lens.max() > 64:
         raise ValueError("This result file is damaged (bad points or faces)")
     if int(lens.sum()) != len(flat) or flat.min() < 0 or flat.max() >= len(co) or len(mat) != count or len(parts) != count:

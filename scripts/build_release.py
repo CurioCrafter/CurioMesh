@@ -148,7 +148,9 @@ def _series_overrides(root: Path, series: str, layout: str) -> dict[str, bytes]:
         limits = f'blender_version_min = "{series}.0"\n'
         if nxt:
             limits += f'blender_version_max = "{nxt}.0"\n'
-        return {"blender_manifest.toml": (text.rstrip("\n") + "\n" + limits).encode("utf-8")}
+        head, table, rest = text.partition("\n[")  # top-level keys must stay above the first [table]
+        tail = "\n[" + rest if table else ""
+        return {"blender_manifest.toml": (head.rstrip("\n") + "\n" + limits + tail).encode("utf-8")}
     major, minor = series.split(".")
     text = (root / "__init__.py").read_text(encoding="utf-8")
     text, n = re.subn(r'("blender"\s*:\s*)\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)', rf"\g<1>({major}, {minor}, 0)", text, count=1)

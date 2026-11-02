@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import stat
 import subprocess
 import sys
@@ -87,9 +86,26 @@ def _memory() -> tuple[float | None, float | None]:
     return None, None
 
 
+def _on_path(name: str) -> str | None:
+    """`name` from the absolute folders on PATH only, never the current folder.
+
+    shutil.which on Python 3.11 and older (Blender 3.6 - 4.x) looks in the current folder first on Windows, and that
+    can be the folder of a .blend somebody sent, so a planted nvidia-smi.exe there would run. Only .exe on Windows.
+    """
+    suffix = ".exe" if sys.platform == "win32" else ""
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if not folder or not os.path.isabs(folder):
+            continue
+        candidate = os.path.join(folder, name + suffix)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def _gpu() -> dict:
     """The NVIDIA card as nvidia-smi sees it. Empty when there is none or the tool is missing."""
-    exe = shutil.which("nvidia-smi")
+    exe = _on_path("nvidia-smi")
     if exe is None:
         return {}
     try:

@@ -79,6 +79,7 @@ class ReleasePackageTests(unittest.TestCase):
                 self.assertEqual(manifest["blender_version_min"], f"{series}.0")
                 expected_max = f"{series_list[i + 1]}.0" if i + 1 < len(series_list) else None
                 self.assertEqual(manifest.get("blender_version_max"), expected_max)
+                self.assertIn("files", manifest["permissions"])  # the version limits must not land inside [permissions]
 
     def test_source_version_drift_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
