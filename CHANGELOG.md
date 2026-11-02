@@ -96,7 +96,7 @@
 - Job results and saved parts are validated, and a .npz that unpacks past 1 GB is refused. Remembered fixes
   never use a shared temp file. A planted `nvidia-smi` in the current folder is never run.
 - Releases are built only by the release workflow, from the tag, with `SHA256SUMS.txt`. The workflow has
-  least privilege, with actions and installs pinned. See `SECURITY.md`.
+  least privilege, with actions and installs pinned.
 - `THIRD_PARTY_NOTICES.md` ships in every zip. A separate Python-only, CC0-only zip is built for
   extensions.blender.org.
 
