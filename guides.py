@@ -84,6 +84,9 @@ def gather(objects, source, depsgraph) -> list[np.ndarray]:
         else:
             evaluated = obj.evaluated_get(depsgraph)
             mesh = evaluated.to_mesh()
+            if mesh is None:  # not in this view layer, or a curve with nothing to draw
+                evaluated.to_mesh_clear()
+                continue
             try:
                 flat = np.empty(len(mesh.vertices) * 3, dtype=np.float64)
                 mesh.vertices.foreach_get("co", flat)

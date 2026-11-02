@@ -949,7 +949,8 @@ def _draw_all_panels(label):
         if poll is not None and not poll(bpy.context):
             continue
         log: list = []
-        holder = type("Holder", (), {"layout": _MockLayout(log)})()
+        helpers = {name: getattr(cls, name) for name in dir(cls) if name.startswith("_") and not name.startswith("__") and callable(getattr(cls, name, None))}
+        holder = type("Holder", (), {**helpers, "layout": _MockLayout(log)})()  # the panel's own _helpers, bound to the mock
         for hook in ("draw_header", "draw_header_preset", "draw"):
             fn = getattr(cls, hook, None)
             if fn is None or (hook != "draw" and fn is getattr(bpy.types.Panel, hook, None)):
@@ -1308,6 +1309,46 @@ def run_multires_case(module):
     guided.state["auto_base"] = None
     bpy.data.objects.remove(cage)
     bpy.data.objects.remove(ball)
+
+
+def run_auto_apply_lod_case():
+    """Auto search, Apply as a new object, then a LOD set: three objects, each smaller than the last."""
+    from curiomesh import guided, profiles
+
+    reset_scene()
+    gs = bpy.context.scene.curiomesh_guided
+    ball = make_uv_sphere("CurioSmoke_Lod", segments=32, rings=16)
+    reset_selection(ball)
+    guided.stop_work()
+    guided.remove_preview()
+    guided.state.update(auto_base=None, source=ball.name, lod=None)
+    gs.scope = "AUTO"
+    if not gs.enabled:
+        gs.enabled = True
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    if guided.state["res"] is None or guided.state["auto_base"] is None:
+        raise AssertionError(f"auto apply: no result: {guided.status()}")
+    if "FINISHED" not in bpy.ops.curiomesh.guided_apply():
+        raise AssertionError(f"auto apply: apply failed: {guided.status()}")
+    out = bpy.data.objects.get("CurioSmoke_Lod_Retopo")
+    if out is None or not len(out.data.polygons) or len(out.data.polygons) >= len(ball.data.polygons):
+        raise AssertionError("auto apply: no smaller _Retopo object")
+    print(f"PASS auto apply: {len(out.data.polygons)} faces in {out.name}")
+
+    reset_selection(ball)
+    gs.lod0_percent, gs.lod1_percent, gs.lod2_percent = 50.0, 25.0, 12.0
+    if "FINISHED" not in bpy.ops.curiomesh.guided_make_lods():
+        raise AssertionError("lod: Make LOD Set did not start")
+    guided.finish_work(bpy.context)
+    lods = [bpy.data.objects.get(profiles.lod_name(ball.name, level)) for level in range(profiles.LOD_LEVELS)]
+    if any(obj is None for obj in lods):
+        raise AssertionError(f"lod: missing objects {[obj is not None for obj in lods]}: {guided.status()}")
+    sizes = [len(obj.data.polygons) for obj in lods]
+    if not all(a > b > 0 for a, b in zip(sizes, sizes[1:])) or sizes[0] >= len(ball.data.polygons):
+        raise AssertionError(f"lod: sizes do not shrink: {sizes}")
+    print(f"PASS lod set: {', '.join(f'{obj.name} {n}' for obj, n in zip(lods, sizes))}")
+    gs.enabled = False
 
 
 def run_guided_case(module):
@@ -2161,6 +2202,7 @@ def main():
     run_region_case(module)
     run_multires_case(module)
     run_guided_case(module)
+    run_auto_apply_lod_case()
     run_ui_features_case(module)
     run_ui_prefs_case(module)
     module.unregister()
