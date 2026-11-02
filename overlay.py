@@ -282,8 +282,8 @@ def next_step_hint(obj, stats: MeshStats | None, settings) -> str:
         return "Mesh has no faces"
     if "curiomesh_engine" not in obj.keys():
         if stats.quad_ratio >= 0.999:
-            return "Already all quads - Remesh only to change density"
-        return "Press Remesh to build clean quads"
+            return "Already all quads - Auto or Remesh to lighten it"
+        return "Press Auto or Remesh for clean quads"
     if stats.tris:
         if settings is not None and not settings.require_quads:
             return f"{stats.tris} triangles left - turn on Pure Quads"
@@ -528,13 +528,18 @@ def _sidebar_inset() -> float:
 def hud_model(context) -> dict:
     """Everything the HUD shows, as plain data (testable without a GPU)."""
     settings = _settings()
+    from . import guided  # late: guided imports this module
+
     obj = context.object
     if obj is None or obj.type != "MESH":
         # Working on a region (the source is hidden and a cage is active): report the preview instead.
-        from . import guided  # late: guided imports this module
-
         obj = bpy.data.objects.get(REGION_PREVIEW_NAME) or guided.state_source() or obj  # a job can leave nothing active for a moment
-    model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": ""}
+    # While an Auto Segments result waits for Apply, the HUD reports the result, not the original it came from.
+    preview = bpy.data.objects.get(guided.PREVIEW_NAME)
+    showing_result = preview is not None and preview.type == "MESH" and obj is not None and obj in (guided.state_source(), preview)
+    if showing_result:
+        obj = preview
+    model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": "", "original": False}
     if settings is not None:
         model["target"] = int(settings.target_faces)
         model["batch"] = settings.batch_status
@@ -542,7 +547,7 @@ def hud_model(context) -> dict:
     too_big = is_mesh and len(obj.data.polygons) > HEATMAP_MAX_FACES
     stats = get_stats(obj) if is_mesh and not too_big else None
     if is_mesh:
-        model["name"] = "Region preview" if obj.name == REGION_PREVIEW_NAME else obj.name
+        model["name"] = "Region preview" if obj.name == REGION_PREVIEW_NAME else "Result preview" if showing_result else obj.name
     if too_big:
         model.update(faces=len(obj.data.polygons), hint=f"Over {HEATMAP_MAX_FACES:,} faces - live stats off")
         return model
@@ -557,7 +562,14 @@ def hud_model(context) -> dict:
         if elapsed is not None:
             info += f"  {float(elapsed) / 1000.0:.2f} s"
         model["info"] = info
-    model["hint"] = next_step_hint(obj, stats, settings)
+    if showing_result:
+        auto = getattr(getattr(context.scene, "curiomesh_guided", None), "scope", "") == "AUTO"
+        model["target"] = 0  # Quick Start's Target Faces is not what this result aimed for
+        model["hint"] = "Check the parts, then press Apply" if auto else "Press Apply when it looks right"
+    else:
+        model["hint"] = next_step_hint(obj, stats, settings)
+    # A mesh CurioMesh has not touched yet is the starting point, not a failure: no red, no NEEDS WORK
+    model["original"] = is_mesh and not showing_result and obj.name != REGION_PREVIEW_NAME and "curiomesh_engine" not in obj.keys()
     return model
 
 
@@ -582,7 +594,7 @@ def _draw_hud() -> None:
         model = hud_model(context)
         ui = _ui_scale()
         s = ui * float(prefs.hud_scale)
-        accent = accent_for_ratio(model["ratio"])
+        accent = (0.45, 0.55, 1.0) if model["original"] else accent_for_ratio(model["ratio"])
         w, h = 330 * s, 168 * s
         pad = 14 * s
         corner = prefs.hud_corner
@@ -611,7 +623,7 @@ def _draw_hud() -> None:
         top = y + h - pad
         _text(left, top - 10 * s, 11 * s, (*accent, 1.0), "CURIOMESH")
         _text(left + 95 * s, top - 10 * s, 11 * s, muted, model["name"][:18] or "no mesh")
-        _text_right(right, top - 10 * s, 10 * s, (*accent, 1.0), quality_word(model["ratio"]))
+        _text_right(right, top - 10 * s, 10 * s, (*accent, 1.0), "ORIGINAL" if model["original"] else quality_word(model["ratio"]))
 
         ratio = model["ratio"]
         big = f"{ratio * 100:.1f}%" if ratio is not None else "--"
@@ -630,7 +642,7 @@ def _draw_hud() -> None:
 
         col_w = (w - 2 * pad - 6 * s) / 3
         cells = (
-            ("FACES", f"{model['faces']:,} / {model['target']:,}", (1, 1, 1, 1)),
+            ("FACES", f"{model['faces']:,} / {model['target']:,}" if model["target"] else f"{model['faces']:,}", (1, 1, 1, 1)),
             ("TRIS", f"! {model['tris']:,}" if model["tris"] else "0", (1.0, 0.5, 0.5, 1) if model["tris"] else (0.6, 0.9, 0.7, 1)),
             ("POLES", f"{model['poles']:,}", (1.0, 0.78, 0.3, 1)),
         )
