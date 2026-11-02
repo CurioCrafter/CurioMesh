@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Part cases** (Auto Segments). Each part now gets a named case from a few cheap
+  measurements: tiny part, flat plate, thin sheet, box, tube, dome, rough scan, ornament or
+  organic smooth. A small table, built from camera results on nine models, says which
+  small sizes that case doesn't hold, so the search starts above them. The camera still
+  measures the sizes it looks at and checks the whole result, and it sends the search back
+  down when a part has room to spare. Reduce To looks at every size as before. The segment
+  view says in plain words what a part was taken for and what was kept. The case names are
+  rough: a smooth chess piece can come out as a rough scan. Rebuild the table with
+  `scripts/build_case_table.py`.
+  Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r)
 - **Auto Segments makes about 20-55% fewer quads at the same Change Allowed.** Leftover
   triangles now join in twos along a short path of quads instead of splitting all
   their edges, then quads are taken away cheapest first until the camera says the

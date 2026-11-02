@@ -24,7 +24,7 @@ from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from .triadq import checks, parts, patch, patterns
+from .triadq import cases, checks, parts, patch, patterns
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
@@ -66,6 +66,7 @@ PART_PIXELS = 100  # a part showing fewer pixels than this over the six views ca
 REFINE_PIECES = 8
 REFINE_COVER = 0.8  # share of the faces the extra sizes need to cover
 SHOW_EVERY = 1.0  # seconds between preview updates
+USE_CASES = True  # let the table of part cases say which size of a part to look at first
 POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
 MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
@@ -473,6 +474,9 @@ class AutoJob:
         self.seen: list[float] = []
         self.picked: list[int] = []
         self.timings: dict[str, float] = {}  # seconds spent per kind of work, for the report
+        self.looks = 0  # sizes of pieces the camera looked at
+        self.part_cases: dict[int, tuple] = {}  # piece -> (case, sizes skipped, sizes looked at), for `explain_piece`
+        self.table = cases.load_table() if USE_CASES else None
         self._search = self._run()
 
     def seconds_left(self) -> float | None:
@@ -560,7 +564,7 @@ class AutoJob:
         pixel = 2.0 * half / pixels
         reference = yield from self._reference(center, half, pixels, points, polys)
         turned_sizes, turned_levels = [], []
-        sizes, levels, seen, spots = [], [], 0.0, []
+        seen = 0.0
         enough = GOOD_ENOUGH * self.detail / 100.0
         if self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
             for out in parts.rebuilds(points, polys, max(set(kinds), key=kinds.count)):
@@ -575,22 +579,42 @@ class AutoJob:
                 turned_levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
                 if wrong <= enough * shown:
                     break
-        for share in LEVELS:
-            if share * triangles < 12.0:
-                continue
+        shares = [share for share in LEVELS if share * triangles >= 12.0]
+        floor = PIECE_LIMIT * self.detail / 100.0
+        first, case = 0, None
+        if self.table is not None:
+            case = cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0))
+            if not self.target_faces:  # Reduce To may want any small size to land on its count
+                first = cases.first_size(case, shares, floor, self.table)
+        area = pixel * pixel
+        looked = {}
+
+        def look(k: int):
+            """Generator: this size measured. Returns the share of its view that changed."""
             yield
             started = time.perf_counter()
-            reduced = _decimate(self.context, points, polys, kinds, share, self._piece_drop(ids))
+            reduced = _decimate(self.context, points, polys, kinds, shares[k], self._piece_drop(ids))
             self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
             view = yield from self._timed("pictures", pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = picture_counts(reference, view, pixel)
-            area = pixel * pixel
-            seen = max(seen, shown * area)
-            sizes.append(reduced)
-            levels.append(Level(len(reduced[1]), wrong * area))
-            spots.append(wrong_points(reference, view, center, half, pixels, pixel))
-            if wrong <= enough * shown:
-                break
+            self.looks += 1
+            looked[k] = (reduced, Level(len(reduced[1]), wrong * area), wrong_points(reference, view, center, half, pixels, pixel), shown * area)
+            return wrong / max(shown, 1)
+
+        at = first
+        start_change = change = yield from look(at)
+        while at > 0 and change <= floor / 2.0:  # room to spare: the table was too careful, so the camera sends the search back down
+            at -= 1
+            change = yield from look(at)
+        at, change = first, start_change
+        while change > enough and at + 1 < len(shares):
+            at += 1
+            change = yield from look(at)
+        order = sorted(looked)
+        sizes, levels, spots = [looked[k][0] for k in order], [looked[k][1] for k in order], [looked[k][2] for k in order]
+        seen = max([seen] + [looked[k][3] for k in order])
+        if case is not None:
+            self.part_cases[len(self.sizes)] = (case, order[0], len(order))
         if triangles >= FINER_TRIANGLES and seen > 0.0 and self.drop is None:  # painted vertices would not survive the first pass
             asked = self.detail / 100.0
             uppers = {next((k for k, level in enumerate(levels) if level.loss <= limit * seen), 0) for limit in (asked, PIECE_LIMIT * asked)} - {0}
@@ -1210,7 +1234,7 @@ class AutoJob:
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
         bend = guides.bend_stats([group for _tag, group in self.bend_groups], self.output["co"], shown, self.gap) if self.bend_groups else None
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "check": check, "notes": list(dict.fromkeys(self.notes)), "guides": follows}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "check": check, "notes": list(dict.fromkeys(self.notes)), "guides": follows}
 
     def _make_all(self, co, faces, kinds):
         """Generator: the faces for the whole object. Pieces on the usual method go in one call; others one by one."""
@@ -1266,6 +1290,21 @@ class AutoJob:
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
             return
         self.tuned[index] = _decimate(self.context, points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
+
+    def explain_piece(self, index: int) -> str:
+        """In plain words, for the segment view: what this part was taken for and what was kept. Empty before that."""
+        if self.report is None or index >= len(self.picked):
+            return ""
+        if len(self.levels[index]) == 1:
+            return "Too small to reduce, so it was kept as it was."
+        if index not in self.part_cases:
+            return ""
+        case, skipped, looked = self.part_cases[index]
+        if index in self.tuned:
+            return cases.explain(case, len(self.tuned[index][1]), None, skipped, looked)
+        kept = self.levels[index][self.picked[index]]
+        whole = self.picked[index] == len(self.levels[index]) - 1
+        return cases.explain(case, kept.faces, kept.loss / max(self.seen[index], 1e-30), skipped, looked, whole, False)
 
     def status(self) -> str:
         extra = f" | {self.note}" if self.note else ""

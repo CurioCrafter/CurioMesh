@@ -803,6 +803,9 @@ def draw_parts(layout, context, gs) -> None:
     if len(selected) == 1:
         for i, line in enumerate(info_lines(selected[0])):
             box.label(text=line, icon="OBJECT_DATA" if i == 0 else "BLANK1")
+        words = _g().state["auto_base"]["job"].explain_piece(selected[0])
+        if words:
+            overlay.wrap_label(box, words, icon="INFO", width=36, limit=3)
     else:
         after = sum(seg["parts"][p]["after"] for p in selected)
         known = [seg["parts"][p]["change"] for p in selected if seg["parts"][p]["change"] is not None]
