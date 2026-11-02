@@ -43,6 +43,7 @@ ROBUST = 0.05  # gaps far above this share of a cell are left to be defects rath
 SAME_CORNER = 0.35
 RELAX_ROUNDS = 8
 RELAX_RATE = 0.5
+MOST_REACH = 2.0  # cells
 SETTLED = 0.02  # of a cell: a grid corner this close to its neighbours' is left alone
 FINISH_ROUNDS = 4
 MOST_TARGET = 30_000  # quads on one piece: beyond this a run takes many minutes in plain NumPy
@@ -557,7 +558,7 @@ def regions(points: np.ndarray, tris: np.ndarray, level: _Level) -> np.ndarray:
     return np.unique(_labels(len(points), a[same], b[same]), return_inverse=True)[1]
 
 
-def _split_rings(points: np.ndarray, tris: np.ndarray, labels: np.ndarray, a, b) -> np.ndarray:
+def _split_rings(points: np.ndarray, tris: np.ndarray, labels: np.ndarray, a, b, cells: np.ndarray) -> np.ndarray:
     """Cut every region that isn't a disk in two across its long side, so it can become one vertex."""
 
     count = int(labels.max()) + 1
@@ -566,6 +567,11 @@ def _split_rings(points: np.ndarray, tris: np.ndarray, labels: np.ndarray, a, b)
     euler = np.bincount(labels, minlength=count) - np.bincount(labels[a[inner]], minlength=count) + np.bincount(labels[tris[whole, 0]], minlength=count)
     sizes = np.bincount(labels, minlength=count)
     bad = (euler != 1) & (sizes >= 3)
+    # A grid can slide along a closed line and call the whole line one corner. No region reaches this far from its middle.
+    middle = np.stack([np.bincount(labels, points[:, k], count) for k in range(3)], axis=1) / np.maximum(sizes, 1)[:, None]
+    far = np.zeros(count)
+    np.maximum.at(far, labels, np.linalg.norm(points - middle[labels], axis=1) / cells)
+    bad |= (far > MOST_REACH) & (sizes >= 3)
     dual = dual_triangles(tris, labels)
     if len(dual):  # two regions may share one stretch of border only, or three faces would meet on an edge
         x, y, _e, uses = _edges(dual, count)
@@ -619,12 +625,12 @@ def dual_triangles(tris: np.ndarray, labels: np.ndarray) -> np.ndarray:
     return t[three]
 
 
-def _clean_regions(points: np.ndarray, tris: np.ndarray, labels: np.ndarray) -> np.ndarray:
+def _clean_regions(points: np.ndarray, tris: np.ndarray, labels: np.ndarray, cells: np.ndarray) -> np.ndarray:
     a, b, _edge_of, _uses = _edges(tris, len(points))
     for _ in range(12):
         before = int(labels.max())
         labels, merged = _merge_small(tris, labels, a, b)
-        labels = _split_rings(points, tris, labels, a, b)
+        labels = _split_rings(points, tris, labels, a, b, cells)
         if not merged and int(labels.max()) == before:
             break
     return labels
@@ -720,7 +726,7 @@ class FieldMesher:
 
     def extract(self) -> FieldMesh:
         finest = self.levels[0]
-        labels = _clean_regions(self.fine_points, self.fine_tris, regions(self.fine_points, self.fine_tris, finest))
+        labels = _clean_regions(self.fine_points, self.fine_tris, regions(self.fine_points, self.fine_tris, finest), finest.sizes)
         count = int(labels.max()) + 1
         weight = self.fine_area
         total = np.maximum(np.bincount(labels, weight, count), 1e-30)
@@ -1177,12 +1183,11 @@ def nearest_points(points: np.ndarray, asks: np.ndarray, cell: float, normals: n
     return out
 
 
-def graph_voronoi(count: int, a: np.ndarray, b: np.ndarray, length: np.ndarray, seeds: np.ndarray) -> np.ndarray:
-    """Per graph vertex, the index of the seed nearest along edges."""
+def graph_reach(count: int, a: np.ndarray, b: np.ndarray, length: np.ndarray, seeds: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per graph vertex, (the index of the seed nearest along edges, how far that is)."""
 
     distance = np.full(count, np.inf)
     owner = np.full(count, -1, dtype=np.int64)
-    # Two output vertices may share a seed: the later one simply has no region of its own for now.
     owner[seeds] = np.arange(len(seeds))
     distance[seeds] = 0.0
     tail = np.concatenate((a, b))
@@ -1197,7 +1202,7 @@ def graph_voronoi(count: int, a: np.ndarray, b: np.ndarray, length: np.ndarray, 
         ids = ids[np.argsort(-offer[ids], kind="stable")]  # the last write, the smallest offer, wins
         distance[head[ids]] = offer[ids]
         owner[head[ids]] = owner[tail[ids]]
-    return owner
+    return owner, distance
 
 
 def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, faces, rounds: int = 3, creased: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -1213,7 +1218,7 @@ def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, fa
     for _ in range(rounds):
         seeds = nearest_points(fine_points, points, side, fine_normals, _face_area_normals(points, faces, len(points)))
         unique_seeds, first = np.unique(seeds, return_index=True)
-        owner = graph_voronoi(len(fine_points), a, b, length, unique_seeds)
+        owner = graph_reach(len(fine_points), a, b, length, unique_seeds)[0]
         labels = first[owner]
         known = np.bincount(labels, minlength=len(points)) > 0
         cell = np.full(len(points), side)

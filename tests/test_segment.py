@@ -203,5 +203,54 @@ class JoinTests(unittest.TestCase):
         self.assertEqual(kept, {tuple(p) for p in seam[0].tolist()})
 
 
+class TrueLoopTests(unittest.TestCase):
+    def test_a_closed_line_becomes_a_true_edge_loop(self) -> None:
+        angle = np.linspace(0.0, 2.0 * np.pi, 60, endpoint=False)
+        lat = np.linspace(-1.0, 1.0, 40)
+        radius = np.sqrt(np.maximum(1.0 - lat**8, 0.0))
+        points = [(0.0, 0.0, -2.0)]
+        for z, r in zip(lat[1:-1], radius[1:-1]):
+            points += [(r * np.cos(a), r * np.sin(a), 2.0 * z) for a in angle]
+        points.append((0.0, 0.0, 2.0))
+        at = lambda i, j: 1 + i * 60 + j % 60  # noqa: E731
+        faces = []
+        for j in range(60):
+            faces += [(0, at(0, j + 1), at(0, j)), (len(points) - 1, at(37, j), at(37, j + 1))]
+            for i in range(37):
+                faces += [(at(i, j), at(i, j + 1), at(i + 1, j + 1)), (at(i, j), at(i + 1, j + 1), at(i + 1, j))]
+        points = np.asarray(points)
+        stroke = np.stack((np.cos(np.linspace(0, 2 * np.pi, 41)), np.sin(np.linspace(0, 2 * np.pi, 41)), np.full(41, 0.3)), axis=1)
+        co, quads = segment.field_with_rings(points, faces, [stroke], [], 500)
+        self.assertEqual(segment._crowded_edges(quads), 0)
+        self.assertEqual(segment.open_edges(quads), 0)
+        neighbours: dict[int, set[int]] = {}
+        for face in quads:
+            for k in range(len(face)):
+                x, y = face[k], face[(k + 1) % len(face)]
+                neighbours.setdefault(x, set()).add(y)
+                neighbours.setdefault(y, set()).add(x)
+        near = [v for v in range(len(co)) if abs(co[v, 2] - 0.3) < 1e-2 and abs(np.hypot(*co[v, :2]) - 1.0) < 0.02]
+        self.assertGreater(len(near), 8)
+        for v in near:  # on the loop every vertex has four edges, and two of them run along it
+            self.assertEqual(len(neighbours[v]), 4)
+            self.assertEqual(len(neighbours[v] & set(near)), 2)
+        seen = {near[0]}
+        walk = [near[0]]
+        while True:  # one loop, not several
+            following = [w for w in neighbours[walk[-1]] & set(near) if w not in seen]
+            if not following:
+                break
+            seen.add(following[0])
+            walk.append(following[0])
+        self.assertEqual(len(walk), len(near))
+
+    def test_a_line_that_does_not_part_the_surface_is_refused(self) -> None:
+        points = np.array([(float(x), float(y), 0.0) for x in range(9) for y in range(9)])
+        faces = [(x * 9 + y, (x + 1) * 9 + y, (x + 1) * 9 + y + 1) for x in range(8) for y in range(8)] + [(x * 9 + y, (x + 1) * 9 + y + 1, x * 9 + y + 1) for x in range(8) for y in range(8)]
+        stroke = np.array([(1.0, 1.0, 0.0), (1.2, 1.0, 0.0), (1.2, 1.2, 0.0), (1.0, 1.0, 0.0)])
+        with self.assertRaises(ValueError):
+            segment._ring_band(points, np.asarray(faces), stroke, 20.0, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

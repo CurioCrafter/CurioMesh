@@ -210,6 +210,12 @@ def _tiny_segments(job, labels, piece) -> list[int]:
     return tiny
 
 
+def _is_closed(line) -> bool:
+    """A stroke that ends where it began."""
+    line = np.asarray(line, dtype=np.float64)
+    return len(line) >= 4 and float(np.linalg.norm(line[0] - line[-1])) < 0.03 * float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
+
+
 def _on_lines(points, tris, lines):
     """For the field mesher: chains of edges hugging the drawn lines, moved onto them, each vertex told which way its line runs."""
     spacing = float(np.median(np.linalg.norm(points[tris[:, 0]] - points[tris[:, 1]], axis=1)))
@@ -500,11 +506,17 @@ class GoalJob(view.PartJob):
             seams = S.seam_loops(out["co"], out["faces"], ids)
         except ValueError:
             return None
-        drawn = self._expand_lines(items, edge, project)
+        rings = [line for line, _count, tag in items if tag != "BEND" and _is_closed(line)]
+        drawn = [line for line in self._expand_lines(items, edge, project) if not any(line is ring for ring in rings)]
         marks = (lambda pts, tris: _on_lines(pts, tris, drawn)) if drawn else None
         settle = (lambda co, faces, pinned: _lay_edges(co, faces, pinned, drawn, project)) if drawn else None
         most = int(np.bincount(np.asarray(out["mat"])[ids]).argmax()) if len(ids) else 0
-        made = yield from self._in_thread(lambda: S.field_on_seams(points, polys, seams, target, project, marks, settle))
+        made = yield from self._in_thread(lambda: S.field_with_rings(points, polys, rings, seams, target, project, marks, settle))
+        if made is None and rings:  # a loop that can't be a true one still gets edges along it
+            drawn = self._expand_lines(items, edge, project)
+            marks = lambda pts, tris: _on_lines(pts, tris, drawn)  # noqa: E731
+            settle = lambda co, faces, pinned: _lay_edges(co, faces, pinned, drawn, project)  # noqa: E731
+            made = yield from self._in_thread(lambda: S.field_on_seams(points, polys, seams, target, project, marks, settle))
         if made is None:
             return None
         return made[0], made[1], [most] * len(made[1])
