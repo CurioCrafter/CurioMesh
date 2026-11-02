@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Multires Detail.** A clean, low cage keeps its faces at level 0 and your mesh's shape comes
+  back as Multires levels (Blender's Subdivide and Reshape; your mesh is only read). Offered
+  for Animation, Subdivision and Sculpt Base, on or off per segment, and for any cage of
+  your own with **Add Multires Detail**. Hard edges of the cage get creases. Level 0 keeps its
+  own rough outline: a normal map changes its shading only.
+- **Auto button**, at the top of Quick Start and Auto Segments: picks the Use and settings
+  from the mesh and the free memory, says why, and starts. Nothing changes until Apply.
 - **Part cases** (Auto Segments). Each part now gets a named case from a few cheap
   measurements: tiny part, flat plate, thin sheet, box, tube, dome, rough scan, ornament or
   organic smooth. A small table, built from camera results on nine models, says which

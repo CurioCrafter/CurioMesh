@@ -1211,6 +1211,105 @@ def _region_faces(obj, mask_fn):
     return [p.index for p in obj.data.polygons if mask_fn(p.center)]
 
 
+def run_multires_case(module):
+    import numpy as np
+
+    guided = sys.modules["curiomesh.guided"]
+    gs = bpy.context.scene.curiomesh_guided
+    reset_scene()
+    # Multires Detail: a coarse cage gets levels that follow a bumpy ball, and the ball is only read.
+    multires = sys.modules["curiomesh.multires"]
+    bumps = bmesh.new()
+    bmesh.ops.create_icosphere(bumps, subdivisions=5, radius=1.0)
+    for vert in bumps.verts:
+        vert.co *= 1.0 + 0.06 * np.sin(7.0 * vert.co.x) * np.sin(7.0 * vert.co.y)
+    bump_mesh = bpy.data.meshes.new("CurioSmoke_Bumps")
+    bumps.to_mesh(bump_mesh)
+    bumps.free()
+    ball = bpy.data.objects.new("CurioSmoke_Bumps", bump_mesh)
+    bpy.context.scene.collection.objects.link(ball)
+    before = np.empty(len(bump_mesh.vertices) * 3)
+    bump_mesh.vertices.foreach_get("co", before)
+    bpy.ops.mesh.primitive_cube_add(size=1.5, location=(0.0, 0.0, 0.0))
+    cage = bpy.context.active_object
+    for vert in cage.data.vertices:
+        vert.co = vert.co.normalized()
+    box = bmesh.new()
+    box.from_mesh(cage.data)
+    bmesh.ops.subdivide_edges(box, edges=box.edges[:], cuts=7, use_grid_fill=True)
+    for vert in box.verts:
+        vert.co = vert.co.normalized()
+    box.to_mesh(cage.data)
+    box.free()
+    ball.select_set(True)
+    reset = (len(cage.data.polygons), cage.data.vertices[0].co.copy())
+    if "FINISHED" not in bpy.ops.curiomesh.multires_detail():
+        raise AssertionError("multires detail: did not run")
+    modifier = cage.modifiers.get(multires.MODIFIER)
+    if modifier is None or modifier.total_levels != gs.multires_levels:
+        raise AssertionError("multires detail: no levels")
+    if (len(cage.data.polygons), cage.data.vertices[0].co.copy()) != reset:
+        raise AssertionError("multires detail: level 0 moved")
+    after = np.empty(len(bump_mesh.vertices) * 3)
+    bump_mesh.vertices.foreach_get("co", after)
+    if not np.array_equal(before, after):
+        raise AssertionError("multires detail: the source changed")
+    top = multires.level_mesh(bpy.context, cage, modifier, modifier.total_levels)
+    tree = multires.source_tree(ball)
+    gap = np.array([tree.find_nearest(p)[3] for p in multires._vertices(top).tolist()])
+    if float(np.percentile(gap, 95)) > 0.02:
+        raise AssertionError(f"multires detail: the top level is {float(np.percentile(gap, 95)):.3f} off the surface")
+    bpy.data.meshes.remove(top)
+    # A masked face keeps its own shape at every level; the others follow the ball.
+    bpy.ops.mesh.primitive_cube_add(size=1.5, location=(0.0, 0.0, 0.0))
+    half = bpy.context.active_object
+    box = bmesh.new()
+    box.from_mesh(half.data)
+    bmesh.ops.subdivide_edges(box, edges=box.edges[:], cuts=7, use_grid_fill=True)
+    for vert in box.verts:
+        vert.co = vert.co.normalized()
+    box.to_mesh(half.data)
+    box.free()
+    keep = np.array([p.center.x > 0.0 for p in half.data.polygons])
+    own = multires.source_tree(half)
+    multires.add_detail(bpy.context, half, tree, 2, flat_faces=keep)
+    top = multires.level_mesh(bpy.context, half, half.modifiers[multires.MODIFIER], 2)
+    points = multires._vertices(top)
+    on_own = np.array([own.find_nearest(p)[3] for p in points.tolist()])
+    if float(np.percentile(on_own[points[:, 0] > 0.15], 95)) > 1e-3 or float(np.percentile(on_own[points[:, 0] < -0.15], 50)) < 0.005:
+        raise AssertionError("multires detail: the mask did not land on its faces")
+    bpy.data.meshes.remove(top)
+    bpy.data.objects.remove(half)
+    print(f"PASS multires detail: {len(cage.data.polygons)} faces at level 0, top level on the surface, source untouched")
+    reset_selection(ball)
+    guided.stop_work()
+    guided.remove_preview()
+    guided.state["auto_base"] = None
+    if "FINISHED" not in bpy.ops.curiomesh.guided_auto_all():
+        raise AssertionError(f"auto button: did not start: {guided.status()}")
+    guided.finish_work(bpy.context)
+    if guided.state["res"] is None or not gs.auto_why:
+        raise AssertionError(f"auto button: no result or no reason: {guided.status()}")
+    print(f"PASS auto button: {gs.auto_profile}, {len(guided.state['res']['faces'])} faces. {gs.auto_why}")
+    if gs.multires_on:
+        if "FINISHED" not in bpy.ops.curiomesh.guided_apply():
+            raise AssertionError("auto button: apply")
+        done = bpy.context.active_object
+        if done.modifiers.get(multires.MODIFIER) is None:
+            raise AssertionError("auto button: apply made no levels")
+        bpy.data.objects.remove(done)
+    gs.multires_on = False
+    gs.auto_why = ""
+    gs.auto_profile = "GAME"
+    gs.auto_aim = "KEEP"
+    gs.bake_detail = "OFF"
+    guided.stop_work()
+    guided.remove_preview()
+    guided.state["auto_base"] = None
+    bpy.data.objects.remove(cage)
+    bpy.data.objects.remove(ball)
+
+
 def run_guided_case(module):
     import numpy as np
     from curiomesh import guided
@@ -2044,6 +2143,7 @@ def main():
     )
 
     run_region_case(module)
+    run_multires_case(module)
     run_guided_case(module)
     run_ui_features_case(module)
     run_ui_prefs_case(module)

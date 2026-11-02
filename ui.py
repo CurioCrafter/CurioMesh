@@ -234,6 +234,14 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
             if not compact:
                 box.label(text="Click your own mesh to remesh it.", icon="BLANK1")
 
+        guided.draw_auto_button(layout, context, context.scene.curiomesh_guided)
+        if guided.state["res"] is not None and guided.progress_info() is None:
+            row = layout.row()
+            row.scale_y = 1.6
+            row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
+        elif guided.progress_info() is not None:
+            guided.draw_progress(layout, *guided.progress_info())
+
         # The one primary action.
         big = layout.column(align=True)
         big.enabled = usable

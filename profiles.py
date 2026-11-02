@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import ctypes
+import math
+import os
+
 METHOD_ITEMS = [
     ("AUTO", "Auto", "The camera decides how many faces each part keeps, then pairs triangles into quads and closes the rest", "CAMERA_DATA", 0),
     ("PAIRING", "Pairing", "Pairs triangles into quads from more starting points, so quads come out more even. Slower, a few more faces", "MOD_LATTICE", 1),
@@ -29,6 +33,68 @@ PROFILES = {
     "SCULPT": ("Sculpt Base", "Even, smooth quads to sculpt on: smoothness over detail", 6.0, "PAIRING", "QUADS"),
 }
 PROFILE_ITEMS = [(k, v[0], v[1]) for k, v in PROFILES.items()] + [("CUSTOM", "Custom", "Your own Detail, Method and Output")]
+
+
+MULTIRES_USES = {"ANIMATION", "SUBDIV", "SCULPT"}  # the uses where a clean base matters more than its own shape
+MOST_FACES_PER_GB = 1_000_000  # of the top Multires level: its grids and the mesh shown take about this much memory
+FEWEST_CAGE, MOST_CAGE = 1500, 12000
+
+
+def cage_faces(source_faces: int) -> int:
+    """Faces for a clean Multires cage: a quarter of the source, within what bends and draws well."""
+    return int(min(max(source_faces // 4, FEWEST_CAGE), MOST_CAGE))
+
+
+def top_faces(base_faces: int, levels: int) -> int:
+    return int(base_faces) * 4 ** int(levels)
+
+
+def multires_words(base_faces: int, levels: int) -> str:
+    """The plain summary under the Multires Detail switch."""
+    return (
+        f"About {base_faces:,} clean quads at level 0, up to about {top_faces(base_faces, levels):,} faces at level {levels}. "
+        "Level 0 keeps its own rough shape and is what you animate; the detail is in the levels above. "
+        "A normal map only changes the shading at level 0, never the outline."
+    )
+
+
+def free_memory_gb() -> float:
+    """Free memory on this computer, or a modest guess when it can't be read."""
+    try:
+        if os.name == "nt":
+            class Status(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in ("total", "free", "pagefile", "free_pagefile", "virtual", "free_virtual", "extended")]
+            status = Status()
+            status.length = ctypes.sizeof(Status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return status.free / 2**30
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 2**30
+    except (AttributeError, OSError, ValueError):
+        return 8.0
+
+
+def levels_for(base_faces: int, free_gb: float, source_faces: int = 10**9) -> int:
+    """Multires levels this computer holds, at least 1. Past about the source's own faces a level only copies its flat
+    triangles (measured: from there the shading stops getting closer), so one level above that is the most."""
+    room = min(max(free_gb - 1.0, 0.5) * MOST_FACES_PER_GB, 4.0 * source_faces) / max(base_faces, 1)
+    return int(max(1, math.floor(math.log(max(room, 1.0), 4.0))))
+
+
+def choose(facts: dict, free_gb: float) -> dict:
+    """What the Auto button picks from `detail.mesh_facts` and the free memory: a Use, Multires levels (0 is off), a bake and why."""
+    faces, parts = facts["faces"], facts["parts"]
+    many_parts = parts >= 20 or facts["biggest_part"] < 0.3
+    bake_size = "2048" if free_gb >= 4.0 else "1024"
+    size = f"{faces:,} faces in {parts:,} loose part{'s' if parts != 1 else ''}"
+    if many_parts:
+        return {"use": "GAME", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "assembly", "why": f"{size}: an assembly. Game Asset, part by part. No Multires: its levels would round hard edges and many small parts gain little."}
+    if facts["flat"] >= 0.2:
+        return {"use": "GAME", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "hard", "why": f"{size}, {100.0 * facts['flat']:.0f}% of its edges flat: a hard-surface model. Game Asset. No Multires: its levels would round the hard edges."}
+    levels = levels_for(cage_faces(faces), free_gb, faces)
+    room = f"{levels} Multires level{'s' if levels != 1 else ''}: past that your mesh has no more to give, or the {free_gb:.0f} GB free runs out"
+    if facts["flat"] < 0.06:
+        return {"use": "SCAN", "levels": 0, "bake": "NORMAL", "bake_size": bake_size, "kind": "scan", "why": f"{size}, almost no flat edges: a scan. Scan Cleanup keeps its surface, and a baked normal map holds what is left."}
+    return {"use": "ANIMATION", "levels": levels, "bake": "OFF", "bake_size": bake_size, "kind": "organic", "why": f"{size}, smooth with few flats: an organic shape. Animation with Multires Detail: clean quads at level 0, the shape back in the levels. {room}."}
 
 
 def preset(key: str):
