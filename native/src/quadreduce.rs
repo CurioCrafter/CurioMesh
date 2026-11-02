@@ -295,6 +295,9 @@ impl Reducer {
                 // It would be left in two quads: they become one.
                 let mut others = row.iter().copied().filter(|&f| f != q);
                 let (first, second) = (others.next().unwrap(), others.next().unwrap());
+                if merged_with.iter().any(|m| m.0 == first || m.0 == second) {
+                    return false; // both sides share a quad, which can't merge twice in one removal
+                }
                 let in_moved = |f: u32, moved: &Vec<(u32, Vec<u32>)>| moved.iter().position(|m| m.0 == f);
                 let (Some(first_at), Some(second_at)) = (in_moved(first, &moved), in_moved(second, &moved)) else {
                     return false;
