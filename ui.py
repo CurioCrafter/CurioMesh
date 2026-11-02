@@ -172,7 +172,7 @@ def _draw_result(layout, settings, compact: bool) -> None:
     status = settings.metrics_status
     if not status:
         if not compact:
-            layout.label(text="No result yet. Press Remesh.", icon="DOT")
+            overlay.wrap_label(layout, "Auto: picks settings, works part by part, you review. Remesh: one quick pass to Target Faces.", icon="INFO", width=36, limit=3)
         return
     ok = status == "OK"
     box = layout.box()
@@ -239,13 +239,16 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
             row = layout.row()
             row.scale_y = 1.6
             row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
+            if not compact and context.scene.curiomesh_guided.scope == "AUTO":
+                layout.label(text="Check the parts first: Guided, step 4", icon="FORWARD")
         elif guided.progress_info() is not None:
             guided.draw_progress(layout, *guided.progress_info())
 
-        # The one primary action.
+        # The one-pass remesh: second to Auto, so it is a size smaller.
+        layout.separator()
         big = layout.column(align=True)
         big.enabled = usable
-        big.scale_y = 1.6 if compact else 2.0
+        big.scale_y = 1.4
         text = "Remesh" if compact else f"Remesh to ~{settings.target_faces:,} faces"
         _fill_remesh_operator(big.operator("curiomesh.remesh", text=text, icon="MOD_REMESH"), settings)
 

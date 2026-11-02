@@ -64,7 +64,7 @@ SCOPE_ITEMS = [
     ("WHOLE", "Whole Mesh", "Remesh the whole mesh; the points change the quad size across it", "MESH_DATA", 0),
     ("POINTS", "Points Only", "Remesh only inside the point spheres; the rest of the mesh stays exactly as it is", "SELECT_SET", 1),
     ("AREAS", "Work Areas", "Each point is its own area with its own density and fill style. They are remeshed one at a time in the background, so you can keep working", "BRUSH_DATA", 2),
-    ("AUTO", "Auto Segments", "Finds the fewest faces that keep the detail you ask for, or lands on a face count you pick, checking every loose piece with a camera, then makes all quads. Guided in five steps with a progress bar, and Blender stays usable while it works", "MOD_EXPLODE", 3),
+    ("AUTO", "Auto Segments", "Splits the mesh into parts, finds the fewest faces that still look the same (checked by camera), then makes quads. Blender stays usable while it works", "MOD_EXPLODE", 3),
 ]
 AIM_ITEMS = [
     ("KEEP", "Keep Detail", "Keep what you can see: the fewest faces that still look like your mesh, within Detail", "ZOOM_ALL", 0),
@@ -271,7 +271,7 @@ class CURIOMESH_PG_guided_guide(bpy.types.PropertyGroup):
 class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(name="Guided Preview", description="Show the point cage and keep a live preview of the new quads next to your mesh", default=False, update=_enabled_update)
     preset: bpy.props.EnumProperty(name="Mesh Type", description="Starting density, point type and fill style for this kind of mesh", items=PRESET_ITEMS, default="CHARACTER", update=_preset_update)
-    scope: bpy.props.EnumProperty(name="Remesh", description="Which part of the mesh is rebuilt", items=SCOPE_ITEMS, default="WHOLE")
+    scope: bpy.props.EnumProperty(name="Remesh", description="Which part of the mesh is rebuilt", items=SCOPE_ITEMS, default="AUTO")
     strategy: bpy.props.EnumProperty(name="Fill Style", description="Pattern of the new quads in a region: Flow follows the surface, Grid is a regular grid", items=region.STRATEGY_ITEMS, default="FLOW")
     base_faces: bpy.props.IntProperty(name="Base Quads", description="Roughly how many quads the whole mesh would get with no points. The points make some areas denser or coarser than this", default=3000, min=50, soft_max=60000)
     new_kind: bpy.props.EnumProperty(name="New Point Type", description="Type of the next point you place (keys 1-4 while placing)", items=KIND_ITEMS, default="DETAIL", update=_redraw_update)
@@ -279,9 +279,14 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_profile: bpy.props.EnumProperty(name="Use", description="What the result is for. Each use sets Detail, Method and Output for you; change any of them and it becomes Custom", items=profiles.PROFILE_ITEMS, default="GAME", update=_profile_update)
-    multires_on: bpy.props.BoolProperty(name="Multires Detail", description="Make clean, low quads, and on Apply add a Multires modifier whose levels follow your mesh. Level 0 is what you animate or put in the game; the shape comes back in the levels above it. Your mesh is only read", default=False, update=_multires_update)
+    multires_on: bpy.props.BoolProperty(name="Multires Detail", description="Make a clean low cage and, on Apply, a Multires modifier whose levels bring your shape back. Animate or export level 0. Your mesh is only read", default=False, update=_multires_update)
     multires_levels: bpy.props.IntProperty(name="Levels", description="Multires levels to add. Each one has four times the faces of the one below", default=2, min=1, max=5, update=_redraw_update)
     auto_why: bpy.props.StringProperty(name="Why", description="What the Auto button chose and why", default="")
+    # which fold-outs of the Auto Segments panel are open (Blender 4.1+ draws them as native panels)
+    ui_more_open: bpy.props.BoolProperty(name="More Options", description="Guides, paint, clean-up and output options", default=False)
+    ui_pc_open: bpy.props.BoolProperty(name="This Computer", description="What this computer can do, how hard to work, and sending the job to another computer", default=False)
+    ui_lod_open: bpy.props.BoolProperty(name="LOD Set", description="Make three levels of detail in one go", default=False)
+    ui_teach_open: bpy.props.BoolProperty(name="Show It How", description="Fix a spot by hand and CurioMesh remembers the fix for next time", default=False)
     auto_detail: bpy.props.FloatProperty(name="Detail", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces; very high gives a rough, very low-poly shape", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
     auto_effort: bpy.props.EnumProperty(name="Effort", description="How hard Auto Segments works on this computer. Light leaves it usable and works in small steps; Full finishes soonest; Auto picks from your cores and free memory", items=hardware.EFFORT_ITEMS, default="AUTO", update=_redraw_update)
     auto_style: bpy.props.EnumProperty(name="Style", description="Auto Segments: what comes first when the two disagree", items=(("DETAIL", "Keep Detail", "Holds the amount of change you allow, with the fewest faces. Quads follow the shape, so they can look slanted"), ("BALANCED", "Balanced", "Holds the same change with far fewer irregular vertices, by splitting every quad. Costs more faces"), ("ROWS", "Clean Rows", "Even, square quads in long rows. Costs more visible change, and small sharp detail softens")), default="DETAIL", update=_redraw_update)
@@ -301,11 +306,11 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_method: bpy.props.EnumProperty(name="Method", description="How Reduce and Low Poly make their quads", items=segments.METHOD_ITEMS, default="AUTO")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
-    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Auto Segments: solve one half of the mesh and mirror it. The two sides come out identical and the seam is exact. Only used when the mesh really is symmetric; otherwise the whole mesh is solved and you are told why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
+    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Solve one half and mirror it, so both sides match and the seam is exact. Only used when the mesh really is symmetric; otherwise it says why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
     guide_use: bpy.props.BoolProperty(name="Use Guide Curves", description="Auto Segments: make the quads follow the guide curves in the list (an edge loop round an eye, a line along a panel). The curves are laid on the mesh, so they can float a little off it", default=False, update=_redraw_update)
     guide_curves: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_guide)
     guide_index: bpy.props.IntProperty(default=0)
-    region_use: bpy.props.BoolProperty(name="Selected Faces Only", description="Auto Segments: redo only the faces you selected in Edit Mode before pressing Start, and leave the rest exactly as it is. Loops you drew there are used; the seam is joined where its vertices line up. Not used with Mirror or Paint Density", default=False, update=_redraw_update)
+    region_use: bpy.props.BoolProperty(name="Selected Faces Only", description="Redo only the faces selected in Edit Mode and leave the rest exactly as it is. Not used with Mirror or Paint Density", default=False, update=_redraw_update)
     loop_use: bpy.props.BoolProperty(name="Edge Loops", description="Auto Segments: loops and flow lines you drew (round an eye or the mouth, or along a cheek) become real continuous edge loops with rows of regular quads beside them. Poles are put outside them", default=False, update=_redraw_update)
     loop_count: bpy.props.IntProperty(name="Loops", description="Parallel loops per drawn line: the one you drew and one more each side is 3", default=3, min=3, max=9, update=_redraw_update)
     bend_use: bpy.props.BoolProperty(name="Deformation Lines", description="Auto Segments: lines drawn across a joint or crease (elbow, knee, mouth corner, eyelid, knuckle) become parallel edge loops, evenly spaced, so the mesh bends without pinching", default=False, update=_redraw_update)
@@ -321,13 +326,13 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_index: bpy.props.IntProperty(default=0)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
-    auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Auto Segments: Apply writes one mesh per repeated part, placed as linked objects, so a copy costs no geometry. Each object is a draw call unless your engine instances it, and copies share the first one's UVs. Off: one merged mesh", default=False)
+    auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Repeated parts become linked copies that cost no extra geometry (copies share UVs). Off: one merged mesh", default=False)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
-    auto_rough: bpy.props.BoolProperty(name="Rough As Texture", description="Auto Segments: judge rough surfaces, like scanned rock or sea floor, by their average direction over a few pixels instead of each pixel, and merge edges to get rid of leftover triangles. Far fewer faces on rough scans; bumps smaller than a few pixels are not kept. Smooth surfaces are judged as before", default=False)
+    auto_rough: bpy.props.BoolProperty(name="Rough As Texture", description="For rough scans (rock, sea floor): judge bumps on average and merge leftover triangles. Far fewer faces; bumps smaller than a few pixels are lost", default=False)
     auto_drop_hidden: bpy.props.BoolProperty(name="Leave Out Hidden Pieces", description="Auto Segments: leave out loose pieces no camera outside the model can see, from 14 directions. The count of what was left out is shown with the result", default=False)
-    auto_baked: bpy.props.BoolProperty(name="Judge After Baking", description="Low Poly only, for scans and rocks you will bake a normal map for. Runs at 3% and judges the result as it looks baked, so bumps stop counting and far fewer faces are left. It damages hard-surface models, and its score misses that, so it only runs on a scan (almost no flat edges)", default=False)
+    auto_baked: bpy.props.BoolProperty(name="Judge After Baking", description="Low Poly on scans you will bake a normal map for: judge the result as it looks baked, so far fewer faces remain. Only runs on scans, never hard-surface", default=False)
     auto_tidy: bpy.props.BoolProperty(name="Tidy Quads", description="Auto Segments: after the search, try to make the quads tidier, like hand-made meshes. Slow, and the view changes a little more, so it is off unless you want it", default=False)
-    keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Auto Segments: quads stay inside one UV island, so textures land where they did. Costs faces, nearly double on a model cut into many islands. Bake Detail Normal + Color is the better route for most game assets, as it needs no old seams", default=False)
+    keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Keep quads inside UV islands so textures stay put. Costs faces, up to double. For most game assets, Bake Normal + Color is better", default=False)
     lod0_percent: bpy.props.FloatProperty(name="LOD0", description="Faces of the first LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[0], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
     lod1_percent: bpy.props.FloatProperty(name="LOD1", description="Faces of the second LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[1], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
     lod2_percent: bpy.props.FloatProperty(name="LOD2", description="Faces of the third LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[2], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
@@ -1182,7 +1187,7 @@ def _restore_kept(context, source) -> None:
 class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
     bl_idname = "curiomesh.teach_remember"
     bl_label = "Remember This Fix"
-    bl_description = "You fixed an area by hand on the preview, in Edit Mode, with any tools. This remembers it, in a file in your Blender config folder, and offers it again where the same pattern shows up. Nothing is uploaded. The area stays as you made it when you press Start again on the same mesh"
+    bl_description = "Remember the area you fixed by hand on the preview, and offer the same fix where the pattern shows up again. Kept on this PC only; nothing is uploaded"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -2275,8 +2280,7 @@ class CURIOMESH_OT_guided_work(_SurfaceTool, bpy.types.Operator):
     bl_idname = "curiomesh.guided_work"
     bl_label = "Work Live"
     bl_description = (
-        "Remesh the mesh area by area while you watch. Click or drag on your mesh or on the result to add an area. "
-        "Over an area, scroll sets its size, Shift+scroll its density and F its fill style. It redoes only what changed, in the background"
+        "Click or drag on the mesh to add an area; it is remeshed in the background. Over an area: scroll for size, Shift+scroll for density, F for fill style"
     )
 
     def invoke(self, context, event):
@@ -2869,7 +2873,7 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
 class CURIOMESH_OT_guided_stop(bpy.types.Operator):
     bl_idname = "curiomesh.guided_stop"
     bl_label = "Cancel"
-    bl_description = "Turn the guided preview off and remove it. Your points stay on the mesh"
+    bl_description = "Remove the preview and keep your mesh as it was. Your points and guides stay"
     bl_options = {"INTERNAL"}
 
     def execute(self, context):
@@ -2931,7 +2935,7 @@ class CURIOMESH_OT_guided_check_pc(bpy.types.Operator):
 class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
     bl_idname = "curiomesh.guided_export_job"
     bl_label = "Export Job For Another Computer"
-    bl_description = "Write a folder with this mesh, your settings and a script that runs the same search without a window (blender --background --python run_job.py), for a stronger computer. Copy the folder there yourself; nothing is uploaded"
+    bl_description = "Write a folder with this mesh, your settings and a script, to run the same search on a stronger computer. You copy it there; nothing is uploaded"
     bl_options = {"INTERNAL"}
 
     directory: bpy.props.StringProperty(subtype="DIR_PATH")
@@ -3355,6 +3359,26 @@ def progress_info(kind: str | None = None):
     return done / total, f"Redoing piece {min(done + 1, total)} of {total}"
 
 
+def fold(layout, data, prop: str, text: str):
+    """A fold-out section: a native panel on Blender 4.1+, a disclosure toggle before. Returns the body, or None when closed."""
+    if hasattr(layout, "panel_prop"):
+        header, body = layout.panel_prop(data, prop)
+        header.label(text=text)
+        return body
+    is_open = getattr(data, prop)
+    layout.prop(data, prop, text=text, icon="DOWNARROW_HLT" if is_open else "RIGHTARROW", emboss=False)
+    return layout.column() if is_open else None
+
+
+def turbo_words(line: str) -> str:
+    """The speed-up module's status for an artist: the import error belongs in Diagnostics, not the panel."""
+    if line.startswith("Turbo unavailable"):
+        return "Speed-up module not installed: works, but slower"
+    if line.startswith("Turbo disabled"):
+        return "Speed-up module turned off: works, but slower"
+    return line
+
+
 def draw_progress(layout, fraction: float, text: str) -> None:
     """A real progress bar on Blender 4.0 and later, a text bar before that."""
     fraction = min(max(float(fraction), 0.0), 1.0)
@@ -3436,7 +3460,6 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "CurioMesh"
-    bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
@@ -3446,7 +3469,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         self.layout.label(icon="PIVOT_ACTIVE")
 
     def _draw_auto(self, layout, context, gs, obj):
-        """Auto Segments: one big button that is always the next thing to do, then settings, the result and sub-panels."""
+        """Auto Segments: Auto (or set up and Start), the result, then Fix Parts and Apply. Everything advanced is folded away."""
         layout.prop(gs, "scope", text="")
         base = state["auto_base"]
         searching = progress_info("AUTO")
@@ -3463,32 +3486,35 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 overlay.wrap_label(box, "Convert it first: Object menu, Convert, Mesh.", icon="BLANK1", width=36, limit=2)
             else:
                 box.label(text="1. Click a mesh in the 3D view", icon="RESTRICT_SELECT_OFF")
-                overlay.wrap_label(box, "Auto Segments keeps the shape and cuts the faces, part by part.", icon="BLANK1", width=36, limit=2)
+                overlay.wrap_label(box, "Then press Auto. It picks the settings, keeps the shape and makes clean quads, part by part.", icon="BLANK1", width=36, limit=3)
             return
-        row = layout.row(align=True)
+        row = layout.split(factor=0.62, align=True)  # the name gets the room: "marble_bus..." was cut at half width
         row.label(text=f"1. {obj.name}", icon="MESH_DATA")
         row.label(text=f"{faces:,} faces")
         if faces == 0:
-            layout.box().label(text="This mesh has no faces to reduce", icon="ERROR")
+            box = layout.box()
+            box.label(text="This mesh has no faces to reduce", icon="ERROR")
+            overlay.wrap_label(box, "Pick a mesh with faces, or add some in Edit Mode.", icon="BLANK1", width=36, limit=2)
             return
 
         draw_auto_button(layout, context, gs)
+        if not done and not searching and not gs.auto_why:
+            overlay.wrap_label(layout, "Auto picks every setting and starts. Or set them below and press Start.", icon="BLANK1", width=36, limit=2)
 
-        if not searching and not done:
-            col = layout.box().column(align=True)
-            row = col.row(align=True)
-            row.prop(gs, "lod0_percent")
-            row.prop(gs, "lod1_percent")
-            row.prop(gs, "lod2_percent")
-            col.operator("curiomesh.guided_make_lods", icon="MOD_DECIM")
-            for line in state["lod_report"].split(" | ") if state["lod_report"] else ():
-                overlay.wrap_label(col, line, icon="CHECKMARK", width=36, limit=2)
-
-        # Settings, read-only while the search runs
+        # Step 2, read-only while the search runs; the everyday choices first, the rest folded away
         layout.label(text="2. Choose what it's for")
         col = layout.column(align=True)
         col.enabled = not searching
         col.prop(gs, "auto_profile")
+        col.row(align=True).prop(gs, "auto_aim", expand=True)
+        if gs.auto_aim == "KEEP":
+            col.prop(gs, "auto_detail")
+            overlay.wrap_label(col, profiles.detail_words(gs.auto_detail), icon="INFO", width=36, limit=2)
+        else:
+            col.row(align=True).prop(gs, "auto_reduce_by", expand=True)
+            col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
+            col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
+        col.prop(gs, "sym_axis", icon="MOD_MIRROR")
         if gs.auto_profile in profiles.MULTIRES_USES or gs.multires_on:
             col.prop(gs, "multires_on", toggle=True, icon="MOD_MULTIRES")
             if gs.multires_on:
@@ -3499,8 +3525,83 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 row.prop(gs, "bake_detail", text="Bake")
                 if gs.bake_detail != "OFF":
                     row.prop(gs, "bake_size", text="")
-        col.row(align=True).prop(gs, "auto_aim", expand=True)
-        col.prop(gs, "sym_axis", icon="MOD_MIRROR")
+
+        on = sum((gs.region_use, gs.loop_use, gs.guide_use, gs.bend_use, gs.density_use))
+        body = fold(layout, gs, "ui_more_open", "More Options" + (f" ({on} on)" if on else ""))  # names of what is on were cut in a narrow sidebar
+        if body is not None:
+            self._draw_more(body, gs, obj, searching)
+
+        body = fold(layout, gs, "ui_pc_open", "This Computer")
+        if body is not None:
+            self._draw_pc(body, gs, searching)
+
+        if not searching and not done:
+            body = fold(layout, gs, "ui_lod_open", "LOD Set (optional)")
+            if body is not None:
+                col = body.column(align=True)  # one per line: three in a row were cut in a narrow sidebar
+                col.prop(gs, "lod0_percent")
+                col.prop(gs, "lod1_percent")
+                col.prop(gs, "lod2_percent")
+                col.operator("curiomesh.guided_make_lods", icon="MOD_DECIM")
+                for line in state["lod_report"].split(" | ") if state["lod_report"] else ():
+                    overlay.wrap_label(col, line, icon="CHECKMARK", width=36, limit=2)
+
+        # Step 3: how long it will take, then the big button while there is nothing yet; once there is a result the big button is Apply, in 5
+        if state["machine"] is not None and not done and not searching:
+            level, text, _settings = job_rating(gs, faces, state["src"]["sig"] if state["src"] is not None else None)
+            overlay.wrap_label(layout, text, icon="TIME" if level == "OK" else "ERROR", width=36, limit=3)
+        if searching:
+            draw_progress(layout, *searching)
+            layout.operator("curiomesh.guided_stop_work", icon="CANCEL")
+        elif done:
+            row = layout.row(align=True)
+            row.enabled = not redoing and progress_info() is None
+            row.operator("curiomesh.guided_auto_start", text="3. Start Again", icon="FILE_REFRESH")
+        else:
+            row = layout.row()
+            row.scale_y = 1.9
+            row.operator("curiomesh.guided_auto_start", text="3. Start", icon="PLAY")
+
+        if done:
+            self._draw_summary(layout, gs, base["report"], len(res["faces"]))
+            body = fold(layout, gs, "ui_teach_open", "Show It How (optional)")
+            if body is not None:
+                self._draw_teach(body, obj)
+
+        message = status()
+        if message and not searching and not (done and message == base["summary"]):  # while searching the bar already says it
+            box = layout.box()
+            box.alert = _is_problem(message)
+            for i, chunk in enumerate(message.split(" | ")[:2]):
+                overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=32, limit=4)
+
+    @staticmethod
+    def _draw_summary(layout, gs, report, after):
+        """The result in an artist's numbers: how many faces, how many fewer, how alike it looks."""
+        before = report["before"]
+        col = layout.box().column(align=True)
+        col.label(text=f"{after:,} faces, {100.0 * (1.0 - after / max(before, 1)):.0f}% fewer", icon="CHECKMARK")
+        col.label(text=f"Looks {max(0.0, 100.0 - report['loss']):.0f}% the same" + (" (before fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="HIDE_OFF")
+        if report.get("shading") is not None:
+            col.label(text=f"Shading {max(0.0, 100.0 - report['shading']):.0f}% the same", icon="SHADING_SOLID")
+        if report.get("topology") is not None:
+            col.label(text=f"Tidiness {report['topology']:.0f}/100 (hand-made: 100)", icon="MESH_GRID")
+        if report["asked"]:
+            col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
+        follows = report.get("guides")
+        if follows:
+            overlay.wrap_label(col, f"Guides: {follows['strokes']} strokes, the nearest edge is {100.0 * follows['mean']:.2f}% of the size away on average", icon="CURVE_DATA", width=36, limit=3)
+        bend = report.get("bend")
+        if bend:
+            overlay.wrap_label(col, f"Deformation lines: {bend['found']} of {bend['loops']} loops found, {bend['poles']} poles on {bend['verts']} vertices", icon="MOD_SIMPLEDEFORM", width=36, limit=3)
+            overlay.wrap_label(col, f"Loop gap {100.0 * bend['gap']:.0f}% of asked, uneven by {100.0 * bend['uneven']:.0f}%", icon="BLANK1", width=36, limit=2)
+        col.label(text="Next: check parts (4), then Apply (5)", icon="FORWARD")
+
+    @staticmethod
+    def _draw_more(col, gs, obj, searching):
+        """Guides, paint, clean-up and output: the options most meshes never need."""
+        col = col.column(align=True)
+        col.enabled = not searching
         if REGION_READY:
             col.prop(gs, "region_use", text="Selected Faces Only", toggle=True, icon="FACESEL")
         if gs.region_use:
@@ -3546,15 +3647,9 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row.operator("curiomesh.guided_paint_density", icon="WPAINT_HLT")
             row.operator("curiomesh.guided_clear_density", icon="X")
             col.prop(gs, "density_strength")
-            if obj is not None and obj.vertex_groups.get(gs.density_group) is None:
+            if obj.vertex_groups.get(gs.density_group) is None:
                 overlay.wrap_label(col, "Press Paint, colour the parts that need more quads red", icon="INFO", width=36, limit=3)
-        if gs.auto_aim == "KEEP":
-            col.prop(gs, "auto_detail")
-            overlay.wrap_label(col, profiles.detail_words(gs.auto_detail), icon="INFO", width=36, limit=2)
-        else:
-            col.row(align=True).prop(gs, "auto_reduce_by", expand=True)
-            col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
-            col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
+        col.separator()
         if obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
             col.prop(gs, "keep_uvs", toggle=True, icon="UV")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
@@ -3567,95 +3662,48 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.prop(gs, "auto_method")
         col.row(align=True).prop(gs, "auto_output", expand=True)
 
-        box = layout.box()
-        box.label(text="This computer", icon="PREFERENCES")
+    @staticmethod
+    def _draw_pc(col, gs, searching):
+        """The machine in plain words, how hard to work, and handing the job to another computer."""
         machine = state["machine"]
         if machine is None:
-            box.label(text="Not checked yet", icon="INFO")
+            col.label(text="Not checked yet", icon="INFO")
         else:
-            for line in hardware.describe(machine, turbo.status()):
-                overlay.wrap_label(box, line, icon="BLANK1", width=36, limit=2)
-            if obj is not None:
-                level, text, settings = job_rating(gs, faces, state["src"]["sig"] if state["src"] is not None else None)
-                overlay.wrap_label(box, text, icon="CHECKMARK" if level == "OK" else "ERROR", width=36, limit=3)
-                if gs.auto_effort == "AUTO":
-                    box.label(text=f"Auto picked {settings.name}")
-        col = box.column()
-        col.enabled = not searching
-        col.prop(gs, "auto_effort")
-        row = col.row(align=True)
-        row.operator("curiomesh.guided_check_pc", icon="FILE_REFRESH")
-        row = col.row(align=True)
+            for line in hardware.describe(machine, turbo_words(turbo.status())):
+                overlay.wrap_label(col, line, icon="BLANK1", width=36, limit=2)
+        sub = col.column()
+        sub.enabled = not searching
+        sub.prop(gs, "auto_effort")
+        if machine is not None and gs.auto_effort == "AUTO":
+            sub.label(text=f"Auto picked {hardware.settings_for(gs.auto_effort, machine).name}", icon="BLANK1")
+        sub.operator("curiomesh.guided_check_pc", icon="FILE_REFRESH")
+        row = sub.row(align=True)
         row.operator("curiomesh.guided_export_job", text="Export Job", icon="EXPORT")
         row.operator("curiomesh.guided_import_result", text="Import Result", icon="IMPORT")
 
-        # Step 3: the big button while there is nothing yet; once there is a result the big button is Apply, below
-        if searching:
-            draw_progress(layout, *searching)
-            layout.operator("curiomesh.guided_stop_work", icon="CANCEL")
-        elif done:
-            row = layout.row(align=True)
-            row.enabled = not redoing and progress_info() is None
-            row.operator("curiomesh.guided_auto_start", text="3. Start Again", icon="FILE_REFRESH")
-            layout.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if segments.seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(segments.seg.get("reviewing")))
+    @staticmethod
+    def _draw_teach(col, obj):
+        """Fix a spot by hand, remember it, and find the same spot next time."""
+        col = col.column(align=True)
+        overlay.wrap_label(col, "Fix a spot by hand, then:", width=36, limit=2)
+        row = col.row(align=True)
+        row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
+        row.operator("curiomesh.teach_remember", text="Remember", icon="BOOKMARKS")
+        known = len(_library())
+        col.label(text=f"{known} fix{'' if known == 1 else 'es'} remembered on this PC")
+        if state["fixes_in_memory"]:
+            overlay.wrap_label(col, "Blender's config folder can't be written, so these last only until you close Blender. Export them to keep them.", icon="ERROR", width=36, limit=4)
+        if state["found"]:
+            col.label(text="You've fixed something like this before:", icon="INFO")
+            col.operator("curiomesh.teach_apply", text=f"Apply ({len(state['found'])} places)", icon="CHECKMARK")
         else:
-            row = layout.row()
-            row.scale_y = 1.9
-            row.operator("curiomesh.guided_auto_start", text="3. Start", icon="PLAY")
-
-        # The result
-        if done:
-            report = base["report"]
-            after, before = len(res["faces"]), report["before"]
-            col = layout.box().column(align=True)
-            col.label(text=f"{before:,} to {after:,} faces ({100.0 * (1.0 - after / max(before, 1)):.0f}% fewer)", icon="CHECKMARK")
-            overlay.wrap_label(col, f"The view changed by {report['loss']:.1f}%" + (" (before your fixes)" if gs.bool_on and len(gs.bool_shapes) else ""), icon="BLANK1", width=32, limit=2)
-            if report.get("shading") is not None:
-                col.label(text=f"Smooth shading differs by {report['shading']:.1f}%", icon="BLANK1")
-            if report.get("topology") is not None:
-                overlay.wrap_label(col, f"Tidiness {report['topology']:.0f}/100: 100 is as tidy as hand-made meshes. It says nothing about shape, so read it with the view change.", icon="BLANK1", width=32, limit=5)
-            if report["asked"]:
-                col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
-            follows = report.get("guides")
-            if follows:
-                overlay.wrap_label(col, f"Guides: {follows['strokes']} strokes, the nearest edge is {100.0 * follows['mean']:.2f}% of the size away on average", icon="BLANK1", width=36, limit=3)
-            bend = report.get("bend")
-            if bend:
-                overlay.wrap_label(col, f"Deformation lines: {bend['found']} of {bend['loops']} loops found, {bend['poles']} poles on {bend['verts']} vertices", icon="BLANK1", width=36, limit=3)
-                overlay.wrap_label(col, f"Loop gap {100.0 * bend['gap']:.0f}% of asked, uneven by {100.0 * bend['uneven']:.0f}%", icon="BLANK1", width=36, limit=2)
-
-        box = layout.box()
-        box.label(text="Show it how (optional)", icon="MODIFIER")
-        col = box.column(align=True)
-        col.enabled = done
-        if not done:
-            col.label(text="Available once the search has finished")
-        else:
-            overlay.wrap_label(col, "Fix a spot by hand, then:", width=36, limit=2)
-            row = col.row(align=True)
-            row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
-            row.operator("curiomesh.teach_remember", text="Remember", icon="BOOKMARKS")
-            known = len(_library())
-            col.label(text=f"{known} fix(es) remembered on this PC")
-            if state["fixes_in_memory"]:
-                overlay.wrap_label(col, "Blender's config folder can't be written, so these last only until you close Blender. Export them to keep them.", icon="ERROR", width=36, limit=4)
-            if state["found"]:
-                col.label(text="You've fixed something like this before:", icon="INFO")
-                col.operator("curiomesh.teach_apply", text=f"Apply ({len(state['found'])} places)", icon="CHECKMARK")
-            else:
-                col.operator("curiomesh.teach_find", icon="VIEWZOOM")
-            row = col.row(align=True)
-            row.operator("curiomesh.teach_export", icon="EXPORT")
-            row.operator("curiomesh.teach_import", icon="IMPORT")
-            if obj is not None and _kept(obj):
-                col.operator("curiomesh.teach_forget_kept", text=f"Forget {len(_kept(obj))} Kept Fix(es)", icon="X")
-
-        message = status()
-        if message and not searching and not (done and message == base["summary"]):  # while searching the bar already says it
-            box = layout.box()
-            box.alert = _is_problem(message)
-            for i, chunk in enumerate(message.split(" | ")[:2]):
-                overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=32, limit=4)
+            col.operator("curiomesh.teach_find", icon="VIEWZOOM")
+        row = col.row(align=True)
+        row.operator("curiomesh.teach_export", icon="EXPORT")
+        row.operator("curiomesh.teach_import", icon="IMPORT")
+        kept = len(_kept(obj)) if obj is not None else 0
+        if kept:
+            col.operator("curiomesh.teach_forget_kept", text=f"Forget {kept} Kept Fix{'' if kept == 1 else 'es'}", icon="X")
 
     def draw(self, context):
         layout = self.layout
@@ -3799,9 +3847,9 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
         row.enabled = done and not busy
         row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
         if not done:
-            overlay.wrap_label(layout, "Available once the search has finished. Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
-        if not busy:
-            layout.operator("curiomesh.guided_stop", text="Cancel", icon="X")
+            overlay.wrap_label(layout, "Available once the search has finished. Nothing changes until you press Apply.", icon="LOCKED", width=30, limit=3)
+        elif not busy:
+            layout.operator("curiomesh.guided_stop", text="Discard Result", icon="X")
         layout.prop(gs, "apply_mode", text="Write to")
         layout.prop(gs, "bake_detail", text="Bake")
         if gs.bake_detail != "OFF":
@@ -3811,7 +3859,7 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
 
 
 class CURIOMESH_PT_guided_shapes(_AutoSub, bpy.types.Panel):
-    bl_label = "4. Fix Inside Shapes (optional)"
+    bl_label = "Or Fix Inside Shapes (optional)"
     bl_idname = "CURIOMESH_PT_guided_shapes"
     bl_options = {"DEFAULT_CLOSED"}
 
