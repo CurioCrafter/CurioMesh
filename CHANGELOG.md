@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The panel reads as one path: Auto, check the parts, Apply.** The Guided panel is open and on
+  Auto Segments from the first run. Step 2 keeps the everyday choices (Use, Keep Detail or Reduce
+  To, Detail, Mirror); guides, paint, clean-up and output fold into More Options, the machine and
+  Export Job into This Computer, Show It How appears once there is a result. The time estimate sits
+  right above Start. The result reads "2,508 faces, 86% fewer / Looks 94% the same / Tidiness
+  27/100", and parts, hover and tries use the same words. Quick Start says what Auto and Remesh
+  each do; Remesh is a size smaller. The HUD shows the result preview while it waits for Apply,
+  and an untouched mesh is "ORIGINAL" in blue, not red NEEDS WORK. Part numbers under the mouse
+  sit on a dark card (white on a pale part was unreadable) with the keys to use. Long tooltips
+  are cut to about two lines; the speed-up module's import error left the panel.
+
 - **Auto Segments also tries each big part reduced in small steps.** Each step starts
   Decimate afresh, which keeps 15-20% fewer triangles at the same camera change on skin and
   rock. Pairing into quads uses up most of that: about 3-5% fewer quads on the models
