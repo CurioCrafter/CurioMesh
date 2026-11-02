@@ -573,15 +573,20 @@ def _draw_text() -> None:
         import blf
 
         x, y = seg["mouse"]
-        for i, line in enumerate(info_lines(hover)):
-            try:
-                blf.size(0, 14.0)
-            except TypeError:  # before Blender 4.0 the size also takes a dpi
-                blf.size(0, 14, 72)
+        lines = info_lines(hover)
+        try:
+            blf.size(0, 14.0)
+        except TypeError:  # before Blender 4.0 the size also takes a dpi
+            blf.size(0, 14, 72)
+        wide = max(blf.dimensions(0, line)[0] for line in lines)
+        edge = bpy.context.region.width - overlay._sidebar_inset()  # the N-panel is drawn over the viewport's right side
+        left = x + 18 if x + 18 + wide < edge else max(x - 18 - wide, 4.0)
+        y = max(y, 18 * len(lines) + 24)  # keep the last line above the bottom edge
+        for i, line in enumerate(lines):
             blf.enable(0, blf.SHADOW)
             blf.shadow(0, 5, 0.0, 0.0, 0.0, 1.0)
             blf.color(0, 1.0, 1.0, 1.0 if i else 0.95, 1.0)
-            blf.position(0, x + 18, y - 18 - 18 * i, 0)
+            blf.position(0, left, y - 18 - 18 * i, 0)
             blf.draw(0, line)
             blf.disable(0, blf.SHADOW)
     except Exception as exc:

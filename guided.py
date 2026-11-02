@@ -3162,7 +3162,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             if report.get("shading") is not None:
                 col.label(text=f"Smooth shading differs by {report['shading']:.1f}%", icon="BLANK1")
             if report.get("topology") is not None:
-                overlay.wrap_label(col, f"Tidiness {report['topology']:.0f}/100: 100 is as tidy as hand-made meshes. It says nothing about shape, so read it with the view change.", icon="BLANK1", width=36, limit=5)
+                overlay.wrap_label(col, f"Tidiness {report['topology']:.0f}/100: 100 is as tidy as hand-made meshes. It says nothing about shape, so read it with the view change.", icon="BLANK1", width=32, limit=5)
             if report["asked"]:
                 col.label(text=f"You asked for about {report['asked']:,}", icon="BLANK1")
             follows = report.get("guides")
@@ -3180,7 +3180,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if not done:
             col.label(text="Available once the search has finished")
         else:
-            overlay.wrap_label(col, "Fix a spot by hand on the preview, then:", width=36, limit=2)
+            overlay.wrap_label(col, "Fix a spot by hand, then:", width=36, limit=2)
             row = col.row(align=True)
             row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
             row.operator("curiomesh.teach_remember", text="Remember", icon="BOOKMARKS")
@@ -3209,7 +3209,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row.operator("curiomesh.guided_auto_start", text="Start Again", icon="FILE_REFRESH")
             row.operator("curiomesh.guided_stop", text="Cancel", icon="X")
             layout.prop(gs, "apply_mode", text="Write to")
-            layout.prop(gs, "bake_detail")
+            layout.prop(gs, "bake_detail", text="Bake")
             if gs.bake_detail != "OFF":
                 layout.prop(gs, "bake_size", text="")
             elif obj.data.uv_layers:
@@ -3304,7 +3304,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         sub.operator("curiomesh.guided_apply", icon="CHECKMARK")
         row.operator("curiomesh.guided_stop", icon="X")
         layout.prop(gs, "apply_mode", text="")
-        layout.prop(gs, "bake_detail")
+        layout.prop(gs, "bake_detail", text="Bake")
         if gs.bake_detail != "OFF":
             layout.prop(gs, "bake_size", text="")
         if not previewing and not compact:
