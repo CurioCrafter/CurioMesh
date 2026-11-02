@@ -1628,6 +1628,8 @@ def _collect_work(context) -> None:
         return
     res = state["res"]
     made = f"{int(res['new'].sum()):,} new quads in {len(res['faces']):,} faces" if res is not None else "No quads yet"
+    if res is not None and work["key"][1] == "BOOL" and not res["new"].any():
+        made = "Nothing changed: a redo there would make more faces than it replaces. Slide towards Organized or use a bigger shape"
     if runner.busy:
         state["message"] = f"Working on piece {min(done + 1, max(total, 1))} of {max(total, 1)}. {made}"
     elif not work.get("settled") == runner.output_id:
