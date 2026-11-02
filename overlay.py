@@ -632,8 +632,7 @@ def _draw_hud() -> None:
             ("TRIS", f"! {model['tris']:,}" if model["tris"] else "0", (1.0, 0.5, 0.5, 1) if model["tris"] else (0.6, 0.9, 0.7, 1)),
             ("POLES", f"{model['poles']:,}", (1.0, 0.78, 0.3, 1)),
         )
-        for i, (cell_label, value, color) in enumerate(cells):
-            cx = left + i * col_w
+        for (cell_label, value, color), cx in zip(cells, (left, left + col_w * 1.5, left + col_w * 2.25)):  # FACES holds "17,456 / 8,000", so it gets a wider column
             _text(cx, top - 90 * s, 10 * s, label, cell_label)
             _text(cx, top - 106 * s, 14 * s, color, value)
 
