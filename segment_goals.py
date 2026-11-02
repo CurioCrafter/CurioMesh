@@ -1041,7 +1041,7 @@ def draw_selected(layout, gs) -> None:
             box.label(text=line, icon="OBJECT_DATA" if i == 0 else "BLANK1")
         words = guided.state["auto_base"]["job"].explain_piece(selected[0])
         if words:
-            overlay.wrap_label(box, words, icon="INFO", width=36, limit=3)
+            overlay.wrap_label(box, words, icon="INFO", width=32, limit=4)
     else:
         parts = [view.seg["parts"][p] for p in selected]
         known = [r["change"] for r in parts if r["change"] is not None]
@@ -1049,7 +1049,7 @@ def draw_selected(layout, gs) -> None:
         if known:
             box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
     if view.mirrored():
-        box.label(text="Redo is off with Mirror or Clean Rows: start again without it", icon="INFO")
+        overlay.wrap_label(box, "Redo is off with Mirror or Clean Rows: start again without it", icon="INFO", width=32, limit=3)
         return
     col = box.column(align=True)
     col.prop(gs, "seg_goal", text="Use")
