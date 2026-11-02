@@ -3259,7 +3259,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 layout.label(text="Detail = smaller quads, Calm = bigger,", icon="INFO")
                 layout.label(text="Loop = rings around, Sharp = keep edges")
         col = layout.column(align=True)
-        col.prop(gs, "new_kind", text="Next Point")
+        col.prop(gs, "new_kind", text="Next")
         col.prop(gs, "new_radius", text="Radius")
         col.prop(gs, "new_strength", text="Strength")
 
