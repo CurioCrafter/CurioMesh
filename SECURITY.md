@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report security problems privately through GitHub: open the repository's **Security** tab and choose
-**Report a vulnerability** (a private security advisory). Don't open a public issue for it.
+**Report a vulnerability** ([direct link](https://github.com/CurioCrafter/CurioMesh/security/advisories/new)), which opens a private security advisory. Don't open a public issue for it.
 
 Say what an attacker would need (for example "the victim opens this .blend" or "imports this result.npz"), what
 happens, and the Blender, CurioMesh and OS versions. A small file that shows it helps most. You'll get an answer in
