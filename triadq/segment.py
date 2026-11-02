@@ -81,6 +81,13 @@ RING_GRID = 12  # vertices round the last row at which a grid can finish a disk
 SHEET_DETAIL = 0.5  # how much more of the sheet's rows a bumpy area gets, on a smooth one's 1
 SHEET_EVEN_ROUNDS = 10  # rounds of evening out its flat map
 SHEET_RELAX = 6  # passes settling a sheet on the surface
+RING_ROWS = 2  # rows each side of a drawn loop, laid with it
+RING_LEAST = 8  # a loop has at least this many vertices
+RING_EVEN = 3  # rounds evening out a dragged loop
+RING_CLEAR = 0.5  # of a cell: what's this close to the line is neither side yet
+RING_LEAST_ROOM = 2.5  # cells across the smaller side for each cell on the line
+RING_SPLIT = 0.4  # of a cell: longest edge of the surface these loops are laid on
+RING_GAP = 0.3  # of a cell: left free between the last row and what the rows beside it are made from
 SHEET_GOOD = 70.0  # a sheet with this topology score needs no flow fill to compare it with
 
 
@@ -1087,7 +1094,7 @@ def _bridge(points, field_loop, seam_ids, next_id):
         extra_face = [(int(first[k - 1]), int(first[k]), int(first[k + 1]))]
         first = np.delete(first, k)
     if len(first) > 3 * len(second):
-        raise ValueError("the seam and the part differ too much in density for one row to join them")
+        raise ValueError(f"the seam and the part differ too much in density for one row to join them: {len(first)} and {len(second)} vertices")
     strip, middles = smoothgrid._strip(first, second, next_id, _arc(points[first]), _arc(points[second]))
     faces = strip + extra_face
     return ([tuple(f[::-1]) for f in faces] if flip else [tuple(f) for f in faces]), middles
@@ -1102,6 +1109,9 @@ def _crowded_edges(faces) -> int:
 def _peel(faces, count: int, wanted: int):
     """Take the field mesh's rough last row off until what's left has one clean border per seam: (faces, border loops). Stray islands and corners that touch go too."""
 
+    loops, pinched = boundary_loops(faces, range(len(faces)))
+    if len(loops) == wanted and not pinched and len(mask_components(faces, np.ones(len(faces), dtype=bool))) == 1:
+        return faces, sorted(loops, key=len, reverse=True)  # clean as it is: a small hole's border would only break up
     for _ in range(6):
         face_of, a, b = _half_edges(faces)
         _keys, inverse, uses = np.unique(np.minimum(a, b) * count + np.maximum(a, b), return_inverse=True, return_counts=True)
@@ -1201,7 +1211,7 @@ def field_on_seams(points, polys, seams, target: float, project=None, lines=None
             closed = parity_path_quad_closure(mesh, allow_invalid=True)
             co, faces = np.asarray(closed.vertices, dtype=np.float64), [tuple(f) for f in closed.faces]
         except ValueError:  # the certificate wants every quad flat and convex first: a handful of triangles stay
-            pass
+            faces = fieldmesh.pair_by_paths(co, faces, 4000)
     pinned = np.zeros(len(co), dtype=bool)
     pinned[pinned_ids] = True
     co = fit_to_surface(co, faces, pinned, project, 2, 0.5)
@@ -1212,6 +1222,174 @@ def field_on_seams(points, polys, seams, target: float, project=None, lines=None
     if _crowded_edges(faces):
         raise ValueError(f"{_crowded_edges(faces)} edges have more than two faces")
     return _local_mesh(co, faces)
+
+
+def _around_loop(stroke, spacing: float) -> np.ndarray:
+    """A closed polyline at even steps."""
+
+    stroke = np.asarray(stroke, dtype=np.float64)
+    if np.linalg.norm(stroke[0] - stroke[-1]) > 1e-12:
+        stroke = np.vstack((stroke, stroke[:1]))
+    steps = np.linalg.norm(np.diff(stroke, axis=0), axis=1)
+    run = np.concatenate(([0.0], np.cumsum(steps)))
+    count = max(RING_LEAST, int(round(run[-1] / max(spacing, 1e-30))))
+    at = np.linspace(0.0, run[-1], count, endpoint=False)
+    return np.stack([np.interp(at, run, stroke[:, k]) for k in range(3)], axis=1)
+
+
+def _ring_step(ring, normals_at, sign, step, on_side):
+    """The ring moved `step` sideways along the surface, as a person drags a loop, kept even and on that side."""
+
+    along = np.roll(ring, -1, axis=0) - np.roll(ring, 1, axis=0)
+    sideways = np.cross(normals_at(ring), along)
+    sideways /= np.maximum(np.linalg.norm(sideways, axis=1, keepdims=True), 1e-30)
+    out = on_side(ring + sign * step * sideways)
+    for _ in range(RING_EVEN):
+        out = on_side(out + 0.5 * (0.5 * (np.roll(out, 1, axis=0) + np.roll(out, -1, axis=0)) - out))
+    return out
+
+
+def _ring_band(pts, tris, stroke, cell: float, rows: int):
+    """Rows of quads round a closed line: its own loop and `rows` each side, all with the same count, so every one is a true edge loop.
+
+    Returns (points as (rows, count, 3), per fine point its side 0 or 1, per fine point its distance from the line, rows on each side). Raises ValueError where the line doesn't part the surface in two.
+    """
+
+    a, b, _edge_of, _uses = fieldmesh._edges(tris, len(pts))
+    length = np.linalg.norm(pts[a] - pts[b], axis=1)
+    normals = fieldmesh._normals_areas(pts, tris)[2]
+    samples = _around_loop(stroke, 0.2 * cell)
+    no_facing = np.zeros_like(samples)
+    seeds = np.unique(fieldmesh.nearest_points(pts, samples, cell, normals, no_facing))
+    distance = fieldmesh.graph_reach(len(pts), a, b, length, seeds)[1]
+    apart = distance > RING_CLEAR * cell
+    keep = apart[a] & apart[b]
+    labels = _labels(len(pts), a[keep], b[keep])
+    counts = np.bincount(labels[apart], minlength=len(pts))
+    two = np.argsort(counts)[-2:]
+    if counts[two[0]] < RING_LEAST:
+        raise ValueError("A drawn loop has to go all the way round: it doesn't part this surface in two.")
+    known = np.flatnonzero((labels == two[0]) | (labels == two[1]))
+    owner = fieldmesh.graph_reach(len(pts), a, b, length, known)[0]
+    side = (labels[known] == two[1]).astype(np.int64)[owner]
+    reach = [float(distance[side == k].max()) for k in (0, 1)]
+    step = min(cell, min(reach) / RING_LEAST_ROOM)
+    ring = _around_loop(stroke, step)
+    if len(ring) % 2:  # all quads on a side can only meet an even border
+        ring = _around_loop(stroke, step * len(ring) / (len(ring) + 1.0))
+    each = [max(1, min(rows, int(reach[k] / step) - 1)) for k in (0, 1)]
+
+    def nearest(ids):
+        return lambda asked: fieldmesh.nearest_points(pts[ids], asked, step, normals[ids], np.zeros_like(asked))
+
+    def on(ids):
+        finder = nearest(ids)
+
+        def onto(asked):  # onto the tangent plane there: the nearest point of the split copy alone makes a loop wobble by its edge length
+            found = ids[finder(asked)]
+            return asked - normals[found] * ((asked - pts[found]) * normals[found]).sum(axis=1, keepdims=True)
+
+        return onto
+
+    everywhere = np.arange(len(pts))
+    ring = on(everywhere)(ring)
+    normals_at = lambda asked: normals[nearest(everywhere)(asked)]  # noqa: E731
+    sign = 1.0  # which way sideways is side 0
+    along = np.roll(ring, -1, axis=0) - np.roll(ring, 1, axis=0)
+    trial = nearest(everywhere)(ring + 0.5 * step * np.cross(normals_at(ring), along) / np.maximum(np.linalg.norm(along, axis=1, keepdims=True), 1e-30))
+    if side[trial].mean() > 0.5:
+        sign = -1.0
+    chains = {0: [], 1: []}
+    for k, way in ((0, sign), (1, -sign)):
+        ids = np.flatnonzero(side == k)
+        now = ring
+        for _ in range(each[k]):
+            now = _ring_step(now, normals_at, way, step, on(ids))
+            chains[k].append(now)
+    all_rows = np.stack(chains[1][::-1] + [ring] + chains[0])
+    return all_rows, side, distance, each, step
+
+
+def _band_quads(rows: np.ndarray, normals_at) -> list:
+    """The quads between rows, facing as the surface does. The first and last rows then run so a neighbour's seam reads them forward or back: see the caller."""
+
+    count = rows.shape[1]
+    quads = []
+    for r in range(rows.shape[0] - 1):
+        for i in range(count):
+            j = (i + 1) % count
+            quads.append((r * count + i, r * count + j, (r + 1) * count + j, (r + 1) * count + i))
+    flat = rows.reshape(-1, 3)
+    corners = np.asarray(quads, dtype=np.int64)
+    facing = np.cross(flat[corners[:, 2]] - flat[corners[:, 0]], flat[corners[:, 3]] - flat[corners[:, 1]])
+    flip = float((facing * normals_at(flat[corners].mean(axis=1))).sum()) < 0.0
+    return [q[::-1] for q in quads] if flip else quads, flip
+
+
+def _cap_disk(seam, points, normals, step: float):
+    """What's inside a small drawn loop, too small for rows of its own: the loop drawn in on itself, with the poles at the middle."""
+
+    seam = np.asarray(seam, dtype=np.float64)
+    middle = seam.mean(axis=0)
+    count = len(seam)
+    many = max(1, int(float(np.linalg.norm(seam - middle, axis=1).mean()) / step))
+    rows = [seam]
+    for k in range(1, many + 1):
+        pulled = seam + (middle - seam) * (k / (many + 1.0))
+        found = fieldmesh.nearest_points(points, pulled, step, normals, np.zeros_like(pulled))
+        rows.append(pulled - normals[found] * ((pulled - points[found]) * normals[found]).sum(axis=1, keepdims=True))
+    co = np.vstack(rows)
+    faces = [(r * count + i, r * count + (i + 1) % count, (r + 1) * count + (i + 1) % count, (r + 1) * count + i) for r in range(many) for i in range(count)]
+    loops = [loop for loop in boundary_loops(faces, range(len(faces)))[0] if min(loop) >= many * count]
+    return _fill_holes(co, faces, loops)
+
+
+def field_with_rings(points, polys, rings, seams, target: float, project=None, lines=None, settle=None, rows: int = RING_ROWS):
+    """Rows from the field mesher with each closed line as a true edge loop: Loop Select follows it all the way round.
+
+    Each line gets rows of the same count on both sides, laid first. The field mesher fills what's left and is tied to the
+    outermost rows, so its poles stay outside. Returns (points, faces). Raises ValueError where a line can't be done.
+    """
+
+    if not rings:
+        return field_on_seams(points, polys, seams, target, project, lines, settle)
+    points = np.asarray(points, dtype=np.float64)
+    tris = fieldmesh.triangulate(polys)[0]
+    area = float(fieldmesh._normals_areas(points, tris)[1].sum())
+    cell = float(np.sqrt(area / max(target, 1.0)))
+    pts, tris, _sizes, _carried = fieldmesh.split_long_edges(points, tris, np.full(len(points), cell), RING_SPLIT)
+    band, side, distance, each, step = _ring_band(pts, tris, rings[0], cell, rows)
+    normals = fieldmesh._normals_areas(pts, tris)[2]
+    normals_at = lambda asked: normals[fieldmesh.nearest_points(pts, asked, step, normals, np.zeros_like(asked))]  # noqa: E731
+    quads, flipped = _band_quads(band, normals_at)
+    all_points, all_faces = [band.reshape(-1, 3)], list(quads)
+    offset = len(all_points[0])
+    fine_area = fieldmesh._normals_areas(pts, tris)[1]
+    left = max(target - len(quads), 0.0)
+    total = max(float(fine_area.sum()), 1e-30)
+    # Row 0 borders side 1 and the last row side 0. A side's seam runs against the band's own edges on that row.
+    for k, row, forward in ((1, band[0], flipped), (0, band[-1], not flipped)):
+        keep = (side == k) & (distance > (each[k] + RING_GAP) * step)
+        inside = keep[tris].all(axis=1)
+        if not inside.any():
+            raise ValueError("No room beside a drawn loop.")
+        used, flat = np.unique(tris[inside], return_inverse=True)
+        here_tris = flat.reshape(-1, 3)
+        here = pts[used]
+        side_of = lambda p: side[fieldmesh.nearest_points(pts, p[None], step, normals, np.zeros((1, 3)))[0]]  # noqa: E731
+        side_rings = [r for r in rings[1:] if side_of(np.asarray(r, dtype=np.float64)[0]) == k]
+        side_seams = [s for s in seams if side_of(np.asarray(s, dtype=np.float64)[0]) == k] + [row if forward else row[::-1]]
+        share = float(fine_area[inside].sum()) / total
+        try:
+            made = field_with_rings(here, [tuple(t) for t in here_tris.tolist()], side_rings, side_seams, share * left, project, lines, settle, rows)
+        except ValueError:
+            if side_rings or len(side_seams) != 1:
+                raise
+            made = _cap_disk(side_seams[0], here, normals[used], step)
+        all_points.append(made[0])
+        all_faces += [tuple(v + offset for v in f) for f in made[1]]
+        offset += len(made[0])
+    return weld_border(np.vstack(all_points), all_faces)
 
 
 def seam_loops(co, faces, ids) -> list[np.ndarray]:

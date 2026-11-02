@@ -16,6 +16,7 @@ METHOD_ITEMS = [
     ("QUADRIFLOW", "QuadriFlow", "Blender's own QuadriFlow on each part. Even flowing quads on smooth organic parts; it can fail on thin or open parts (Auto is used then)", "MOD_REMESH", 3),
     ("GRID", "Grid Fill", "A regular grid. Needs a part with one open edge loop; a closed part falls back to Auto", "MESH_GRID", 4),
     ("FLOW", "Flow Fill", "Quad loops that follow the surface. Needs a part with one open edge loop; a closed part falls back to Auto", "MOD_WAVE", 5),
+    ("FIELD", "Field Rows", "Lays long rows of quads over each part from a direction field, along its long creases. Most organized, with more shape change on busy parts. Parts it can't do well use Auto. Up to 30,000 quads per part", "OUTLINER_OB_LATTICE", 7),
     ("TRIS", "Tris Only", "No pairing at all: the reduced triangles as they are. About twice the faces of the same shape in quads", "MESH_DATA", 6),
 ]
 OUTPUT_ITEMS = [
