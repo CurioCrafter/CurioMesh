@@ -1,6 +1,6 @@
-# CurioMesh: free automatic retopology for Blender
+# CurioMesh: free auto retopology and quad remesh add-on for Blender
 
-**Turn a dense sculpt, scan or high-poly game asset into a clean all-quad, low-poly mesh. Free and open source.**
+**A free, open source Blender retopology add-on. It turns a dense sculpt, scan or high-poly game asset into a clean all-quad, low-poly mesh.**
 
 [![Download CurioMesh](https://img.shields.io/badge/Download-free%20add--on-2ea44f?style=for-the-badge&logo=blender&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
 [![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-24292f?style=for-the-badge&logo=github&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/stargazers)
@@ -17,13 +17,25 @@ CurioMesh is an automatic quad retopology add-on for Blender 3.6 to 5.2. Say wha
 the model part by part. A camera check compares the result with your original from six sides and tells you how much of the view
 changed. Then you redo only the part that still looks wrong. It runs on your PC and uploads nothing.
 
-**Try it:** [install the zip](#download-and-install), select a mesh, and press **Auto** in the Guided panel. CurioMesh picks the Use and settings from
-your mesh and free memory, says why, and starts. Or follow the numbered steps yourself: choose what it is for, **Start**, fix parts in
-**Review Segments**, then **Apply**. Nothing changes in your scene until Apply.
+**Who it is for:** 3D artists, technical artists and game developers who need a lower-poly, all-quad version of a high-poly
+model, a sculpt or a photogrammetry scan, and want to fix single parts instead of redoing the whole mesh.
+
+**Try it in four steps:**
+
+1. Download the zip for your Blender version from the [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest) ([which one?](#download-and-install-the-blender-retopology-add-on)).
+2. In Blender, install it and enable **CurioMesh**.
+3. Select a mesh and open `3D View > N-panel > CurioMesh`.
+4. Press **Auto** in the Guided panel.
+
+Auto picks the Use and settings from your mesh and free memory, says why, and starts. Or follow the numbered steps yourself:
+choose what it is for, **Start**, fix parts in **Review Segments**, then **Apply**. Nothing changes in your scene until Apply.
+
+**Honest limits:** quads can look slanted on smooth surfaces, fine ornaments go jagged at high reduction, it does not find edge
+loops for faces and joints on its own, and big scans take minutes, sometimes tens of minutes. See [Known limits](#known-limits).
 
 ## Contents
 
-[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install) · [FAQ](#frequently-asked-questions) · [Limits](#known-limits) · [All features](#all-features)
+[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install-the-blender-retopology-add-on) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
 
 ## What it does
 
@@ -47,15 +59,15 @@ Asset settings: Keep Detail, **Detail 6%**. Detail is how much of the view may l
 download the same models and check the numbers. Each picture shows the original (left) and the result (right), the whole
 object on top and a close-up below.
 
-![Chess set (33 pieces): 76,832 faces become 10,110 quads, wire on both, whole object and close-up](docs/images/chess_set.jpg)
+![Auto retopology of a chess set in Blender: 76,832 faces become 10,110 quads, wireframe before and after, whole object and close-up](docs/images/chess_set.jpg)
 
 *Chess set (33 pieces), [Poly Haven](https://polyhaven.com/a/chess_set), CC0.*
 
-![Overhead crane: 89,964 faces become 22,541 quads, wire on both, whole object and close-up](docs/images/overhead_crane.jpg)
+![Quad remesh of an overhead crane in Blender: 89,964 faces become 22,541 quads, wireframe before and after, whole object and close-up](docs/images/overhead_crane.jpg)
 
 *Overhead crane, [Poly Haven](https://polyhaven.com/a/overhead_crane), CC0.*
 
-![Concrete road barrier: 60,928 faces become 987 quads, wire on both, whole object and close-up](docs/images/concrete_road_barrier.jpg)
+![Low-poly retopology of a concrete road barrier in Blender: 60,928 faces become 987 quads, wireframe before and after, whole object and close-up](docs/images/concrete_road_barrier.jpg)
 
 *Concrete road barrier, [Poly Haven](https://polyhaven.com/a/concrete_road_barrier), CC0.*
 
@@ -258,7 +270,7 @@ Whole-mesh Atlas-Q, **Regions** (redo any selection or cage with an exact seam),
 CurioMesh. They are described in [docs/OLDER_FEATURES.md](docs/OLDER_FEATURES.md). The solvers, controls and maths of the whole-mesh remesher
 are in [docs/ATLAS_Q_REFERENCE.md](docs/ATLAS_Q_REFERENCE.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
-## Download and install
+## Download and install the Blender retopology add-on
 
 Each release has a zip for your exact Blender version, plus two all-in-one zips.
 Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest).
@@ -270,7 +282,12 @@ Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/rel
 | Not sure | `...-blender-4.2-plus-extension.zip` (4.2 and newer) or `...-blender-3.6-plus-addon.zip` (any version from 3.6) | as above |
 | 3.5 and older | not supported | |
 
-Then enable **CurioMesh**, select a mesh, and open `3D View > N-panel > CurioMesh`.
+To install:
+
+1. Download the zip that matches your Blender version from the table above. Do not unzip it.
+2. In Blender, open the menu from the table (Get Extensions for 4.2 and newer, Add-ons for older versions) and pick the zip.
+3. Enable **CurioMesh**.
+4. Select a mesh and open `3D View > N-panel > CurioMesh`.
 
 The version on extensions.blender.org is Python-only (the site allows no compiled code), so it is slower on big meshes, and its tidiness score uses CC0
 reference meshes only. The GitHub zips include the fast native Turbo core. `python scripts/build_release.py --blender-listing` builds that zip. Releases are built
@@ -279,7 +296,7 @@ by the release workflow from the tag, and each comes with `SHA256SUMS.txt` so yo
 The last full test on every Blender version from 3.6 to 5.2 was for 0.8.0. The checks for this version ran on 3.6 LTS, 4.2 LTS and 5.2 LTS, and most of the work on Auto Segments
 was done on 5.2. The viewport overlays draw with Blender's GPU module. If a build cannot draw them, the rest of the add-on keeps working.
 
-## Frequently asked questions
+## Frequently asked questions about free Blender retopology
 
 **Is there a free automatic retopology add-on for Blender?**
 Yes. CurioMesh is free and open source (GPL-3.0-or-later), works in Blender 3.6 to 5.2, and needs no account. Paid retopology tools exist too. This README makes no quality comparison with them.
@@ -312,7 +329,7 @@ Turn on Keep UV Seams and each quad stays inside one UV island, at the cost of m
 No. Everything runs on your PC. Export Job writes a folder that you move yourself.
 
 **Does it work in Blender 4.x and 5.x?**
-Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-install) for which versions were tested for this release.
+Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-install-the-blender-retopology-add-on) for which versions were tested for this release.
 
 ## Known limits
 
