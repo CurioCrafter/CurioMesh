@@ -370,8 +370,12 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
     return co.reshape(-1, 3), faces, materials
 
 
+def _triangle_count(polys) -> int:
+    return len(polys.flat) - 2 * len(polys) if isinstance(polys, FlatFaces) else sum(len(p) - 2 for p in polys)
+
+
 def _native_reducible(polys, kinds, drop) -> bool:
-    return len(polys) >= NATIVE_FROM and len(set(kinds)) == 1 and (drop is None or not float(drop.max(initial=0.0)) > 0.0) and max(map(len, polys)) == 3
+    return len(polys) >= NATIVE_FROM and len(set(kinds)) == 1 and (drop is None or not float(drop.max(initial=0.0)) > 0.0) and _triangle_count(polys) == len(polys)
 
 
 def _face_areas(points: np.ndarray, polys) -> np.ndarray:
@@ -717,7 +721,7 @@ class AutoJob:
         """Generator: this piece at each size, smallest first, with how much each changes it."""
         points, polys, kinds = yield from self._off(lambda: self._piece_arrays(ids))
         whole = (points, polys, kinds)
-        triangles = sum(len(p) - 2 for p in polys)
+        triangles = _triangle_count(polys)
         if triangles <= KEEP_TRIANGLES:
             self.sizes.append([whole])
             self.files.append(None)
@@ -1111,7 +1115,7 @@ class AutoJob:
             at = self.picked[index]
             other = at + 1 if finer else at - 1
             whole = self.sizes[index][-1]
-            triangles = sum(len(f) - 2 for f in whole[1])
+            triangles = _triangle_count(whole[1])
             if other < 0 or other >= len(self.sizes[index]) or self.ready[index][at] or self.ready[index][other]:
                 continue
             first, second = len(self.sizes[index][at][1]) / triangles, len(self.sizes[index][other][1]) / triangles
@@ -1216,8 +1220,11 @@ class AutoJob:
                 owner[list(chain.from_iterable(self.faces[f] for f in ids.tolist()))] = index
             used = np.flatnonzero(owner >= 0)
             kd = KDTree(len(used))
-            for slot, point in enumerate(self.co[used].tolist()):
-                kd.insert(point, slot)
+            coordinates = self.co[used].tolist()
+            # In random order: a welded source's vertices come sorted, and Blender's balance took minutes on them, holding up everything.
+            for slot in np.random.default_rng(0).permutation(len(used)).tolist():
+                kd.insert(coordinates[slot], slot)
+            del coordinates
             kd.balance()
             self._kd, self._kd_owner = kd, owner[used]
         fa, fb = patch.face_adjacency(faces)
@@ -1277,7 +1284,7 @@ class AutoJob:
                     continue
                 made = triangulate(co, polys, kinds) if self.output_kind == "TRIS" else (co, list(polys), list(kinds))
             builds[p] = made
-        return self._splice(points, faces, mats, piece, builds)
+        return (yield from self._off(lambda: self._splice(points, faces, mats, piece, builds)))
 
     def _check(self, points, faces, mats, piece, view):
         """Generator: measure the result against the source, repair the parts that got new problems, say what happened."""
@@ -1770,7 +1777,7 @@ class AutoJob:
         made = [i for i in range(len(self.picked)) if not self.ready[i][self.picked[i]]]  # leave a rebuilt part alone while another can take it
         index = max(made or range(len(self.picked)), key=lambda i: self.levels[i][self.picked[i]].faces)
         points, polys, kinds = yield from self._off(lambda: self._piece_arrays(self.pieces[index]))
-        triangles = sum(len(p) - 2 for p in polys)
+        triangles = _triangle_count(polys)
         goal = self.levels[index][self.picked[index]].faces + miss
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
             return
