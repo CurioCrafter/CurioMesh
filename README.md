@@ -292,16 +292,16 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-in
 - **Soft faces and fine detail go first.** At 6%, cloth folds, small rounded ends and fine ornaments are simplified. Lower Detail to keep more. CurioMesh does not give you a hand-made low poly yet.
 - **UV seams.** By default quads may span several UV islands, so textures can smear there. Turn on Keep UV Seams (up to about twice the faces) or bake with Normal + Color.
 - **Big scans are slow.** A scan of over a million faces can take a long time on a busy PC, and Blender can pause for a few seconds at a time. Use Effort, or Export Job.
-- **Grid Fill and Flow Fill** only work on a part with one open edge loop and an even number of edges around it. Otherwise Auto is used, and the summary says so.
-- **Repair is cautious.** A fix that the camera dislikes, or that adds over a tenth more faces, is undone, so a few spots can stay. They are selected on the applied mesh and named in the summary.
+- **Grid Fill and Flow Fill** only work on a part that is one open surface with one edge loop round it. Otherwise Auto is used, and the summary says so.
+- **Repair is cautious.** A fix the camera dislikes, or one that adds over 3% more faces, is undone, and clearing crossings stops after 30 seconds, so a few spots can stay. They are selected on the applied mesh and named in the summary.
 - **Selected Faces Only** for Draw Edge Loops does not close its seam yet and is switched off. Use Redo Inside Shapes.
 - **Live Boolean** refuses a redo that would make more faces than it replaces. On a mesh already reduced hard, that can be most redos.
 - **No global patch layout.** CurioMesh has none, and it does not promise exact loops round eyes, mouths or joints without your help. An optional script, `scripts/flowtool.py`, can use QuadWild if you install it separately. It is not in the panel, it covers organic parts only, and it is untested on Linux and macOS.
-- **Windows first.** The native Turbo core is built for Windows only today. On other systems CurioMesh falls back to slower Python code, which is much slower on big meshes. The release workflow is meant to add the other platforms.
+- **Native core builds.** The release workflow builds the Turbo core for Windows, Linux and macOS (Intel and Apple Silicon). The Intel Mac build is compiled but not run in CI, and the developers tried only Windows by hand. Without the core, CurioMesh falls back to Python, which is much slower on big meshes.
 - **CPU only.** There is no GPU compute.
-- **No LOD set button yet.** Run Reduce To several times to make levels.
+- **Folded slivers on some small thin parts.** A quad can come out bent about 90 degrees round an edge of a thin part (ship pinnace: 40 of 59,900 quads; treasure chest: 1). They are named in the summary and selected on Apply, so you can fix them by hand.
 - Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
-- Stop is felt between steps. One reduction of a piece with several hundred thousand faces cannot be interrupted.
+- **Judge After Baking is experimental.** On big flat areas of a scan it can leave long thin slivers, which bake badly, and its score misses them. It is off by default.
 
 ## Community
 

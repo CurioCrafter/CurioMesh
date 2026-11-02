@@ -6,17 +6,33 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch: # rebuild an existing tag with this branch's workflow
+  workflow_dispatch: # rebuild an existing tag, or a dry run of any branch
     inputs:
       tag:
-        description: Existing tag to publish, e.g. v0.7.0
-        required: true
+        description: Existing tag to publish, e.g. v0.9.0 (leave empty for a dry run of the chosen branch)
+        required: false
+        default: ""
+      dry_run:
+        description: Build every native core and zip as workflow artifacts, but create no GitHub release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  check:
+    # Publishing needs a tag; a branch without one may only be built as a dry run.
+    runs-on: ubuntu-latest
+    steps:
+      - name: A release needs a tag
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.tag == ''
+        run: |
+          echo "::error::Give an existing tag to publish, or tick dry_run to only build."
+          exit 1
+
   native:
+    needs: check
     # One abi3 (Python >= 3.10) binary per OS/arch serves Blender 3.6 - 5.x.
     strategy:
       fail-fast: true
@@ -87,8 +103,6 @@ jobs:
   package:
     needs: native
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # only this job publishes the release
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -111,12 +125,33 @@ jobs:
         run: python scripts/build_release.py --per-version --native-dir native-bin --output dist
       - name: Checksums, so a download can be checked against the release
         run: cd dist && sha256sum *.zip > SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-zips
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
       - name: Listing zip for extensions.blender.org (Python only, CC0 patterns), kept out of the release
         run: python scripts/build_release.py --blender-listing --output listing
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: blender-listing
           path: listing/*.zip
+          if-no-files-found: error
+
+  publish:
+    # The only job that can write: it publishes what `package` built, and never runs in a dry run.
+    needs: package
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-zips
+          path: dist
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
