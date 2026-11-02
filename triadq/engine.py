@@ -158,11 +158,11 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
     best_report: RemeshReport | None = None
     candidate_reports: list[dict[str, Any]] = []
     seed_count = max(1, int(options.seed_count))
-    paired = _pair_natively(tri_mesh, _pairing_prep(tri_mesh, _options_for_mode(options, mode), mode), list(range(seed_count)))
+    tri_mesh.cache["paired"] = _pair_natively(tri_mesh, _pairing_prep(tri_mesh, _options_for_mode(options, mode), mode), list(range(seed_count)))
 
     for seed in range(seed_count):
         check_cancelled()
-        candidate = _run_candidate(tri_mesh, options, mode, seed, paired)
+        candidate = _run_candidate(tri_mesh, options, mode, seed)
         candidate.report.vertex_fan_splits = vertex_fan_splits
         candidate.report.candidates = []
         candidate_reports.append(candidate.report.to_dict())
@@ -259,9 +259,10 @@ def _classify_mesh(mesh: _TriMesh, options: RemeshOptions) -> str:
     return "BalancedFlow"
 
 
-def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int, paired: dict | None = None) -> _Candidate:
+def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int) -> _Candidate:
     prep = _pairing_prep(mesh, _options_for_mode(options, mode), mode)
-    output_mesh, feature_breaks, rescued_pairs = paired[seed] if paired else _pair_triangles(mesh, prep, seed)
+    paired = mesh.cache.get("paired")
+    output_mesh, feature_breaks, rescued_pairs = paired.pop(seed) if paired else _pair_triangles(mesh, prep, seed)
     closure_applied = bool(options.force_quads)
     closure_method = ""
     closure_error = ""
