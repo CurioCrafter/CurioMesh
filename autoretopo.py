@@ -1966,7 +1966,7 @@ class AutoJob:
 
     def _make_all(self, co, faces, kinds):
         """Generator: the faces for the whole object. Pieces on the usual method go in one call; others one by one."""
-        parts = (yield from self._off(lambda: self._combined(False)))[3]
+        parts = (yield from self._off(lambda: self._combined(False, firsts=True)))[3]
         special = {i for i, m in self.methods.items() if m != self.method} | ({i for i in range(len(self.pieces))} if self.method in INLINE else set())
         if not special or self.guide_lines or self.strips:  # with strokes the faces have changed: one call
             return (yield from self._build(co, faces, kinds, self.method))
