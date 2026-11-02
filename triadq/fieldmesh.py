@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import segment
 from .patch import _labels, quad_quality
 
 SHARP_DEG = 60.0
@@ -34,8 +33,8 @@ SEGMENT_DETAIL = 0.5  # how finely a piece is cut into limbs, each with its own 
 ROW_WIDTH = 4.0  # at least this many cells across a limb or panel
 SEGMENT_TURN = 1.0  # radians the surface may turn across a cell, read per limb, so rows are whole inside each
 SPLIT_SHARE = 0.4  # no edge of the split copy longer than this share of the local cell size
+LINE_CELL, LINE_REACH = 0.5, 4.0  # cells along a drawn line, as a share of even ones, and the cells it takes to open out to even
 SMALLEST = 0.5  # no cell under this share of the size that even cells would have
-QUADS_PER_REGION = 0.92  # cleaning up takes some away
 SMOOTH_REACH = 0.5
 ORIENT_SWEEPS = 8
 POSITION_SWEEPS = 8
@@ -44,20 +43,21 @@ ROBUST = 0.05  # gaps far above this share of a cell are left to be defects rath
 SAME_CORNER = 0.35
 RELAX_ROUNDS = 8
 RELAX_RATE = 0.5
+SETTLED = 0.02  # of a cell: a grid corner this close to its neighbours' is left alone
 FINISH_ROUNDS = 4
 MOST_TARGET = 30_000  # quads on one piece: beyond this a run takes many minutes in plain NumPy
 MOST_SOURCE = 2_000_000  # triangles
-CHEAP_SWEEPS = 6  # while still finding the right cell size
 CREASE_SMOOTH = 4
 CORNER_COS = 0.5  # edges of a line this far from its direction make a corner
 FAR_SIDE = 25.0  # how much further away a point facing the other way counts
 SMALLEST_TARGET = 24
-COUNT_SLACK = 0.06
+COUNT_SHARE = 0.88  # output quads per cell the sizes allow for: merged regions and row ends take the rest
 GUARD_QUALITY = 0.1
 UNTANGLE_BELOW = 0.05
 WORST_CLOSING = 0.99
 CONFIDENCE = 1.0
-FINAL_SWEEPS = 20
+FINAL_SWEEPS = 16
+FINEST_SWEEPS = 6
 CONFORMAL = 1.0
 MOST_LOG = 0.5
 CAMERA_PULL = 1.0
@@ -138,6 +138,8 @@ def size_limits(points: np.ndarray, tris: np.ndarray, even: float, most_turn: fl
 def segment_limits(points: np.ndarray, tris: np.ndarray, even: float, most_turn: float) -> np.ndarray:
     """Per vertex, its limb's largest cell: thin or bent limbs get small cells, and each limb's cells are all alike, so rows
     stay whole inside a limb and only end at its seam. Cut by `segment`; a part it can't cut is one limb."""
+
+    from . import segment  # it uses this file for Animation rows
 
     bends = size_limits(points, tris, even, most_turn)
     try:
@@ -338,10 +340,13 @@ def _coarsen(level: _Level, rng: np.random.Generator) -> _Level | None:
     return _Level(points, normals, sizes, keys // count, keys % count, along, pinned)
 
 
-def _hierarchy(points, tris, sizes, rng) -> list[_Level]:
+def _hierarchy(points, tris, sizes, rng, forced=None) -> list[_Level]:
     normals, _areas, vertex = _normals_areas(points, tris)
     a, b, edge_of, uses = _edges(tris, len(points))
     along, pinned = _features(points, tris, normals, a, b, edge_of, uses)
+    if forced is not None:  # lines drawn by hand count as creases
+        on = forced[1] > 0
+        along[on], pinned[on] = forced[0][on], forced[1][on]
     levels = [_Level(points, vertex, sizes, a, b, along, pinned)]
     while len(levels[-1].points) > 64:
         coarser = _coarsen(levels[-1], rng)
@@ -397,9 +402,18 @@ def _position_sweep(level: _Level, rng: np.random.Generator, robust: bool = Fals
     colors = rng.integers(0, 3, len(o))
     head = np.concatenate((level.a, level.b))
     tail = np.concatenate((level.b, level.a))
+    settled = None
+    if robust and level.misfit is not None:  # where a grid agrees with all around it, a sweep has nothing to do
+        unsettled = level.misfit > SETTLED
+        unsettled[tail[unsettled[head]]] = True
+        settled = ~unsettled[head]
     for color in range(3):
         use = colors[head] == color
+        if settled is not None:
+            use &= ~settled
         i, j = head[use], tail[use]
+        if not len(i):
+            continue
         middle = 0.5 * (p[i] + p[j])
         mine = _nearest_grid(o[i], q[i], np.cross(n[i], q[i]), level.sizes[i][:, None], middle)
         theirs = _nearest_grid(o[j], q[j], np.cross(n[j], q[j]), level.sizes[j][:, None], mine)
@@ -407,8 +421,8 @@ def _position_sweep(level: _Level, rng: np.random.Generator, robust: bool = Fals
         relative = np.linalg.norm(gap, axis=1) / np.minimum(level.sizes[i], level.sizes[j])
         trust = 1.0 / (ROBUST + relative) if robust else np.ones(len(i))
         if robust and CONFIDENCE:  # listen most to neighbours whose own grid agrees with everyone around them
-            mean = np.bincount(i, relative, len(o)) / np.maximum(np.bincount(i, minlength=len(o)), 1)
-            level.misfit = np.where(np.bincount(i, minlength=len(o)) > 0, mean, level.misfit)
+            heard = np.bincount(i, minlength=len(o))
+            level.misfit = np.where(heard > 0, np.bincount(i, relative, len(o)) / np.maximum(heard, 1), level.misfit)
             trust = trust / (ROBUST + level.misfit[j])
         total = np.stack([np.bincount(i, gap[:, k] * trust, len(o)) for k in range(3)], axis=1)
         uses = np.bincount(i, trust, len(o))
@@ -431,7 +445,7 @@ def solve_orientation(levels: list[_Level], rng: np.random.Generator, sweeps: in
             _orient_sweep(level, rng)
 
 
-def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None, final_sweeps: int | None = None, stop=None) -> None:
+def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None, stop=None) -> None:
     sweeps = int(POSITION_SWEEPS if sweeps is None else sweeps)
     coarsest = levels[-1]
     coarsest.o = _place(coarsest, coarsest.points.copy())
@@ -439,10 +453,11 @@ def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int 
         level = levels[index]
         if index < len(levels) - 1:
             level.o = _place(level, levels[index + 1].o[level.parent])
-        for _ in range(sweeps):
+        # Most of the work is on the second-finest level, at half the cost; the finest only takes up the rounding.
+        for _ in range(max(2, sweeps // 2) if index == 0 else sweeps):
             _position_sweep(level, rng)
         level.misfit = np.ones(len(level.o))
-        for _ in range(int(ROBUST_SWEEPS) if index else int(FINAL_SWEEPS if final_sweeps is None else final_sweeps)):
+        for _ in range(int(FINEST_SWEEPS if index == 0 else FINAL_SWEEPS if index == 1 else ROBUST_SWEEPS)):
             if stop is not None:
                 stop()
             _position_sweep(level, rng, True)
@@ -654,7 +669,7 @@ class FieldMesher:
     `turn`, in radians, is how far the surface may turn across a cell, read per limb.
     """
 
-    def __init__(self, vertices, tris, target: float, turn: float | None = None, seed: int = 0, cancelled=None):
+    def __init__(self, vertices, tris, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None):
         self.cancelled = cancelled
         self.rng = np.random.default_rng(seed)
         self.source = np.asarray(vertices, dtype=np.float64)
@@ -668,7 +683,18 @@ class FieldMesher:
         self.fine_points, self.fine_tris, self.fine_sizes, self.limits = split_long_edges(self.source, self.source_tris, sizes, carried=limits)
         _fine_normals, fine_areas, _ = _normals_areas(self.fine_points, self.fine_tris)
         self.fine_area = np.bincount(self.fine_tris.reshape(-1), np.repeat(fine_areas / 3.0, 3), len(self.fine_points))
-        self.levels = _hierarchy(self.fine_points, self.fine_tris, self.fine_sizes, self.rng)
+        forced = None
+        if lines is not None:  # `lines(points, tris)` gives (points moved onto the lines, direction along them, 1 on them)
+            self.fine_points, along, pinned = lines(self.fine_points, self.fine_tris)
+            forced = (along, pinned)
+            on = self.fine_points[pinned > 0]
+            if len(on):  # rows close together along a drawn line, opening out over a few cells
+                near = np.full(len(self.fine_points), np.inf)
+                for at in range(0, len(self.fine_points), 4096):
+                    gap = self.fine_points[at : at + 4096, None, :] - on[None]
+                    near[at : at + 4096] = np.sqrt((gap * gap).sum(axis=2).min(axis=1))
+                self.limits = np.minimum(self.limits, even * (LINE_CELL + near / (LINE_REACH * even)))
+        self.levels = _hierarchy(self.fine_points, self.fine_tris, self.fine_sizes, self.rng, forced)
         solve_orientation(self.levels, self.rng)
         self.shape = None
         if CONFORMAL:
@@ -679,22 +705,14 @@ class FieldMesher:
             self.shape = np.exp(np.clip(CONFORMAL * phi, -MOST_LOG, MOST_LOG))
 
     def solve(self, target: float | None = None) -> FieldMesh:
-        """Lay the grid. Cheap tries find the cell size that gives the number wanted (merged regions and row ends change it), then one full solve."""
+        """Lay the grid, once: finding the exact count by solving again cost half the time for a few percent of faces."""
 
+        self._stop_check()
         wanted = self.target if target is None else target
-        asked = wanted
-        for last in (False, False, True):
-            self._stop_check()
-            self.fine_sizes = fit_sizes(self.limits, self.fine_area, asked, self.shape)
-            set_sizes(self.levels, self.fine_sizes)
-            solve_positions(self.levels, self.rng, final_sweeps=None if last else CHEAP_SWEEPS, stop=self._stop_check)
-            mesh = self.extract()
-            got = QUADS_PER_REGION * mesh.report["regions"]
-            if last:
-                break
-            if abs(got - wanted) > COUNT_SLACK * wanted:
-                asked *= wanted / max(got, 1)
-        return mesh
+        self.fine_sizes = fit_sizes(self.limits, self.fine_area, wanted / COUNT_SHARE, self.shape)
+        set_sizes(self.levels, self.fine_sizes)
+        solve_positions(self.levels, self.rng, stop=self._stop_check)
+        return self.extract()
 
     def _stop_check(self) -> None:
         if self.cancelled is not None and self.cancelled():
@@ -1216,7 +1234,7 @@ def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, fa
 
 
 
-def field_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
+def field_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
     """Quads in rows on one loose piece, about `target` of them. May leave a few triangles or folds: see `is_clean`.
 
     Best on large, smooth or simply shaped pieces. Busy machined parts lose far more shape than the usual reduction and
@@ -1231,7 +1249,7 @@ def field_quads(vertices, faces, target: float, turn: float | None = None, seed:
     tris = triangulate(faces)[0]
     if len(tris) > MOST_SOURCE:
         raise ValueError(f"Rows of quads stop at {MOST_SOURCE:,} triangles on one part, and this one has {len(tris):,}.")
-    mesh = FieldMesher(vertices, tris, target, turn, seed, cancelled).solve()
+    mesh = FieldMesher(vertices, tris, target, turn, seed, cancelled, lines).solve()
     points, quads = quads_from(mesh)
     if len(quads) < SMALLEST_TARGET // 2:
         raise ValueError("Rows of quads fell apart on this part.")

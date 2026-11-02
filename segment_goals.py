@@ -40,6 +40,8 @@ LOW_POLY_EDGE = 2.2  # Low Poly's quads against the sizes the others use at the 
 SMALLEST_RESULT = 60  # a found segment with fewer faces in the result joins a neighbour: too few to be worth remaking
 WORSE_TIMES, WORSE_BY = 1.5, 4.0  # Reduce may change the view this many times, and this many points, more than the part had before
 CLOSED_SHARE, STROKE_SHARE = 1.3, 0.8  # triangles to reduce to, per quad wanted, with closure and with drawn lines
+FIELD_MOST = 300_000  # faces of your mesh above which a part is too slow for the field mesher
+LAY_ROUNDS = 3  # steps pulling a run of edges onto a drawn line
 SHARPEN_DROP = 8.0  # topology score a sheet may give up for following the camera's misses
 GOAL_ITEMS = [
     ("KEEP", "Keep as Is", "Your original faces, unchanged except for the row along the seam, which joins the neighbours", "FREEZE", 0),
@@ -206,6 +208,43 @@ def _tiny_segments(job, labels, piece) -> list[int]:
             tiny.append(k)
             per_loose[pieces[k]] -= 1
     return tiny
+
+
+def _on_lines(points, tris, lines):
+    """For the field mesher: chains of edges hugging the drawn lines, moved onto them, each vertex told which way its line runs."""
+    spacing = float(np.median(np.linalg.norm(points[tris[:, 0]] - points[tris[:, 1]], axis=1)))
+    chains, _keys = guides.chain(points, tris, lines, spacing)
+    moved = guides.pull(points, tris, chains, lines, spacing) if chains else points
+    along = np.zeros_like(moved)
+    pinned = np.zeros(len(moved), dtype=np.int64)
+    for chain in chains:
+        ids = np.asarray(chain, dtype=np.int64)
+        if len(ids) < 3:
+            continue
+        closed = ids[0] == ids[-1]
+        ids = ids[:-1] if closed else ids
+        step = np.roll(moved[ids], -1, axis=0) - np.roll(moved[ids], 1, axis=0)
+        if not closed:
+            step[0], step[-1] = moved[ids[1]] - moved[ids[0]], moved[ids[-1]] - moved[ids[-2]]
+        along[ids] = step / np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-30)
+        pinned[ids] = 1
+    return moved, along, pinned
+
+
+def _lay_edges(co, faces, pinned, lines, project):
+    """The drawn lines become runs of the result's own edges: the cheapest path of edges along each is pulled onto it, and the faces beside it settle."""
+    edges = patch._unique_edges(faces)
+    cell = float(np.median(np.linalg.norm(co[edges[:, 0]] - co[edges[:, 1]], axis=1)))
+    chains, _keys = guides.chain(co, None, lines, cell, edges=(edges[:, 0], edges[:, 1]))
+    if not chains:
+        return co
+    fan = np.asarray([(f[0], f[k], f[k + 1]) for f in faces for k in range(1, len(f) - 1)], dtype=np.int64)
+    held = pinned.copy()
+    held[np.unique(np.concatenate([np.asarray(c, dtype=np.int64) for c in chains]))] = True
+    for _ in range(LAY_ROUNDS):
+        co = guides.pull(co, fan, chains, lines, cell, pinned)
+        co = patch.fit_to_surface(co, faces, held, project, 2, 0.5, guard=False)
+    return patch.fit_to_surface(co, faces, held, project, 1, 0.5)
 
 
 def _misses(reference, view, center, half, pixels) -> np.ndarray:
@@ -449,6 +488,43 @@ class GoalJob(view.PartJob):
             record["creases"] = S.long_creases(points, polys)
         return record["creases"]
 
+    def _field(self, record: dict, ids, edge: float, items, project):
+        """Generator: the part in rows from the field mesher, on its seams. None when that can't be done, for the others to try."""
+        out = self.base["out"]
+        if S.fieldmesh is None or len(record["source"]) > FIELD_MOST:
+            return None
+        points, polys, kinds = self.job._piece_arrays(record["source"])
+        area = float(S.face_frames(points, polys)[1].sum())
+        target = area / max(edge * edge, 1e-30)
+        try:
+            seams = S.seam_loops(out["co"], out["faces"], ids)
+        except ValueError:
+            return None
+        drawn = self._expand_lines(items, edge, project)
+        marks = (lambda pts, tris: _on_lines(pts, tris, drawn)) if drawn else None
+        settle = (lambda co, faces, pinned: _lay_edges(co, faces, pinned, drawn, project)) if drawn else None
+        most = int(np.bincount(np.asarray(out["mat"])[ids]).argmax()) if len(ids) else 0
+        made = yield from self._in_thread(lambda: S.field_on_seams(points, polys, seams, target, project, marks, settle))
+        if made is None:
+            return None
+        return made[0], made[1], [most] * len(made[1])
+
+    def _expand_lines(self, items, edge: float, project) -> list:
+        """Strokes as polylines. A deformation line becomes its parallel loops, spaced like the quads."""
+        if not items:
+            return []
+        guided = _g()
+        bvh = guided._bvh(guided._source_data(guided.state_source()))
+        nearest = lambda p: bvh.find_nearest(Vector(p))[:2]  # noqa: E731
+        out = []
+        for line, count, tag in items:
+            if tag == "BEND":
+                for group in guides.parallel([line], count, edge, nearest):
+                    out += group
+            else:
+                out.append(line)
+        return out
+
     def _build(self, goal: str, record: dict, ids, edge: float, topology, project, focus=None):
         """Generator: (points, faces, materials) of this segment for this Use, or None."""
         out = self.base["out"]
@@ -456,6 +532,13 @@ class GoalJob(view.PartJob):
         cancelled = lambda: self._stopped  # noqa: E731
         most = np.bincount(np.asarray(out["mat"])[ids]).argmax() if len(ids) else 0
         items = self._strokes(record) if goal in {"ANIMATION", "SUBD"} else []
+        self.field_made = False
+        if goal == "ANIMATION" or items:  # rows from a direction field, with drawn lines as creases it has to follow
+            made = yield from self._field(record, ids, edge, items, project)
+            if made is not None:
+                self.field_made = True
+                return made
+            self.warnings = []
         if items:  # lines you drew come first: the rows run along them, and the rest is paired around them
             bvh = _g()._bvh(_g()._source_data(_g().state_source()))
             nearest = lambda p: bvh.find_nearest(Vector(p))[:2]  # noqa: E731
@@ -556,7 +639,7 @@ class GoalJob(view.PartJob):
                     tried = yield from self._change(p, more[0], more[1])
                     if tried < change:
                         made, change = more, tried
-            elif record["goal"] == "ANIMATION" and not self._strokes(record):  # second go: more rows where the camera saw the first one go wrong
+            elif record["goal"] == "ANIMATION" and not self.field_made and not self._strokes(record):  # second go: more rows where the camera saw the first one go wrong
                 self.stage = f"{record['name']}: more rows where the camera found a difference"
                 misses = _misses(*self.last_look)
                 if len(self._creases(record, "ANIMATION")):

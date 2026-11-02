@@ -248,9 +248,9 @@ def _path(adj, cost, start: int, goal: int, banned: set):
     return None
 
 
-def chain(co: np.ndarray, tris: np.ndarray, lines: list[np.ndarray], spacing: float):
-    """Vertex chains that hug the strokes. Returns (chains, edge keys): chains are lists of vertex ids, keys are (lo, hi)."""
-    lo, hi, _count = _edge_use(tris)
+def chain(co: np.ndarray, tris: np.ndarray, lines: list[np.ndarray], spacing: float, edges=None):
+    """Vertex chains that hug the strokes. Returns (chains, edge keys): chains are lists of vertex ids, keys are (lo, hi). `edges`, as (lo, hi), are walked instead of the triangles' own: a quad mesh's, say."""
+    lo, hi = edges if edges is not None else _edge_use(tris)[:2]
     length = np.linalg.norm(co[hi] - co[lo], axis=1)
     mid = 0.5 * (co[lo] + co[hi])
     chains, keys = [], set()

@@ -39,8 +39,9 @@
   check and topology score; an Animation segment is ranked by its topology score. Animation lays
   rows round the part with a small grid at the far end; a seam keeps the vertices it has, so a
   segment far denser or coarser than its neighbours tapers towards the seam.
-  Drawn edge loops and deformation lines over an Animation or Subdivision segment become real loops
-  on sealed seams. Reduce and Low Poly close to all quads, and Reduce adds faces if a part would lose
+  Animation lays rows from a direction field, with drawn edge loops and deformation lines as creases
+  it must follow, and one row of quads joins it to the seams; a run of edges follows every line, and
+  a few triangles can stay. Reduce and Low Poly close to all quads, and Reduce adds faces if a part would lose
   its shape. Segments with few faces join a neighbour, seams without a crease run straight, and small
   loose pieces of a big model stay whole unless you raise Segment Detail.
 - **Segment view** (Auto Segments, new Parts panel). The whole result is drawn with every part

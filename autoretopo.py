@@ -52,8 +52,10 @@ PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount
 REBUILD_MARGIN = 1.5  # a rebuilt part's measured change counts this many times, as it looks better alone than in the whole view
 FIELD_SMALLEST = 1000  # triangles: a part with fewer isn't worth laying a grid on while Auto looks for the best
 FIELD_MOST = 8000  # quads Auto may ask of it in one look, as it does this for every large part
-FIELD_SECONDS = 120.0  # Auto stops offering rows after spending this long on them in one run
-FIELD_SHARES = (0.04, 0.08, 0.16, 0.32)  # shares of a part's triangles, as quads, that the Field Rows method tries
+FIELD_SECONDS = 60.0  # Auto stops offering rows after spending this long on them in one run
+FIELD_START = 0.1  # share of a part's triangles, as quads, that the Field Rows method tries first
+FIELD_TRIES = 3
+FIELD_AIM = 0.9
 QUAD_WEIGHT = 0.9  # a rebuilt quad counts as this many faces of a triangle level (those end up about 1.1 quads each)
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 FINER_TRIANGLES = 200  # pieces smaller than this have too few faces for a size between two others to matter
@@ -616,18 +618,23 @@ class AutoJob:
         method_here = self._method(len(self.sizes))
         plain = self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and self.drop is None and len(set(kinds)) == 1
         if method_here == "FIELD" and plain:
-            for share in FIELD_SHARES:
-                if share * triangles > MOST_TARGET or share * triangles < 24.0:
-                    continue
-                self.stage = f"Laying rows of quads on piece {len(self.sizes) + 1}"
-                out = yield from self._field_size(points, polys, kinds, share * triangles, center, half, pixels, reference, pixel, 1.0)
+            want = max(FIELD_START * triangles, 24.0)
+            asked = self.detail / 100.0
+            for _try in range(FIELD_TRIES):  # change falls about as faces ** -0.7, so each look says where to go next
+                want = min(want, float(MOST_TARGET))
+                self.stage = f"Laying rows of quads on piece {len(self.sizes) + 1}: about {int(want):,} quads"
+                out = yield from self._field_size(points, polys, kinds, want, center, half, pixels, reference, pixel, 1.0)
+                if self._stopped:
+                    return
                 if out is None:
+                    want *= 1.2  # refused, not too coarse: a little more room may do
                     continue
                 seen = max(seen, out[2])
                 turned_sizes.append(out[0])
                 turned_levels.append(out[1])
-                if out[3] <= enough:
+                if out[3] <= asked or want >= MOST_TARGET:
                     break
+                want *= min((out[3] / (FIELD_AIM * asked)) ** (1.0 / 0.7), 4.0)
             if turned_sizes:
                 sizes = [*turned_sizes, whole]
                 levels = [*turned_levels, Level(len(polys), 0.0)]
@@ -702,12 +709,10 @@ class AutoJob:
             kept = best_levels(levels)
             sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
         if method_here == "AUTO" and plain and triangles >= FIELD_SMALLEST and self.field_spent < FIELD_SECONDS and seen > 0.0:
-            # At about the size the camera settled on, and half as many again: the camera says if rows hold the shape.
+            # At about the size the camera settled on: the camera says if rows hold the shape.
             good = next((level.faces for level in levels if level.loss <= self.detail / 100.0 * seen), levels[-1].faces if levels else 0)
-            for want in (good, 1.5 * good):
-                if not FIELD_SMALLEST / 40.0 <= want <= FIELD_MOST or self.field_spent >= FIELD_SECONDS:
-                    continue
-                out = yield from self._field_size(points, polys, kinds, want, center, half, pixels, reference, pixel, REBUILD_MARGIN)
+            if FIELD_SMALLEST / 40.0 <= good <= FIELD_MOST:
+                out = yield from self._field_size(points, polys, kinds, good, center, half, pixels, reference, pixel, REBUILD_MARGIN)
                 if out is not None:
                     turned_sizes.append(out[0])
                     turned_levels.append(out[1])
