@@ -249,6 +249,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_profile: bpy.props.EnumProperty(name="Use", description="What the result is for. Each use sets Detail, Method and Output for you; change any of them and it becomes Custom", items=profiles.PROFILE_ITEMS, default="GAME", update=_profile_update)
     auto_detail: bpy.props.FloatProperty(name="Detail", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces; very high gives a rough, very low-poly shape", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
+    auto_style: bpy.props.EnumProperty(name="Style", description="Auto Segments: what comes first when the two disagree", items=(("DETAIL", "Keep Detail", "Holds the amount of change you allow, with the fewest faces. Quads follow the shape, so they can look slanted"), ("BALANCED", "Balanced", "Holds the same change with far fewer irregular vertices, by splitting every quad. Costs more faces"), ("ROWS", "Clean Rows", "Even, square quads in long rows. Costs more visible change, and small sharp detail softens")), default="DETAIL", update=_redraw_update)
     auto_method: bpy.props.EnumProperty(name="Method", description="How the faces are made. Auto lets the camera decide the detail of each part; the other methods change how the reduced part is turned into faces. Each part can have its own (step 4)", items=profiles.METHOD_ITEMS, default="AUTO", update=_custom_update)
     auto_output: bpy.props.EnumProperty(name="Output", description="The kind of faces in the result", items=profiles.OUTPUT_ITEMS, default="QUADS", update=_custom_update)
     auto_aim: bpy.props.EnumProperty(name="Aim", description="How Auto Segments decides how many faces to keep", items=AIM_ITEMS, default="KEEP", update=_redraw_update)
@@ -1466,7 +1467,7 @@ def _start_segments(context, gs, src) -> bool:
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
     charts = _uv_charts(state_source(), src) if gs.keep_uvs and gs.bake_detail != "NORMAL_COLOR" else None
     codes = src["mat"] if charts is None else charts[0]
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_method, gs.auto_output, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
+    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_method, gs.auto_output, gs.auto_style, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
     state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
         return True
@@ -1492,7 +1493,7 @@ def _start_segments(context, gs, src) -> bool:
     cache_key = (src["sig"], mirror[:2] if mirror else None, charts is None)
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
-    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, method=gs.auto_method, output=gs.auto_output, strips=strips, outside=outside)
+    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, method=gs.auto_method, output=gs.auto_output, strips=strips, outside=outside, style=gs.auto_style)
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -3192,6 +3193,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
             col.prop(gs, "keep_uvs", toggle=True, icon="UV")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
+        col.prop(gs, "auto_style")
         col.prop(gs, "auto_method")
         col.row(align=True).prop(gs, "auto_output", expand=True)
 

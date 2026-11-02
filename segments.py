@@ -155,9 +155,9 @@ def build_table(base: dict) -> None:
 
 
 def mirrored() -> bool:
-    """A mirrored result holds both sides but the job only solved one: part redos would lose the other side."""
+    """A mirrored result holds both sides but the job only solved one, and Clean Rows has no sizes to pick from: no part redos."""
     base = _g().state["auto_base"]
-    return base is not None and base["job"].mirror is not None
+    return base is not None and (base["job"].mirror is not None or base["job"].style == "ROWS")
 
 
 def ensure() -> None:
@@ -245,6 +245,7 @@ def kinds_back(kinds, charts) -> np.ndarray:
 
 def _faces_for(job, method: str, co, polys, kinds):
     """Generator: (points, faces, materials) for one reduced part by `method`. Returns None when it fails."""
+    job._stopped = False  # the search itself was stopped when this redo took over
     return (yield from job._build(co, polys, kinds, method, len(polys) // 2))
 
 
@@ -852,7 +853,7 @@ def draw_parts(layout, context, gs) -> None:
         if known:
             box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
     if mirrored():
-        layout.label(text="Redo is off with Mirror on: start again without it", icon="INFO")
+        layout.label(text="Redo is off with Mirror or Clean Rows: start again without it", icon="INFO")
     if seg["src"] is not None:
         segment_goals.draw_goal(box, gs, len(selected) > 1)
     if all(seg["parts"][p].get("whole", True) for p in selected):  # another method rebuilds a whole loose piece, which has no seam to keep

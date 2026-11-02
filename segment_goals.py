@@ -366,7 +366,7 @@ def start_find(context, fresh: bool = False) -> bool:
 
 
 def worth_finding(base: dict) -> bool:
-    return base["job"].mirror is None and any(len(ids) >= S.MIN_FACES for ids in base["job"].pieces)  # a mirrored result has no one-sided seams
+    return base["job"].mirror is None and base["job"].style != "ROWS" and any(len(ids) >= S.MIN_FACES for ids in base["job"].pieces)  # a mirrored result has no one-sided seams
 
 
 # --------------------------------------------------------------------------- remaking a segment for its Use
