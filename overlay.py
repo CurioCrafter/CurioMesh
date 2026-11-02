@@ -531,7 +531,9 @@ def hud_model(context) -> dict:
     obj = context.object
     if obj is None or obj.type != "MESH":
         # Working on a region (the source is hidden and a cage is active): report the preview instead.
-        obj = bpy.data.objects.get(REGION_PREVIEW_NAME) or obj
+        from . import guided  # late: guided imports this module
+
+        obj = bpy.data.objects.get(REGION_PREVIEW_NAME) or guided.state_source() or obj  # a job can leave nothing active for a moment
     model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": ""}
     if settings is not None:
         model["target"] = int(settings.target_faces)

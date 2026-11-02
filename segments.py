@@ -504,11 +504,11 @@ def part_colours(gs, count: int):
 
 
 def _triangles(guided, res, piece):
-    if seg["tris"] is None or seg["tris"][0] != id(res):
+    if seg["tris"] is None or seg["tris"][0] is not res or seg["tris"][3] is not piece:  # not by id: a freed result's id comes back
         tris = guided._fan(res["faces"])
         owner = np.repeat(piece, [len(f) - 2 for f in res["faces"]])
-        seg["tris"] = (id(res), tris.reshape(-1), np.repeat(owner, 3))
-    return seg["tris"]
+        seg["tris"] = (res, tris.reshape(-1), np.repeat(owner, 3), piece)
+    return seg["tris"][:3]
 
 
 def _draw_view() -> None:
@@ -525,6 +525,7 @@ def _draw_view() -> None:
         from gpu_extras.batch import batch_for_shader
 
         matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
+        seg["held"] = (res, piece)  # kept alive so the ids below can't come back on a new result
         colour_key = (id(res), id(piece), matrix, gs.seg_colors, gs.seg_heat, frozenset(seg["sel"]), round(gs.auto_detail, 2))
         flat = gpu.shader.from_builtin("FLAT_COLOR")
         gpu.state.blend_set("ALPHA")

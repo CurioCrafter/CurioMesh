@@ -214,7 +214,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.curiomesh_settings
         compact = bool(_prefs().compact_mode)
-        obj = context.object
+        obj = context.object or guided.state_source()  # a job can leave nothing active for a moment
         has_mesh = obj is not None and obj.type == "MESH"
         usable = has_mesh and not _is_preview(obj)
 
