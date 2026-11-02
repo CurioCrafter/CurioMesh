@@ -38,8 +38,8 @@ from .patch import (
     remesh_region,
     tutte_embedding,
 )
-from .topology import parity_path_quad_closure
-from .types import MeshData
+from .topology import _turbo, parity_path_quad_closure
+from .types import Cancelled, MeshData
 
 try:  # the scorer and the grids are features of their own
     from . import patterns
@@ -191,6 +191,17 @@ def _merge_all(leaf, shell, links, co, normals, areas, centroids, log_thick, can
     ends = np.concatenate((pa, pb))
     # Per patch: how bent its surroundings are. Tells a flat plate from the round rim next to it.
     turned = np.bincount(ends, np.tile(angle * pair_len, 2), count) / np.maximum(np.bincount(ends, np.tile(pair_len, 2), count), 1e-30)
+    module = _turbo.native() if _turbo is not None else None
+    if module is not None and hasattr(module, "segment_merges"):  # the same merges in the same order
+        bent = pair_len * angle
+        rows = np.column_stack((pair_len, np.where(concave, bent, 0.0), np.where(concave, 0.0, bent)))
+        if cancelled is not None and cancelled():
+            raise ValueError("cancelled")
+        try:
+            merges, costs = _turbo._stoppable(module.segment_merges, count, pa.astype(np.int64), pb.astype(np.int64), np.ascontiguousarray(rows).reshape(-1), leaf_area, turned * leaf_area, log_thick * leaf_area, float(shell_area.sum()), [CONVEX, USUAL, CURVE_STEP, THICK_STEP, NECK, BASE])
+        except Cancelled:
+            raise ValueError("cancelled") from None
+        return merges.reshape(-1, 2), costs, leaf_area
     near: list[dict] = [{} for _ in range(count)]
     for x, y, length, ang, dent in zip(pa.tolist(), pb.tolist(), pair_len.tolist(), angle.tolist(), concave.tolist()):
         row = [length, length * ang if dent else 0.0, 0.0 if dent else length * ang]

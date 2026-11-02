@@ -14,6 +14,7 @@ mod near;
 mod pairing;
 mod qem;
 mod quadreduce;
+mod segment;
 mod topo;
 
 use numpy::{Complex64, IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1};
@@ -835,6 +836,23 @@ fn field_nearest_points<'py>(py: Python<'py>, points: PyReadonlyArray1<'py, f64>
     Ok(py.detach(|| field::nearest_points(points, normals, sorted_keys, order, centre, around, asks, ask_normals, far_side)).into_pyarray(py))
 }
 
+/// `segment._merge_all`'s merge loop: (merges (2M,), costs). Weights: (convex, usual, curve_step, thick_step, neck, base).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn segment_merges<'py>(py: Python<'py>, count: usize, pa: PyReadonlyArray1<'py, i64>, pb: PyReadonlyArray1<'py, i64>, rows: PyReadonlyArray1<'py, f64>, area: PyReadonlyArray1<'py, f64>, curve: PyReadonlyArray1<'py, f64>, thick: PyReadonlyArray1<'py, f64>, whole: f64, weights: [f64; 6], stop: &StopFlag) -> PyResult<(I64Array<'py>, F64Array<'py>)> {
+    let (pa, pb, rows) = (slice(&pa, "pa")?, slice(&pb, "pb")?, slice(&rows, "rows")?);
+    let (area, curve, thick) = (slice(&area, "area")?, slice(&curve, "curve")?, slice(&thick, "thick")?);
+    if pa.len() != pb.len() || rows.len() != 3 * pa.len() || area.len() != count || curve.len() != count || thick.len() != count || pa.iter().chain(pb).any(|&v| v < 0 || v as usize >= count) {
+        return Err(PyValueError::new_err("merge arrays are inconsistent"));
+    }
+    let rows: Vec<[f64; 3]> = rows.chunks_exact(3).map(|r| [r[0], r[1], r[2]]).collect();
+    let w = segment::Weights { convex: weights[0], usual: weights[1], curve_step: weights[2], thick_step: weights[3], neck: weights[4], base: weights[5] };
+    let found = py.detach(|| segment::merge_all(count, pa, pb, &rows, area, curve, thick, whole, &w, &stop.0));
+    let (merges, costs) = found.ok_or_else(|| pyo3::exceptions::PyInterruptedError::new_err("stopped"))?;
+    let flat: Vec<i64> = merges.iter().flat_map(|m| [m.0, m.1]).collect();
+    Ok((flat.into_pyarray(py), costs.into_pyarray(py)))
+}
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -859,6 +877,7 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(leader_clusters, m)?)?;
     m.add_function(wrap_pyfunction!(mesh_checks, m)?)?;
     m.add_function(wrap_pyfunction!(closed_walk, m)?)?;
+    m.add_function(wrap_pyfunction!(segment_merges, m)?)?;
     m.add_function(wrap_pyfunction!(field_orient_sweep, m)?)?;
     m.add_function(wrap_pyfunction!(field_nearest_points, m)?)?;
     m.add_function(wrap_pyfunction!(field_position_sweep, m)?)?;
