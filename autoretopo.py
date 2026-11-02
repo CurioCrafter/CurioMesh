@@ -149,9 +149,11 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
     return out
 
 
-def picture_counts(reference, other, pixel: float) -> tuple[int, int]:
+def picture_counts(reference, other, pixel: float, baked: bool = False) -> tuple[int, int]:
     """(pixels a viewer would see as different in outline, direction or depth, pixels showing the object)."""
 
+    if baked:
+        return bakescore.picture_counts(reference, other, pixel)
     wrong, total = 0, 0
     limit = math.cos(math.radians(TURNED_DEG))
     for (hit_a, normal_a, depth_a, _), (hit_b, normal_b, depth_b, _) in zip(reference, other):
@@ -315,7 +317,10 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
         parts = labels[face_b[hit_b]]
         shown += np.bincount(parts, minlength=count)
         both = hit_a & hit_b
-        changed = (np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < cosine) | (np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel)
+        if baked:
+            changed = bakescore.surface_changed(hit_a, normal_a, depth_a, hit_b, normal_b, depth_b, pixel)[both]
+        else:
+            changed = (np.abs((normal_a[both] * normal_b[both]).sum(axis=1)) < cosine) | (np.abs(depth_a[both] - depth_b[both]) > 2.0 * pixel)
         wrong += np.bincount(labels[face_b[both]][changed], minlength=count)
     return np.flatnonzero((shown >= PART_PIXELS) & (wrong > limit * shown))
 
@@ -1290,7 +1295,7 @@ class AutoJob:
         def over_limit(mesh, view):
             fa, fb = patch.face_adjacency(mesh.faces)
             labels = np.unique(patch._labels(len(mesh.faces), fa, fb), return_inverse=True)[1]
-            parts = parts_changed_too_much(reference, view, pixel, labels, limit)
+            parts = parts_changed_too_much(reference, view, pixel, labels, limit, self.baked)
             kept = np.isin(labels, parts)
             return np.asarray(sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]}), dtype=np.int64)
 
