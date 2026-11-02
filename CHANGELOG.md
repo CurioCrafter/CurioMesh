@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Redraw Messy Quads: messy parts are redrawn as pole-free grids, and quads are taken away where the camera sees least change. On for Animation and Subdivision, off for other uses and on models of more than 40 loose pieces. Tidiness roughly doubles (bust 28 to 62) for 7-50% more faces and 2-5x the time, capped at 240 s; the summary says when it ran and how long it took.
+- Heat colours are viridis (colour-blind safe) with a legend in the viewport; the time estimate is a range; Export Job copies the engine's data tables.
 - **The panel reads as one path: Auto, check the parts, Apply.** The Guided panel is open and on
   Auto Segments from the first run. Step 2 keeps the everyday choices (Use, Keep Detail or Reduce
   To, Detail, Mirror); guides, paint, clean-up and output fold into More Options, the machine and

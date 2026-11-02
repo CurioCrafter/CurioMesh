@@ -157,14 +157,18 @@ class QuadReducer:
             middle = ((pa[0] + pc[0]) * 0.5, (pa[1] + pc[1]) * 0.5, (pa[2] + pc[2]) * 0.5)
             options = ((pa, 0), (pc, 1), (middle, 2))
         error, place = min(((self._error(q, p), k) for p, k in options), key=lambda item: item[0])
+        spot = next(p for p, k in options if k == place)
         side = _sub(pa, pc)
         # In a flat area every error is zero: the shortest diagonal then goes first, which keeps the sizes even.
-        key = math.sqrt(max(error, 0.0) / max(q[10], 1e-30)) + 1e-4 * math.sqrt(_dot(side, side))
+        key = math.sqrt(max(error, 0.0) / max(q[10], 1e-30)) + 1e-4 * math.sqrt(_dot(side, side)) + self._extra_price(index, corner, spot)
         entry = (key, index, corner, a, c, self.stamps[a], self.stamps[c], place)
         if into is None:
             self.heap.append(entry)
         else:
             heapq.heappush(into, entry)
+
+    def _extra_price(self, index: int, corner: int, spot) -> float:
+        return 0.0
 
     def _try(self, q: int, corner: int, place: int) -> bool:
         """One collapse: everything is checked first, then applied. False leaves the mesh as it was."""
