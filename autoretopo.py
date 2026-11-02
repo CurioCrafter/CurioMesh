@@ -51,7 +51,7 @@ FLAT_SNAP_SHARE = 0.015  # Balanced: a face whose new vertices would move less t
 ROWS_TIME = 600.0  # Clean Rows: a denser layout is only asked for if it should finish within this many seconds
 ROWS_SECONDS_ESTIMATE = 0.003  # Clean Rows: rough QuadriFlow time per quad, measured on a 74,000 quad rock
 ROWS_SHARP_INPUT = 6  # Clean Rows: source triangles per quad needed before vertices seek creases
-ROWS_BAD = 0.01  # Clean Rows: a piece where repair leaves more than this many triangles per quad gets paired instead
+ROWS_BAD = 0.05  # Clean Rows: a piece where repair leaves more than this many triangles per quad gets paired instead
 NARROW_TRIES = 2  # extra tries with a new size in between, when the sizes on offer land well short of it
 TURNED_DEG = 20.0
 MOST_RAYS = 20_000_000  # one look at every piece, so a model of thousands of parts still finishes in minutes
@@ -448,7 +448,10 @@ class AutoJob:
             for k, ids in enumerate(self.pieces):
                 points, polys, kinds = self._piece_arrays(ids)
                 path = os.path.join(folder, f"out_{k}.npz")
-                rows = np.load(path) if os.path.exists(path) else None
+                rows = None
+                if os.path.exists(path):
+                    with np.load(path) as saved:  # an open file couldn't be deleted with the folder
+                        rows = {name: saved[name] for name in saved.files}
                 if rows is None or not len(rows["lens"]):
                     triangles = sum(len(p) - 2 for p in polys)
                     want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
@@ -502,7 +505,9 @@ class AutoJob:
                 fcs += [tuple(v + cursor for v in p) for p in polys]
                 knd += kinds
                 cursor += len(points)
-            closed = pair_and_close(MeshData(np.vstack(pts), fcs, knd), seed_count=1)[0]
+            closed = yield from self._in_thread(lambda: pair_and_close(MeshData(np.vstack(pts), fcs, knd), seed_count=1)[0])
+            if closed is None:
+                return None
             all_points.append(np.asarray(closed.vertices))
             all_faces += [tuple(v + offset for v in f) for f in closed.faces]
             all_kinds += list(closed.face_materials)
