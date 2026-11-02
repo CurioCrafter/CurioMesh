@@ -815,9 +815,9 @@ def _region_pass(base_co, base_faces, mask, pts, L0, gs, project, base_locked, b
     return _merge_results(base_co, base_faces, results, base_locked, base_mat), warns
 
 
-def _merge_results(base_co, base_faces, results, base_locked, base_mat):
+def _merge_results(base_co, base_faces, results, base_locked, base_mat, no_bigger=False):
     """The base mesh with every finished patch put in. None when no patch worked."""
-    good = [r for r in results if r.ok and len(r.faces) <= len(r.removed_faces)]  # a redo never makes a region bigger
+    good = [r for r in results if r.ok and (not no_bigger or len(r.faces) <= len(r.removed_faces))]  # Live Boolean: a redo never makes a region bigger
     if not good:
         return None
     co, faces, new = region._merged_arrays({"co": base_co, "faces": base_faces, "results": good})
@@ -1559,7 +1559,7 @@ def _start_boolean(context, gs, source, src) -> bool:
         runner = areas.AreaRunner(
             co, faces, frozen,
             fit=(lambda r: region._fit_result(co, r, project, iterations)) if iterations > 0 else None,
-            merge=lambda results: _merge_results(co, faces, results, frozen, mat) or dict(out, new=np.zeros(len(faces), dtype=bool)),
+            merge=lambda results: _merge_results(co, faces, results, frozen, mat, no_bigger=True) or dict(out, new=np.zeros(len(faces), dtype=bool)),
             max_faces=region.MAX_PATCH_FACES,
         )
         work = state["work"] = {"key": key, "runner": runner, "cent": None, "seen": 0, "areas": []}
