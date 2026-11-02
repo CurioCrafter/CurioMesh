@@ -333,7 +333,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
     auto_rough: bpy.props.BoolProperty(name="Rough As Texture", description="For rough scans (rock, sea floor): judge bumps on average and merge leftover triangles. Far fewer faces; bumps smaller than a few pixels are lost", default=False)
     auto_drop_hidden: bpy.props.BoolProperty(name="Leave Out Hidden Pieces", description="Auto Segments: leave out loose pieces no camera outside the model can see, from 14 directions. The count of what was left out is shown with the result", default=False)
-    auto_baked: bpy.props.BoolProperty(name="Judge After Baking", description="Low Poly on scans you will bake a normal map for: judge the result as it looks baked, so far fewer faces remain. Only runs on scans, never hard-surface", default=False)
+    auto_baked: bpy.props.BoolProperty(name="Judge After Baking (Experimental)", description="Experimental. Low Poly on scans you will bake a normal map for: judge the result as it looks baked, so far fewer faces remain. It can leave long thin slivers on flat areas, which bake badly, and its score misses them: check the result. Only runs on scans, never hard-surface", default=False)
     auto_chords: bpy.props.BoolProperty(name="Redraw Messy Quads", description="Auto Segments: redraw the parts with many irregular vertices as plain grids, and take quads away where the view changes least. Far tidier loops at the same change, but it takes up to a minute or two more. On for Animation and Subdivision, where tidy loops matter more than the face count. Off on models of many loose parts, where it stalls", default=False)
     auto_tidy: bpy.props.BoolProperty(name="Tidy Quads", description="Auto Segments: after the search, try to make the quads tidier, like hand-made meshes. Slow, and the view changes a little more, so it is off unless you want it", default=False)
     keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Keep quads inside UV islands so textures stay put. Costs faces, up to double. For most game assets, Bake Normal + Color is better", default=False)
@@ -3679,7 +3679,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.prop(gs, "auto_rough", toggle=True, icon="TEXTURE")
         col.prop(gs, "auto_drop_hidden", toggle=True, icon="HIDE_ON")
         if gs.auto_profile == "LOW_POLY":
-            col.prop(gs, "auto_baked", toggle=True, icon="RENDER_STILL")
+            col.prop(gs, "auto_baked", text="Judge After Baking (Experimental)", toggle=True, icon="EXPERIMENTAL")
         col.prop(gs, "auto_instances", toggle=True, icon="LINKED")
         col.prop(gs, "auto_style")
         col.prop(gs, "auto_method")

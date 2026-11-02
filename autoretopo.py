@@ -110,6 +110,7 @@ POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surf
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
 MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
 REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots selected: remaking it costs minutes for a few faces
+REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is selected on Apply (the crane spent 215 s for 71 spots)
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
@@ -1640,6 +1641,7 @@ class AutoJob:
 
     def _inspected(self, points, faces, piece):
         """Generator: all the numbers for one mesh, the crossing test in slices and the rest on a worker thread."""
+        began = time.perf_counter()
         if hasattr(turbo.native(), "FaceLookup"):  # one native call on all cores, off the main thread
             pairs = yield from self._off(lambda: checks.crossing_pairs(points, faces))
         else:
@@ -1649,6 +1651,7 @@ class AutoJob:
             out.new_cross, new = repair.new_by_piece(self._known, pairs, points, faces, piece)
             out.crossing[:] = False
             out.crossing[new.ravel()] = True
+        self.timings["inspect"] = self.timings.get("inspect", 0.0) + time.perf_counter() - began
         return out
 
     def _near_source(self, part: int, where: np.ndarray):
@@ -1668,8 +1671,10 @@ class AutoJob:
             return same
         self.stage = "Repairing crossings"
         yield
-        fixed = yield from self._background(lambda: repair.fix_crossings(points, faces, mats, piece, after.pairs, self._known, self._near_source, self.output_kind == "TRIS", stopped=lambda: self._stopped))
+        began = time.perf_counter()
+        fixed = yield from self._background(lambda: repair.fix_crossings(points, faces, mats, piece, after.pairs, self._known, self._near_source, self.output_kind == "TRIS", stopped=lambda: self._stopped or time.perf_counter() > self._repair_until))
         numbers = fixed[4]
+        self.timings["fix crossings"] = self.timings.get("fix crossings", 0.0) + time.perf_counter() - began
         if not numbers["pushed"] and not numbers["filled"]:
             return same
         now = yield from self._inspected(fixed[0], fixed[1], fixed[3])
@@ -1694,6 +1699,8 @@ class AutoJob:
 
     def _check(self, points, faces, mats, piece, view):
         """Generator: measure the result against the source, repair the parts that got new problems, say what happened."""
+        began = time.perf_counter()
+        self._repair_until = began + REPAIR_SECONDS
         self.stage = "Checking for broken topology"
         yield
         if self._src_check is None:
@@ -1710,7 +1717,7 @@ class AutoJob:
         points, faces, mats, piece, view, after, fixed = yield from self._fix_locally(points, faces, mats, piece, view, after)
         for attempt in range(0 if self.chunks else FIX_TRIES):  # a cut piece's parts are one surface: they can't be remade alone
             bad = self._affordable([p for p in checks.new_spots(before, after)[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES], start_faces)
-            if not bad or self._stopped:
+            if not bad or self._stopped or time.perf_counter() > self._repair_until:
                 break
             self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
             yield
@@ -1734,6 +1741,9 @@ class AutoJob:
             mask = here & (after.broken | after.crossing)
             flag |= mask if mask.any() else here
         self.face_piece, self.flag = piece, flag
+        self.timings["check and repair"] = self.timings.get("check and repair", 0.0) + time.perf_counter() - began
+        if left and time.perf_counter() > self._repair_until:
+            self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
         check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left)}
         return points, faces, mats, view, check
 
