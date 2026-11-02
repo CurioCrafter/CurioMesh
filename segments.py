@@ -573,7 +573,7 @@ def _draw_view() -> None:
 
 
 def _draw_legend() -> None:
-    """With Heat on: the colour bar and what its ends mean, bottom left of the viewport."""
+    """With Heat on: the colour bar and what its ends mean, bottom right of the viewport."""
     gs = getattr(bpy.context.scene, "curiomesh_guided", None)
     if gs is None or not gs.seg_heat or not seg["parts"]:
         return
@@ -582,7 +582,8 @@ def _draw_legend() -> None:
     from gpu_extras.batch import batch_for_shader
 
     ui = overlay._ui_scale()
-    left, bottom, wide, high = 20 * ui, 40 * ui, 160 * ui, 10 * ui
+    wide, high, bottom = 160 * ui, 10 * ui, 40 * ui
+    left = bpy.context.region.width - overlay._sidebar_inset() - wide - 24 * ui  # bottom right: the HUD card holds the bottom left
     top = max([3.0 * gs.auto_detail] + [c for c in (judged(r) for r in seg["parts"]) if c is not None])
     steps = 16
     pos, col, idx = [], [], []
@@ -835,7 +836,7 @@ def draw_parts(layout, context, gs) -> None:
     row.prop(gs, "seg_wire", text="Wire", toggle=True, icon="SHADING_WIRE")
     col.row(align=True).prop(gs, "seg_compare", expand=True)
     if gs.seg_heat:
-        layout.label(text="Heat: purple same, yellow changed most", icon="INFO")
+        overlay.wrap_label(layout, "Heat: purple looks the same, yellow changed most (bar at the bottom right)", icon="INFO", width=36, limit=2)
     segment_goals.draw_tools(layout, gs)
 
     layout.label(text=f"{len(seg['parts']):,} parts, {len(seg['sel'])} selected")

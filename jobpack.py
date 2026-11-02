@@ -111,8 +111,8 @@ def job_folder(directory, name: str) -> Path:
 
 
 def _copy_engine(source: Path, target: Path) -> None:
-    """The add-on's Python files (not tests, docs or compiled binaries) as a package next to run_job.py."""
-    for name in [*source.glob("*.py"), *source.glob("triadq/*.py")]:
+    """The add-on's Python files and the data tables they read (not tests, docs or compiled binaries) as a package next to run_job.py."""
+    for name in [*source.glob("*.py"), *source.glob("triadq/*.py"), *source.glob("triadq/*.json")]:
         destination = target / name.relative_to(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(name, destination)

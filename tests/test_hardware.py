@@ -114,7 +114,7 @@ class JobFolderTests(unittest.TestCase):
         faces = [(0, 1, 2, 3)]
         with tempfile.TemporaryDirectory() as folder:
             out = jobpack.export_job(Path(folder) / "job", co, faces, [0], 6.0, 0, "FULL", Path(__file__).resolve().parents[1], mirror=(0, 0.5, 1.0, 2, 1), lines=[np.zeros((2, 3))], drop=np.zeros(4), source=(2, 6))
-            for name in ("mesh.npz", "guides.npz", "job.json", "run_job.py", "README.txt", "curiomesh_engine/autoretopo.py", "curiomesh_engine/triadq/budget.py"):
+            for name in ("mesh.npz", "guides.npz", "job.json", "run_job.py", "README.txt", "curiomesh_engine/autoretopo.py", "curiomesh_engine/triadq/budget.py", "curiomesh_engine/triadq/cases_table.json"):
                 self.assertTrue((out / name).exists(), name)
             settings = __import__("json").loads((out / "job.json").read_text())
             self.assertEqual((settings["mirror"][3], settings["source_faces"]), (2, 2))
