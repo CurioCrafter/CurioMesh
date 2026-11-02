@@ -30,7 +30,9 @@ from .patch import (
     boundary_loops,
     circle_boundary,
     coons_grid,
+    fill_loop,
     fit_to_surface,
+    mask_components,
     prepare_regions,
     quad_quality,
     remesh_region,
@@ -47,6 +49,10 @@ try:
     from . import smoothgrid
 except ImportError:
     smoothgrid = None
+try:
+    from . import fieldmesh
+except ImportError:
+    fieldmesh = None
 
 CELLS = 44  # patches across a loose piece's longest side: coarse enough to see the shape and not the scan noise
 MIN_FACES = 200  # a loose piece with fewer faces stays one segment
@@ -65,6 +71,7 @@ SEAM_ROUNDS = 4  # passes straightening the result's seams
 SEAM_CREASE = 0.6  # radians between the faces either side: a seam this sharp is on a crease and stays
 CREASE_DEG, CREASE_LENGTH = 20.0, 0.1  # sharper than this and at least this share of the part's size: a crease worth keeping
 CREASE_REACH = 0.6  # edges within which a sheet vertex moves onto a crease
+FIELD_TURN = 1.0  # radians across a cell above which rows on a part get finer: eyes and lips hold their shape, for a few more row ends
 CAMERA_WEIGHT = 3.0  # how much more of an Animation sheet goes where the camera saw it go wrong
 SHEET_RATIO = 1.6  # how fast a row of an Animation sheet may gain or lose vertices
 RING_SAMPLES = 128
@@ -896,7 +903,7 @@ def snap_to_creases(xyz, quads, pinned, creases, edge: float):
     move = dist < CREASE_REACH * edge
     moved = xyz.copy()
     moved[free[move]] = creases[index[move]]
-    faces = np.asarray(quads, dtype=np.int64)
+    faces = np.asarray([f for f in quads if len(f) == 4], dtype=np.int64).reshape(-1, 4)
     before, after = quad_quality(xyz[faces]), quad_quality(moved[faces])
     for _ in range(8):
         bad = (after < 0.1) & (after < before)
@@ -1063,6 +1070,148 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
     out_faces += [faces[i] for i in np.flatnonzero(mask & ~done).tolist()]
     points, final = _local_mesh(np.vstack(all_points), out_faces)
     return points, final, warnings
+
+
+def _bridge(points, field_loop, seam_ids, next_id):
+    """All quads between a loop of the field's mesh and a seam, both running the part's way round. One triangle if their counts differ by an odd number. Returns (faces, new vertices as pairs to average)."""
+
+    start = int(np.argmin(np.linalg.norm(points[seam_ids] - points[field_loop[0]], axis=1)))
+    seam = np.roll(seam_ids, -start)
+    if len(field_loop) >= len(seam):
+        first, second, flip = np.asarray(field_loop), seam, True  # strips run from the longer row to the shorter, seen from the outside
+    else:
+        first, second, flip = seam, np.asarray(field_loop), False
+    extra_face = []
+    if (len(first) - len(second)) % 2:
+        k = len(first) // 2
+        extra_face = [(int(first[k - 1]), int(first[k]), int(first[k + 1]))]
+        first = np.delete(first, k)
+    if len(first) > 3 * len(second):
+        raise ValueError("the seam and the part differ too much in density for one row to join them")
+    strip, middles = smoothgrid._strip(first, second, next_id, _arc(points[first]), _arc(points[second]))
+    faces = strip + extra_face
+    return ([tuple(f[::-1]) for f in faces] if flip else [tuple(f) for f in faces]), middles
+
+
+def _crowded_edges(faces) -> int:
+    _face, a, b = _half_edges(faces)
+    uses = np.unique(np.minimum(a, b) * (int(max(a.max(), b.max())) + 1) + np.maximum(a, b), return_counts=True)[1]
+    return int((uses > 2).sum())
+
+
+def _peel(faces, count: int, wanted: int):
+    """Take the field mesh's rough last row off until what's left has one clean border per seam: (faces, border loops). Stray islands and corners that touch go too."""
+
+    for _ in range(6):
+        face_of, a, b = _half_edges(faces)
+        _keys, inverse, uses = np.unique(np.minimum(a, b) * count + np.maximum(a, b), return_inverse=True, return_counts=True)
+        single = uses[inverse.reshape(-1)] == 1
+        rim = np.zeros(count, dtype=bool)
+        rim[a[single]] = True
+        rim[b[single]] = True
+        faces = [f for f in faces if not any(rim[v] for v in f)]
+        if not faces:
+            break
+        for _tidy in range(4):
+            pieces = mask_components(faces, np.ones(len(faces), dtype=bool))
+            if len(pieces) > wanted:  # the biggest are the part, the rest crumbs
+                faces = [faces[i] for piece in pieces[:wanted] for i in piece.tolist()]
+            loops, pinched = boundary_loops(faces, range(len(faces)))
+            if not pinched:
+                break
+            touching = set(pinched)
+            faces = [f for f in faces if not touching.intersection(f)]
+        else:
+            continue
+        if len(loops) >= wanted:  # the longest are the border; any others are holes for the caller to fill
+            return faces, sorted(loops, key=len, reverse=True)
+    raise ValueError(f"the rows' border does not match the {wanted} seam(s)")
+
+
+def _drop_crowded(faces) -> list:
+    """Faces on an edge shared by more than two go: the mesh is only sure of what it joined cleanly. The hole they leave is filled later."""
+
+    face_of, a, b = _half_edges(faces)
+    keys, inverse, uses = np.unique(np.minimum(a, b) * (int(max(a.max(), b.max())) + 1) + np.maximum(a, b), return_inverse=True, return_counts=True)
+    bad = uses[inverse.reshape(-1)] > 2
+    if not bad.any():
+        return faces
+    gone = np.zeros(len(faces), dtype=bool)
+    gone[face_of[bad]] = True
+    return [f for f, g in zip(faces, gone.tolist()) if not g]
+
+
+def _fill_holes(co, faces, holes):
+    """Quads over each hole, or a fan round its middle where the count is odd. Returns (points, faces)."""
+
+    for loop in holes:
+        done = None
+        if len(loop) % 2 == 0 and len(loop) >= 4:
+            made = fill_loop(co, loop[::-1])
+            if made.ok:
+                co = np.vstack((co, made.points)) if len(made.points) else co
+                done = list(made.faces)
+        if done is None:
+            hub = len(co)
+            co = np.vstack((co, co[loop].mean(axis=0, keepdims=True)))
+            done = [(b, a, hub) for a, b in zip(loop, loop[1:] + loop[:1])]
+        faces = list(faces) + done
+    return co, faces
+
+
+def field_on_seams(points, polys, seams, target: float, project=None, lines=None, settle=None):
+    """Rows from the field mesher, joined to the seams: its last row comes off and one row of quads ties what's left to the seam's own vertices. Returns (points, faces). Raises ValueError where it can't."""
+
+    if fieldmesh is None or smoothgrid is None:
+        raise ValueError("no field mesher")
+    co, faces = fieldmesh.field_quads(np.asarray(points, dtype=np.float64), polys, max(target, fieldmesh.SMALLEST_TARGET), turn=FIELD_TURN, lines=lines)
+    co = np.asarray(co, dtype=np.float64)
+    faces = _drop_crowded(faces)
+    if seams:
+        faces, loops = _peel(faces, len(co), len(seams))
+        co, faces = _fill_holes(co, faces, loops[len(seams) :])
+        loops = loops[: len(seams)]
+        all_points = [co]
+        offset = len(co)
+        seam_at = []
+        for seam in seams:
+            all_points.append(np.asarray(seam, dtype=np.float64))
+            seam_at.append(offset + np.arange(len(seam)))
+            offset += len(seam)
+        known = np.vstack(all_points)
+        left = list(range(len(loops)))
+        pieces = list(faces)
+        new_points = []
+        for ids, seam in zip(seam_at, seams):
+            k = min(left, key=lambda i: float(_nearest_on_cloud(co[loops[i]], np.asarray(seam, dtype=np.float64))[1].mean()))
+            left.remove(k)
+            made, middles = _bridge(known, loops[k], ids, offset + len(new_points))
+            pieces += made
+            new_points += [0.5 * (known[x] + known[y]) for x, y in middles]
+        co = np.vstack([known] + ([np.asarray(new_points)] if new_points else []))
+        faces = pieces
+        pinned_ids = np.concatenate(seam_at)
+    else:
+        loops, _pinched = boundary_loops(faces, range(len(faces)))
+        co, faces = _fill_holes(co, faces, loops)
+        pinned_ids = np.zeros(0, dtype=np.int64)
+    if any(len(f) != 4 for f in faces):
+        mesh = MeshData(co, faces, ["0"] * len(faces))
+        try:
+            closed = parity_path_quad_closure(mesh, allow_invalid=True)
+            co, faces = np.asarray(closed.vertices, dtype=np.float64), [tuple(f) for f in closed.faces]
+        except ValueError:  # the certificate wants every quad flat and convex first: a handful of triangles stay
+            pass
+    pinned = np.zeros(len(co), dtype=bool)
+    pinned[pinned_ids] = True
+    co = fit_to_surface(co, faces, pinned, project, 2, 0.5)
+    if settle is not None:  # drawn lines: edges of the result are laid along them
+        co = settle(co, faces, pinned)
+    if seams and open_edges(faces) != sum(len(s) for s in seams):
+        raise ValueError("the join left a gap")
+    if _crowded_edges(faces):
+        raise ValueError(f"{_crowded_edges(faces)} edges have more than two faces")
+    return _local_mesh(co, faces)
 
 
 def seam_loops(co, faces, ids) -> list[np.ndarray]:

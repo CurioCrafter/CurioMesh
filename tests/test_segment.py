@@ -117,6 +117,25 @@ class SeamTests(unittest.TestCase):
         self.assertTrue(np.array_equal(moved[ridge], co[ridge]))
 
 
+class FieldJoinTests(unittest.TestCase):
+    def test_a_ring_of_different_count_joins_a_seam(self):
+        inner = np.array([(np.cos(a), np.sin(a), 0.0) for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)])
+        outer = 2.0 * np.array([(np.cos(a), np.sin(a), 0.0) for a in np.linspace(0, 2 * np.pi, 12, endpoint=False)])
+        points = np.vstack((inner, outer))
+        faces, middles = segment._bridge(points, np.arange(8), 8 + np.arange(12), 20)
+        self.assertTrue(all(len(f) == 4 for f in faces))
+        self.assertEqual(segment.open_edges(faces), 20)
+        faces, _middles = segment._bridge(points, np.arange(8), 8 + np.arange(11), 20)
+        self.assertEqual(sum(len(f) == 3 for f in faces), 1)
+
+    def test_peeling_leaves_one_clean_border(self):
+        co, faces = grid(10, 10)
+        rough = faces + [(0, 1, 121 - 1)]  # a stray face touching the sheet at two corners
+        kept, loops = segment._peel(rough, len(co), 1)
+        self.assertEqual(len(loops), 1)
+        self.assertEqual(sorted(loops[0]), sorted(patch.boundary_loops(kept, range(len(kept)))[0][0]))
+
+
 class JoinTests(unittest.TestCase):
     def _seam(self, co, faces, ids):
         return segment.seam_loops(co, faces, ids)
