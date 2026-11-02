@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import math
 from pathlib import Path
 import sys
 import traceback
@@ -1443,7 +1442,7 @@ def run_guided_case(module):
     # Segments inside one connected mesh: two balls on a thin bar.
     rings, sides = 44, 24
     bar = lambda t: max(max(0.0, 1.0 - ((t - 0.2) / 0.2) ** 2) ** 0.5, max(0.0, 1.0 - ((t - 0.8) / 0.2) ** 2) ** 0.5, 0.12)  # noqa: E731
-    spots = [(math.cos(2 * math.pi * i / sides) * bar(r / rings) * 0.4, math.sin(2 * math.pi * i / sides) * bar(r / rings) * 0.4, 2.0 * r / rings) for r in range(rings + 1) for i in range(sides)]
+    spots = [(float(np.cos(2 * np.pi * i / sides)) * bar(r / rings) * 0.4, float(np.sin(2 * np.pi * i / sides)) * bar(r / rings) * 0.4, 2.0 * r / rings) for r in range(rings + 1) for i in range(sides)]
     spots += [(0.0, 0.0, 0.0), (0.0, 0.0, 2.0)]
     tris = []
     for r in range(rings):

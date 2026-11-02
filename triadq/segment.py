@@ -60,6 +60,10 @@ LEAST_CUT = 0.02  # the merge cost Segment Detail reaches at 1
 MOST_CUT = 0.3  # and at 0
 SMALLEST = 0.004  # of a loose piece's area: a segment smaller than this is noise, at any detail
 SNAP_LEVELS = 16
+EVEN_ROUNDS = 6  # rounds of rounding off a border where no crease holds it
+SEAM_ROUNDS = 4  # passes straightening the result's seams
+SEAM_CREASE = 0.6  # radians between the faces either side: a seam this sharp is on a crease and stays
+CAMERA_WEIGHT = 1.5  # how much more of an Animation sheet goes where the camera saw it go wrong
 SHEET_RATIO = 1.6  # how fast a row of an Animation sheet may gain or lose vertices
 RING_SAMPLES = 128
 RING_LEVELS = 96
@@ -179,7 +183,7 @@ def _merge_all(leaf, shell, links, co, normals, areas, centroids, log_thick, can
     area = leaf_area.tolist()
     curve = (turned * leaf_area).tolist()
     thick = (log_thick * leaf_area).tolist()
-    whole = shell_area[shell_of].tolist()
+    whole = float(shell_area.sum())  # the whole model: a small loose piece splits only when much detail is asked for
     version = [0] * count
 
     def cost(i, j):
@@ -192,7 +196,7 @@ def _merge_all(leaf, shell, links, co, normals, areas, centroids, log_thick, can
         small = min(ai, aj)
         # A short border for the size of the smaller side is a neck, however smooth. A patch on open surface has about 3.5.
         neck = 1.05 - min(row[0] / (NECK * small**0.5), 1.0)
-        return (BASE + bend + step) * (small / max(whole[i], 1e-30)) ** 0.5 * neck
+        return (BASE + bend + step) * (small / max(whole, 1e-30)) ** 0.5 * neck
 
     heap = [(cost(x, y), x, y, 0, 0) for x, y in zip(pa.tolist(), pb.tolist())]
     heapq.heapify(heap)
@@ -417,7 +421,7 @@ def find(tree: Tree, faces, detail: float, cancelled=None) -> np.ndarray:
 
     parent = cut(tree, detail)
     labels = snap(tree, parent[tree.leaf], cancelled=cancelled)
-    labels = even_borders(faces, labels, _smooth_normals(tree.normals, tree.areas, tree.links[0], tree.links[1], 1), tree.areas)
+    labels = even_borders(faces, labels, _smooth_normals(tree.normals, tree.areas, tree.links[0], tree.links[1], 1), tree.areas, rounds=EVEN_ROUNDS)
     return dense(tidy(faces, labels, tree.links))
 
 
@@ -565,6 +569,46 @@ def settle_seams(co, faces, labels, samples, reach: float = 1.0):
     return moved
 
 
+def straighten_seams(co, faces, labels, project=None, rounds: int = SEAM_ROUNDS):
+    """Slide seam vertices towards the line between their seam neighbours, so a seam with no crease under it runs smooth instead of in steps. Corners where three segments meet, seams on a crease, and anything that would fold a quad stay."""
+
+    co = np.asarray(co, dtype=np.float64)
+    fa, fb, u, v = face_links(faces)
+    across = labels[fa] != labels[fb]
+    if not across.any():
+        return co
+    normals = face_frames(co, faces)[0]
+    sharp = np.arccos(np.clip((normals[fa[across]] * normals[fb[across]]).sum(axis=1), -1.0, 1.0)) > SEAM_CREASE
+    a, b = u[across], v[across]
+    degree = np.bincount(np.concatenate((a, b)), minlength=len(co))
+    held = np.zeros(len(co), dtype=bool)
+    held[a[sharp]] = True
+    held[b[sharp]] = True
+    free = np.flatnonzero((degree == 2) & ~held)
+    if not len(free):
+        return co
+    quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+    out = co.copy()
+    for _ in range(rounds):
+        total = np.zeros_like(out)
+        np.add.at(total, a, out[b])
+        np.add.at(total, b, out[a])
+        moved = out.copy()
+        moved[free] = 0.5 * out[free] + 0.25 * total[free]
+        if project is not None:
+            moved[free] = project(moved[free])
+        if len(quads):
+            before, after = quad_quality(out[quads]), quad_quality(moved[quads])
+            for _try in range(8):
+                bad = (after < 0.1) & (after < before)
+                if not bad.any():
+                    break
+                moved[quads[bad].ravel()] = out[quads[bad].ravel()]
+                after = quad_quality(moved[quads])
+        out = moved
+    return out
+
+
 # --------------------------------------------------------------------------- joining a remade part to its seam
 
 
@@ -692,36 +736,53 @@ def conform(points, faces, seams):
     return final_points, final, origin, [np.searchsorted(used, ids) for ids in seam_ids]
 
 
-def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True):
+def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edges=(), project=None):
     """A reduced part joined to its seams: all quads when ParityPath can close it, every second seam vertex taking the others as frozen midpoints.
 
-    Returns (points, faces, materials). Falls back to quads and a few triangles on the full seam, and gives triangles with `quads` off.
+    Bent seams can leave a face no valid template; it takes the first anyway and the shape is repaired with the seam held.
+    `guide_edges` (pairs of vertices) are edges the quads must keep. `project` lays repaired vertices back on your surface.
+    Returns (points, faces, materials). Falls back to quads and a few triangles on the full seam only if closure can't finish, and gives triangles with `quads` off.
     """
 
-    pairing = RemeshOptions(target_faces=max(1, len(faces) // 2), seed_count=2, force_quads=False, max_pairing=True)
+    points = np.asarray(points, dtype=np.float64)
+    wanted = points[np.asarray(guide_edges, dtype=np.int64).reshape(-1, 2)]
+
+    def pairing(new_points):
+        at = {p.tobytes(): k for k, p in enumerate(new_points)}
+        keep = [(at[x.tobytes()], at[y.tobytes()]) for x, y in wanted if x.tobytes() in at and y.tobytes() in at]  # conforming renumbers, so edges are found by place
+        return RemeshOptions(target_faces=max(1, len(faces) // 2), seed_count=2, force_quads=False, max_pairing=True, guide_edges=tuple(keep))
+
     if not seams and quads:
-        made = pair_and_close(MeshData(points, faces, kinds), seed_count=2)[0]
+        made = pair_and_close(MeshData(points, faces, kinds), seed_count=2, guide_edges=tuple(guide_edges))[0]
         return np.asarray(made.vertices, dtype=np.float64), [tuple(f) for f in made.faces], list(made.face_materials)
-    if quads and all(len(s) % 2 == 0 and len(s) >= 6 for s in seams):
+    if quads and sum(len(s) for s in seams) % 2 == 0 and all(len(s) >= 6 for s in seams):  # two odd borders are fine: all quads only needs an even total
         try:
             p, f, origin, ids = conform(points, faces, [np.asarray(s, dtype=np.float64)[::2] for s in seams])
             at = len(p)
             extra, frozen = [], {}
             for seam, loop in zip(seams, ids):
-                for k, middle in enumerate(np.asarray(seam, dtype=np.float64)[1::2]):
+                for k, middle in enumerate(np.asarray(seam, dtype=np.float64)[1::2]):  # an odd border's last edge has no middle and stays whole
                     a, b = int(loop[k]), int(loop[(k + 1) % len(loop)])
                     frozen[(a, b) if a < b else (b, a)] = at
                     extra.append(middle)
                     at += 1
-            paired = remesh_mesh(MeshData(np.vstack((p, extra)), f, [kinds[i] for i in origin]), pairing)[0]
-            closed = parity_path_quad_closure(paired, frozen_midpoints=frozen)
-            return np.asarray(closed.vertices, dtype=np.float64), [tuple(x) for x in closed.faces], list(closed.face_materials)
-        except ValueError:  # no valid template somewhere along a bent seam: quads and some triangles, on the full seam
+            whole = np.vstack((p, extra))
+            paired = remesh_mesh(MeshData(whole, f, [kinds[i] for i in origin]), pairing(whole))[0]
+            try:
+                closed = parity_path_quad_closure(paired, frozen_midpoints=frozen)
+                final = np.asarray(closed.vertices, dtype=np.float64)
+            except ValueError:
+                closed = parity_path_quad_closure(paired, frozen_midpoints=frozen, allow_invalid=True)
+                pinned = np.zeros(len(closed.vertices), dtype=bool)
+                pinned[[v for loop in ids for v in loop.tolist()] + list(frozen.values())] = True
+                final = fit_to_surface(np.asarray(closed.vertices, dtype=np.float64), closed.faces, pinned, project, 1, 0.5)
+            return final, [tuple(x) for x in closed.faces], list(closed.face_materials)
+        except ValueError:  # closure could not finish: quads and some triangles, on the full seam
             pass
     p, f, origin, _ids = conform(points, faces, seams)
     mats = [kinds[i] for i in origin]
     if quads:
-        paired = remesh_mesh(MeshData(p, f, mats), pairing)[0]
+        paired = remesh_mesh(MeshData(p, f, mats), pairing(p))[0]
         return np.asarray(paired.vertices, dtype=np.float64), [tuple(x) for x in paired.faces], list(paired.face_materials)
     return p, f, mats
 
@@ -750,7 +811,28 @@ def _local_mesh(co, faces):
     return np.asarray(co)[used], out
 
 
-def even_embedding(points, tris, border, circle, rounds: int = SHEET_EVEN_ROUNDS) -> np.ndarray:
+def sheet_importance(points, tris, focus=None) -> np.ndarray:
+    """Per vertex of a disk: how much finer its rows should be. Bumpy places get more, and places near `focus`, the points where the camera saw a difference."""
+
+    q = points[tris]
+    normals = np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0])
+    normals /= np.maximum(np.linalg.norm(normals, axis=1), 1e-30)[:, None]
+    fa, fb, _u, _v = face_links([tuple(t) for t in tris.tolist()])
+    bend = np.arccos(np.clip((normals[fa] * normals[fb]).sum(axis=1), -1.0, 1.0))
+    bent = np.bincount(np.concatenate((fa, fb)), np.tile(bend, 2), len(tris)) / 3.0
+    bumpy = np.bincount(tris.ravel(), np.repeat(bent, 3), len(points)) / np.maximum(np.bincount(tris.ravel(), minlength=len(points)), 1)
+    importance = 1.0 + SHEET_DETAIL * np.minimum(bumpy / max(float(np.median(bumpy)), 1e-6), 4.0)
+    if focus is not None and len(focus):
+        hits = np.bincount(_nearest_on_cloud(np.asarray(focus, dtype=np.float64), points)[0], minlength=len(points)).astype(np.float64)
+        edges = _unique_edges(tris)
+        for _ in range(2):  # a miss says "around here"
+            total = hits + np.bincount(edges[:, 0], hits[edges[:, 1]], len(points)) + np.bincount(edges[:, 1], hits[edges[:, 0]], len(points))
+            hits = total / (1.0 + np.bincount(edges.ravel(), minlength=len(points)))
+        importance *= 1.0 + CAMERA_WEIGHT * np.minimum(hits / max(float(np.percentile(hits, 90)), 1e-9), 1.0)
+    return importance
+
+
+def even_embedding(points, tris, border, circle, importance=None, rounds: int = SHEET_EVEN_ROUNDS) -> np.ndarray:
     """A flat map of a disk where equal areas stay about equal, so a grid laid on it comes out even on the surface.
 
     A plain Tutte map squeezes the far end of a dome into the middle. Edge weights are lowered where the map stretches
@@ -762,13 +844,7 @@ def even_embedding(points, tris, border, circle, rounds: int = SHEET_EVEN_ROUNDS
     weights = 1.0 / np.maximum(np.linalg.norm(points[i] - points[j], axis=1), 1e-30)
     q = points[tris]
     area3 = np.maximum(0.5 * np.linalg.norm(np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]), axis=1), 1e-30)
-    normals = np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0])
-    normals /= np.maximum(np.linalg.norm(normals, axis=1), 1e-30)[:, None]
-    fa, fb, _u, _v = face_links([tuple(t) for t in tris.tolist()])
-    bend = np.arccos(np.clip((normals[fa] * normals[fb]).sum(axis=1), -1.0, 1.0))
-    bent = np.bincount(np.concatenate((fa, fb)), np.tile(bend, 2), len(tris)) / 3.0
-    bumpy = np.bincount(tris.ravel(), np.repeat(bent, 3), len(points)) / np.maximum(np.bincount(tris.ravel(), minlength=len(points)), 1)
-    importance = 1.0 + SHEET_DETAIL * np.minimum(bumpy / max(float(np.median(bumpy)), 1e-6), 4.0)
+    importance = sheet_importance(points, tris) if importance is None else importance
     best, best_stretch, uv = None, np.inf, None
     for k in range(rounds):
         uv = tutte_embedding(len(points), tris, border, circle, points, weights, uv, 1e-7 if k < rounds - 1 else 1e-9)
@@ -790,9 +866,10 @@ def even_embedding(points, tris, border, circle, rounds: int = SHEET_EVEN_ROUNDS
     return best
 
 
-def _ring_plan(uv, tris, points, edge: float, seam_count: int):
+def _ring_plan(uv, tris, points, edge: float, seam_count: int, importance):
     """How rows should run inside a flattened disk: (radius of each row, vertices on it). Rows are `edge` apart on the surface and have quads about `edge` long.
 
+    Lengths count `importance` times, so rows bunch up where detail is, with the budget kept by `edge` growing to match.
     A row keeps its count until the surface asks for clearly more or fewer, so most rows run clean all the way round.
     """
 
@@ -802,8 +879,12 @@ def _ring_plan(uv, tris, points, edge: float, seam_count: int):
     flat = np.stack((np.outer(radii, np.cos(angles)).ravel(), np.outer(radii, np.sin(angles)).ravel()), axis=1)
     tri, weights = locator.locate(flat)
     rings = np.einsum("ij,ijk->ik", weights, points[tris[tri]]).reshape(len(radii), len(angles), 3)
-    around = np.linalg.norm(np.roll(rings, -1, axis=1) - rings, axis=2).sum(axis=1)
-    inwards = np.concatenate(([0.0], np.cumsum(np.linalg.norm(rings[1:] - rings[:-1], axis=2).mean(axis=1))))
+    weight = np.einsum("ij,ij->i", weights, importance[tris[tri]]).reshape(len(radii), len(angles))
+    corners = points[tris]
+    area = np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1)
+    edge = edge * np.sqrt(float((area * (importance[tris] ** 2).mean(axis=1)).sum() / max(float(area.sum()), 1e-30)))
+    around = (np.linalg.norm(np.roll(rings, -1, axis=1) - rings, axis=2) * weight).sum(axis=1)
+    inwards = np.concatenate(([0.0], np.cumsum((np.linalg.norm(rings[1:] - rings[:-1], axis=2) * 0.5 * (weight[1:] + weight[:-1])).mean(axis=1))))
     rows = int(inwards[-1] / max(edge, 1e-30))
     out_radii, counts = [], []
     current = seam_count
@@ -825,7 +906,7 @@ def _ring_plan(uv, tris, points, edge: float, seam_count: int):
     return out_radii, counts
 
 
-def _sheet(co, faces, comp, edge, project):
+def _sheet(co, faces, comp, edge, project, focus=None):
     """Rows round a disk with a small grid at the far end, the even sheet an animator lays by hand: (points, quads, seam loop) or None.
 
     Four poles sit where the rows meet the grid, and a row gains or loses vertices through smoothgrid's strips only where the surface widens or narrows.
@@ -841,8 +922,9 @@ def _sheet(co, faces, comp, edge, project):
     loop_xyz = points[border]
     count = len(border)
     circle = circle_boundary(loop_xyz)
-    uv = even_embedding(points, tris, border, circle)
-    ring_radii, ring_counts = _ring_plan(uv, tris, points, edge, count)
+    importance = sheet_importance(points, tris, focus)
+    uv = even_embedding(points, tris, border, circle, importance)
+    ring_radii, ring_counts = _ring_plan(uv, tris, points, edge, count, importance)
     counts = [count] + ring_counts
     rows = len(ring_counts)
     table = [np.arange(count)]
@@ -889,7 +971,7 @@ def _sheet(co, faces, comp, edge, project):
     return settled, quads, loop
 
 
-def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3):
+def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3, focus=None):
     """Rebuild a part of the result on its own seams. Returns (points, faces, warnings); seam vertices stay exactly where they were.
 
     Animation tries a row-and-grid sheet and a flow fill on each disk and keeps the better topology score. Subdivision is the flow fill.
@@ -907,7 +989,7 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
             raise ValueError("cancelled")
         options = []
         if goal == "ANIMATION":
-            grid = _sheet(co, faces, comp, edge, project or (lambda p: p))
+            grid = _sheet(co, faces, comp, edge, project or (lambda p: p), focus)
             if grid is not None:
                 xyz, quads, loop = grid
                 new = xyz[len(loop) :]

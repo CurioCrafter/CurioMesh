@@ -25,7 +25,7 @@ import bpy
 import numpy as np
 from mathutils import Vector
 
-from . import autoretopo, overlay, region
+from . import autoretopo, guides, loops, overlay, region
 from . import segments as view
 from .triadq import parts as P
 from .triadq import patch
@@ -35,6 +35,9 @@ ATTRIBUTE = "curiomesh_segment"
 SAVED = "curiomesh_segments"
 MOST_MEASURED = 60  # segments looked at by the camera after finding them: a model of thousands of parts would take minutes
 LOW_POLY_EDGE = 2.2  # Low Poly's quads against the sizes the others use at the same detail
+SMALLEST_RESULT = 60  # a found segment with fewer faces in the result joins a neighbour: too few to be worth remaking
+WORSE_TIMES, WORSE_BY = 1.5, 4.0  # Reduce may change the view this many times, and this many points, more than the part had before
+SHARPEN_DROP = 8.0  # topology score a sheet may give up for following the camera's misses
 GOAL_ITEMS = [
     ("KEEP", "Keep as Is", "Your original faces, unchanged except for the row along the seam, which joins the neighbours", "FREEZE", 0),
     ("REDUCE", "Reduce", "Fewer faces where the surface allows it: quads that keep the shape, with no regard for rows", "MOD_DECIM", 1),
@@ -184,6 +187,49 @@ def _drop_labels(labels, gone, fa, fb) -> np.ndarray:
     return labels
 
 
+def _tiny_segments(job, labels, piece) -> list[int]:
+    """Segments with few faces in the result, that are only part of a loose piece (a whole loose piece has no neighbour to join)."""
+    loose = _loose_of(job)
+    count = int(labels.max()) + 1
+    made = np.bincount(piece, minlength=count)
+    pieces = np.zeros(count, dtype=np.int64)
+    pieces[labels] = loose
+    per_loose = np.bincount(pieces, minlength=len(job.pieces))
+    order = np.argsort(made)
+    tiny = []
+    for k in order.tolist():  # never the last segment of a loose piece
+        if made[k] < SMALLEST_RESULT and per_loose[pieces[k]] > 1:
+            tiny.append(k)
+            per_loose[pieces[k]] -= 1
+    return tiny
+
+
+def _misses(reference, view, center, half, pixels) -> np.ndarray:
+    """Where on your mesh the camera saw a difference: 3D points, from the same pictures `picture_counts` compares."""
+    limit = np.cos(np.radians(autoretopo.TURNED_DEG))
+    pixel = 2.0 * half / pixels
+    grid = ((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half
+    out = []
+    side = 0
+    for axis in range(3):
+        u, v = (axis + 1) % 3, (axis + 2) % 3
+        for sign in (1.0, -1.0):
+            hit_a, normal_a, depth_a = reference[side]
+            hit_b, normal_b, depth_b = view[side]
+            side += 1
+            both = hit_a & hit_b
+            wrong = both & ((np.abs((normal_a * normal_b).sum(axis=2)) < limit) | (np.abs(depth_a - depth_b) > 2.0 * pixel))
+            wrong |= hit_a & ~hit_b
+            i, j = np.nonzero(wrong)
+            if len(i):
+                points = np.zeros((len(i), 3))
+                points[:, axis] = center[axis] + sign * (2.0 * half - depth_a[i, j])
+                points[:, u] = center[u] + grid[i]
+                points[:, v] = center[v] + grid[j]
+                out.append(points)
+    return np.vstack(out) if out else np.zeros((0, 3))
+
+
 def transfer(src: dict, bvh, src_labels, co, faces) -> np.ndarray:
     """The segment of each result face: that of the face of your mesh nearest to it."""
     centres = S.face_frames(co, faces)[2]
@@ -236,8 +282,19 @@ class FindJob(view.PartJob):
             labels = _drop_labels(labels, missing.tolist(), tree.links[0], tree.links[1])
         values, labels = np.unique(labels, return_inverse=True)
         piece = np.searchsorted(values, piece)
-        moved = S.settle_seams(co, faces, piece, S.seam_samples(job.co, tree.links, labels.reshape(-1)))
-        box.update(labels=labels.reshape(-1), piece=piece, co=moved, saved=saved)
+        labels = labels.reshape(-1)
+        if saved is None:  # segments found here, not ones you kept, painted or split
+            tiny = _tiny_segments(job, labels, piece)
+            if tiny:
+                labels = _drop_labels(labels, tiny, tree.links[0], tree.links[1])
+                piece = _drop_labels(piece, tiny, links[0], links[1])
+                values, labels = np.unique(labels, return_inverse=True)
+                labels = labels.reshape(-1)
+                piece = np.searchsorted(values, piece)
+        moved = S.settle_seams(co, faces, piece, S.seam_samples(job.co, tree.links, labels))
+        project = region._projector(bvh)
+        moved = S.straighten_seams(moved, faces, piece, project)
+        box.update(labels=labels, piece=piece, co=moved, saved=saved)
 
     def _run(self):
         guided = _g()
@@ -340,13 +397,52 @@ class GoalJob(view.PartJob):
             self.warnings = [box.get("error", "no result")]
         return box.get("out")
 
-    def _build(self, goal: str, record: dict, ids, edge: float, topology, project):
+    def _strokes(self, record: dict) -> list:
+        """(stroke, loops, tag) for the drawn edge loops and deformation lines that run over this segment."""
+        guided = _g()
+        gs = self.context.scene.curiomesh_guided
+        src = guided._source_data(guided.state_source())
+        bvh = guided._bvh(src)
+        labels = view.seg["src"]
+        found = []
+        for kind, count in (("LOOP", gs.loop_count), ("BEND", gs.bend_loops)):
+            for line in guided._guide_lines(self.context, gs, src, kind):
+                nearest = [bvh.find_nearest(Vector(p))[2] for p in line[:: max(len(line) // 16, 1)].tolist()]
+                if np.mean([labels[src["tri_face"][t]] == record["id"] for t in nearest]) > 0.5:
+                    found.append((line, count, kind))
+        return found
+
+    def _cut_strokes(self, points, polys, kinds, items, nearest):
+        """Drawn lines go into the reduced triangles as strips of quads, the way Auto Segments does. Returns (points, triangles, kinds, edges to keep)."""
+        gs = self.context.scene.curiomesh_guided
+        tris, kind = [], []
+        for f, k in zip(polys, kinds):
+            for c in range(1, len(f) - 1):
+                tris.append((f[0], f[c], f[c + 1]))
+                kind.append(int(k) if str(k).isdigit() else 0)
+        tris, kind = np.asarray(tris, dtype=np.int64), np.asarray(kind, dtype=np.int64)
+        spacing = float(np.median(np.linalg.norm(points[tris[:, 0]] - points[tris[:, 1]], axis=1)))
+        gap = gs.loop_gap if gs.loop_gap > 0 else 0.7 * spacing
+        fine = min(loops.room(line, count, gap) for line, count, _tag in items)
+        samples = np.vstack([guides.resample(line, fine / 4.0) for line, _count, _tag in items])
+        co, tris, kind = guides.refine(points, tris, kind, samples, fine / 2.5, lambda p: nearest(p)[0])
+        co, tris, kind, keys, _built, skipped = loops.insert(co, tris, kind, items, gap, nearest, set())
+        if skipped:
+            self.note = f"{len(skipped)} drawn line(s) left out: " + ", ".join(sorted(set(skipped)))
+        return co, [tuple(t) for t in tris.tolist()], [str(k) for k in kind.tolist()], tuple(sorted(keys))
+
+    def _build(self, goal: str, record: dict, ids, edge: float, topology, project, focus=None):
         """Generator: (points, faces, materials) of this segment for this Use, or None."""
         out = self.base["out"]
         co, faces = out["co"], out["faces"]
         cancelled = lambda: self._stopped  # noqa: E731
         most = np.bincount(np.asarray(out["mat"])[ids]).argmax() if len(ids) else 0
-        if goal in {"KEEP", "REDUCE", "LOWPOLY", "TRIS"}:
+        items = self._strokes(record) if goal in {"ANIMATION", "SUBD"} else []
+        if items:  # lines you drew come first: the rows run along them, and the rest is paired around them
+            bvh = _g()._bvh(_g()._source_data(_g().state_source()))
+            nearest = lambda p: bvh.find_nearest(Vector(p))[:2]  # noqa: E731
+            goal = "STROKES"
+        if goal in {"KEEP", "REDUCE", "LOWPOLY", "TRIS", "STROKES"}:
             points, polys, kinds = self.job._piece_arrays(record["source"])
             try:
                 seams = S.seam_loops(co, faces, ids)
@@ -360,8 +456,13 @@ class GoalJob(view.PartJob):
                 if ratio < 0.98:
                     yield
                     points, polys, kinds = autoretopo._decimate(self.context, points, polys, kinds, max(ratio, 1e-4))
-            quads = goal in {"REDUCE", "LOWPOLY"}
-            made = yield from self._in_thread(lambda: S.pair_on_seams(points, polys, kinds, seams, quads=quads))
+            quads = goal in {"REDUCE", "LOWPOLY", "STROKES"}
+            keep = ()
+            if goal == "STROKES":
+                cut = yield from self._in_thread(lambda: self._cut_strokes(points, polys, kinds, items, nearest))
+                if cut is not None:
+                    points, polys, kinds, keep = cut
+            made = yield from self._in_thread(lambda: S.pair_on_seams(points, polys, kinds, seams, quads=quads, guide_edges=keep, project=project))
             if made is not None:
                 return made
             # Your mesh's border and the result's differ too much for a join here. The seam-keeping fill always fits.
@@ -369,7 +470,7 @@ class GoalJob(view.PartJob):
             self.warnings = []
             goal = "SUBD"
             self.note = f"{GOAL_NAMES.get(record['goal'], record['goal'])} could not join its neighbours ({note}): made quads on the seam instead"
-        made = yield from self._in_thread(lambda: S.fill_part(co, faces, ids, goal, edge, project, topology, cancelled))
+        made = yield from self._in_thread(lambda: S.fill_part(co, faces, ids, goal, edge, project, topology, cancelled, focus=focus))
         if made is None:
             return None
         points, new_faces, warnings = made
@@ -408,11 +509,37 @@ class GoalJob(view.PartJob):
                 return
             if made is None:
                 continue
-            trial, trial_mat, trial_piece = view.splice(co, faces, mat, piece, {p: (made[0], made[1], made[2])})[1:]
+            change = yield from self._change(p, made[0], made[1])
+            before = current["change"]
+            if record["goal"] == "REDUCE" and before is not None:  # a part this small can lose its shape: more faces, up to twice
+                for _again in range(2):
+                    if change <= max(WORSE_TIMES * before, before + WORSE_BY):
+                        break
+                    edge *= 0.7
+                    self.stage = f"{record['name']} changed by {change:.0f}%: giving it more faces"
+                    more = yield from self._build("REDUCE", record, ids, edge, topology, project)
+                    if self._stopped:
+                        return
+                    if more is None:
+                        break
+                    tried = yield from self._change(p, more[0], more[1])
+                    if tried < change:
+                        made, change = more, tried
+            elif record["goal"] == "ANIMATION" and not self._strokes(record):  # second go: more rows where the camera saw the first one go wrong
+                self.stage = f"{record['name']}: more rows where the camera found a difference"
+                misses = _misses(*self.last_look)
+                sharper = yield from self._build("ANIMATION", record, ids, edge, topology, project, misses)
+                if self._stopped:
+                    return
+                if sharper is not None:
+                    tried = yield from self._change(p, sharper[0], sharper[1])
+                    old, new = S.topology_score(made[0], made[1]) or 0.0, S.topology_score(sharper[0], sharper[1]) or 0.0
+                    if tried < change and new >= old - SHARPEN_DROP:
+                        made, change = sharper, tried
+            trial = view.splice(co, faces, mat, piece, {p: (made[0], made[1], made[2])})[1]
             if S.open_edges(trial) > S.open_edges(faces):  # never hand back a mesh with a new hole, whatever went wrong above
                 self.warnings = [f"{record['name']}: the new faces did not close on the seam, so it stays as it was"]
                 continue
-            change = yield from self._change(p, made[0], made[1])
             self.new_tries[p] = {
                 "method": record["goal"], "detail": round(record["goal_detail"], 3), "after": len(made[1]), "change": change, "topology": S.topology_score(made[0], made[1]),
                 "build": (made[0], made[1], np.asarray([int(m) if str(m).lstrip("-").isdigit() else 0 for m in made[2]], dtype=np.int32)),
@@ -489,7 +616,7 @@ def relabel(src_labels, piece, touched) -> str:
     out = dict(out, piece=new_piece, parts=new_piece)
     base.update(out=out, id=time.perf_counter_ns())
     job._face_piece = new_src
-    view.seg.update(base=base["id"], piece=new_piece, parts=records, src=new_src, sel=selected, batch_key=None, tris=None, hover=None, surface=True)
+    view.seg.update(base=base["id"], piece=new_piece, parts=records, src=new_src, sel=selected, ref={}, batch_key=None, tris=None, hover=None, surface=True)
     guided.state["res"] = out
     view.refresh_list()
     save()

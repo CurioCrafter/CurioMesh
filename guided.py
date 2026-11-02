@@ -409,7 +409,6 @@ def _source_data(obj) -> dict:
         "tri_loops": _fan(wloops),
         "loops": wloops,
         "mat": mat[keep],
-        "keep": keep,
         "bvh": None,
         "weld": inv,
         "keep": keep,

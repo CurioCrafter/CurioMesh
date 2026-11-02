@@ -346,6 +346,7 @@ class PartJob:
             seg["ref"][piece] = yield from self._pictures_of(pts, polys, center, half, pixels)
         view = yield from self._pictures_of(points, faces, center, half, pixels)
         wrong, shown = autoretopo.picture_counts(seg["ref"][piece], view, 2.0 * half / pixels)
+        self.last_look = (seg["ref"][piece], view, center, half, pixels)
         return 100.0 * wrong / max(shown, 1)
 
     def _whole_loss(self, co, faces):
