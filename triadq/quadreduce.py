@@ -367,6 +367,17 @@ def quad_reducer(mesh: MeshData):
     return fast if fast is not None else QuadReducer(mesh)
 
 
+def _compensated_sum(values) -> float:
+    """Python 3.12's float `sum` (Neumaier), spelled out so 3.11 gives the same last digit and the native core can match it."""
+
+    high = low = 0.0
+    for x in values:
+        t = high + x
+        low += (high - t) + x if abs(high) >= abs(x) else (x - t) + high
+        high = t
+    return high + low if low and math.isfinite(low) else high
+
+
 def _cut_hexagon(hexagon: list[int], points, free_chord) -> tuple[list[tuple[int, ...]], list[int]] | None:
     """The best two quads for a six-sided polygon, or three around a new middle corner. (quads, middle's id or [])."""
 
@@ -397,7 +408,7 @@ def _cut_hexagon(hexagon: list[int], points, free_chord) -> tuple[list[tuple[int
     if best is not None:
         return best, []
     middle = len(points)
-    points.append((sum(c[0] for c in corners) / 6.0, sum(c[1] for c in corners) / 6.0, sum(c[2] for c in corners) / 6.0))
+    points.append(tuple(_compensated_sum(c[k] for c in corners) / 6.0 for k in range(3)))
     for k in (0, 1):
         ring = hexagon[k:] + hexagon[:k]
         quads = [(middle, ring[0], ring[1], ring[2]), (middle, ring[2], ring[3], ring[4]), (middle, ring[4], ring[5], ring[0])]

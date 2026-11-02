@@ -184,7 +184,7 @@ impl Join {
             return best;
         }
         let middle = self.points.len() as i64;
-        // Python 3.12's `sum` is compensated, and Blender 5 has that: the same sum here, or the middle would differ in the last digit.
+        // `quadreduce._compensated_sum` (Python 3.12's `sum`): the same sum here, or the middle would differ in the last digit.
         let mean = |c: usize| {
             let (mut high, mut low) = (0.0f64, 0.0f64);
             for corner in &corners {
