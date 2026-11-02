@@ -4,7 +4,7 @@
 # ruff: noqa: E402
 
 bl_info = {
-    "name": "CurioMesh Quad Remesher",
+    "name": "CurioMesh",
     "author": "CurioCrafter",
     "version": (0, 8, 0),
     "blender": (3, 6, 0),

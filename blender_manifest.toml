@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 id = "curiomesh"
 version = "0.8.0"
-name = "CurioMesh Atlas-Q Quad Retopology"
+name = "CurioMesh"
 tagline = "Scan-aware quad retopology with explicit validation"
 maintainer = "CurioCrafter"
 type = "add-on"
