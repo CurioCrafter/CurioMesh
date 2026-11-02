@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.build_release import build_archives, build_per_version, release_metadata  # noqa: E402
+from scripts.build_release import build_archives, build_listing, build_per_version, release_metadata  # noqa: E402
 
 
 def bl_info_version(source: str) -> str:
@@ -62,6 +63,17 @@ class ReleasePackageTests(unittest.TestCase):
                 self.assertEqual(manifest["id"], package_id)
                 self.assertEqual(manifest["version"], version)
                 self.assertEqual(bl_info_version(payload["__init__.py"].decode("utf-8")), version)
+
+    def test_listing_archive_is_python_only_and_cc0(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = build_listing(ROOT, Path(temporary))
+            with zipfile.ZipFile(path) as archive:
+                names = archive.namelist()
+                self.assertFalse([n for n in names if n.startswith("_native") or n.endswith((".pyd", ".so", ".dll"))])
+                self.assertNotIn("triadq/patterns_cc0.json", names)
+                sources = {s["license"] for s in json.loads(archive.read("triadq/patterns.json"))["sources"]}
+                self.assertTrue(all(s.startswith(("CC0", "Public domain")) for s in sources), sources)
+                self.assertNotIn(b"CC-BY", archive.read("README.md"))
 
     def test_per_version_archives(self) -> None:
         package_id, version = release_metadata(ROOT)

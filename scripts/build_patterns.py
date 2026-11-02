@@ -4,6 +4,7 @@
 
 Only entries named in TRUSTED and allowed in derived form are read, and only statistics are written, never geometry.
     python scripts/build_patterns.py <folder with references.json>
+    python scripts/build_patterns.py <folder> --cc0     # CC0 / public domain sources only -> triadq/patterns_cc0.json
 """
 
 from __future__ import annotations
@@ -65,12 +66,18 @@ def mesh_files(item: dict) -> list[str]:
     return sorted(glob.glob(os.path.join(item["folder"], "meshes", "*.obj")))
 
 
-def measure_all(folder: str) -> tuple[dict, list]:
+def is_cc0(item: dict) -> bool:
+    return str(item.get("license", "")).startswith(("CC0", "Public domain"))
+
+
+def measure_all(folder: str, cc0_only: bool = False) -> tuple[dict, list]:
     with open(os.path.join(folder, "references.json"), encoding="utf-8") as stream:
         book = json.load(stream)
     rows, used = {}, []
     for item in book["items"]:
         if item["name"] not in TRUSTED or not str(item.get("redistribution_derived", "")).lower().startswith("yes"):
+            continue
+        if cc0_only and not is_cc0(item):
             continue
         plan = TRUSTED[item["name"]]
         seen = set()
@@ -125,9 +132,10 @@ def build(rows: dict, used: list) -> dict:
 
 
 if __name__ == "__main__":
-    all_rows, sources = measure_all(sys.argv[1])
+    cc0 = "--cc0" in sys.argv
+    all_rows, sources = measure_all(sys.argv[1], cc0)
     database = build(all_rows, sources)
-    target = os.path.join(ROOT, "triadq", "patterns.json")
+    target = os.path.join(ROOT, "triadq", "patterns_cc0.json" if cc0 else "patterns.json")
     with open(target, "w", encoding="utf-8") as stream:
         json.dump(database, stream, indent=0, sort_keys=True)
     print(f"{len(all_rows)} meshes, {os.path.getsize(target)} bytes -> {target}")

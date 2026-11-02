@@ -111,6 +111,12 @@ jobs:
         run: python scripts/build_release.py --per-version --native-dir native-bin --output dist
       - name: Checksums, so a download can be checked against the release
         run: cd dist && sha256sum *.zip > SHA256SUMS.txt
+      - name: Listing zip for extensions.blender.org (Python only, CC0 patterns), kept out of the release
+        run: python scripts/build_release.py --blender-listing --output listing
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: blender-listing
+          path: listing/*.zip
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
