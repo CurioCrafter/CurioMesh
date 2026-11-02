@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! `quadreduce.join_loose_triangles` on flat arrays, a line-by-line mirror so the faces come out the same.
 
 use crate::topo::FxBuild;

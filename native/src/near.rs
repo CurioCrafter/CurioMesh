@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! Our own lookup trees, in place of Blender's one-call-at-a-time KDTree and BVHTree: nearest points, nearest faces and
 //! faces passing through each other, all cores, a batch at a time, and each batch stops early when the stop flag is set.
 //!

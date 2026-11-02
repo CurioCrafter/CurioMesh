@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! Closing paired meshes into quads, piece by piece on all cores: `flatquad.make_closable`, `flatquad._close_pieces` and
 //! `topology.parity_path_closure_unpairing`. Each mirrors its Python function line by line, so the faces come out the
 //! same and in the same order. Each face carries `origin`, the input face it came from, so Python can look up materials.

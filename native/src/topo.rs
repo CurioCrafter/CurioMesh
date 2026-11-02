@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! Combinatorial mesh topology: edge occurrences, summaries, closures, parity paths.
 //!
 //! Every function mirrors a Python function in `triadq/topology.py` and keeps its
