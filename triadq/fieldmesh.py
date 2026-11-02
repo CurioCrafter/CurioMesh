@@ -1152,6 +1152,14 @@ def quads_from(mesh: FieldMesh) -> tuple[np.ndarray, list[tuple[int, ...]]]:
         points = untangle(points, faces, 24)
         if not _any_folded(points, faces):
             break
+    points = _even_out_folds(points, faces)
+    for _ in range(FINISH_ROUNDS * 2):
+        faces = pair_by_paths(points, faces, 4000)
+        if all(len(f) == 4 for f in faces):
+            break
+        faces = _walk_triangles(points, faces)
+    points = _even_out_folds(points, faces)
+    points, faces = _open_crowded(points, faces)
     used, flat = np.unique(np.fromiter((v for f in faces for v in f), dtype=np.int64), return_inverse=True)
     out, at = [], 0
     for face in faces:
@@ -1259,6 +1267,83 @@ def field_quads(vertices, faces, target: float, turn: float | None = None, seed:
     if len(quads) < SMALLEST_TARGET // 2:
         raise ValueError("Rows of quads fell apart on this part.")
     return points, quads
+
+
+def _open_crowded(points: np.ndarray, faces) -> tuple[np.ndarray, list[tuple[int, ...]]]:
+    """An edge with three faces, which merges can rarely leave: those faces come out, and quads go over the hole."""
+
+    from . import segment  # it uses this file for Animation rows
+
+    if not faces or not segment._crowded_edges(faces):
+        return points, faces
+    before = {v for loop in segment.boundary_loops(faces, range(len(faces)))[0] for v in loop}
+    kept = segment._drop_crowded(faces)
+    holes = [loop for loop in segment.boundary_loops(kept, range(len(kept)))[0] if not before.intersection(loop)]
+    return segment._fill_holes(points, kept, holes)
+
+
+def _walk_triangles(points: np.ndarray, faces) -> list[tuple[int, ...]]:
+    """A triangle no path reaches moves over: its shortest side closes up, and the quad beyond it becomes the triangle."""
+
+    faces = [tuple(f) for f in faces]
+    edges = _edge_map(faces)
+    neighbours: dict[int, set[int]] = {}
+    for x, y in edges:
+        neighbours.setdefault(x, set()).add(y)
+        neighbours.setdefault(y, set()).add(x)
+    gone: set[int] = set()
+    rename: dict[int, int] = {}
+    touched: set[int] = set()
+    for index, face in enumerate(faces):
+        if len(face) != 3 or touched.intersection(face):
+            continue
+        sides = sorted(((float(np.linalg.norm(points[face[k]] - points[face[(k + 1) % 3]])), face[k], face[(k + 1) % 3]) for k in range(3)))
+        for _length, x, y in sides:
+            users = edges[(min(x, y), max(x, y))]
+            if len(users) != 2:
+                continue
+            other = faces[users[0] if users[1] == index else users[1]]
+            common = neighbours[x] & neighbours[y]
+            if common == {v for v in (*face, *other) if v not in (x, y) and (v in neighbours[x] and v in neighbours[y])} and len(common) <= 2 and len(other) in (3, 4):
+                rename[y] = x
+                gone.add(index)
+                touched.update(neighbours[x] | neighbours[y] | {x, y})
+                break
+    out = []
+    for index, face in enumerate(faces):
+        if index in gone:
+            continue
+        renamed = tuple(rename.get(v, v) for v in face)
+        unique = tuple(dict.fromkeys(renamed))
+        if len(unique) >= 3:
+            out.append(unique)
+    return out
+
+
+def _even_out_folds(points: np.ndarray, faces, rounds: int = 40) -> np.ndarray:
+    """Last resort for what's still folded: each corner to the middle of its neighbours, in all directions, spreading outward until none is. Costs a little shape there."""
+
+    quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+    if not len(quads):
+        return points
+    points = points.copy()
+    count = len(points)
+    first = np.concatenate([quads[:, k] for k in range(4)] + [quads[:, (k + 1) % 4] for k in range(4)])
+    second = np.concatenate([quads[:, (k + 1) % 4] for k in range(4)] + [quads[:, k] for k in range(4)])
+    uses = np.maximum(np.bincount(first, minlength=count), 1)
+    reach = None
+    for _ in range(rounds):
+        bad = quad_quality(points[quads]) <= 0.0
+        if not bad.any():
+            break
+        ids = np.unique(quads[bad])
+        if reach is None:
+            reach = np.zeros(count, dtype=bool)
+        reach[ids] = True
+        moving = np.flatnonzero(reach)
+        target = np.stack([np.bincount(first, points[second, k], count) for k in range(3)], axis=1) / uses[:, None]
+        points[moving] += 0.5 * (target[moving] - points[moving])
+    return points
 
 
 def _any_folded(points: np.ndarray, faces) -> bool:

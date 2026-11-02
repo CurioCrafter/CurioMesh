@@ -54,7 +54,9 @@ FIELD_SMALLEST = 1000  # triangles: a part with fewer isn't worth laying a grid 
 FIELD_MOST = 8000  # quads Auto may ask of it in one look, as it does this for every large part
 FIELD_SECONDS = 60.0  # Auto stops offering rows after spending this long on them in one run
 FIELD_START = 0.1  # share of a part's triangles, as quads, that the Field Rows method tries first
-FIELD_TRIES = 3
+FIELD_FIRST = 1500.0  # and at most this many: looking costs far more the more quads there are
+FIELD_LANDED = 0.75  # of the change asked for: near enough to stop looking
+FIELD_TRIES = 4
 FIELD_AIM = 0.9
 QUAD_WEIGHT = 0.9  # a rebuilt quad counts as this many faces of a triangle level (those end up about 1.1 quads each)
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
@@ -618,23 +620,23 @@ class AutoJob:
         method_here = self._method(len(self.sizes))
         plain = self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and self.drop is None and len(set(kinds)) == 1
         if method_here == "FIELD" and plain:
-            want = max(FIELD_START * triangles, 24.0)
+            want = max(min(FIELD_START * triangles, FIELD_FIRST), 24.0)
             asked = self.detail / 100.0
-            for _try in range(FIELD_TRIES):  # change falls about as faces ** -0.7, so each look says where to go next
+            for _try in range(FIELD_TRIES):  # change falls about as faces ** -0.63, so each look says where to go next
                 want = min(want, float(MOST_TARGET))
                 self.stage = f"Laying rows of quads on piece {len(self.sizes) + 1}: about {int(want):,} quads"
                 out = yield from self._field_size(points, polys, kinds, want, center, half, pixels, reference, pixel, 1.0)
                 if self._stopped:
                     return
                 if out is None:
-                    want *= 1.2  # refused, not too coarse: a little more room may do
+                    want *= 1.6  # refused: limbs thinner than a cell are the usual reason, and more cells fit them
                     continue
                 seen = max(seen, out[2])
                 turned_sizes.append(out[0])
                 turned_levels.append(out[1])
-                if out[3] <= asked or want >= MOST_TARGET:
+                if FIELD_LANDED * asked <= out[3] <= asked or want >= MOST_TARGET:
                     break
-                want *= min((out[3] / (FIELD_AIM * asked)) ** (1.0 / 0.7), 4.0)
+                want = len(out[0][1]) * min(max((max(out[3], 1e-4) / (FIELD_AIM * asked)) ** (1.0 / 0.63), 0.25), 4.0)
             if turned_sizes:
                 sizes = [*turned_sizes, whole]
                 levels = [*turned_levels, Level(len(polys), 0.0)]
