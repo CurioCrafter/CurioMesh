@@ -312,11 +312,24 @@ def border_vertices(faces, label: np.ndarray, vertex_count: int) -> np.ndarray:
     return low != high
 
 
+def _tuples(sizes: np.ndarray, flat: np.ndarray) -> list:
+    """Faces as a list of tuples from their sizes and corners, a row of NumPy at a time for each size."""
+    out: list = [None] * len(sizes)
+    starts = np.cumsum(sizes) - sizes
+    for size in np.unique(sizes).tolist():
+        ids = np.flatnonzero(sizes == size)
+        rows = map(tuple, flat[starts[ids][:, None] + np.arange(size)].tolist())
+        for at, row in zip(ids.tolist(), rows):
+            out[at] = row
+    return out
+
+
 def weld(points: np.ndarray, faces: list) -> tuple[np.ndarray, list]:
     """Merge vertices at exactly the same place (the chunk borders, which were kept unmoved)."""
     unique, inverse = np.unique(points, axis=0, return_inverse=True)
-    inverse = inverse.reshape(-1)
-    return unique, [tuple(int(inverse[v]) for v in f) for f in faces]
+    sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
+    flat = np.fromiter((v for f in faces for v in f), dtype=np.int64, count=int(sizes.sum()))
+    return unique, _tuples(sizes, inverse.reshape(-1)[flat])
 
 
 def region_name(center, low, high) -> str:
@@ -419,8 +432,7 @@ def load_piece(path: Path):
                 points = data[f"p{k}"]
                 if points.ndim != 2 or points.shape[1] != 3 or lens.min(initial=3) < 3 or int(lens.sum()) != len(flat) or (len(flat) and (flat.min() < 0 or flat.max() >= len(points))):
                     return None  # not a file we wrote
-                ends = np.cumsum(lens)
-                polys = [tuple(int(v) for v in flat[a:b]) for a, b in zip(ends - lens, ends)]
+                polys = _tuples(np.asarray(lens, dtype=np.int64), np.asarray(flat, dtype=np.int64))
                 sizes.append((data[f"p{k}"], polys, [str(int(m)) for m in data[f"m{k}"]]))
             return float(data["detail"]), sizes, [(int(f), float(w)) for f, w in data["levels"]], float(data["seen"])
     except Exception:
