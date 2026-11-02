@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Auto Segments also tries each big part reduced in small steps.** Each step starts
+  Decimate afresh, which keeps 15-20% fewer triangles at the same camera change on skin and
+  rock. Pairing into quads uses up most of that: about 3-5% fewer quads on the models
+  tried, nothing on rock at this amount. A part keeps a stepped size only if the camera
+  prefers it.
 - **Big scans are much faster, and Blender stays usable** (Turbo). Triangle pairing, closing, joining leftover
   triangles and taking quads away now run in the native core, each seed and each loose piece on its own core, with
   the same faces as the Python path. A piece of 60,000 triangles or more is reduced by a native reducer off the main
