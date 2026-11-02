@@ -133,6 +133,8 @@ state = {
     "fixes": [],  # remembered fixes, when the user's file can't be written
     "fixes_in_memory": False,
     "found": [],  # (fix, match) pairs of remembered fixes that fit the result, best first
+    "lod": None,  # the LOD set being made: {"made": [(name, faces, view change, bake text)]}
+    "lod_report": "",
     "region": None,  # faces of the source (a boolean each) that Selected Faces Only redoes, taken when Start was pressed
     "curve_sig": None,  # what the drawn curves looked like when the search last started: a change restarts it
     "curve_at": 0.0,
@@ -326,6 +328,9 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_baked: bpy.props.BoolProperty(name="Judge After Baking", description="Low Poly only, for scans and rocks you will bake a normal map for. Runs at 3% and judges the result as it looks baked, so bumps stop counting and far fewer faces are left. It damages hard-surface models, and its score misses that, so it only runs on a scan (almost no flat edges)", default=False)
     auto_tidy: bpy.props.BoolProperty(name="Tidy Quads", description="Auto Segments: after the search, try to make the quads tidier, like hand-made meshes. Slow, and the view changes a little more, so it is off unless you want it", default=False)
     keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Auto Segments: quads stay inside one UV island, so textures land where they did. Costs faces, nearly double on a model cut into many islands. Bake Detail Normal + Color is the better route for most game assets, as it needs no old seams", default=False)
+    lod0_percent: bpy.props.FloatProperty(name="LOD0", description="Faces of the first LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[0], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
+    lod1_percent: bpy.props.FloatProperty(name="LOD1", description="Faces of the second LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[1], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
+    lod2_percent: bpy.props.FloatProperty(name="LOD2", description="Faces of the third LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[2], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
     bake_detail: bpy.props.EnumProperty(name="Bake Detail", description="On Apply, bake your mesh's detail into textures on the result, on the CPU or GPU set for Cycles. Can take minutes", items=BAKE_ITEMS, default="OFF")
     bake_size: bpy.props.EnumProperty(name="Bake Size", description="Width and height of the baked textures", items=BAKE_SIZES, default="2048")
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Relax-and-project passes that settle the new quads onto your original surface", default=2, min=0, max=30)
@@ -1571,9 +1576,9 @@ def _solve_inputs(gs, src, lines, paint):
     return co, faces, mat, mirror, lines, paint, note
 
 
-def _start_segments(context, gs, src) -> bool:
-    """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
-    target = auto_target(gs, len(src["faces"]))
+def _start_segments(context, gs, src, target: int | None = None) -> bool:
+    """Start the search, to land on `target` faces if given. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
+    target = auto_target(gs, len(src["faces"])) if target is None else target
     lines = _guide_lines(context, gs, src)
     drawn = {kind: _guide_lines(context, gs, src, kind) for kind in ("LOOP", "BEND")}
     paint = _painted(state_source(), gs, src)
@@ -1745,12 +1750,18 @@ def _collect_work(context) -> None:
         base = state["auto_base"]
         if not runner.busy and runner.report is not None and runner.output is not None and (base is None or base["job"] is not runner):
             state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": _real_materials(runner.output, work.get("charts")), "charts": work.get("charts"), "report": runner.report, "job": runner, "summary": state["message"]}
+            if state["lod"] is not None:
+                _lod_finished(context, source, runner.report)
+                overlay.tag_redraw()
+                return
             segments.ensure()
             _restore_kept(context, source)
             if state["res"] is not None and len(_library()) * len(state["res"]["faces"]) < 300_000:
                 _scan(state["res"])
             segments.ensure()
             segments.segment_goals.start_find(context)
+        elif not runner.busy and runner.report is None and state["lod"] is not None:  # the search failed: nothing more to come
+            state["lod"] = None
         overlay.tag_redraw()
         return
     res = state["res"]
@@ -1881,7 +1892,7 @@ def _stop() -> None:
         bpy.app.timers.unregister(_poll)
     stop_work()
     remove_preview()
-    state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}))
+    state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}), lod=None)
     segments.reset()
     overlay.tag_redraw()
 
@@ -2697,6 +2708,91 @@ def _write_instances(out, source, instances) -> int:
     return made
 
 
+def _write_result(context, source, res, gs, name: str):
+    """A new object from a result, with UVs, normals, shading and materials as your mesh has them. Returns (object, bake text)."""
+    mesh = _make_mesh(name, source, res)
+    _shade_by_angle(mesh)
+    _transfer_normals(mesh, _source_data(source), res)
+    if gs.bend_crease or gs.bend_sharp:
+        _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
+    out = bpy.data.objects.new(name, mesh)
+    (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(out)
+    out.matrix_world = source.matrix_world.copy()
+    for slot, copy in zip(source.material_slots, out.material_slots):
+        if slot.link == "OBJECT":  # materials kept on the object, not in the mesh
+            copy.link = "OBJECT"
+            copy.material = slot.material
+    baked = ""
+    if gs.bake_detail != "OFF":
+        baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
+    return out, baked
+
+
+def _lod_next(context, source) -> None:
+    """Start the next size of the LOD set. What the first one measured is reused, so only it does the full search."""
+    gs = context.scene.curiomesh_guided
+    src = _source_data(source)
+    targets = profiles.lod_targets((gs.lod0_percent, gs.lod1_percent, gs.lod2_percent), len(src["faces"]))
+    stop_work()
+    state["auto_base"] = None
+    _start_segments(context, gs, src, targets[len(state["lod"]["made"])])
+
+
+def _lod_finished(context, source, report) -> None:
+    """One size is done: write its object, and go on to the next or end the set."""
+    gs = context.scene.curiomesh_guided
+    lod = state["lod"]
+    level = len(lod["made"])
+    name = profiles.lod_name(source.name, level)
+    old = bpy.data.objects.get(name)
+    if old is not None and "curiomesh_lod" in old:  # made by this button before: the name must stay free for the engine's import
+        bpy.data.objects.remove(old)
+    out, baked = _write_result(context, source, state["res"], gs, name)
+    out["curiomesh_lod"] = level
+    out["curiomesh_view_change"] = report["loss"]
+    lod["made"].append((out.name, report["faces"], report["loss"], baked))
+    if level < profiles.LOD_LEVELS - 1:
+        _lod_next(context, source)
+        return
+    made = lod["made"]
+    gs.enabled = False  # removes the preview, stops the timer
+    state["lod_report"] = " | ".join(f"{name}: {faces:,} faces, view changed by {loss:.1f}%{bake}" for name, faces, loss, bake in made)
+    bpy.ops.object.select_all(action="DESELECT")
+    first = bpy.data.objects[made[0][0]]
+    first.select_set(True)
+    context.view_layer.objects.active = first
+
+
+class CURIOMESH_OT_guided_make_lods(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_make_lods"
+    bl_label = "Make LOD Set"
+    bl_description = "Make three new objects named for game engines (_LOD0, _LOD1, _LOD2), each a Reduce To of your mesh at the percents here. Blender stays usable, and only the first needs the full search. Uses your UV and bake settings"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return _source_mesh(context) is not None
+
+    def execute(self, context):
+        if context.object is not None and context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        gs = _gs(context)
+        source = _source_mesh(context)
+        state["source"] = source.name
+        stop_work()
+        remove_preview()
+        state.update(region=None, lod_report="", lod=None)
+        gs["bool_on"] = False
+        gs.scope = "AUTO"
+        if not gs.enabled:
+            gs.enabled = True
+        state["lod"] = {"made": []}
+        _lod_next(context, source)
+        state["sig"] = _signature(context, source)
+        state["dirty"] = False
+        return {"FINISHED"}
+
+
 class CURIOMESH_OT_guided_apply(bpy.types.Operator):
     bl_idname = "curiomesh.guided_apply"
     bl_label = "Apply"
@@ -2928,6 +3024,7 @@ class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
             stop_work()
             remove_preview()
             state["auto_base"] = None
+            state["lod"] = None  # the sizes already made stay as objects
             state["message"] = "Stopped. Press Start to try again"
         overlay.tag_redraw()
         return {"FINISHED"}
@@ -3377,6 +3474,16 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
 
         draw_auto_button(layout, context, gs)
 
+        if not searching and not done:
+            col = layout.box().column(align=True)
+            row = col.row(align=True)
+            row.prop(gs, "lod0_percent")
+            row.prop(gs, "lod1_percent")
+            row.prop(gs, "lod2_percent")
+            col.operator("curiomesh.guided_make_lods", icon="MOD_DECIM")
+            for line in state["lod_report"].split(" | ") if state["lod_report"] else ():
+                overlay.wrap_label(col, line, icon="CHECKMARK", width=36, limit=2)
+
         # Settings, read-only while the search runs
         layout.label(text="2. Choose what it's for")
         col = layout.column(align=True)
@@ -3787,6 +3894,7 @@ CLASSES = (
     CURIOMESH_OT_guided_redraw_strip,
     CURIOMESH_OT_guided_frame,
     CURIOMESH_OT_guided_apply,
+    CURIOMESH_OT_guided_make_lods,
     CURIOMESH_OT_guided_stop,
     CURIOMESH_OT_guided_auto_start,
     CURIOMESH_OT_guided_check_pc,

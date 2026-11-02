@@ -787,7 +787,7 @@ class AutoJob:
             if found:
                 return
             self.reps.append((len(self.sizes), points, polys))
-        key = ("piece", ids.tobytes(), (None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips), self.rough, self.baked))  # sizes judged another way are no use
+        key = ("piece", ids.tobytes(), (None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips), self.rough, self.baked, self.target_faces > 0))  # Reduce To needs the small sizes a kept-detail search skips; sizes judged another way are no use  # sizes judged another way are no use
         file = None
         if self.checkpoint is not None:
             file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
@@ -1408,6 +1408,7 @@ class AutoJob:
         view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
         limited = yield from self._off(lambda: over_limit(full, view))
         reducer.freeze(sorted(set(back[limited].tolist())))  # whatever is at its limit stays as it is
+        already = set(reducer.original_ids(sorted(set(back[limited].tolist()))))  # numbered as the reducer started: parts over before are not to blame
         saved = yield from self._background(reducer.save)
         step = REDUCE_STEP
         looks = 0
@@ -1429,7 +1430,8 @@ class AutoJob:
             view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
             wrong, shown = self._counts(reference, view, pixel)
             now = 100.0 * wrong / max(shown, 1)
-            ruined = yield from self._off(lambda: sorted(set(back[over_limit(full, view)].tolist())))
+            found = yield from self._off(lambda: sorted(set(back[over_limit(full, view)].tolist())))
+            ruined = [v for v, name in zip(found, reducer.original_ids(found)) if name not in already]  # parts over before, and frozen, are not to blame
             if now <= self.detail and not ruined:
                 result, owner, loss = attempt, attempt_owner, now
                 saved = yield from self._background(reducer.save)

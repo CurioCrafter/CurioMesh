@@ -137,3 +137,22 @@ def uv_overlap(uv_tris: np.ndarray, pixels: int = 256) -> float:
         hits[x[inside], y[inside]] += 1
     used = int((hits > 0).sum())
     return float((hits > 1).sum()) / used if used else 1.0
+
+
+def is_see_through(material) -> bool:
+    """A material a color bake would ruin: glass nodes, blended transparency, or a Principled shader with transmission or alpha."""
+
+    if material is None:
+        return False
+    if getattr(material, "blend_method", "OPAQUE") in {"BLEND", "HASHED"} or getattr(material, "surface_render_method", "DITHERED") == "BLENDED":
+        return True
+    tree = material.node_tree if material.use_nodes else None
+    for node in tree.nodes if tree is not None else ():
+        if node.type in {"BSDF_GLASS", "BSDF_TRANSPARENT", "BSDF_REFRACTION"}:
+            return True
+        if node.type == "BSDF_PRINCIPLED":
+            for name, opaque in (("Alpha", 1.0), ("Transmission Weight", 0.0), ("Transmission", 0.0)):  # the name changed in Blender 4.0
+                plug = node.inputs.get(name)
+                if plug is not None and (plug.is_linked or plug.default_value != opaque):
+                    return True
+    return False

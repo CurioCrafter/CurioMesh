@@ -117,3 +117,16 @@ def detail_words(detail: float) -> str:
         if detail < limit:
             return words
     return "Extreme: a rough block of the object"
+
+
+LOD_LEVELS = 3
+LOD_PERCENTS = (50.0, 25.0, 12.5)  # each half the last, a common starting point; the view change each LOD reports is the real test
+
+
+def lod_name(source: str, level: int) -> str:
+    return f"{source}_LOD{level}"
+
+
+def lod_targets(percents, faces: int) -> list[int]:
+    """Faces to land on per LOD: never so few that nothing is left."""
+    return [max(12, int(round(p / 100.0 * faces))) for p in percents]

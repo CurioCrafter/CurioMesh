@@ -2,10 +2,11 @@
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
-from triadq.uvs import chart_codes, simplify_borders, uv_overlap
+from triadq.uvs import chart_codes, is_see_through, simplify_borders, uv_overlap
 
 
 class UvHelpersTest(unittest.TestCase):
@@ -38,6 +39,29 @@ class UvHelpersTest(unittest.TestCase):
         self.assertEqual(uv_overlap(np.array([left, right])), 0.0)
         self.assertGreater(uv_overlap(np.array([left, left])), 0.9)
         self.assertEqual(uv_overlap(np.array([[[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]]])), 1.0)
+
+
+def _plug(value=0.0, linked=False):
+    return SimpleNamespace(default_value=value, is_linked=linked)
+
+
+def _material(*nodes, **extra):
+    return SimpleNamespace(use_nodes=True, node_tree=SimpleNamespace(nodes=list(nodes)), **extra)
+
+
+class SeeThroughTests(unittest.TestCase):
+    def test_opaque_shader_can_be_baked(self):
+        shader = SimpleNamespace(type="BSDF_PRINCIPLED", inputs={"Alpha": _plug(1.0), "Transmission Weight": _plug(0.0)})
+        self.assertFalse(is_see_through(_material(shader, blend_method="OPAQUE")))
+        self.assertFalse(is_see_through(None))
+
+    def test_glass_is_kept_out_of_the_bake(self):
+        glass = SimpleNamespace(type="BSDF_GLASS", inputs={})
+        faded = SimpleNamespace(type="BSDF_PRINCIPLED", inputs={"Alpha": _plug(0.4)})
+        clear = SimpleNamespace(type="BSDF_PRINCIPLED", inputs={"Transmission": _plug(1.0)})
+        for node in (glass, faded, clear):
+            self.assertTrue(is_see_through(_material(node)))
+        self.assertTrue(is_see_through(_material(blend_method="BLEND")))
 
 
 if __name__ == "__main__":

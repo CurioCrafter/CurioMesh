@@ -9,7 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from profiles import PROFILES, detail_words, preset  # noqa: E402
+from profiles import PROFILES, detail_words, lod_name, lod_targets, preset  # noqa: E402
 from triadq import checks, repair  # noqa: E402
 
 CUBE = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
@@ -74,6 +74,12 @@ class CrossingTests(unittest.TestCase):
         self.assertFalse(work.is_new(0, 1))  # right where the source crosses itself
         work.piece[:] = [0, 2, 1]
         self.assertTrue(work.is_new(1, 2))  # pieces that did not cross
+
+
+class LodTests(unittest.TestCase):
+    def test_lod_names_and_sizes(self):
+        self.assertEqual(lod_name("Crate", 2), "Crate_LOD2")
+        self.assertEqual(lod_targets((50.0, 25.0, 0.001), 10000), [5000, 2500, 12])
 
 
 if __name__ == "__main__":

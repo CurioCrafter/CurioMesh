@@ -32,6 +32,19 @@
   own rough outline: a normal map changes its shading only.
 - **Auto button**, at the top of Quick Start and Auto Segments: picks the Use and settings
   from the mesh and the free memory, says why, and starts. Nothing changes until Apply.
+- **Make LOD Set** (Auto Segments). One button makes `<name>_LOD0`, `_LOD1` and `_LOD2`, each a
+  Reduce To of your mesh at percents you can change (50, 25 and 12.5% by default: each half the
+  last, a common starting point, not a rule). Only the first does the full search; the others
+  reuse what it measured. Each object keeps UVs and materials as your settings say and reports
+  how much its view changed. Air compressor: 41,428 / 21,161 / 10,629 faces, view changed by
+  1.0 / 1.7 / 6.8%, in under 10 minutes for all three.
+- **Taking quads away works on models of many parts again.** A part that was already at its
+  limit before anything came off blocked every later step, so nothing was taken away. The
+  compressor now ends about 10% smaller, with or without kept UVs, and that step is 5x faster.
+  With Keep UV Seams the result is still about 2.3x the faces: the vertices on UV island borders
+  can't move, and on a model cut into 1,500 islands they are almost half of them.
+- **Bake Normal + Color keeps glass.** See-through materials (glass, transmission, alpha, blended)
+  stay as they are, with their own UVs, instead of being merged into the baked material.
 - **Part cases** (Auto Segments). Each part now gets a named case from a few cheap
   measurements: tiny part, flat plate, thin sheet, box, tube, dome, rough scan, ornament or
   organic smooth. A small table, built from camera results on nine models, says which
