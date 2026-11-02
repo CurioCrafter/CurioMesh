@@ -1534,7 +1534,7 @@ def _shape_mask(context, source, base, shapes) -> np.ndarray:
     return patch.combine_masks(len(local), entries)
 
 
-def _start_boolean(context, gs, source, src) -> bool:
+def _start_boolean(context, gs, source, src, coarser: float = 1.0) -> bool:
     """Step 4: redo the faces inside the shapes on the worker, from the finished Auto Segments result."""
     base = state["auto_base"]
     if base is None or base["sig"] != src["sig"]:
@@ -1574,7 +1574,8 @@ def _start_boolean(context, gs, source, src) -> bool:
         # Never finer than the quads already there, so a redo does not add faces; Reduce To scales it by the share asked for.
         report = base["report"]
         share = min(1.0, report["asked"] / max(report["before"], 1)) if report["asked"] else 1.0
-        edge = max(edge * 1.2 * 2.5 ** (1.0 - 2.0 * gs.bool_detail), edge) / math.sqrt(max(share, 0.01))
+        edge = coarser * max(edge * 1.2 * 2.5 ** (1.0 - 2.0 * gs.bool_detail), edge) / math.sqrt(max(share, 0.01))
+        work["coarser"] = coarser
         jobs = [areas.Job(mask, edge, gs.strategy, (0,))]
     state["message"] = work["note"] or "Redoing the part inside the shapes..."
     work["runner"].start(jobs)
@@ -1608,6 +1609,10 @@ def _collect_work(context) -> None:
             state["res"] = res
             _build_preview(context, source, res, uvs=False)  # the UVs are copied when you Apply
         state["draw_key"] = None
+    res = state["res"]
+    if work["key"][1] == "BOOL" and not runner.busy and res is not None and not res["new"].any() and not work.get("note") and work.get("coarser", 4.0) < 4.0:
+        _start_boolean(context, _gs(context), source, _source_data(source), work["coarser"] * 1.6)  # too many faces for the room: try bigger quads
+        return
     if isinstance(runner, segments.PartJob):
         state["message"] = runner.status()
         if not runner.busy and not runner.committed:
@@ -1646,7 +1651,7 @@ def finish_work(context) -> None:
         work = state["work"]
         work["runner"].wait()
         _collect_work(context)
-        if state["work"] is work:
+        if state["work"] is work and not work["runner"].busy:
             break
 
 
