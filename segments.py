@@ -573,15 +573,20 @@ def _draw_text() -> None:
         import blf
 
         x, y = seg["mouse"]
-        for i, line in enumerate(info_lines(hover)):
-            try:
-                blf.size(0, 14.0)
-            except TypeError:  # before Blender 4.0 the size also takes a dpi
-                blf.size(0, 14, 72)
+        lines = info_lines(hover)
+        try:
+            blf.size(0, 14.0)
+        except TypeError:  # before Blender 4.0 the size also takes a dpi
+            blf.size(0, 14, 72)
+        wide = max(blf.dimensions(0, line)[0] for line in lines)
+        edge = bpy.context.region.width - overlay._sidebar_inset()  # the N-panel is drawn over the viewport's right side
+        left = x + 18 if x + 18 + wide < edge else max(x - 18 - wide, 4.0)
+        y = max(y, 18 * len(lines) + 24)  # keep the last line above the bottom edge
+        for i, line in enumerate(lines):
             blf.enable(0, blf.SHADOW)
             blf.shadow(0, 5, 0.0, 0.0, 0.0, 1.0)
             blf.color(0, 1.0, 1.0, 1.0 if i else 0.95, 1.0)
-            blf.position(0, x + 18, y - 18 - 18 * i, 0)
+            blf.position(0, left, y - 18 - 18 * i, 0)
             blf.draw(0, line)
             blf.disable(0, blf.SHADOW)
     except Exception as exc:
@@ -750,8 +755,9 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
         if item.piece >= len(seg["parts"]):
             return
         r = seg["parts"][item.piece]
-        row = layout.row(align=True)
+        row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
         row.label(text=name_of(item.piece), icon="CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
+        row = row.split(factor=0.55, align=True)
         row.label(text="?" if r["change"] is None else f"{r['change']:.1f}%")
         row.label(text=f"{r['after']:,} f")
 
@@ -760,7 +766,7 @@ def draw_parts(layout, context, gs) -> None:
     """The Parts panel: switches, bulk selection, the worst-first list, and the selected part's numbers and tries."""
     if not ready():
         box = layout.box()
-        box.label(text="Parts appear when the search is done", icon="INFO")
+        overlay.wrap_label(box, "Parts appear when the search is done", icon="INFO", width=30, limit=2)
         return
     col = layout.column(align=True)
     row = col.row(align=True)
