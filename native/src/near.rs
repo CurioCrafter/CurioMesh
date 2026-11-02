@@ -339,7 +339,9 @@ fn closest_on_triangle(p: V3, a: V3, b: V3, c: V3) -> V3 {
     [a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w]
 }
 
-/// Do two triangles pass through each other? As Blender's `isect_tri_tri_v3`: coplanar ones don't, and touching ones do.
+/// Do two triangles pass through each other? Blender's `isect_tri_tri_v3_ex` (GPL), step for step and with its mix of
+/// single and double precision, so the count matches what Blender's BVH overlap gave: coplanar ones don't cross, and
+/// the pieces along the line where the planes meet must overlap by more than a point.
 fn triangles_cross(ta: &[[f32; 3]; 3], tb: &[[f32; 3]; 3]) -> bool {
     let a = [to_f64(ta[0]), to_f64(ta[1]), to_f64(ta[2])];
     let b = [to_f64(tb[0]), to_f64(tb[1]), to_f64(tb[2])];
@@ -347,21 +349,19 @@ fn triangles_cross(ta: &[[f32; 3]; 3], tb: &[[f32; 3]; 3]) -> bool {
         let n = cross(sub(t[0], t[1]), sub(t[2], t[1]));
         (n, -dot(n, t[1]))
     };
-    let sides = |t: &[V3; 3], n: V3, d: f64| [(dot(n, t[0]) + d) as f32, (dot(n, t[1]) + d) as f32, (dot(n, t[2]) + d) as f32];
-    let apart = |s: &[f32; 3]| (s[0] == 0.0 && s[1] == 0.0 && s[2] == 0.0) || (s[0] != 0.0 && s[1] != 0.0 && s[2] != 0.0 && (s[0] < 0.0) == (s[1] < 0.0) && (s[0] < 0.0) == (s[2] < 0.0));
-    let (na, da) = plane(&a);
-    let side_b = sides(&b, na, da);
-    if apart(&side_b) {
+    let sides = |t: &[V3; 3], (n, d): (V3, f64)| [(dot(n, t[0]) + d) as f32, (dot(n, t[1]) + d) as f32, (dot(n, t[2]) + d) as f32];
+    let one_side = |s: &[f32; 3]| s[0] != 0.0 && s[1] != 0.0 && s[2] != 0.0 && (s[0] < 0.0) == (s[1] < 0.0) && (s[0] < 0.0) == (s[2] < 0.0);
+    let (plane_a, plane_b) = (plane(&a), plane(&b));
+    let side_b = sides(&b, plane_a);
+    if (side_b[0] == 0.0 && side_b[1] == 0.0 && side_b[2] == 0.0) || one_side(&side_b) {
         return false;
     }
-    let (nb, db) = plane(&b);
-    let side_a = sides(&a, nb, db);
-    if apart(&side_a) {
+    let side_a = sides(&a, plane_b);
+    if one_side(&side_a) {
         return false;
     }
-    let line = cross(na, nb);
-    let span = |t: &[V3; 3], s: &[f32; 3]| {
-        // Reorder so the corner alone on its side of the plane is the middle one.
+    let line = cross(plane_a.0, plane_b.0);
+    let range = |t: &[V3; 3], s: &[f32; 3]| -> (f32, f32) {
         let same = |i: usize, j: usize| s[i] != 0.0 && s[j] != 0.0 && (s[i] < 0.0) == (s[j] < 0.0);
         let (i0, i1, i2) = if same(0, 1) {
             (1, 2, 0)
@@ -371,17 +371,20 @@ fn triangles_cross(ta: &[[f32; 3]; 3], tb: &[[f32; 3]; 3]) -> bool {
             (0, 1, 2)
         };
         let base = dot(line, t[i1]);
-        let lone = s[i1] as f64;
-        let at0 = (dot(line, t[i0]) - base) * (lone / (lone - s[i0] as f64)) + base;
-        let at1 = (dot(line, t[i2]) - base) * (lone / (lone - s[i2] as f64)) + base;
-        if at0 > at1 {
-            (at1, at0)
-        } else {
-            (at0, at1)
+        let lone = s[i1];
+        if lone == 0.0 {
+            return (base as f32, base as f32);
         }
+        let fac0 = lone / (lone - s[i0]);
+        let fac1 = lone / (lone - s[i2]);
+        let (mut off0, mut off1) = (fac0 as f64 * (dot(line, t[i0]) - base), fac1 as f64 * (dot(line, t[i2]) - base));
+        if off0 > off1 {
+            std::mem::swap(&mut off0, &mut off1);
+        }
+        ((base + off0) as f32, (base + off1) as f32)
     };
-    let (ra, rb) = (span(&a, &side_a), span(&b, &side_b));
-    !(ra.0 > rb.1 || ra.1 < rb.0)
+    let (ra, rb) = (range(&a, &side_a), range(&b, &side_b));
+    ra.1 > rb.0 && ra.0 < rb.1
 }
 
 impl FaceTree {

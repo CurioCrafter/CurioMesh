@@ -75,7 +75,7 @@ def pure_cross(a, b) -> bool:
         return (min(ends), max(ends)) if ends else None
 
     sa, sb = span(a, nb, b[0]), span(b, na, a[0])
-    return sa is not None and sb is not None and sa[0] <= sb[1] and sb[0] <= sa[1]
+    return sa is not None and sb is not None and sa[0] < sb[1] and sb[0] < sa[1]
 
 
 @unittest.skipUnless(LOOKUPS, f"native module without the lookups: {turbo.status()}")
