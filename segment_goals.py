@@ -1041,7 +1041,7 @@ def draw_selected(layout, gs) -> None:
             box.label(text=line, icon="OBJECT_DATA" if i == 0 else "BLANK1")
         words = guided.state["auto_base"]["job"].explain_piece(selected[0])
         if words:
-            overlay.wrap_label(box, words, icon="INFO", width=32, limit=4)
+            overlay.wrap_label(box, words, icon="INFO", width=32, limit=6)
     else:
         parts = [view.seg["parts"][p] for p in selected]
         known = [r["change"] for r in parts if r["change"] is not None]
