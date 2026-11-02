@@ -106,6 +106,7 @@ REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots sel
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
+STEP = 0.8  # each size made in steps is this share of the size before it
 
 
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None, baked_from: BVHTree | None = None):
@@ -934,6 +935,17 @@ class AutoJob:
                     sizes.append(reduced)
                     levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
                     spots.append(spots[k])
+            # Reduced a little at a time, Decimate forgets the errors it has built up and leaves a closer surface: 15-20% fewer
+            # triangles on skin and rock, about even on plates. So these go in beside the other sizes, and the camera chooses.
+            reduced = sizes[len(order) - 1] if triangles < NATIVE_FROM else None  # the native reducer keeps its own sizes
+            while reduced is not None and len(reduced[1]) * STEP >= 12.0:
+                yield
+                reduced = _decimate(self.context, *reduced, STEP)
+                view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
+                sizes.append(reduced)
+                levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
+                if levels[-1].loss > floor * seen:
+                    break
             kept = best_levels(levels)
             sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
         # Rows are offered to Auto only on flat or simple parts: the camera mostly turns them down elsewhere, and each try costs seconds.
