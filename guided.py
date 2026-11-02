@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,6 +130,8 @@ state = {
     "predicted": 0,
     "work": None,
     "auto_cache": (None, {}),  # (mesh signature, measurements of it): Start again with another amount skips the looking
+    "fixes": [],  # remembered fixes, when the user's file can't be written
+    "fixes_in_memory": False,
     "found": [],  # (fix, match) pairs of remembered fixes that fit the result, best first
     "region": None,  # faces of the source (a boolean each) that Selected Faces Only redoes, taken when Start was pressed
     "curve_sig": None,  # what the drawn curves looked like when the search last started: a change restarts it
@@ -1038,13 +1039,33 @@ class _PreviewOp:
         return bpy.data.objects.get(PREVIEW_NAME) is not None and state["res"] is not None
 
 
-def library_path() -> str:
-    """The user's own file of remembered fixes, in Blender's user config folder (not in the add-on)."""
+def library_path() -> str | None:
+    """The user's own file of remembered fixes, in Blender's user config folder (not in the add-on). None if that can't be written."""
     try:
-        folder = bpy.utils.user_resource("CONFIG", path="curiomesh", create=True)
-    except OSError:  # a config folder we can't write: the fixes last for this session
-        folder = tempfile.gettempdir()
-    return os.path.join(folder, "fixes.json")
+        return os.path.join(bpy.utils.user_resource("CONFIG", path="curiomesh", create=True), "fixes.json")
+    except (OSError, ValueError):
+        return None
+
+
+def _library() -> list[dict]:
+    """The remembered fixes: from the user's file, or this session's memory when it can't be used."""
+    path = None if state["fixes_in_memory"] else library_path()
+    if path is None:
+        return state["fixes"]
+    return teach.load(path)
+
+
+def _keep_library(fixes: list[dict]) -> None:
+    """Save the fixes to the user's file. When that can't be written they stay in memory for this session, and the panel says so."""
+    path = library_path()
+    try:
+        if path is None:
+            raise OSError("no config folder")
+        teach.save(path, fixes)
+        state["fixes_in_memory"] = False
+    except OSError:
+        state["fixes"] = fixes
+        state["fixes_in_memory"] = True
 
 
 def _drain(generator):
@@ -1086,16 +1107,18 @@ def _adopt(context, source, co, faces, mat) -> None:
 
 
 def _kept(source) -> list[dict]:
+    """The fixes kept on this object. A .blend file can come from anybody, so only valid ones count."""
     try:
-        return json.loads(source.get("curiomesh_kept", "[]"))
-    except ValueError:
+        kept = json.loads(source.get("curiomesh_kept", "[]"))
+    except (ValueError, TypeError, RecursionError):
         return []
+    return [e for e in kept if isinstance(e, dict) and teach.valid_fix(e.get("fix")) and type(e.get("reach")) in (int, float) and teach._points([e.get("at")])] if isinstance(kept, list) else []
 
 
 def _scan(res) -> None:
     """Which remembered fixes fit the result now."""
     found = []
-    for fix in teach.load(library_path()):
+    for fix in _library():
         found += [(fix, m) for m in teach.find(fix, res["co"], res["faces"])[:5]]
     state["found"] = sorted(found, key=lambda pair: pair[1]["score"])
 
@@ -1152,7 +1175,7 @@ class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
         ring = np.asarray(res["co"])[teach.outline(res["faces"], gone)]
         edge = float(np.mean(np.linalg.norm(np.roll(ring, -1, axis=0) - ring, axis=1)))
         _leave_preview(context)
-        teach.save(library_path(), teach.merge(teach.load(library_path()), [fix]))
+        _keep_library(teach.merge(_library(), [fix]))
         entry = {"fix": fix, "at": ring.mean(axis=0).tolist(), "reach": 3.0 * edge}
         source["curiomesh_kept"] = json.dumps(_kept(source) + [entry])
         _adopt(context, source, co, faces, mat)
@@ -1218,7 +1241,7 @@ class CURIOMESH_OT_teach_export(bpy.types.Operator, ExportHelper):
     filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
 
     def execute(self, context):
-        teach.save(self.filepath, teach.load(library_path()))
+        teach.save(self.filepath, _library())
         return {"FINISHED"}
 
 
@@ -1230,9 +1253,9 @@ class CURIOMESH_OT_teach_import(bpy.types.Operator, ImportHelper):
     filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
 
     def execute(self, context):
-        mine = teach.load(library_path())
+        mine = _library()
         both = teach.merge(mine, teach.load(self.filepath))
-        teach.save(library_path(), both)
+        _keep_library(both)
         self.report({"INFO"}, f"{len(both) - len(mine)} fix(es) added")
         return {"FINISHED"}
 
@@ -1695,7 +1718,7 @@ def _collect_work(context) -> None:
             state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": _real_materials(runner.output, work.get("charts")), "charts": work.get("charts"), "report": runner.report, "job": runner, "summary": state["message"]}
             segments.ensure()
             _restore_kept(context, source)
-            if state["res"] is not None and len(teach.load(library_path())) * len(state["res"]["faces"]) < 300_000:
+            if state["res"] is not None and len(_library()) * len(state["res"]["faces"]) < 300_000:
                 _scan(state["res"])
             segments.ensure()
             segments.segment_goals.start_find(context)
@@ -3408,8 +3431,10 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row = col.row(align=True)
             row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
             row.operator("curiomesh.teach_remember", text="Remember", icon="BOOKMARKS")
-            known = len(teach.load(library_path()))
+            known = len(_library())
             col.label(text=f"{known} fix(es) remembered on this PC")
+            if state["fixes_in_memory"]:
+                overlay.wrap_label(col, "Blender's config folder can't be written, so these last only until you close Blender. Export them to keep them.", icon="ERROR", width=36, limit=4)
             if state["found"]:
                 col.label(text="You've fixed something like this before:", icon="INFO")
                 col.operator("curiomesh.teach_apply", text=f"Apply ({len(state['found'])} places)", icon="CHECKMARK")

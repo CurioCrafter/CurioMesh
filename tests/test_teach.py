@@ -51,5 +51,29 @@ class TeachTests(unittest.TestCase):
             self.assertEqual(teach.load(path)[0]["id"], fix["id"])
 
 
+class LibraryFileTests(unittest.TestCase):
+    good = {"id": "a", "ring": 3, "ring_points": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "before": [[0, 1, 2]], "before_inner": [], "after": [[0, 1, 2]], "after_inner": []}
+
+    def test_only_valid_fixes_are_read_and_saving_leaves_no_temp_file(self):
+        bad = [
+            dict(self.good, ring="3"),
+            dict(self.good, ring=4),  # ring_points doesn't match
+            dict(self.good, before=[[0, 1, 99]]),  # past the vertices it has
+            dict(self.good, after=[[0, 0, 1]]),
+            dict(self.good, ring_points=[[0, 0, float("nan")], [1, 0, 0], [0, 1, 0]]),
+            dict(self.good, id=5),
+            [],
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "fixes.json")
+            teach.save(path, [self.good] + bad)
+            self.assertEqual([f["id"] for f in teach.load(path)], ["a"])
+            self.assertEqual([p.name for p in Path(folder).iterdir()], ["fixes.json"])
+            Path(path).write_text('{"fixes": 7}', encoding="utf-8")
+            self.assertEqual(teach.load(path), [])
+            Path(path).write_text("[" * 100000, encoding="utf-8")
+            self.assertEqual(teach.load(path), [])
+
+
 if __name__ == "__main__":
     unittest.main()

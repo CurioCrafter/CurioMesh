@@ -15,6 +15,9 @@ and NumPy, and nothing leaves the machine: the library is one JSON file the user
 from __future__ import annotations
 
 import json
+import math
+import os
+import tempfile
 import time
 
 import numpy as np
@@ -284,18 +287,68 @@ def put_in(co, faces, fix: dict, match: dict, project=None):
 # --------------------------------------------------------------------------- the library file
 
 
+MOST_BYTES = 32_000_000  # a library file bigger than this is not read
+MOST_FIXES = 2000
+MOST_VERTICES = 20_000  # in one fix
+MOST_FACES = 20_000
+LONGEST_NAME = 200
+
+
+def _points(value) -> bool:
+    """A list of finite (x, y, z)."""
+    return isinstance(value, list) and len(value) <= MOST_VERTICES and all(
+        isinstance(p, list) and len(p) == 3 and all(type(x) in (int, float) and math.isfinite(x) for x in p) for p in value
+    )
+
+
+def _faces_in(value, count: int) -> bool:
+    """A list of faces of 3 or more corners, each a different vertex below `count`."""
+    return isinstance(value, list) and 0 < len(value) <= MOST_FACES and all(
+        isinstance(f, list) and 3 <= len(f) <= 64 and len(set(f)) == len(f) and all(type(v) is int and 0 <= v < count for v in f) for f in value
+    )
+
+
+def valid_fix(fix) -> bool:
+    """Whether a fix read from a file is safe to use: a library can come from anybody, so nothing in it is taken on trust."""
+    if not isinstance(fix, dict):
+        return False
+    ring = fix.get("ring")
+    if type(ring) is not int or not 3 <= ring <= MOST_VERTICES:
+        return False
+    if not isinstance(fix.get("id"), str) or len(fix["id"]) > LONGEST_NAME or type(fix.get("uses", 0)) is not int:
+        return False
+    if not (_points(fix.get("ring_points")) and _points(fix.get("before_inner", [])) and _points(fix.get("after_inner", []))) or len(fix["ring_points"]) != ring:
+        return False
+    shape = fix.get("shape", [])
+    if not isinstance(shape, list) or len(shape) > 16 or not all(type(x) in (int, float) and math.isfinite(x) for x in shape):
+        return False
+    return _faces_in(fix.get("before"), ring + len(fix.get("before_inner", []))) and _faces_in(fix.get("after"), ring + len(fix.get("after_inner", [])))
+
+
 def load(path: str) -> list[dict]:
+    """The valid fixes in a file. Anything else in it is left out; a file that can't be read gives none."""
     try:
+        if os.path.getsize(path) > MOST_BYTES:
+            return []
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
-        return [f for f in data.get("fixes", []) if {"id", "ring", "before", "after", "ring_points"} <= set(f)]
-    except (OSError, ValueError, AttributeError):
+        fixes = data.get("fixes", [])
+        return [f for f in fixes[:MOST_FIXES] if valid_fix(f)] if isinstance(fixes, list) else []
+    except (OSError, ValueError, AttributeError, RecursionError):
         return []
 
 
 def save(path: str, fixes: list[dict]) -> None:
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump({"version": 1, "note": "Quad fixes remembered by CurioMesh. Local only; share by exporting.", "fixes": fixes}, handle)
+    """Write through a unique file beside it, so nobody else's file is followed and a crash leaves the old one whole."""
+    descriptor, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".fixes-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "note": "Quad fixes remembered by CurioMesh. Local only; share by exporting.", "fixes": fixes}, handle)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def merge(old: list[dict], new: list[dict]) -> list[dict]:
