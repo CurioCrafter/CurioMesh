@@ -125,6 +125,10 @@ class SafetyTests(unittest.TestCase):
             jobpack.save_result(Path(root) / "ok.npz", out, report, 1, 3)  # vertex 7 does not exist
             with self.assertRaises(ValueError):
                 jobpack.load_result(Path(root) / "ok.npz", 1, 3)
+            report_text = np.asarray('{"faces": 1, "quads": 0, "loss": 0.0, "seconds": 1.0}')
+            np.savez(Path(root) / "float.npz", co=np.zeros((3, 3)), lens=np.array([3.0]), flat=np.array([0.0, 1.0, 2.0]), mat=np.zeros(1, np.int32), parts=np.zeros(1, np.int64), source=np.array([1, 3]), report=report_text)
+            with self.assertRaises(ValueError):  # face sizes as floats would fail later with a TypeError
+                jobpack.load_result(Path(root) / "float.npz", 1, 3)
 
 
 class JobFolderTests(unittest.TestCase):
