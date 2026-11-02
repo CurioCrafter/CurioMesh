@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 import bpy
 import numpy as np
@@ -39,7 +40,7 @@ from .triadq.quadreduce import quad_reducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
-from . import guides, loops, symmetry, turbo
+from . import guides, hardware, loops, symmetry, turbo
 from .triadq.types import Cancelled, FlatFaces, MeshData
 from .triadq.uvs import simplify_borders
 
@@ -394,13 +395,50 @@ def _folded(points: np.ndarray, faces) -> int:
     return int((patch.quad_quality(points[quads]) <= 0.0).sum())
 
 
-def _picture_sizes(sizes: np.ndarray) -> np.ndarray:
+def _native_tree(context, co: np.ndarray, flat: np.ndarray, sizes: np.ndarray) -> BVHTree | None:
+    """The BVH of a big mesh built inside Blender from arrays, with no Python lists of faces. None if this Blender won't take it."""
+    mesh = obj = None
+    try:
+        starts = np.cumsum(sizes) - sizes
+        counts = sizes - 2  # fan-triangulate like BVHTree.FromPolygons does, so a quad is cut the same way and the pictures match
+        face = np.repeat(np.arange(len(sizes)), counts)
+        local = np.arange(int(counts.sum())) - np.repeat(np.cumsum(counts) - counts, counts)
+        base = starts[face]
+        flat = np.stack((flat[base], flat[base + local + 1], flat[base + local + 2]), axis=1).ravel()
+        sizes = np.full(len(face), 3, dtype=np.int64)
+        mesh = bpy.data.meshes.new("CurioMesh_Tree")
+        mesh.vertices.add(len(co))
+        mesh.vertices.foreach_set("co", np.ascontiguousarray(co, dtype=np.float32).ravel())
+        mesh.loops.add(len(flat))
+        mesh.loops.foreach_set("vertex_index", flat.astype(np.int32))
+        mesh.polygons.add(len(sizes))
+        mesh.polygons.foreach_set("loop_start", (np.cumsum(sizes) - sizes).astype(np.int32))
+        try:
+            mesh.polygons.foreach_set("loop_total", sizes.astype(np.int32))  # read-only from Blender 4.0, where the starts are enough
+        except Exception:
+            pass
+        mesh.update()
+        if len(mesh.polygons) != len(sizes) or mesh.polygons[len(sizes) - 1].loop_total != int(sizes[-1]) or mesh.polygons[0].loop_total != int(sizes[0]):
+            return None
+        obj = bpy.data.objects.new("CurioMesh_Tree", mesh)
+        context.scene.collection.objects.link(obj)
+        return BVHTree.FromObject(obj, context.evaluated_depsgraph_get(), epsilon=0.0)
+    except Exception:
+        return None
+    finally:
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh is not None:
+            bpy.data.meshes.remove(mesh)
+
+
+def _picture_sizes(sizes: np.ndarray, most_rays: int = MOST_RAYS, max_pixels: int = MAX_PIXELS) -> np.ndarray:
     """Pixels per side for pieces of these sizes (the whole object is 1.0), coarser for a model with very many parts."""
 
-    view, most = float(VIEW_PIXELS), float(MAX_PIXELS)
+    view, most = float(VIEW_PIXELS), float(max_pixels)
     while True:
         pixels = np.clip(np.ceil(sizes * view), 8, most).astype(np.int64)
-        if 6 * int((pixels * pixels).sum()) <= MOST_RAYS or most <= 16:
+        if 6 * int((pixels * pixels).sum()) <= most_rays or most <= 16:
             return pixels
         view *= 0.85
         most *= 0.85
@@ -441,10 +479,29 @@ def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=No
     return coarse, report
 
 
+class _SizesOnDisk:
+    """The sizes of one part of a cut mesh: read from its file when asked for, the last being the whole part, from the mesh."""
+
+    def __init__(self, job, index: int, file, count: int):
+        self.job, self.index, self.file, self.count = job, index, file, count
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, at: int):
+        at = at + self.count if at < 0 else at
+        if at == self.count - 1:
+            return self.job._piece_arrays(self.job.pieces[self.index])
+        loaded = hardware.load_piece(self.file)
+        if loaded is None:
+            raise RuntimeError("a saved part went missing")
+        return loaded[1][at]
+
+
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL"):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False):
         self.style = style  # DETAIL, BALANCED or ROWS
         self._tree = None
         self._worker: subprocess.Popen | None = None
@@ -470,6 +527,19 @@ class AutoJob:
         self.why: list[str] = []
         self.gap = 0.0
         self.drop = None if drop is None or not float(np.max(drop, initial=0.0)) > 0.0 else np.asarray(drop, dtype=np.float64)  # per vertex, from the painted density
+        self.cfg = settings or hardware.EFFORTS["NORMAL"]  # how hard to work: slice length, rays, chunk size
+        self.max_pixels = self.cfg.max_pixels
+        self.checkpoint = checkpoint  # folder where finished parts are saved so a stopped job can resume (None = don't save)
+        self.keep_progress = keep_progress
+        self.resumed = 0  # parts loaded from the saved progress instead of measured
+        self.names: list[str] = []  # where each part is, in words
+        self.locked: np.ndarray | None = None  # vertices on a chunk border: never moved, so neighbours join without a gap
+        self.chunks = 0  # how many regions a huge piece was cut into
+        self.losses: list[float] = []  # the view change measured after each try
+        self.first: list = []  # per piece, its smallest size (what the preview shows before sizes are picked)
+        self.files: list = []  # per piece, the file that holds its sizes when they are kept on disk, not in memory
+        self._tmp: Path | None = None  # where sizes go when there is no checkpoint folder
+        self.mem: dict[str, int] = {"start": round(hardware.peak_memory_mb())}  # the most memory used by the end of each stage, MB
         self.target_faces = int(target_faces)  # 0 = keep the detail asked for; above 0 = land on this many faces
         self.method = method  # for every part without its own in `methods`
         self.output_kind = output  # TRIS, QUADS or MIXED
@@ -526,11 +596,44 @@ class AutoJob:
         self.busy = False
         self._kill_worker()
         self._search.close()  # runs what cleans up after it, such as the Clean Rows folder
+        self._drop_tmp()
 
-    def step(self, seconds: float = 0.04) -> None:
+    def _drop_tmp(self) -> None:
+        if self._tmp is not None:
+            shutil.rmtree(self._tmp, ignore_errors=True)
+            self._tmp = None
+
+    def _mark(self, stage: str) -> None:
+        self.mem[stage] = round(hardware.peak_memory_mb())
+
+    def _finish_piece(self, key, sizes: list, levels: list, ready: list, seen: float, file, fresh: bool) -> None:
+        """Keep a measured piece, whose sizes end with the whole piece. A piece of a cut mesh goes to disk and only its numbers stay in memory."""
+        self.levels.append(levels)
+        self.ready.append(ready)
+        self.seen.append(seen)
+        self.first.append(sizes[0])
+        pairs = [(lv.faces, lv.loss) for lv in levels]
+        if self.chunks:
+            if file is None:
+                if self._tmp is None:
+                    self._tmp = Path(tempfile.mkdtemp(prefix="curiomesh_"))
+                file = hardware.piece_file(self._tmp, repr(key[2]).encode() + key[1])
+            if fresh:
+                hardware.save_piece(file, self.detail, sizes[:-1], pairs[:-1], seen)
+            self.sizes.append(_SizesOnDisk(self, len(self.sizes), file, len(sizes)))
+            self.files.append(file)
+            return
+        self.sizes.append(sizes)
+        self.files.append(None)
+        self.cache[key] = (self.detail, sizes, levels, seen, ready)
+        if file is not None and fresh:
+            hardware.save_piece(file, self.detail, sizes[:-1], pairs[:-1], seen)
+
+    def step(self, seconds: float | None = None) -> None:
         """Do the next slice of work on this (the main) thread."""
         if not self.busy:
             return
+        seconds = self.cfg.slice_s if seconds is None else seconds
         ends = time.perf_counter() + seconds
         try:
             while time.perf_counter() < ends:
@@ -589,10 +692,16 @@ class AutoJob:
 
     def _piece_drop(self, ids: np.ndarray):
         """The painted density of the vertices of a piece, in the order `_piece_arrays` lists them (or None)."""
-        if self.drop is None:
+        return self._piece_vertex(ids, self.drop)
+
+    def _piece_lock(self, ids: np.ndarray):
+        """Which vertices of a piece sit on a chunk border (or None when nothing was cut)."""
+        return self._piece_vertex(ids, self.locked)
+
+    def _piece_vertex(self, ids: np.ndarray, per_vertex):
+        if per_vertex is None:
             return None
-        used = np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))
-        return self.drop[used]
+        return per_vertex[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))]
 
     def _piece_arrays(self, ids: np.ndarray):
         chosen = ids.tolist()
@@ -610,14 +719,27 @@ class AutoJob:
         triangles = sum(len(p) - 2 for p in polys)
         if triangles <= KEEP_TRIANGLES:
             self.sizes.append([whole])
+            self.files.append(None)
+            self.first.append(whole)
             self.levels.append([Level(len(polys), 0.0)])
             self.ready.append([False])
             self.seen.append(0.0)
             return
         key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips))
+        file = None
+        if self.checkpoint is not None:
+            file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
+            saved = hardware.load_piece(file) if file.exists() else None
+            if saved is not None and saved[0] <= self.detail:  # a stopped run measured this part already
+                self.resumed += 1
+                ready = [all(len(p) == 4 for p in polys_at) for _co, polys_at, _kinds in saved[1]] + [False]
+                self._finish_piece(key, saved[1] + [whole], [Level(f, w) for f, w in saved[2]] + [Level(len(polys), 0.0)], ready, saved[3], file, False)
+                return
         known = self.cache.get(key)
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
+            self.files.append(None)
+            self.first.append(known[1][0])
             self.levels.append(known[2])
             self.ready.append(known[4])
             self.seen.append(known[3])
@@ -629,7 +751,7 @@ class AutoJob:
         turned_sizes, turned_levels = [], []
         seen = 0.0
         enough = GOOD_ENOUGH * self.detail / 100.0
-        if self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
+        if self.locked is None and self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
             tries = parts.rebuilds(points, polys, max(set(kinds), key=kinds.count))
             while True:
                 out = yield from self._off(lambda: next(tries, False))
@@ -660,7 +782,7 @@ class AutoJob:
         def look(k: int):
             """Generator: this size measured. Returns the share of its view that changed."""
             yield
-            reduced = yield from self._reduced(points, polys, kinds, shares[k], self._piece_drop(ids))
+            reduced = yield from self._reduced(points, polys, kinds, shares[k], self._piece_drop(ids), self._piece_lock(ids))
             view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = picture_counts(reference, view, pixel)
             self.looks += 1
@@ -681,7 +803,7 @@ class AutoJob:
         seen = max([seen] + [looked[k][3] for k in order])
         if case is not None:
             self.part_cases[len(self.sizes)] = (case, order[0], len(order))
-        if triangles >= FINER_TRIANGLES and seen > 0.0 and self.drop is None:  # painted vertices would not survive the first pass
+        if triangles >= FINER_TRIANGLES and seen > 0.0 and self.drop is None and not self.chunks:  # painted vertices would not survive the first pass
             asked = self.detail / 100.0
             uppers = {next((k for k, level in enumerate(levels) if level.loss <= limit * seen), 0) for limit in (asked, PIECE_LIMIT * asked)} - {0}
             for upper in sorted(uppers):
@@ -710,24 +832,22 @@ class AutoJob:
         levels = turned_levels + levels + [Level(len(polys), 0.0)]
         order = sorted(range(len(sizes)), key=lambda k: levels[k].faces)
         sizes, levels, ready = [sizes[k] for k in order], [levels[k] for k in order], [ready[k] for k in order]
-        self.sizes.append(sizes)
-        self.levels.append(levels)
-        self.ready.append(ready)
-        self.seen.append(seen)
-        self.cache[key] = (self.detail, sizes, levels, seen, ready)
+        self._finish_piece(key, sizes, levels, ready, seen, file, True)
 
-    def _reference(self, center, half, pixels, points, polys):
+    def _reference(self, center, half, pixels, points, polys, tree=None):
         """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
         key = ("view", center.tobytes(), half, pixels, len(polys), hash(points.tobytes()))
         if key not in self.cache:
             self.cache[key] = yield from self._timed("pictures", self._pictures(points, polys, center, half, pixels))
         return self.cache[key]
 
-    def _combined(self, rebuilt: bool | None = None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
+    def _combined(self, rebuilt: bool | None = None, join: bool = False, only_done: bool = False) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
         """Every piece at its picked size, and any not measured yet as it is. `rebuilt` True or False keeps only those."""
         all_points, all_faces, all_kinds, owner = [], [], [], []
         offset = 0
         for index, ids in enumerate(self.pieces):
+            if only_done and index >= len(self.sizes):
+                continue
             if index in self.tuned:
                 if rebuilt:
                     continue
@@ -736,7 +856,7 @@ class AutoJob:
                 at = self.picked[index] if index < len(self.picked) else 0
                 if rebuilt is not None and self.ready[index][at] != rebuilt:
                     continue
-                points, polys, kinds = self.sizes[index][at]
+                points, polys, kinds = self.sizes[index][at] if index < len(self.picked) else self.first[index]
             elif rebuilt:
                 continue
             else:
@@ -746,11 +866,18 @@ class AutoJob:
             all_kinds += kinds
             owner += [index] * len(polys)
             offset += len(points)
-        return np.vstack(all_points) if all_points else np.zeros((0, 3)), all_faces, all_kinds, np.asarray(owner, dtype=np.int64)
+        if not all_points:
+            return np.zeros((0, 3)), [], [], np.zeros(0, dtype=np.int64)
+        points = np.vstack(all_points)
+        if join and self.locked is not None:  # the chunk borders were never moved, so a cut piece is one surface again
+            points, all_faces = hardware.weld(points, all_faces)
+        return points, all_faces, all_kinds, np.asarray(owner, dtype=np.int64)
 
     def _show(self, final=None) -> None:
         if final is None:
-            co, faces, kinds, parts = self._combined()
+            co, faces, kinds, parts = self._combined(only_done=self.cfg.only_done or bool(self.chunks))
+            if not faces:
+                return
         else:
             co, faces, kinds, parts = final
         if self.mirror is not None:
@@ -888,7 +1015,7 @@ class AutoJob:
         try:
             coarse = MeshData(co, faces, kinds)
             # Rows of quads would ignore the strokes and the paint, and they are what Auto means.
-            if method == "AUTO" and self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.drop is None:
+            if method == "AUTO" and self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.drop is None and self.locked is None:
                 if self._labels is None:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
@@ -971,6 +1098,8 @@ class AutoJob:
         Sizes double from one to the next, which is a huge step on a big piece: it would land well under what was asked
         for, or over it. So only the sizes next to the current pick, and only for the pieces where that matters.
         """
+        if self.chunks:
+            return
         counts = [self.levels[i][k].faces for i, k in enumerate(self.picked)]
         total = sum(counts)
         spent = 0
@@ -1019,7 +1148,7 @@ class AutoJob:
             kept = np.isin(labels, parts)
             return sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]})
 
-        view = yield from self._timed("pictures", self._pictures(np.asarray(result.vertices), result.faces, center, half, MAX_PIXELS))
+        view = yield from self._timed("pictures", self._pictures(np.asarray(result.vertices), result.faces, center, half, self.max_pixels))
         limited = yield from self._off(lambda: over_limit(result, view))
         reducer.freeze(limited + list(range(rebuilt_from, len(result.vertices))))  # whatever is at its limit stays as it is, and so do rebuilt parts
         saved = yield from self._background(reducer.save)
@@ -1038,7 +1167,7 @@ class AutoJob:
                     break
             attempt = yield from self._background(reducer.result)
             self.stage = f"Taking away quads: {len(attempt.faces):,}"
-            view = yield from self._timed("pictures", self._pictures(np.asarray(attempt.vertices), attempt.faces, center, half, MAX_PIXELS))
+            view = yield from self._timed("pictures", self._pictures(np.asarray(attempt.vertices), attempt.faces, center, half, self.max_pixels))
             wrong, shown = picture_counts(reference, view, pixel)
             now = 100.0 * wrong / max(shown, 1)
             ruined = yield from self._off(lambda: over_limit(attempt, view))
@@ -1165,7 +1294,7 @@ class AutoJob:
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx")
         first = {k: getattr(after, k) for k in keys}
         start_faces = len(faces)
-        for attempt in range(FIX_TRIES):
+        for attempt in range(0 if self.chunks else FIX_TRIES):  # a cut piece's parts are one surface: they can't be remade alone
             bad = checks.new_spots(before, after)[:MOST_REPAIRED]
             if not bad or self._stopped:
                 break
@@ -1325,13 +1454,13 @@ class AutoJob:
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         low, high = self.co.min(axis=0), self.co.max(axis=0)
         center, half = (low + high) / 2.0, extent * 0.55
-        pixel = 2.0 * half / MAX_PIXELS
-        reference = yield from pictures(self.co, self.faces, center, half, MAX_PIXELS)
+        pixel = 2.0 * half / self.max_pixels
+        reference = yield from pictures(self.co, self.faces, center, half, self.max_pixels)
         source = sum(len(f) - 2 for f in self.faces)
         most = int(ROWS_MOST * source)
         target = self.target_faces or min(max(int(ROWS_START * source), 256), most)
         best = None
-        reference_shaded = shaded(reference, self.co, self.faces, center, half, MAX_PIXELS)
+        reference_shaded = shaded(reference, self.co, self.faces, center, half, self.max_pixels)
         self._view = (center, half, reference, reference_shaded, pixel)
 
         def judge(points, out_faces, kinds, loss):
@@ -1408,10 +1537,30 @@ class AutoJob:
         self._shell = shell
         order = np.argsort(shell, kind="stable")
         starts = np.concatenate(([0], np.flatnonzero(shell[order][1:] != shell[order][:-1]) + 1, [len(order)]))
-        self.pieces = sorted((order[a:b] for a, b in zip(starts[:-1], starts[1:])), key=len, reverse=True)
+        shells = [order[a:b] for a, b in zip(starts[:-1], starts[1:])]
+        low, high = self.co.min(axis=0), self.co.max(axis=0)
+        sizes_f = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
+        flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes_f.sum()))
+        centers = np.add.reduceat(self.co[flat], np.concatenate(([0], np.cumsum(sizes_f)[:-1])), axis=0) / sizes_f[:, None]
+        cut = []  # a piece with more faces than the machine should hold at once is cut into regions
+        for ids in shells:
+            if len(ids) > self.cfg.chunk_faces:
+                regions = hardware.split_chunks(centers[ids], self.cfg.chunk_faces)
+                cut += [ids[r] for r in regions]
+                self.chunks += len(regions)
+            else:
+                cut.append(ids)
+        cut.sort(key=len, reverse=True)
+        self.pieces = cut
+        self.names = [hardware.region_name(centers[ids].mean(axis=0), low, high) for ids in cut]
+        if self.chunks:
+            label = np.zeros(len(self.faces), dtype=np.int64)
+            for number, ids in enumerate(cut):
+                label[ids] = number
+            self.locked = hardware.border_vertices(self.faces, label, len(self.co))
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
-        self.picture_sizes = _picture_sizes(sizes).tolist()
+        self.picture_sizes = _picture_sizes(sizes, self.cfg.max_rays, self.max_pixels).tolist()
         weights = np.asarray([sum(len(self.faces[f]) - 2 for f in ids.tolist()) for ids in self.pieces], dtype=np.float64)
         return np.concatenate(([0.0], np.cumsum(weights))) / max(float(weights.sum()), 1.0)
 
@@ -1423,21 +1572,22 @@ class AutoJob:
         for index, ids in enumerate(self.pieces):
             self.progress = (index, len(self.pieces))
             self.fraction = MEASURE_SHARE * float(done_share[index])
-            self.stage = f"Looking at piece {index + 1} of {len(self.pieces)}"
+            self.stage = f"Part {index + 1} of {len(self.pieces)}: {self.names[index]}" if self.chunks or len(self.pieces) < 40 else f"Looking at piece {index + 1} of {len(self.pieces)}"
             yield from self._measure_piece(ids, picture_sizes[index])
             yield
             if self._stopped:
                 return
-            if time.perf_counter() - self.shown_at > SHOW_EVERY:
+            if time.perf_counter() - self.shown_at > self.cfg.show_every:
                 yield from self._off(self._show)
         self.progress = (len(self.pieces), len(self.pieces))
         self.fraction = MEASURE_SHARE
         self.stage = "Looking at the whole object"
         low, high = self.co.min(axis=0), self.co.max(axis=0)
         center, half = (low + high) / 2.0, extent * 0.55
-        pixel = 2.0 * half / MAX_PIXELS
-        reference = yield from self._reference(center, half, MAX_PIXELS, self.co, self.faces)
-        reference_shaded = yield from self._off(lambda: shaded(reference, self.co, self.faces, center, half, MAX_PIXELS))
+        pixel = 2.0 * half / self.max_pixels
+        self._mark("measured")
+        reference = yield from self._reference(center, half, self.max_pixels, self.co, self.faces)
+        reference_shaded = yield from self._off(lambda: shaded(reference, self.co, self.faces, center, half, self.max_pixels))
         self._view = (center, half, reference, reference_shaded, pixel)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
@@ -1460,7 +1610,7 @@ class AutoJob:
                 break
             tried.add(pick)
             self.stage = f"Making the faces, try {round_index + 1}"
-            co, faces, kinds, _parts = yield from self._off(lambda: self._combined(False))
+            co, faces, kinds, _parts = yield from self._off(lambda: self._combined(False, join=True))
             rco, rfaces, rkinds, _owner = yield from self._off(lambda: self._combined(True))  # rebuilt parts are already quads
             if self.guide_lines or self.strips:
                 self.stage = f"Cutting the guide curves in, try {round_index + 1}"
@@ -1565,7 +1715,10 @@ class AutoJob:
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
         bend = guides.bend_stats([group for _tag, group in self.bend_groups], self.output["co"], shown, self.gap) if self.bend_groups else None
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "check": check, "notes": list(dict.fromkeys(self.notes)), "guides": follows}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "check": check, "notes": list(dict.fromkeys(self.notes)), "chunks": self.chunks, "resumed": self.resumed, "memory_mb": dict(self.mem), "guides": follows}
+        if self.checkpoint is not None and not self.keep_progress:
+            shutil.rmtree(self.checkpoint, ignore_errors=True)  # finished: nothing left to resume
+        self._drop_tmp()
 
     def _make_all(self, co, faces, kinds):
         """Generator: the faces for the whole object. Pieces on the usual method go in one call; others one by one."""
@@ -1600,9 +1753,9 @@ class AutoJob:
 
     def _look(self, points, out_faces, center, half, reference, reference_shaded, pixel):
         """Generator: percent of the view that differs in shape, and in smooth shading past 20 and 10 degrees, when exhausted."""
-        view = yield from self._timed("pictures", self._pictures(points, out_faces, center, half, MAX_PIXELS))
+        view = yield from self._timed("pictures", self._pictures(points, out_faces, center, half, self.max_pixels))
         wrong, shown = picture_counts(reference, view, pixel)
-        view_shaded = yield from self._off(lambda: shaded(view, points, out_faces, center, half, MAX_PIXELS))
+        view_shaded = yield from self._off(lambda: shaded(view, points, out_faces, center, half, self.max_pixels))
         bad_shade, seen_both = shading_counts(reference, view, reference_shaded, view_shaded)
         soft = shading_counts(reference, view, reference_shaded, view_shaded, SOFT_DEG)[0]
         return 100.0 * wrong / max(shown, 1), 100.0 * bad_shade / max(seen_both, 1), 100.0 * soft / max(seen_both, 1)

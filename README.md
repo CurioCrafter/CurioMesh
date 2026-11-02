@@ -342,6 +342,24 @@ Three optional helpers sit in step 2 of the Auto Segments panel.
 - **Paint Density.** **Paint** opens Weight Paint on a vertex group; colour red the
   parts that need more quads. Works best with **Reduce To**.
 
+### Auto Segments on a small PC, or on a bigger one
+
+The **This computer** box in the Auto Segments panel reads your cores, free memory and
+graphics card, times a short test, and says in words how big the job is for this PC
+("This mesh is large for this PC: about 40 minutes, working in small steps").
+
+- **Effort** (Auto, Light, Normal, Full). Light uses short slices with long gaps, fewer
+  camera rays, one Turbo thread and smaller pieces in memory, so the PC stays usable.
+  Full finishes soonest. Auto picks from your cores and free memory.
+- A piece with more faces than the effort allows is cut into regions. The border of each
+  region is kept exactly where it was, so neighbours join with no gap. The progress bar
+  names the region being done ("Part 3 of 12: upper left") and each one appears in the
+  viewport when it finishes. Finished regions are saved to disk, so a stopped or crashed
+  job resumes where it was.
+- **Export Job** writes a folder you can run on any computer with Blender
+  (`blender --background --python run_job.py`), and **Import Result** brings
+  `result.npz` back onto your mesh. See [docs/CLOUD_WORKFLOW.md](docs/CLOUD_WORKFLOW.md).
+
 ## Known Limits
 
 - Auto Segments gets the shape right before it gets the quads tidy. About half of its

@@ -16,6 +16,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import bmesh
 import bpy
@@ -27,7 +28,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, profiles, teach
+from . import autoretopo, hardware, jobpack, profiles, teach, turbo
 from .triadq import areas, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -134,6 +135,9 @@ state = {
     "curve_sig": None,  # what the drawn curves looked like when the search last started: a change restarts it
     "curve_at": 0.0,
     "auto_base": None,  # the finished Auto Segments result that step 4 (Live Boolean) works on
+    "machine": None,  # what this computer is (hardware.detect), read on demand
+    "rays": 0.0,  # camera rays per second measured on it
+    "parts": None,  # (mesh signature, loose pieces) counted by Check This Computer
 }
 
 
@@ -249,6 +253,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_profile: bpy.props.EnumProperty(name="Use", description="What the result is for. Each use sets Detail, Method and Output for you; change any of them and it becomes Custom", items=profiles.PROFILE_ITEMS, default="GAME", update=_profile_update)
     auto_detail: bpy.props.FloatProperty(name="Detail", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces; very high gives a rough, very low-poly shape", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
+    auto_effort: bpy.props.EnumProperty(name="Effort", description="How hard Auto Segments works on this computer. Light leaves it usable and works in small steps; Full finishes soonest; Auto picks from your cores and free memory", items=hardware.EFFORT_ITEMS, default="AUTO", update=_redraw_update)
     auto_style: bpy.props.EnumProperty(name="Style", description="Auto Segments: what comes first when the two disagree", items=(("DETAIL", "Keep Detail", "Holds the amount of change you allow, with the fewest faces. Quads follow the shape, so they can look slanted"), ("BALANCED", "Balanced", "Holds the same change with far fewer irregular vertices, by splitting every quad. Costs more faces"), ("ROWS", "Clean Rows", "Even, square quads in long rows. Costs more visible change, and small sharp detail softens")), default="DETAIL", update=_redraw_update)
     auto_method: bpy.props.EnumProperty(name="Method", description="How the faces are made. Auto lets the camera decide the detail of each part; the other methods change how the reduced part is turned into faces. Each part can have its own (step 4)", items=profiles.METHOD_ITEMS, default="AUTO", update=_custom_update)
     auto_output: bpy.props.EnumProperty(name="Output", description="The kind of faces in the result", items=profiles.OUTPUT_ITEMS, default="QUADS", update=_custom_update)
@@ -1473,6 +1478,38 @@ def _uv_charts(source, src):
     return chart_codes(src["mat"], _uv_islands(src, uv.reshape(-1, 2)))
 
 
+def machine_info(refresh: bool = False) -> dict:
+    """This computer, read once (graphics card lookup and a 0.1 s ray test) and kept."""
+    if state["machine"] is None or refresh:
+        state["machine"] = hardware.detect()
+        state["rays"] = hardware.benchmark()
+    return state["machine"]
+
+
+def effort_settings(gs) -> hardware.Settings:
+    return hardware.settings_for(gs.auto_effort, machine_info())
+
+
+def job_rating(gs, faces: int, sig=None) -> tuple[str, str, hardware.Settings]:
+    """(level, sentence, settings) for a mesh of this many faces on this computer."""
+    machine = state["machine"]
+    settings = hardware.settings_for(gs.auto_effort, machine)
+    parts = state["parts"][1] if state["parts"] is not None and state["parts"][0] == sig else None
+    level, text = hardware.rate(machine, hardware.estimate(faces, parts, settings, state["rays"]), settings)
+    return level, text, settings
+
+
+def _solve_inputs(gs, src, lines, paint):
+    """What the search runs on: (co, faces, mat, mirror, lines, paint, note). With Mirror it is one half, and the strokes and paint follow it."""
+    half, note = _mirror_half(gs, src, src["mat"])
+    co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], src["mat"], None)
+    if paint is not None:
+        paint = paint[half[4]] if half is not None else paint
+    if lines and mirror:
+        lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
+    return co, faces, mat, mirror, lines, paint, note
+
+
 def _start_segments(context, gs, src) -> bool:
     """Start the search. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
     target = auto_target(gs, len(src["faces"]))
@@ -1482,7 +1519,8 @@ def _start_segments(context, gs, src) -> bool:
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
     charts = _uv_charts(state_source(), src) if gs.keep_uvs and gs.bake_detail != "NORMAL_COLOR" else None
     codes = src["mat"] if charts is None else charts[0]
-    key = (src["sig"], "AUTO", round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_method, gs.auto_output, gs.auto_style, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
+    settings = effort_settings(gs)
+    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_method, gs.auto_output, gs.auto_style, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
     state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
         return True
@@ -1508,7 +1546,13 @@ def _start_segments(context, gs, src) -> bool:
     cache_key = (src["sig"], mirror[:2] if mirror else None, charts is None)
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
-    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, method=gs.auto_method, output=gs.auto_output, strips=strips, outside=outside, style=gs.auto_style)
+    saved = hardware.checkpoint_dir(co, len(faces))
+    resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
+    if not turbo.limit_threads(settings.threads) and settings.threads:
+        note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
+    job = autoretopo.AutoJob(context, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, method=gs.auto_method, output=gs.auto_output, strips=strips, outside=outside, style=gs.auto_style, settings=settings, checkpoint=saved)
+    if resume:
+        job.note = (job.note + " | " if job.note else "") + f"{resume} finished parts from an earlier run will be reused"
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
@@ -1602,8 +1646,8 @@ def _auto_slice():
     work = state["work"]
     if work is None or not isinstance(work["runner"], (autoretopo.AutoJob, segments.PartJob)) or not work["runner"].busy:
         return None
-    work["runner"].step(0.04)
-    return 0.01
+    work["runner"].step()
+    return work["runner"].cfg.gap_s
 
 
 def _collect_work(context) -> None:
@@ -2671,6 +2715,98 @@ class CURIOMESH_OT_guided_auto_start(bpy.types.Operator):
         return {"FINISHED"} if ok else {"CANCELLED"}
 
 
+class CURIOMESH_OT_guided_check_pc(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_check_pc"
+    bl_label = "Check This Computer"
+    bl_description = "Read your cores, memory and graphics card, time a short test, and count the loose pieces of the selected mesh, so the panel can say how big this job is for this PC"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        machine_info(refresh=True)
+        obj = _source_mesh(context)
+        if obj is not None:
+            src = _source_data(obj)
+            fa, fb = patch.face_adjacency(src["faces"])
+            state["parts"] = (src["sig"], int(len(np.unique(patch._labels(len(src["faces"]), fa, fb)))))
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_export_job"
+    bl_label = "Export Job For Another Computer"
+    bl_description = "Write a folder with this mesh, your settings and a script that runs the same search without a window (blender --background --python run_job.py), for a stronger computer. Copy the folder there yourself; nothing is uploaded"
+    bl_options = {"INTERNAL"}
+
+    directory: bpy.props.StringProperty(subtype="DIR_PATH")
+
+    @classmethod
+    def poll(cls, context):
+        return _source_mesh(context) is not None
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        gs = _gs(context)
+        obj = _source_mesh(context)
+        src = _source_data(obj)
+        try:
+            folder = jobpack.job_folder(self.directory, obj.name)
+        except ValueError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        target = auto_target(gs, len(src["faces"]))
+        co, faces, mat, mirror, lines, paint, _note = _solve_inputs(gs, src, _guide_lines(context, gs, src), _painted(obj, gs, src))
+        jobpack.export_job(
+            folder, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, "FULL", Path(__file__).resolve().parent,
+            mirror=mirror, lines=lines, drop=None if paint is None else density_drop(paint, gs.density_strength), source=(len(src["faces"]), len(src["co"])),
+        )
+        state["message"] = f"Job written to {folder}. Copy the folder to the other computer and follow README.txt in it"
+        self.report({"INFO"}, state["message"])
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_import_result(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_import_result"
+    bl_label = "Import Job Result"
+    bl_description = "Bring the result.npz of an exported job back as the preview of the selected mesh, then press Apply"
+    bl_options = {"INTERNAL"}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.npz", options={"HIDDEN"})
+
+    @classmethod
+    def poll(cls, context):
+        return _source_mesh(context) is not None
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        gs = _gs(context)
+        obj = _source_mesh(context)
+        src = _source_data(obj)
+        try:
+            res, report = jobpack.load_result(self.filepath, len(src["faces"]), len(src["co"]))
+        except (ValueError, OSError, KeyError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        stop_work()
+        state["source"] = obj.name
+        gs.scope = "AUTO"
+        state["auto_base"] = {"id": time.perf_counter_ns(), "sig": src["sig"], "out": dict(res), "report": report, "job": None, "summary": jobpack.summary(report)}
+        state["res"] = res
+        _build_preview(context, obj, res, uvs=False)
+        state["message"] = "Imported: " + state["auto_base"]["summary"] + ". Press Apply"
+        if not gs.enabled:
+            gs.enabled = True
+        state["draw_key"] = None
+        overlay.tag_redraw()
+        return {"FINISHED"}
+
+
 class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
     bl_idname = "curiomesh.guided_stop_work"
     bl_label = "Stop"
@@ -3173,6 +3309,28 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.prop(gs, "auto_method")
         col.row(align=True).prop(gs, "auto_output", expand=True)
 
+        box = layout.box()
+        box.label(text="This computer", icon="PREFERENCES")
+        machine = state["machine"]
+        if machine is None:
+            box.label(text="Not checked yet", icon="INFO")
+        else:
+            for line in hardware.describe(machine, turbo.status()):
+                overlay.wrap_label(box, line, icon="BLANK1", width=36, limit=2)
+            if obj is not None:
+                level, text, settings = job_rating(gs, faces, state["src"]["sig"] if state["src"] is not None else None)
+                overlay.wrap_label(box, text, icon="CHECKMARK" if level == "OK" else "ERROR", width=36, limit=3)
+                if gs.auto_effort == "AUTO":
+                    box.label(text=f"Auto picked {settings.name}")
+        col = box.column()
+        col.enabled = not searching
+        col.prop(gs, "auto_effort")
+        row = col.row(align=True)
+        row.operator("curiomesh.guided_check_pc", icon="FILE_REFRESH")
+        row = col.row(align=True)
+        row.operator("curiomesh.guided_export_job", text="Export Job", icon="EXPORT")
+        row.operator("curiomesh.guided_import_result", text="Import Result", icon="IMPORT")
+
         # The result
         if done:
             report = base["report"]
@@ -3440,6 +3598,9 @@ CLASSES = (
     CURIOMESH_OT_guided_apply,
     CURIOMESH_OT_guided_stop,
     CURIOMESH_OT_guided_auto_start,
+    CURIOMESH_OT_guided_check_pc,
+    CURIOMESH_OT_guided_export_job,
+    CURIOMESH_OT_guided_import_result,
     CURIOMESH_OT_guided_stop_work,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,

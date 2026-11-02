@@ -157,9 +157,9 @@ def build_table(base: dict) -> None:
 
 
 def mirrored() -> bool:
-    """A mirrored result holds both sides but the job only solved one, and Clean Rows has no sizes to pick from: no part redos."""
+    """A mirrored result holds both sides but the job only solved one, Clean Rows has no sizes to pick from, a cut piece's parts are one surface, and an imported result has no job: no part redos."""
     base = _g().state["auto_base"]
-    return base is not None and (base["job"].mirror is not None or base["job"].style == "ROWS")
+    return base is not None and (base["job"] is None or base["job"].mirror is not None or base["job"].style == "ROWS" or bool(base["job"].chunks))
 
 
 def ensure() -> None:

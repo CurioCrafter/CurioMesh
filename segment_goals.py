@@ -1049,7 +1049,7 @@ def draw_selected(layout, gs) -> None:
         if known:
             box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
     if view.mirrored():
-        overlay.wrap_label(box, "Redo is off with Mirror or Clean Rows: start again without it", icon="INFO", width=32, limit=3)
+        overlay.wrap_label(box, "Redo is off on this result (Mirror, Clean Rows, a very large piece or an imported job)", icon="INFO", width=32, limit=3)
         return
     col = box.column(align=True)
     col.prop(gs, "seg_goal", text="Use")

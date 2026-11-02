@@ -93,6 +93,18 @@ def native() -> Any:
     return _load()
 
 
+def limit_threads(count: int) -> bool:
+    """Ask Turbo to use `count` threads (0 = all). Only works before the native module first loads; True if it took."""
+
+    if _tried and _module is not None:
+        return False
+    if count > 0:
+        os.environ["RAYON_NUM_THREADS"] = str(count)
+    else:
+        os.environ.pop("RAYON_NUM_THREADS", None)
+    return True
+
+
 def available() -> bool:
     return native() is not None
 
