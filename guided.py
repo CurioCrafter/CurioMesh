@@ -3389,7 +3389,10 @@ def draw_progress(layout, fraction: float, text: str) -> None:
     """A real progress bar on Blender 4.0 and later, a text bar before that."""
     fraction = min(max(float(fraction), 0.0), 1.0)
     if hasattr(layout, "progress"):
-        layout.progress(factor=fraction, type="BAR", text=text)
+        short = len(text) <= 30  # a bar can't wrap: a longer stage goes in full on the lines under it, not cut to "Laying rows of q..."
+        layout.progress(factor=fraction, type="BAR", text=text if short else f"{fraction * 100:.0f}%")
+        if not short:
+            overlay.wrap_label(layout, text, width=36, limit=3)
     else:
         filled = int(round(fraction * 20))
         layout.label(text=f"[{'#' * filled}{'-' * (20 - filled)}] {fraction * 100:.0f}%")
