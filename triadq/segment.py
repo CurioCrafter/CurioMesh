@@ -63,7 +63,7 @@ SNAP_LEVELS = 16
 EVEN_ROUNDS = 6  # rounds of rounding off a border where no crease holds it
 SEAM_ROUNDS = 4  # passes straightening the result's seams
 SEAM_CREASE = 0.6  # radians between the faces either side: a seam this sharp is on a crease and stays
-CAMERA_WEIGHT = 1.5  # how much more of an Animation sheet goes where the camera saw it go wrong
+CAMERA_WEIGHT = 3.0  # how much more of an Animation sheet goes where the camera saw it go wrong
 SHEET_RATIO = 1.6  # how fast a row of an Animation sheet may gain or lose vertices
 RING_SAMPLES = 128
 RING_LEVELS = 96
@@ -71,7 +71,7 @@ RING_CHANGE = 0.18  # a row stays the same length until the surface wants this m
 RING_GRID = 12  # vertices round the last row at which a grid can finish a disk
 SHEET_DETAIL = 0.5  # how much more of the sheet's rows a bumpy area gets, on a smooth one's 1
 SHEET_EVEN_ROUNDS = 10  # rounds of evening out its flat map
-SHEET_RELAX = 12  # passes settling a sheet on the surface
+SHEET_RELAX = 6  # passes settling a sheet on the surface
 SHEET_GOOD = 70.0  # a sheet with this topology score needs no flow fill to compare it with
 
 

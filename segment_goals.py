@@ -37,6 +37,7 @@ MOST_MEASURED = 60  # segments looked at by the camera after finding them: a mod
 LOW_POLY_EDGE = 2.2  # Low Poly's quads against the sizes the others use at the same detail
 SMALLEST_RESULT = 60  # a found segment with fewer faces in the result joins a neighbour: too few to be worth remaking
 WORSE_TIMES, WORSE_BY = 1.5, 4.0  # Reduce may change the view this many times, and this many points, more than the part had before
+CLOSED_SHARE, STROKE_SHARE = 1.3, 0.8  # triangles to reduce to, per quad wanted, with closure and with drawn lines
 SHARPEN_DROP = 8.0  # topology score a sheet may give up for following the camera's misses
 GOAL_ITEMS = [
     ("KEEP", "Keep as Is", "Your original faces, unchanged except for the row along the seam, which joins the neighbours", "FREEZE", 0),
@@ -252,6 +253,10 @@ class FindJob(view.PartJob):
         self.stage = "Finding the segments"
         self.report = self.base["report"]  # finding them changes no face, so the search's numbers still hold
 
+    def __getattr__(self, name):
+        """Whatever else is asked of the job on screen is the search's to answer: finding segments only adds labels."""
+        return getattr(self.__dict__["job"], name)
+
     def status(self) -> str:
         if self.warnings:
             return self.warnings[0]
@@ -319,6 +324,7 @@ class FindJob(view.PartJob):
         while thread.is_alive():
             if self._stopped:
                 return
+            thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
             yield
         if "tree" in box:
             view.seg.update(tree=box["tree"], tree_job=job)
@@ -392,6 +398,7 @@ class GoalJob(view.PartJob):
         thread = threading.Thread(target=work, daemon=True, name="CurioMeshSegment")
         thread.start()
         while thread.is_alive():
+            thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
             yield
         if "out" not in box and box.get("error") != "cancelled":
             self.warnings = [box.get("error", "no result")]
@@ -422,7 +429,7 @@ class GoalJob(view.PartJob):
                 kind.append(int(k) if str(k).isdigit() else 0)
         tris, kind = np.asarray(tris, dtype=np.int64), np.asarray(kind, dtype=np.int64)
         spacing = float(np.median(np.linalg.norm(points[tris[:, 0]] - points[tris[:, 1]], axis=1)))
-        gap = gs.loop_gap if gs.loop_gap > 0 else 0.7 * spacing
+        gap = gs.loop_gap if gs.loop_gap > 0 else 0.4 * spacing  # the triangles here are coarser than the quads wanted
         fine = min(loops.room(line, count, gap) for line, count, _tag in items)
         samples = np.vstack([guides.resample(line, fine / 4.0) for line, _count, _tag in items])
         co, tris, kind = guides.refine(points, tris, kind, samples, fine / 2.5, lambda p: nearest(p)[0])
@@ -452,7 +459,8 @@ class GoalJob(view.PartJob):
             if goal != "KEEP":
                 triangles = sum(len(p) - 2 for p in polys)
                 area = float(S.face_frames(points, polys)[1].sum())
-                ratio = 2.0 * area / max(edge * edge, 1e-30) / max(triangles, 1)
+                # Closure splits some faces: about 0.78 quads per triangle come out, not the 0.5 of pure pairing. Drawn lines add their own.
+                ratio = (STROKE_SHARE if goal == "STROKES" else CLOSED_SHARE if goal in {"REDUCE", "LOWPOLY"} else 2.0) * area / max(edge * edge, 1e-30) / max(triangles, 1)
                 if ratio < 0.98:
                     yield
                     points, polys, kinds = autoretopo._decimate(self.context, points, polys, kinds, max(ratio, 1e-4))
