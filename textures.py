@@ -8,7 +8,7 @@ from collections.abc import Iterable
 import bpy
 import numpy as np
 
-from .triadq.uvs import uv_overlap
+from .triadq.uvs import is_see_through, uv_overlap
 
 BAKE_LAYER = "CurioMesh_Bake"
 MOST_OVERLAP = 0.01  # share of texels a UV map may reuse and still hold a bake
@@ -154,6 +154,33 @@ def _baked_material(name: str, color: bpy.types.Image, normal: bpy.types.Image, 
     return material
 
 
+def _keep_see_through(mesh: bpy.types.Mesh, old: np.ndarray, glass: dict, uv_layer: str) -> None:
+    """Point the faces (`old` slot each) at the baked material, slot 0, but those of `glass` (old slot: material) at their own.
+
+    Their textures, if any, need their old UVs, and the bake's layer is the one that stays.
+    """
+    remap = np.zeros(max(int(old.max(initial=0)), *glass, 0) + 1, dtype=np.int32)
+    for slot, (index, material) in enumerate(glass.items(), start=1):
+        mesh.materials.append(material)
+        remap[index] = slot
+    mesh.polygons.foreach_set("material_index", remap[old])
+    kept = next((layer for layer in mesh.uv_layers if layer.name != uv_layer), None)
+    if not glass or kept is None:
+        return
+    starts, sizes = np.empty(len(old), dtype=np.int64), np.empty(len(old), dtype=np.int64)
+    mesh.polygons.foreach_get("loop_start", starts)
+    mesh.polygons.foreach_get("loop_total", sizes)
+    corners = np.zeros(len(mesh.loops), dtype=bool)
+    order = np.argsort(starts)
+    corners[np.flatnonzero(np.repeat(remap[old][order] > 0, sizes[order]))] = True
+    theirs, ours = np.empty(len(mesh.loops) * 2), np.empty(len(mesh.loops) * 2)
+    kept.data.foreach_get("uv", theirs)
+    mesh.uv_layers[uv_layer].data.foreach_get("uv", ours)
+    both = np.repeat(corners, 2)
+    ours[both] = theirs[both]
+    mesh.uv_layers[uv_layer].data.foreach_set("uv", ours)
+
+
 def bake_detail(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
@@ -165,10 +192,12 @@ def bake_detail(
 ) -> list[bpy.types.Image]:
     """Bake the source's detail onto the target. The source and its materials are only read.
 
-    With color, the target ends up with one new material holding both maps. Without it, it keeps its own materials,
-    as private copies, with the normal map added to each. A new UV layer is made when the kept one overlaps itself.
+    With color, the target ends up with one new material holding both maps, and see-through materials stay as they are:
+    a bake has no way to hold glass. Without color, it keeps its own materials, as private copies, with the normal map
+    added to each. A new UV layer is made when the kept one overlaps itself.
     """
     mesh = target_obj.data
+    glass = {i: m for i, m in enumerate(mesh.materials) if with_color and is_see_through(m)}
     margin = max(4, int(resolution) // 128)  # padding that survives the texture's smaller mip levels
     if new_uvs or not _uv_layer_can_hold_bake(mesh):
         ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
@@ -184,9 +213,11 @@ def bake_detail(
     normal = images[0]
     if with_color:
         private = [m for m in mesh.materials if m is not None]
-        mesh.materials.clear()
+        slots = np.empty(len(mesh.polygons), dtype=np.int32)
+        mesh.polygons.foreach_get("material_index", slots)
+        mesh.materials.clear()  # this sets every face's slot to 0
         mesh.materials.append(_baked_material(f"{target_obj.name}_Baked", images[1], normal, uv_layer))
-        mesh.polygons.foreach_set("material_index", np.zeros(len(mesh.polygons), dtype=np.int32))
+        _keep_see_through(mesh, slots, glass, uv_layer)
         mesh.update()
         for material in private:
             bpy.data.materials.remove(material)

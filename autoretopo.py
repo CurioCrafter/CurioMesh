@@ -552,7 +552,7 @@ class AutoJob:
             self.ready.append([False])
             self.seen.append(0.0)
             return
-        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips))
+        key = ("piece", ids.tobytes(), None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips), self.target_faces > 0)  # Reduce To needs the small sizes a kept-detail search skips
         known = self.cache.get(key)
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
@@ -911,7 +911,9 @@ class AutoJob:
             return sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]})
 
         view = yield from self._timed("pictures", pictures(np.asarray(result.vertices), result.faces, center, half, MAX_PIXELS))
-        reducer.freeze(over_limit(result, view) + list(range(rebuilt_from, len(result.vertices))))  # whatever is at its limit stays as it is, and so do rebuilt parts
+        already = over_limit(result, view)
+        reducer.freeze(already + list(range(rebuilt_from, len(result.vertices))))  # whatever is at its limit stays as it is, and so do rebuilt parts
+        already = set(already)  # numbered as in `result`, which is the reducer's own numbering before anything comes off
         saved = yield from self._background(reducer.save)
         step = REDUCE_STEP
         looks = 0
@@ -931,7 +933,8 @@ class AutoJob:
             view = yield from self._timed("pictures", pictures(np.asarray(attempt.vertices), attempt.faces, center, half, MAX_PIXELS))
             wrong, shown = picture_counts(reference, view, pixel)
             now = 100.0 * wrong / max(shown, 1)
-            ruined = over_limit(attempt, view)
+            found = over_limit(attempt, view)
+            ruined = [v for v, name in zip(found, reducer.original_ids(found)) if name not in already]  # parts over before, and frozen, are not to blame
             if now <= self.detail and not ruined:
                 result, loss = attempt, now
                 saved = yield from self._background(reducer.save)
