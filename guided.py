@@ -1556,7 +1556,7 @@ def _start_boolean(context, gs, source, src) -> bool:
         runner = areas.AreaRunner(
             co, faces, frozen,
             fit=(lambda r: region._fit_result(co, r, project, iterations)) if iterations > 0 else None,
-            merge=lambda results: _merge_results(co, faces, results, frozen, mat) or out,
+            merge=lambda results: _merge_results(co, faces, results, frozen, mat) or dict(out, new=np.zeros(len(faces), dtype=bool)),
             max_faces=region.MAX_PATCH_FACES,
         )
         work = state["work"] = {"key": key, "runner": runner, "cent": None, "seen": 0, "areas": []}
