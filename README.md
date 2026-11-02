@@ -58,8 +58,8 @@ object on top and a close-up below.
 
 *Concrete road barrier, [Poly Haven](https://polyhaven.com/a/concrete_road_barrier), CC0.*
 
-| Model | Original faces | CurioMesh quads | Size | View changed | Time | Wire pictures |
-|---|---:|---:|---:|---:|---:|---|
+| Model | Original faces | CurioMesh quads | Size | View changed | Wire pictures |
+|---|---:|---:|---:|---:|---|
 | [Marble bust](https://polyhaven.com/a/marble_bust_01) | 17,456 | 2,632 | 15% | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
 | [Concrete road barrier](https://polyhaven.com/a/concrete_road_barrier) | 60,928 | 987 | 2% | 5.9% | [before and after](docs/images/concrete_road_barrier.jpg) |
 | [Old military compressor](https://polyhaven.com/a/old_military_compressor) | 79,042 | 16,317 | 21% | 5.3% | [before and after](docs/images/old_military_compressor.jpg) |
@@ -97,8 +97,8 @@ and press **Start**. Nothing changes in your scene until you press **Apply**.
 
 Each Use sets Detail, Method and Output for you. Change any of them and the Use becomes Custom. The same bust with each Use:
 
-| Use | CurioMesh faces | Triangles left | View changed | Time | Wire pictures |
-|---|---:|---:|---:|---:|---|
+| Use | CurioMesh faces | Triangles left | View changed | Wire pictures |
+|---|---:|---:|---:|---|
 | Low Poly | 1,396 | 1,396 | 10.4% | [before and after](docs/images/bust_low_poly.jpg) |
 | Game Asset (default) | 2,632 | 0 | 6.0% | [before and after](docs/images/marble_bust_01.jpg) |
 | Animation | 7,042 | 0 | 2.0% | [before and after](docs/images/bust_animation.jpg) |
@@ -127,8 +127,8 @@ Quads can follow the shape, or they can run in rows. Pick what comes first when 
 - **Balanced** holds the same change with far fewer irregular vertices, by splitting every quad. It costs more faces.
 - **Clean Rows** makes even, square quads in long rows. It costs more visible change, and small sharp detail softens.
 
-| Style | Model | CurioMesh quads | View changed | Tidiness | Time | Wire pictures |
-|---|---|---:|---:|---:|---:|---|
+| Style | Model | CurioMesh quads | View changed | Tidiness | Wire pictures |
+|---|---|---:|---:|---:|---|
 | Keep Detail | Marble bust | 2,632 | 6.0% | 28 | [before and after](docs/images/marble_bust_01.jpg) |
 | Balanced | Marble bust | 5,708 | 5.2% | 69 | [before and after](docs/images/bust_balanced.jpg) |
 | Clean Rows | Marble bust | 14,147 | 5.7% | 97 | [before and after](docs/images/bust_rows.jpg) |
