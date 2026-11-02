@@ -37,6 +37,7 @@ from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap
 from .triadq.quadreduce import QuadReducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
+from .triadq.fieldmesh import MOST_TARGET, field_quads, is_clean
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
 from . import guides, loops, symmetry, turbo
 from .triadq.types import Cancelled, MeshData
@@ -49,6 +50,10 @@ MEASURE_SHARE = 0.6  # of the progress bar, spent looking at the pieces
 LEVELS = (0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64)  # shares of a piece's triangles to try
 PIECE_LIMIT = 3.0  # no piece may change by more than this many times the amount asked for
 REBUILD_MARGIN = 1.5  # a rebuilt part's measured change counts this many times, as it looks better alone than in the whole view
+FIELD_SMALLEST = 1000  # triangles: a part with fewer isn't worth laying a grid on while Auto looks for the best
+FIELD_MOST = 8000  # quads Auto may ask of it in one look, as it does this for every large part
+FIELD_SECONDS = 120.0  # Auto stops offering rows after spending this long on them in one run
+FIELD_SHARES = (0.04, 0.08, 0.16, 0.32)  # shares of a part's triangles, as quads, that the Field Rows method tries
 QUAD_WEIGHT = 0.9  # a rebuilt quad counts as this many faces of a triangle level (those end up about 1.1 quads each)
 GOOD_ENOUGH = 0.25  # stop trying bigger sizes of a piece once its change is this share of the amount asked for
 FINER_TRIANGLES = 200  # pieces smaller than this have too few faces for a size between two others to matter
@@ -496,6 +501,7 @@ class AutoJob:
         self.picture_sizes: list[int] = []
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
+        self.field_spent = 0.0
         self.ready: list[list[bool]] = []  # per piece and size: already all quads, so it skips pairing
         self.seen: list[float] = []
         self.picked: list[int] = []
@@ -607,6 +613,34 @@ class AutoJob:
                 turned_levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
                 if wrong <= enough * shown:
                     break
+        method_here = self._method(len(self.sizes))
+        plain = self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and self.drop is None and len(set(kinds)) == 1
+        if method_here == "FIELD" and plain:
+            for share in FIELD_SHARES:
+                if share * triangles > MOST_TARGET or share * triangles < 24.0:
+                    continue
+                self.stage = f"Laying rows of quads on piece {len(self.sizes) + 1}"
+                out = yield from self._field_size(points, polys, kinds, share * triangles, center, half, pixels, reference, pixel, 1.0)
+                if out is None:
+                    continue
+                seen = max(seen, out[2])
+                turned_sizes.append(out[0])
+                turned_levels.append(out[1])
+                if out[3] <= enough:
+                    break
+            if turned_sizes:
+                sizes = [*turned_sizes, whole]
+                levels = [*turned_levels, Level(len(polys), 0.0)]
+                ready = [True] * len(turned_sizes) + [False]
+                order = sorted(range(len(sizes)), key=lambda k: levels[k].faces)
+                sizes, levels, ready = [sizes[k] for k in order], [levels[k] for k in order], [ready[k] for k in order]
+                self.sizes.append(sizes)
+                self.levels.append(levels)
+                self.ready.append(ready)
+                self.seen.append(seen)
+                self.cache[key] = (self.detail, sizes, levels, seen, ready)
+                return
+            self.notes.append("Rows of quads did not work on a part: Auto was used there")
         shares = [share for share in LEVELS if share * triangles >= 12.0]
         floor = PIECE_LIMIT * self.detail / 100.0
         first, case = 0, None
@@ -667,6 +701,16 @@ class AutoJob:
                     spots.append(spots[k])
             kept = best_levels(levels)
             sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
+        if method_here == "AUTO" and plain and triangles >= FIELD_SMALLEST and self.field_spent < FIELD_SECONDS and seen > 0.0:
+            # At about the size the camera settled on, and half as many again: the camera says if rows hold the shape.
+            good = next((level.faces for level in levels if level.loss <= self.detail / 100.0 * seen), levels[-1].faces if levels else 0)
+            for want in (good, 1.5 * good):
+                if not FIELD_SMALLEST / 40.0 <= want <= FIELD_MOST or self.field_spent >= FIELD_SECONDS:
+                    continue
+                out = yield from self._field_size(points, polys, kinds, want, center, half, pixels, reference, pixel, REBUILD_MARGIN)
+                if out is not None:
+                    turned_sizes.append(out[0])
+                    turned_levels.append(out[1])
         ready = [True] * len(turned_sizes) + [False] * (len(sizes) + 1)
         sizes = turned_sizes + sizes + [whole]
         levels = turned_levels + levels + [Level(len(polys), 0.0)]
@@ -677,6 +721,32 @@ class AutoJob:
         self.ready.append(ready)
         self.seen.append(seen)
         self.cache[key] = (self.detail, sizes, levels, seen, ready)
+
+    def _field_size(self, points, polys, kinds, want, center, half, pixels, reference, pixel, margin):
+        """Generator: rows of quads on this part at about `want` quads, looked at. (build, level, area seen, change) or None."""
+        started = time.perf_counter()
+        strict = self.output_kind == "QUADS"
+
+        def work():
+            try:
+                made = field_quads(points, polys, want, cancelled=lambda: self._stopped)
+                return made if not strict or is_clean(made[0], made[1]) else None
+            except ValueError as exc:
+                if "Stopped" not in str(exc) and "too small" not in str(exc):
+                    self.notes.append(str(exc))
+                return None
+
+        made = yield from self._background(work)
+        self.field_spent += time.perf_counter() - started
+        self.timings["field"] = self.timings.get("field", 0.0) + time.perf_counter() - started
+        if made is None or self._stopped:
+            return None
+        kind = max(set(kinds), key=kinds.count)
+        build = (made[0], parts.orient_like(made[0], made[1], points, polys), [kind] * len(made[1]))
+        view = yield from self._timed("pictures", pictures(build[0], build[1], center, half, pixels))
+        wrong, shown = picture_counts(reference, view, pixel)
+        area = pixel * pixel
+        return build, Level(len(build[1]) * QUAD_WEIGHT, margin * wrong * area), shown * area, wrong / max(shown, 1)
 
     def _reference(self, center, half, pixels, points, polys):
         """Generator: the six pictures of the original at this view. A lone piece is the whole object, so they are made once."""
@@ -987,6 +1057,8 @@ class AutoJob:
 
     def _build(self, co, faces, kinds, method, goal=0):
         """Generator: faces for these pieces by `method` in the chosen output. Returns (points, faces, materials) or None."""
+        if method == "FIELD":  # a part it could do skips this: it is here because it was refused or isn't plain enough
+            method = "AUTO"
         if method in INLINE:
             try:
                 made = _quadriflow(self.context, co, faces, kinds, goal) if method == "QUADRIFLOW" else _fill(co, faces, kinds, method, goal)

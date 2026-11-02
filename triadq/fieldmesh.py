@@ -24,9 +24,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import segment
 from .patch import _labels, quad_quality
 
-SHARP_DEG = 60.0  # lower and a sculpt's noise pins the grid in many places, which breaks rows
+SHARP_DEG = 60.0
+CREASE_DEG = 20.0  # faces this far apart may be a feature line
+CREASE_LENGTH = 0.1  # of the piece's size a line must reach before the grid is laid along it
+SEGMENT_DETAIL = 0.5  # how finely a piece is cut into limbs, each with its own cell size
+ROW_WIDTH = 4.0  # at least this many cells across a limb or panel
+SEGMENT_TURN = 1.0  # radians the surface may turn across a cell, read per limb, so rows are whole inside each
 SPLIT_SHARE = 0.4  # no edge of the split copy longer than this share of the local cell size
 SMALLEST = 0.5  # no cell under this share of the size that even cells would have
 QUADS_PER_REGION = 0.92  # cleaning up takes some away
@@ -38,6 +44,13 @@ ROBUST = 0.05  # gaps far above this share of a cell are left to be defects rath
 SAME_CORNER = 0.35
 RELAX_ROUNDS = 8
 RELAX_RATE = 0.5
+FINISH_ROUNDS = 4
+MOST_TARGET = 30_000  # quads on one piece: beyond this a run takes many minutes in plain NumPy
+MOST_SOURCE = 2_000_000  # triangles
+CHEAP_SWEEPS = 6  # while still finding the right cell size
+CREASE_SMOOTH = 4
+CORNER_COS = 0.5  # edges of a line this far from its direction make a corner
+FAR_SIDE = 25.0  # how much further away a point facing the other way counts
 SMALLEST_TARGET = 24
 COUNT_SLACK = 0.06
 GUARD_QUALITY = 0.1
@@ -122,6 +135,28 @@ def size_limits(points: np.ndarray, tris: np.ndarray, even: float, most_turn: fl
     return most_turn / np.maximum(curvature, 1e-12)
 
 
+def segment_limits(points: np.ndarray, tris: np.ndarray, even: float, most_turn: float) -> np.ndarray:
+    """Per vertex, its limb's largest cell: thin or bent limbs get small cells, and each limb's cells are all alike, so rows
+    stay whole inside a limb and only end at its seam. Cut by `segment`; a part it can't cut is one limb."""
+
+    bends = size_limits(points, tris, even, most_turn)
+    try:
+        faces = [tuple(t) for t in tris.tolist()]
+        labels = segment.dense(segment.find(segment.build(points, faces), faces, SEGMENT_DETAIL))
+    except ValueError:
+        labels = np.zeros(len(tris), dtype=np.int64)
+    vertex = np.zeros(len(points), dtype=np.int64)
+    vertex[tris.reshape(-1)] = np.repeat(labels, 3)
+    out = np.empty(len(points))
+    order = np.argsort(vertex, kind="stable")
+    for ids in np.split(order, np.flatnonzero(vertex[order][1:] != vertex[order][:-1]) + 1):
+        here = points[ids] - points[ids].mean(axis=0)
+        axes = np.linalg.eigh(here.T @ here)[1]
+        width = float(np.ptp(here @ axes[:, 1]))  # across a tube or the shorter way along a panel
+        out[ids] = min(float(np.median(bends[ids])), max(width, 1e-12) / ROW_WIDTH)
+    return out
+
+
 def fit_sizes(limits: np.ndarray, area: np.ndarray, target: float, shape: np.ndarray | None = None) -> np.ndarray:
     """Cell sizes covering `area` in about `target` cells: `shape`, capped by `limits`, all scaled together.
 
@@ -199,28 +234,58 @@ class _Level:
     misfit: np.ndarray | None = None
 
 
+def long_creases(points: np.ndarray, a: np.ndarray, b: np.ndarray, turn: np.ndarray, degrees: float | None = None, share: float | None = None) -> np.ndarray:
+    """Per edge: on a line of sharp edges, unbroken by crossings, reaching `share` of the object's size. Short ones are noise, and each breaks the rows around it."""
+
+    sharp = np.flatnonzero(turn >= np.radians(CREASE_DEG if degrees is None else degrees))
+    out = np.zeros(len(a), dtype=bool)
+    if not len(sharp):
+        return out
+    ends = np.concatenate((a[sharp], b[sharp]))
+    ids = np.concatenate((sharp, sharp))
+    order = np.argsort(ends, kind="stable")
+    ends, ids = ends[order], ids[order]
+    plain = np.bincount(ends, minlength=len(points))[ends] == 2  # a vertex with two sharp edges joins them; more is a crossing
+    link = np.flatnonzero((ends[:-1] == ends[1:]) & plain[:-1])
+    lines = _labels(len(a), ids[link], ids[link + 1])
+    lengths = np.linalg.norm(points[a] - points[b], axis=1)
+    total = np.bincount(lines[sharp], lengths[sharp], len(a))
+    out[sharp] = total[lines[sharp]] >= (CREASE_LENGTH if share is None else share) * float(np.ptp(points, axis=0).max())
+    return out
+
+
 def _features(points: np.ndarray, tris: np.ndarray, normals: np.ndarray, a, b, edge_of, uses) -> tuple[np.ndarray, np.ndarray]:
     """(direction along a crease or zero, 0 free / 1 on a crease or border / 2 a corner) per vertex."""
 
-    turn = edge_turn(tris, normals, edge_of, len(a))
-    sharp = (turn >= np.radians(SHARP_DEG)) | (uses != 2)
+    sharp = long_creases(points, a, b, edge_turn(tris, normals, edge_of, len(a))) | (uses != 2)
     ends = np.concatenate((a[sharp], b[sharp]))
     count = np.bincount(ends, minlength=len(points))
-    pinned = np.where(count == 0, 0, np.where(count == 2, 1, 2))
+    pinned = np.where(count == 0, 0, np.where(count <= 2, 1, 2))
+    # Direction along the line: a mesh's zigzag averaged out over a few edges, each edge signed to follow its neighbours.
+    ea, eb = a[sharp], b[sharp]
+    direction = _unit(points[eb] - points[ea])
     along = np.zeros_like(points)
-    # Sign each sharp edge so both at a vertex point the same way through it.
-    direction = _unit(points[b[sharp]] - points[a[sharp]])
-    first = np.full(len(points), -1, dtype=np.int64)
-    for side, ends_here in ((1.0, a[sharp]), (-1.0, b[sharp])):
-        hold = first[ends_here] < 0
-        along[ends_here[hold]] = side * direction[hold]
-        first[ends_here[hold]] = 0
-        again = np.flatnonzero(~hold)
-        # the second edge at a vertex
-        np.add.at(along, ends_here[again], -side * direction[again])
-    strength = np.linalg.norm(along, axis=1)
-    pinned[(pinned == 1) & (strength < 1.4)] = 2  # the crease turns hard here
-    along = _unit(along)
+    seen = np.zeros(len(points), dtype=bool)
+    for _ in range(CREASE_SMOOTH):
+        total = np.zeros_like(points)
+        for ends_here, sign in ((ea, 1.0), (eb, -1.0)):  # edge a -> b leaves a and enters b; through a vertex, one of each is straight
+            first_time = ~seen[ends_here]
+            flip = np.where(((along[ends_here] * direction).sum(axis=1) < 0.0) | (first_time & (sign < 0.0)), -1.0, 1.0)
+            np.add.at(total, ends_here, flip[:, None] * direction)
+        seen[ea] = True
+        seen[eb] = True
+        total[pinned == 2] = 0.0
+        # share along the line
+        spread = total.copy()
+        same = np.where((total[eb] * total[ea]).sum(axis=1) >= 0.0, 0.5, -0.5)
+        for k in range(3):
+            spread[:, k] += np.bincount(ea, total[eb, k] * same, len(points)) + np.bincount(eb, total[ea, k] * same, len(points))
+        along = _unit(spread)
+    # A line that turns hard at a vertex has a corner there: its two edges point well apart.
+    neighbour_dot = np.ones(len(points))
+    np.minimum.at(neighbour_dot, ea, np.abs((direction * along[ea]).sum(axis=1)))
+    np.minimum.at(neighbour_dot, eb, np.abs((direction * along[eb]).sum(axis=1)))
+    pinned[(pinned == 1) & (neighbour_dot < CORNER_COS)] = 2
     along[pinned != 1] = 0.0
     return along, pinned
 
@@ -366,7 +431,7 @@ def solve_orientation(levels: list[_Level], rng: np.random.Generator, sweeps: in
             _orient_sweep(level, rng)
 
 
-def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None) -> None:
+def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None, final_sweeps: int | None = None, stop=None) -> None:
     sweeps = int(POSITION_SWEEPS if sweeps is None else sweeps)
     coarsest = levels[-1]
     coarsest.o = _place(coarsest, coarsest.points.copy())
@@ -377,7 +442,9 @@ def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int 
         for _ in range(sweeps):
             _position_sweep(level, rng)
         level.misfit = np.ones(len(level.o))
-        for _ in range(int(ROBUST_SWEEPS) if index else int(FINAL_SWEEPS)):
+        for _ in range(int(ROBUST_SWEEPS) if index else int(FINAL_SWEEPS if final_sweeps is None else final_sweeps)):
+            if stop is not None:
+                stop()
             _position_sweep(level, rng, True)
 
 
@@ -483,7 +550,14 @@ def _split_rings(points: np.ndarray, tris: np.ndarray, labels: np.ndarray, a, b)
     whole = (labels[tris[:, 0]] == labels[tris[:, 1]]) & (labels[tris[:, 1]] == labels[tris[:, 2]])
     euler = np.bincount(labels, minlength=count) - np.bincount(labels[a[inner]], minlength=count) + np.bincount(labels[tris[whole, 0]], minlength=count)
     sizes = np.bincount(labels, minlength=count)
-    bad = np.flatnonzero((euler != 1) & (sizes >= 3))
+    bad = (euler != 1) & (sizes >= 3)
+    dual = dual_triangles(tris, labels)
+    if len(dual):  # two regions may share one stretch of border only, or three faces would meet on an edge
+        x, y, _e, uses = _edges(dual, count)
+        crowded = uses > 2
+        bad[x[crowded]] |= sizes[x[crowded]] >= 3
+        bad[y[crowded]] |= sizes[y[crowded]] >= 3
+    bad = np.flatnonzero(bad)
     if not len(bad):
         return labels
     side = np.zeros(len(points), dtype=np.int64)
@@ -570,24 +644,25 @@ class FieldMesh:
     fine_tris: np.ndarray
     labels: np.ndarray  # per fine point, its output vertex
     sizes: np.ndarray  # per fine point
+    creased: np.ndarray | None = None  # per fine point: on a long crease or a border
     report: dict = field(default_factory=dict)
 
 
 class FieldMesher:
     """Holds the split copy and its direction field, so positions can be solved again for other cell sizes.
 
-    `turn`, in radians, makes cells shrink where the surface turns more than that across one. It buys shape at a price in
-    rows, since a grid can only change size at row ends: about 1.5 is the useful setting, and None keeps the rows whole.
+    `turn`, in radians, is how far the surface may turn across a cell, read per limb.
     """
 
-    def __init__(self, vertices, tris, target: float, turn: float | None = None, seed: int = 0):
+    def __init__(self, vertices, tris, target: float, turn: float | None = None, seed: int = 0, cancelled=None):
+        self.cancelled = cancelled
         self.rng = np.random.default_rng(seed)
         self.source = np.asarray(vertices, dtype=np.float64)
         self.source_tris = np.asarray(tris, dtype=np.int64)
         _normals, areas, _vertex = _normals_areas(self.source, self.source_tris)
         area = np.bincount(self.source_tris.reshape(-1), np.repeat(areas / 3.0, 3), len(self.source))
         even = float(np.sqrt(max(areas.sum(), 1e-30) / max(target, 1.0)))
-        limits = size_limits(self.source, self.source_tris, even, turn) if turn else np.full(len(self.source), np.inf)
+        limits = segment_limits(self.source, self.source_tris, even, SEGMENT_TURN if turn is None else turn)
         self.target = float(target)
         sizes = fit_sizes(limits, area, self.target)
         self.fine_points, self.fine_tris, self.fine_sizes, self.limits = split_long_edges(self.source, self.source_tris, sizes, carried=limits)
@@ -598,23 +673,32 @@ class FieldMesher:
         self.shape = None
         if CONFORMAL:
             phi = conformal_scale(self.fine_points, self.fine_tris, self.levels[0].q, self.levels[0].normals)
+            # Each limb averages its own size: on a long shape phi alone gives one end far bigger cells than the other.
+            _groups, group = np.unique(np.round(np.log(np.maximum(self.limits, 1e-30)), 3), return_inverse=True)
+            phi -= (np.bincount(group, phi * self.fine_area) / np.maximum(np.bincount(group, self.fine_area), 1e-30))[group]
             self.shape = np.exp(np.clip(CONFORMAL * phi, -MOST_LOG, MOST_LOG))
 
     def solve(self, target: float | None = None) -> FieldMesh:
-        """Lay the grid, and again if the regions came out far from the number wanted (merged regions and row ends change it)."""
+        """Lay the grid. Cheap tries find the cell size that gives the number wanted (merged regions and row ends change it), then one full solve."""
 
         wanted = self.target if target is None else target
         asked = wanted
-        for _ in range(3):
+        for last in (False, False, True):
+            self._stop_check()
             self.fine_sizes = fit_sizes(self.limits, self.fine_area, asked, self.shape)
             set_sizes(self.levels, self.fine_sizes)
-            solve_positions(self.levels, self.rng)
+            solve_positions(self.levels, self.rng, final_sweeps=None if last else CHEAP_SWEEPS, stop=self._stop_check)
             mesh = self.extract()
             got = QUADS_PER_REGION * mesh.report["regions"]
-            if abs(got - wanted) <= COUNT_SLACK * wanted:
+            if last:
                 break
-            asked *= wanted / max(got, 1)
+            if abs(got - wanted) > COUNT_SLACK * wanted:
+                asked *= wanted / max(got, 1)
         return mesh
+
+    def _stop_check(self) -> None:
+        if self.cancelled is not None and self.cancelled():
+            raise ValueError("Stopped.")
 
     def extract(self) -> FieldMesh:
         finest = self.levels[0]
@@ -626,7 +710,7 @@ class FieldMesher:
         cell = np.bincount(labels, finest.sizes * weight, count) / total
         points = fit_regions(self.fine_points, self.fine_tris, labels, start, cell)
         tris = dual_triangles(self.fine_tris, labels)
-        return FieldMesh(points, tris, self.fine_points, self.fine_tris, labels, finest.sizes, {"regions": count, "triangles": len(tris), "fine_points": len(self.fine_points), "levels": len(self.levels)})
+        return FieldMesh(points, tris, self.fine_points, self.fine_tris, labels, finest.sizes, finest.pinned > 0, {"regions": count, "triangles": len(tris), "fine_points": len(self.fine_points), "levels": len(self.levels)})
 
 
 
@@ -776,6 +860,19 @@ def _face_area_normals(points, faces, count: int) -> np.ndarray:
     return _unit(out)
 
 
+def onto_creases(points: np.ndarray, fine_points: np.ndarray, labels: np.ndarray, creased: np.ndarray) -> np.ndarray:
+    """A vertex whose region holds part of a crease goes to the nearest crease point there, so the ridge is an edge of the mesh."""
+
+    ids = np.flatnonzero(creased)
+    if not len(ids):
+        return points
+    points = points.copy()
+    away = np.linalg.norm(fine_points[ids] - points[labels[ids]], axis=1)
+    order = np.argsort(-away)  # the last write, the nearest, wins
+    points[labels[ids[order]]] = fine_points[ids[order]]
+    return points
+
+
 def relax(mesh: FieldMesh, points: np.ndarray, faces, rounds: int | None = None) -> np.ndarray:
     """Even the rows out along the surface, each round fitted back to each vertex's own region of the source."""
 
@@ -795,6 +892,7 @@ def relax(mesh: FieldMesh, points: np.ndarray, faces, rounds: int | None = None)
         target = np.stack([np.bincount(first, points[second, k], count) for k in range(3)], axis=1) / uses[:, None]
         points += RELAX_RATE * _tangent(target - points, _face_area_normals(points, faces, count))
         points[:known] = fit_regions(mesh.fine_points, mesh.fine_tris, mesh.labels, points[:known], cell)
+        points[:known] = onto_creases(points[:known], mesh.fine_points, mesh.labels, mesh.creased)
     return points
 
 
@@ -858,7 +956,7 @@ def pair_by_paths(points: np.ndarray, faces: list[tuple[int, ...]], reach: int =
         queue = [start]
         end = None
         for here in queue:
-            if len(queue) > reach:
+            if len(queue) > reach or end is not None:
                 break
             face = alive[here]
             for k in range(len(face)):
@@ -875,18 +973,15 @@ def pair_by_paths(points: np.ndarray, faces: list[tuple[int, ...]], reach: int =
                 came[other] = (here, x, y)
                 queue.append(other)
                 if len(alive[other]) == 3:
-                    end = other
-                    break
-            if end is not None:
-                break
+                    path = [other]
+                    while came[path[-1]] is not None:
+                        path.append(came[path[-1]][0])
+                    path.reverse()
+                    built = _rejoin(points, alive, came, path)
+                    if built is not None:
+                        end = other
+                        break
         if end is None:
-            continue
-        path = [end]
-        while came[path[-1]] is not None:
-            path.append(came[path[-1]][0])
-        path.reverse()
-        built = _rejoin(points, alive, came, path)
-        if built is None:
             continue
         for index in path:
             face = alive.pop(index)
@@ -1020,10 +1115,19 @@ def quads_from(mesh: FieldMesh) -> tuple[np.ndarray, list[tuple[int, ...]]]:
     faces = pair_by_paths(points, faces)
     points = relax(mesh, points, faces, 4)
     points, faces = clean(points, faces)
-    points = relax(mesh, points, faces, 4)
-    points, faces = clean(points, faces)
+    for _ in range(FINISH_ROUNDS):  # cleaning can leave a triangle, and pairing a fold
+        faces = pair_by_paths(points, faces, 4000)
+        points = relax(mesh, points, faces, 2)
+        points, faces = clean(points, faces)
+        if all(len(f) == 4 for f in faces):
+            break
     points = untangle(points, faces)
-    points = refit(mesh.fine_points, mesh.fine_tris, points, faces)[0]
+    points = refit(mesh.fine_points, mesh.fine_tris, points, faces, creased=mesh.creased)[0]
+    for _ in range(FINISH_ROUNDS):
+        points, faces = clean(points, faces)
+        points = untangle(points, faces, 24)
+        if not _any_folded(points, faces):
+            break
     used, flat = np.unique(np.fromiter((v for f in faces for v in f), dtype=np.int64), return_inverse=True)
     out, at = [], 0
     for face in faces:
@@ -1032,8 +1136,8 @@ def quads_from(mesh: FieldMesh) -> tuple[np.ndarray, list[tuple[int, ...]]]:
     return points[used], out
 
 
-def nearest_points(points: np.ndarray, asks: np.ndarray, cell: float) -> np.ndarray:
-    """For each ask, the index of the nearest of `points`: the grid cells around it, or all of them if those are empty."""
+def nearest_points(points: np.ndarray, asks: np.ndarray, cell: float, normals: np.ndarray, ask_normals: np.ndarray) -> np.ndarray:
+    """For each ask, the nearest of `points` that faces its way, so a thin wall's far side is never picked: looks in the grid cells around it, or all if those are empty."""
 
     low = points.min(axis=0)
     size = max(float(cell), float(np.ptp(points, axis=0).max()) / 512.0, 1e-30)
@@ -1046,11 +1150,12 @@ def nearest_points(points: np.ndarray, asks: np.ndarray, cell: float) -> np.ndar
     cells = np.floor((asks - low) / size).astype(np.int64)
     centre = ((cells[:, 0] + 1) * span + cells[:, 1] + 1) * span + cells[:, 2] + 1
     out = np.zeros(len(asks), dtype=np.int64)
-    for index, (ask, key) in enumerate(zip(asks, centre.tolist())):
+    for index, (ask, key, facing) in enumerate(zip(asks, centre.tolist(), ask_normals)):
         wanted = key + around
         lefts, rights = np.searchsorted(sorted_keys, wanted), np.searchsorted(sorted_keys, wanted, side="right")
         found = np.concatenate([order[x:y] for x, y in zip(lefts.tolist(), rights.tolist()) if y > x] or [order])
-        out[index] = found[np.argmin(((points[found] - ask) ** 2).sum(axis=1))]
+        away = ((points[found] - ask) ** 2).sum(axis=1) * np.where(normals[found] @ facing < 0.0, FAR_SIDE, 1.0)
+        out[index] = found[np.argmin(away)]
     return out
 
 
@@ -1077,7 +1182,7 @@ def graph_voronoi(count: int, a: np.ndarray, b: np.ndarray, length: np.ndarray, 
     return owner
 
 
-def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, faces, rounds: int = 3) -> tuple[np.ndarray, np.ndarray]:
+def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, faces, rounds: int = 3, creased: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Give each vertex the piece of the source nearest to it, then fit it to the planes there. Returns (points, region per fine point)."""
 
     a, b, _e, _u = _edges(fine_tris, len(fine_points))
@@ -1086,8 +1191,9 @@ def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, fa
     labels = np.zeros(len(fine_points), dtype=np.int64)
     points = points.copy()
     quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+    fine_normals = _normals_areas(fine_points, fine_tris)[2]
     for _ in range(rounds):
-        seeds = nearest_points(fine_points, points, side)
+        seeds = nearest_points(fine_points, points, side, fine_normals, _face_area_normals(points, faces, len(points)))
         unique_seeds, first = np.unique(seeds, return_index=True)
         owner = graph_voronoi(len(fine_points), a, b, length, unique_seeds)
         labels = first[owner]
@@ -1095,6 +1201,8 @@ def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, fa
         cell = np.full(len(points), side)
         moved = fit_regions(fine_points, fine_tris, labels, points, cell)
         moved[~known] = points[~known]
+        if creased is not None:
+            moved = onto_creases(moved, fine_points, labels, creased)
         before = quad_quality(points[quads])
         for _try in range(8):  # any vertex on a quad the move made bad goes back
             bad = quads[quad_quality(moved[quads]) < np.minimum(before, GUARD_QUALITY)]
@@ -1108,19 +1216,44 @@ def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, fa
 
 
 
-def field_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0) -> tuple[np.ndarray, list[tuple[int, ...]]]:
-    """Quads in rows on one loose piece, about `target` of them. May leave a few triangles.
+def field_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
+    """Quads in rows on one loose piece, about `target` of them. May leave a few triangles or folds: see `is_clean`.
 
-    Best on large, smooth or simply shaped pieces. Busy machined parts, thin walls and sculpts with fine limbs lose far
-    more shape than the usual reduction and pairing, so a caller should judge the result and keep the better one.
-    Raises ValueError on a piece too small for a grid.
+    Best on large, smooth or simply shaped pieces. Busy machined parts lose far more shape than the usual reduction and
+    pairing, so a caller should judge the result and keep the better one.
+    Raises ValueError with a message for a person on a piece too small for a grid or too large to finish in reasonable time.
     """
 
     if target < SMALLEST_TARGET:
-        raise ValueError("Too few quads asked for to lay a grid.")
+        raise ValueError("This part is too small for rows of quads.")
+    if target > MOST_TARGET:
+        raise ValueError(f"Rows of quads stop at {MOST_TARGET:,} quads on one part, and this one asks for {int(target):,}.")
     tris = triangulate(faces)[0]
-    mesh = FieldMesher(vertices, tris, target, turn, seed).solve()
+    if len(tris) > MOST_SOURCE:
+        raise ValueError(f"Rows of quads stop at {MOST_SOURCE:,} triangles on one part, and this one has {len(tris):,}.")
+    mesh = FieldMesher(vertices, tris, target, turn, seed, cancelled).solve()
     points, quads = quads_from(mesh)
     if len(quads) < SMALLEST_TARGET // 2:
-        raise ValueError("The grid fell apart on this piece.")
+        raise ValueError("Rows of quads fell apart on this part.")
     return points, quads
+
+
+def _any_folded(points: np.ndarray, faces) -> bool:
+    quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+    return bool((quad_quality(points[quads]) <= 0.0).any())
+
+
+def is_clean(points: np.ndarray, faces) -> bool:
+    """All quads, none folded, and no edge with more than two faces: what a Quads result promises."""
+
+    if not faces or any(len(f) != 4 for f in faces):
+        return False
+    quads = np.asarray(faces, dtype=np.int64)
+    if (quad_quality(points[quads]) <= 0.0).any():
+        return False
+    return not (_edge_counts(quads, len(points)) > 2).any()
+
+
+def _edge_counts(quads: np.ndarray, count: int) -> np.ndarray:
+    first, second = quads.reshape(-1), np.roll(quads, -1, axis=1).reshape(-1)
+    return np.unique(np.minimum(first, second) * count + np.maximum(first, second), return_counts=True)[1]

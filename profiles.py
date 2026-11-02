@@ -12,6 +12,7 @@ METHOD_ITEMS = [
     ("QUADRIFLOW", "QuadriFlow", "Blender's own QuadriFlow on each part. Even flowing quads on smooth organic parts; it can fail on thin or open parts (Auto is used then)", "MOD_REMESH", 3),
     ("GRID", "Grid Fill", "A regular grid. Needs a part with one open edge loop; a closed part falls back to Auto", "MESH_GRID", 4),
     ("FLOW", "Flow Fill", "Quad loops that follow the surface. Needs a part with one open edge loop; a closed part falls back to Auto", "MOD_WAVE", 5),
+    ("FIELD", "Field Rows", "Lays long rows of quads over each part from a direction field, along its long creases. Most organized, with more shape change on busy parts. Parts it can't do well use Auto. Up to 30,000 quads per part", "OUTLINER_OB_LATTICE", 7),
     ("TRIS", "Tris Only", "No pairing at all: the reduced triangles as they are. About twice the faces of the same shape in quads", "MESH_DATA", 6),
 ]
 OUTPUT_ITEMS = [
@@ -23,7 +24,7 @@ OUTPUT_ITEMS = [
 PROFILES = {
     "LOW_POLY": ("Low Poly", "Fewest faces for a game prop or background: flat areas collapse into big polygons, then triangles. Small parts may vanish", 10.0, "FLAT", "TRIS"),
     "GAME": ("Game Asset", "All quads, few faces, good for a game model. The default", 6.0, "AUTO", "QUADS"),
-    "ANIMATION": ("Animation", "All quads, even sizes and more faces, so the mesh bends cleanly. Check eyes, mouth and joints by hand", 1.5, "PAIRING", "QUADS"),
+    "ANIMATION": ("Animation", "All quads, even sizes and more faces, so the mesh bends cleanly. Check eyes, mouth and joints by hand", 1.5, "FIELD", "QUADS"),
     "SUBDIV": ("Subdivision", "All quads with flat panels kept as single large quads, so smoothing keeps the shape", 1.5, "FLAT", "QUADS"),
     "SCAN": ("Scan Cleanup", "Keeps more of the detail of a dirty scan (scans have few true flats, so no flat merging)", 2.0, "AUTO", "QUADS"),
     "SCULPT": ("Sculpt Base", "Even, smooth quads to sculpt on: smoothness over detail", 6.0, "PAIRING", "QUADS"),

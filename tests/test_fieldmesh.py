@@ -6,7 +6,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.fieldmesh import field_quads  # noqa: E402
+from triadq.fieldmesh import field_quads, is_clean, long_creases  # noqa: E402
 from triadq.patterns import measure  # noqa: E402
 
 
@@ -46,6 +46,24 @@ class FieldMeshTests(unittest.TestCase):
     def test_cells_can_follow_bends(self) -> None:
         points, faces = capsule()
         self.assertGreater(len(field_quads(points, faces, 400, 1.5)[1]), 200)
+
+    def test_clean_means_all_quads_unfolded_and_manifold(self) -> None:
+        points = np.array([(0.0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 0), (2, 1, 0)])
+        self.assertTrue(is_clean(points, [(0, 1, 2, 3), (1, 4, 5, 2)]))
+        self.assertFalse(is_clean(points, [(0, 1, 2), (1, 4, 5, 2)]))
+        self.assertFalse(is_clean(points, [(0, 2, 1, 3)]))
+        self.assertFalse(is_clean(points, [(0, 1, 2, 3), (1, 4, 5, 2), (1, 2, 3, 4)]))
+
+    def test_short_or_crossed_creases_are_not_lines(self) -> None:
+        points = np.array([(float(k), 0.0, 0.0) for k in range(11)] + [(5.0, 1.0, 0.0), (5.0, -1.0, 0.0)])
+        a, b = np.array([0, 1, 2, 3, 5, 5, 8]), np.array([1, 2, 3, 4, 11, 12, 9])
+        found = long_creases(points, a, b, np.radians(np.full(7, 30.0)), share=0.3)
+        self.assertEqual(found.tolist(), [True, True, True, True, False, False, False])
+
+    def test_too_many_quads_are_refused_with_a_message(self) -> None:
+        points, faces = capsule(8, 8)
+        with self.assertRaisesRegex(ValueError, "stop at"):
+            field_quads(points, faces, 10_000_000)
 
     def test_refuses_a_grid_too_small_to_lay(self) -> None:
         points, faces = capsule(8, 8)
