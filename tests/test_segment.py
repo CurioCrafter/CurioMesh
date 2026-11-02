@@ -77,9 +77,69 @@ class LineTests(unittest.TestCase):
         self.assertEqual(segment.side_of_line(points, stroke).tolist(), [True, False, True, False])
 
 
+class WalkTests(unittest.TestCase):
+    def test_order_wraps_and_starts_at_the_worst(self):
+        self.assertEqual(segment.next_in_order([3, 1, 2], None, 1), 3)
+        self.assertEqual(segment.next_in_order([3, 1, 2], None, -1), 2)
+        self.assertEqual(segment.next_in_order([3, 1, 2], 2, 1), 3)
+        self.assertIsNone(segment.next_in_order([], 2, 1))
+
+
+class CreaseTests(unittest.TestCase):
+    def test_a_long_ridge_counts_and_a_short_one_does_not(self):
+        co, faces = grid(10, 10)
+        co[:, 2] = np.abs(co[:, 0] - 5.0)
+        found = segment.long_creases(co, faces)
+        self.assertTrue(len(found) > 0 and np.allclose(found[:, 0], 5.0))
+        co[:, 2] = 0.0
+        co[60, 2] = 1.0  # one bump: its sharp edges are nowhere near three times the sheet
+        self.assertEqual(len(segment.long_creases(co, faces, share=3.0)), 0)
+
+
+class SeamTests(unittest.TestCase):
+    def test_a_stepped_seam_on_a_flat_sheet_gets_straighter(self):
+        co, faces = grid(12, 12)
+        centres = co[np.asarray(faces)].mean(axis=1)
+        labels = (centres[:, 0] + (centres[:, 1].astype(int) % 2) > 6.0).astype(np.int64)
+        moved = segment.straighten_seams(co, faces, labels)
+        fa, fb, u, v = segment.face_links(faces)
+        across = labels[fa] != labels[fb]
+        before = np.linalg.norm(co[u[across]] - co[v[across]], axis=1).sum()
+        after = np.linalg.norm(moved[u[across]] - moved[v[across]], axis=1).sum()
+        self.assertLess(after, before)
+
+    def test_a_seam_on_a_crease_stays(self):
+        co, faces = grid(8, 8)
+        co[:, 2] = np.abs(co[:, 0] - 4.0)  # a roof ridge along x = 4
+        centres = co[np.asarray(faces)].mean(axis=1)
+        moved = segment.straighten_seams(co, faces, (centres[:, 0] > 4.0).astype(np.int64))
+        ridge = np.flatnonzero(co[:, 0] == 4.0)
+        self.assertTrue(np.array_equal(moved[ridge], co[ridge]))
+
+
 class JoinTests(unittest.TestCase):
     def _seam(self, co, faces, ids):
         return segment.seam_loops(co, faces, ids)
+
+    def test_bent_seam_still_closes_to_all_quads(self):
+        co, faces = grid(10, 10)
+        co[:, 2] = 0.8 * np.sin(co[:, 0]) * np.cos(co[:, 1])  # bent enough to refuse some templates
+        tris = [t for f in faces for t in ((f[0], f[1], f[2]), (f[0], f[2], f[3]))]
+        seam = self._seam(co, faces, range(len(faces)))
+        points, made, _mats = segment.pair_on_seams(co, tris, ["0"] * len(tris), seam)
+        self.assertEqual(sum(len(f) != 4 for f in made), 0)
+        self.assertEqual(segment.open_edges(made), len(seam[0]))
+        self.assertEqual({tuple(p) for p in points[patch.boundary_loops(made, range(len(made)))[0][0]].tolist()}, {tuple(p) for p in seam[0].tolist()})
+
+    def test_guide_edges_stay_edges(self):
+        co, faces = grid(10, 10)
+        tris = [t for f in faces for t in ((f[0], f[1], f[2]), (f[0], f[2], f[3]))]
+        row = [(5 * 11 + i, 5 * 11 + i + 1) for i in range(2, 8)]
+        points, made, _mats = segment.pair_on_seams(co, tris, ["0"] * len(tris), self._seam(co, faces, range(len(faces))), guide_edges=row)
+        fa, _fb, u, v = segment.face_links(made)
+        have = {(tuple(points[a]), tuple(points[b])) for a, b in zip(u.tolist(), v.tolist())}
+        kept = sum((tuple(co[a]), tuple(co[b])) in have or (tuple(co[b]), tuple(co[a])) in have for a, b in row)
+        self.assertGreaterEqual(kept, 4)  # closure may split one, but the line is still there
 
     def test_conform_coarse_part_gets_every_seam_vertex(self):
         co, faces = grid(4, 4)

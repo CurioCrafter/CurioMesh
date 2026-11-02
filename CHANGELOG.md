@@ -39,6 +39,10 @@
   check and topology score; an Animation segment is ranked by its topology score. Animation lays
   rows round the part with a small grid at the far end; a seam keeps the vertices it has, so a
   segment far denser or coarser than its neighbours tapers towards the seam.
+  Drawn edge loops and deformation lines over an Animation or Subdivision segment become real loops
+  on sealed seams. Reduce and Low Poly close to all quads, and Reduce adds faces if a part would lose
+  its shape. Segments with few faces join a neighbour, seams without a crease run straight, and small
+  loose pieces of a big model stay whole unless you raise Segment Detail.
 - **Segment view** (Auto Segments, new Parts panel). The whole result is drawn with every part
   in its own colour. Hover a part (Inspect Parts) to see its faces before and after, how much of
   its view changed and its method; click to select, Shift+click to add. Pick another method for
@@ -125,8 +129,8 @@
   Auto, Pairing, Flat Quads, QuadriFlow, Grid Fill, Flow Fill, Tris Only (Grid and Flow
   need a part with one open edge loop, QuadriFlow can fail on thin parts: Auto is used
   then and the summary says so). Output: Triangles, Quads, or Mixed (paired quads kept,
-  leftover triangles left, no closing). **Click a Part** in the Parts panel remakes just
-  that part with the chosen method and checks the result again.
+  leftover triangles left, no closing). **Review Segments** in the Parts panel remakes
+  just the part you click, with the chosen method, and checks the result again.
 - **The result is checked and repaired.** After every run Auto Segments counts
   non-manifold edges and vertices, flipped edges, duplicate faces, holes and faces that pass through each other
   (BVH overlap), on your mesh and on the result, and only what the result adds counts.

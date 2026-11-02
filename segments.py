@@ -3,8 +3,9 @@
 
 """Segment view: the whole Auto Segments result with every part in its own colour.
 
-Hover or click a part to see its numbers, pick another method for it and watch only that part redo (the same timer and
-progress bar as the search), flip between the methods you tried, or select parts in bulk by kind. Colours, a wireframe,
+Review Segments (`segment_goals`) is the one way to pick a part: hover, click, walk them worst first, change its Use,
+Method and Detail, watch only it redo (the same timer and progress bar as the search), flip between the tries, or select
+parts in bulk by kind. Colours, a wireframe,
 the original laid over the result and a heat map of each part's camera check are overlays you switch on and off.
 
 A part is a segment: one loose piece of your mesh, or a piece of it found by `segment_goals`. Per-part choices live in `job.methods` ({piece: method}) when the job has it, so
@@ -63,7 +64,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None)
+    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None)
 
 
 def ready() -> bool:
@@ -148,6 +149,7 @@ def build_table(base: dict) -> None:
         records.append({
             "id": index, "kind": P.classify(points, polys), "before": len(ids), "after": int(counts[index]) if index < len(counts) else 0,
             "change": change, "method": method, "tries": [{"method": method, "after": int(counts[index]), "change": change, "build": None}], "cur": 0,
+            "name": f"Part {index + 1}", "goal": "REDUCE", "goal_detail": 0.5, "choice": "AUTO", "whole": True, "loose": index, "source": ids, "topology": None,
         })
     seg.update(base=base["id"], piece=piece, parts=records, ref={}, whole=None, batch_key=None, tris=None, hover=None, src=None, surface=False)
     seg["sel"] = {p for p in seg["sel"] if p < len(records)}
@@ -409,8 +411,8 @@ def commit(runner: PartJob) -> None:
             same -= drop < same
         record.update(cur=same, method=new["method"], after=new["after"], change=new["change"], topology=new.get("topology"))
         methods = getattr(runner.job, "methods", None)
-        if methods is not None and "loose" not in record:
-            methods[p] = new["method"]
+        if methods is not None and record.get("whole"):
+            methods[record.get("loose", p)] = new["method"]
     base["out"] = dict(runner.output)
     base["report"] = runner.report
     base["id"] = time.perf_counter_ns()
@@ -479,9 +481,9 @@ def _palette(count: int) -> np.ndarray:
 
 
 def part_colours(gs, count: int):
-    """RGBA per part for the current overlay switches, or None when nothing should be tinted."""
-    selected, hover = seg["sel"], seg["hover"]
-    if not (gs.seg_colors or gs.seg_heat or selected or hover is not None):
+    """RGBA per part for the current overlay switches, or None when nothing should be tinted. The part under the mouse has its own small batch: redoing this one on every hover would stall a big mesh."""
+    selected = seg["sel"]
+    if not (gs.seg_colors or gs.seg_heat or selected):
         return None
     if gs.seg_heat:
         changes = [judged(r) for r in seg["parts"]]
@@ -498,9 +500,15 @@ def part_colours(gs, count: int):
     for p in selected:
         rgb[p] = rgb[p] * 0.5 + 0.5
         alpha[p] = 0.85
-    if hover is not None and hover < count:
-        alpha[hover] = max(alpha[hover], 0.7)
     return np.concatenate((rgb, alpha[:, None]), axis=1).astype(np.float32)
+
+
+def _triangles(guided, res, piece):
+    if seg["tris"] is None or seg["tris"][0] != id(res):
+        tris = guided._fan(res["faces"])
+        owner = np.repeat(piece, [len(f) - 2 for f in res["faces"]])
+        seg["tris"] = (id(res), tris.reshape(-1), np.repeat(owner, 3))
+    return seg["tris"]
 
 
 def _draw_view() -> None:
@@ -517,7 +525,7 @@ def _draw_view() -> None:
         from gpu_extras.batch import batch_for_shader
 
         matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
-        colour_key = (id(res), matrix, gs.seg_colors, gs.seg_heat, frozenset(seg["sel"]), seg["hover"], round(gs.auto_detail, 2))
+        colour_key = (id(res), id(piece), matrix, gs.seg_colors, gs.seg_heat, frozenset(seg["sel"]), round(gs.auto_detail, 2))
         flat = gpu.shader.from_builtin("FLAT_COLOR")
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_mask_set(False)
@@ -526,17 +534,14 @@ def _draw_view() -> None:
             seg["batch"] = None
             colours = part_colours(gs, len(seg["parts"]))
             if colours is not None:
-                if seg["tris"] is None or seg["tris"][0] != id(res):
-                    tris = guided._fan(res["faces"])
-                    owner = np.repeat(piece, [len(f) - 2 for f in res["faces"]])
-                    seg["tris"] = (id(res), tris.reshape(-1), np.repeat(owner, 3))
-                _id, corners, owners = seg["tris"]
+                _id, corners, owners = _triangles(guided, res, piece)
                 world = guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32)
                 seg["batch"] = batch_for_shader(flat, "TRIS", {"pos": world, "color": colours[owners]})
             seg["batch_key"] = colour_key
         if seg["batch"] is not None:
             flat.bind()
             seg["batch"].draw(flat)
+        segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
         if gs.seg_compare == "OVER":
             lines_key = (source.name, len(source.data.edges), tuple(round(x, 5) for row in source.matrix_world for x in row))
             if seg["lines_key"] != lines_key:
@@ -632,62 +637,6 @@ def _part_at(context, region_, event):
     return int(job._face_piece[index]) if index < len(job._face_piece) else None
 
 
-class CURIOMESH_OT_seg_inspect(bpy.types.Operator):
-    bl_idname = "curiomesh.seg_inspect"
-    bl_label = "Inspect Parts"
-    bl_description = "Hover a part to see its numbers; click to select it (Shift adds more, click empty space to clear). Esc or right-click stops. Moving the view works as usual"
-    bl_options = {"INTERNAL"}
-
-    @classmethod
-    def poll(cls, context):
-        return ready() and context.area is not None and context.area.type == "VIEW_3D"
-
-    def invoke(self, context, event):
-        context.window_manager.modal_handler_add(self)
-        seg["inspecting"] = True
-        context.workspace.status_text_set("Inspect Parts   Hover: numbers   Click: select   Shift+Click: add   Esc: done")
-        return {"RUNNING_MODAL"}
-
-    def _end(self, context):
-        seg["inspecting"] = False
-        seg["hover"] = None
-        context.workspace.status_text_set(None)
-        overlay.tag_redraw()
-
-    def modal(self, context, event):
-        if not ready():
-            self._end(context)
-            return {"CANCELLED"}
-        if event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
-            self._end(context)
-            return {"FINISHED"}
-        region_ = _region_under_mouse(context, event)
-        if region_ is None:
-            if seg["hover"] is not None:
-                seg["hover"] = None
-                overlay.tag_redraw()
-            return {"PASS_THROUGH"}
-        if event.type == "MOUSEMOVE":
-            piece = _part_at(context, region_, event)
-            seg["mouse"], seg["region"] = (event.mouse_x - region_.x, event.mouse_y - region_.y), region_.as_pointer()
-            if piece != seg["hover"]:
-                seg["hover"] = piece
-            overlay.tag_redraw()
-            return {"PASS_THROUGH"}
-        if event.type == "LEFTMOUSE" and event.value == "PRESS":
-            piece = _part_at(context, region_, event)
-            if piece is None:
-                if not event.shift:
-                    select([])
-            else:
-                select([piece], extend=event.shift)
-            return {"RUNNING_MODAL"}
-        return {"PASS_THROUGH"}
-
-    def cancel(self, context):
-        self._end(context)
-
-
 class CURIOMESH_OT_seg_select(bpy.types.Operator):
     bl_idname = "curiomesh.seg_select"
     bl_label = "Select Parts"
@@ -757,6 +706,24 @@ class CURIOMESH_OT_seg_try(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def frame_selected(context) -> bool:
+    """Move the 3D view to the selected parts."""
+    guided = _g()
+    rv3d = getattr(context.space_data, "region_3d", None) or context.region_data
+    preview, res = bpy.data.objects.get(guided.PREVIEW_NAME), guided.state["res"]
+    if rv3d is None or preview is None or res is None:
+        return False
+    mask = np.isin(seg["piece"], list(seg["sel"]))
+    used = np.unique(np.fromiter((v for i in np.flatnonzero(mask).tolist() for v in res["faces"][i]), dtype=np.int64))
+    if not len(used):
+        return False
+    world = guided._world(preview.matrix_world, res["co"][used])
+    low, high = world.min(axis=0), world.max(axis=0)
+    rv3d.view_location = Vector(((low + high) / 2.0).tolist())
+    rv3d.view_distance = max(float(np.linalg.norm(high - low)) * 1.6, 1e-3)
+    return True
+
+
 class CURIOMESH_OT_seg_frame(bpy.types.Operator):
     bl_idname = "curiomesh.seg_frame"
     bl_label = "Frame"
@@ -768,20 +735,7 @@ class CURIOMESH_OT_seg_frame(bpy.types.Operator):
         return ready() and bool(seg["sel"])
 
     def execute(self, context):
-        guided = _g()
-        rv3d = getattr(context.space_data, "region_3d", None) or context.region_data
-        preview, res = bpy.data.objects.get(guided.PREVIEW_NAME), guided.state["res"]
-        if rv3d is None or preview is None or res is None:
-            return {"CANCELLED"}
-        mask = np.isin(seg["piece"], list(seg["sel"]))
-        used = np.unique(np.fromiter((v for i in np.flatnonzero(mask).tolist() for v in res["faces"][i]), dtype=np.int64))
-        if not len(used):
-            return {"CANCELLED"}
-        world = guided._world(preview.matrix_world, res["co"][used])
-        low, high = world.min(axis=0), world.max(axis=0)
-        rv3d.view_location = Vector(((low + high) / 2.0).tolist())
-        rv3d.view_distance = max(float(np.linalg.norm(high - low)) * 1.6, 1e-3)
-        return {"FINISHED"}
+        return {"FINISHED"} if frame_selected(context) else {"CANCELLED"}
 
 
 # --------------------------------------------------------------------------- panel
@@ -804,16 +758,14 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
 
 def draw_parts(layout, context, gs) -> None:
     """The Parts panel: switches, bulk selection, the worst-first list, and the selected part's numbers and tries."""
-    guided = _g()
     if not ready():
         box = layout.box()
         box.label(text="Parts appear when the search is done", icon="INFO")
         return
-    busy = guided.progress_info() is not None
     col = layout.column(align=True)
     row = col.row(align=True)
     row.scale_y = 1.3
-    row.operator("curiomesh.seg_inspect", text="Inspect Parts: Hover and Click", icon="RESTRICT_SELECT_OFF", depress=bool(seg.get("inspecting")))
+    row.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(seg.get("reviewing")))
     row = col.row(align=True)
     row.prop(gs, "seg_colors", text="Colors", toggle=True, icon="COLOR")
     row.prop(gs, "seg_heat", text="Heat", toggle=True, icon="SEQ_HISTOGRAM")
@@ -821,8 +773,7 @@ def draw_parts(layout, context, gs) -> None:
     col.row(align=True).prop(gs, "seg_compare", expand=True)
     if gs.seg_heat:
         layout.label(text="Heat: red parts changed most in the camera check", icon="INFO")
-    if seg["src"] is not None:
-        segment_goals.draw_tools(layout, gs)
+    segment_goals.draw_tools(layout, gs)
 
     layout.label(text=f"{len(seg['parts']):,} parts, {len(seg['sel'])} selected")
     row = layout.row(align=True)
@@ -835,45 +786,7 @@ def draw_parts(layout, context, gs) -> None:
     col.operator("curiomesh.seg_select", text="", icon="SORTSIZE").what = "WORST"
     col.operator("curiomesh.seg_frame", text="", icon="VIEWZOOM")
 
-    selected = sorted(seg["sel"])
-    if not selected:
-        layout.label(text="Click a part (or a row) to see it and try other methods", icon="INFO")
-        return
-    box = layout.box()
-    if len(selected) == 1:
-        for i, line in enumerate(info_lines(selected[0])):
-            box.label(text=line, icon="OBJECT_DATA" if i == 0 else "BLANK1")
-        words = _g().state["auto_base"]["job"].explain_piece(selected[0])
-        if words:
-            overlay.wrap_label(box, words, icon="INFO", width=36, limit=3)
-    else:
-        after = sum(seg["parts"][p]["after"] for p in selected)
-        known = [seg["parts"][p]["change"] for p in selected if seg["parts"][p]["change"] is not None]
-        box.label(text=f"{len(selected)} parts, {after:,} faces now", icon="OBJECT_DATA")
-        if known:
-            box.label(text=f"Worst view change {max(known):.1f}%", icon="BLANK1")
-    if mirrored():
-        layout.label(text="Redo is off with Mirror or Clean Rows: start again without it", icon="INFO")
-    if seg["src"] is not None:
-        segment_goals.draw_goal(box, gs, len(selected) > 1)
-    if all(seg["parts"][p].get("whole", True) for p in selected):  # another method rebuilds a whole loose piece, which has no seam to keep
-        layout.operator("curiomesh.guided_pick_part", icon="RESTRICT_SELECT_OFF")
-        row = box.row(align=True)
-        row.prop(gs, "seg_method", text="")
-        row.operator("curiomesh.seg_redo", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
-    if busy:
-        guided.draw_progress(box, *guided.progress_info())
-        box.operator("curiomesh.guided_stop_work", icon="CANCEL")
-    if len(selected) == 1:
-        record = seg["parts"][selected[0]]
-        if len(record["tries"]) > 1:
-            box.label(text="Tried (click to go back):")
-        col = box.column(align=True)
-        for i, t in enumerate(record["tries"]):
-            change = "?" if t["change"] is None else f"{t['change']:.1f}%"
-            score = "" if t.get("topology") is None else f", topology {t['topology']:.0f}"
-            op = col.operator("curiomesh.seg_try", text=f"{method_name(t['method'])}: {t['after']:,} faces, {change}{score}", depress=i == record["cur"])
-            op.index = i
+    segment_goals.draw_selected(layout, gs)
 
 
 # --------------------------------------------------------------------------- registration
@@ -883,7 +796,6 @@ from . import segment_goals  # noqa: E402  (it builds on PartJob above)
 PRE_CLASSES = (CURIOMESH_PG_segpart,)
 CLASSES = (
     CURIOMESH_UL_segparts,
-    CURIOMESH_OT_seg_inspect,
     CURIOMESH_OT_seg_select,
     CURIOMESH_OT_seg_redo,
     CURIOMESH_OT_seg_try,

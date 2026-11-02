@@ -263,7 +263,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_detail: bpy.props.FloatProperty(name="Segment Detail", description="How many segments a connected mesh splits into. Left finds only the big parts, right also the smaller ones. Changing it starts the segments over, with their tries and hand changes", default=0.65, min=0.0, max=1.0, subtype="FACTOR", update=segments.segment_goals.on_detail)
     seg_goal: bpy.props.EnumProperty(name="Use", description="What the selected segments are for", items=segments.segment_goals.GOAL_ITEMS, default="ANIMATION")
     seg_goal_detail: bpy.props.FloatProperty(name="Detail", description="Faces in the selected segments. The middle keeps the size of the quads they have now", default=0.5, min=0.0, max=1.0, subtype="FACTOR")
-    seg_method: bpy.props.EnumProperty(name="Method", description="The method to remake the selected parts with", items=segments.METHOD_ITEMS, default="FLAT")
+    seg_method: bpy.props.EnumProperty(name="Method", description="How Reduce and Low Poly make their quads", items=segments.METHOD_ITEMS, default="AUTO")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
     sym_axis: bpy.props.EnumProperty(name="Mirror", description="Auto Segments: solve one half of the mesh and mirror it. The two sides come out identical and the seam is exact. Only used when the mesh really is symmetric; otherwise the whole mesh is solved and you are told why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
@@ -1623,8 +1623,8 @@ def _collect_work(context) -> None:
             _restore_kept(context, source)
             if state["res"] is not None and len(teach.load(library_path())) * len(state["res"]["faces"]) < 300_000:
                 _scan(state["res"])
-            if segments.segment_goals.worth_finding(state["auto_base"]):
-                segments.segment_goals.start_find(context)
+            segments.ensure()
+            segments.segment_goals.start_find(context)
         overlay.tag_redraw()
         return
     res = state["res"]
@@ -2651,48 +2651,6 @@ class CURIOMESH_OT_guided_auto_start(bpy.types.Operator):
         return {"FINISHED"} if ok else {"CANCELLED"}
 
 
-class CURIOMESH_OT_guided_pick_part(bpy.types.Operator):
-    bl_idname = "curiomesh.guided_pick_part"
-    bl_label = "Click a Part"
-    bl_description = "Click a part of the result to remake it with the method above. Only that part is redone, and the camera checks the whole object again"
-    bl_options = {"INTERNAL"}
-
-    @classmethod
-    def poll(cls, context):
-        return state["auto_base"] is not None and not segments.mirrored() and context.area is not None and context.area.type == "VIEW_3D"
-
-    def invoke(self, context, event):
-        context.window_manager.modal_handler_add(self)
-        state["message"] = "Click a part of the result (Esc cancels)"
-        return {"RUNNING_MODAL"}
-
-    def modal(self, context, event):
-        if event.type in {"ESC", "RIGHTMOUSE"}:
-            return {"CANCELLED"}
-        if event.type != "LEFTMOUSE" or event.value != "PRESS":
-            return {"RUNNING_MODAL"}
-        base, preview = state["auto_base"], bpy.data.objects.get(PREVIEW_NAME)
-        area = context.area
-        window = next((r for r in area.regions if r.type == "WINDOW"), None)
-        if base is None or preview is None or window is None:
-            return {"CANCELLED"}
-        from bpy_extras import view3d_utils
-
-        point = (event.mouse_x - window.x, event.mouse_y - window.y)
-        origin = view3d_utils.region_2d_to_origin_3d(window, context.region_data, point)
-        direction = view3d_utils.region_2d_to_vector_3d(window, context.region_data, point)
-        inverse = preview.matrix_world.inverted()
-        hit, _location, _normal, index = preview.ray_cast(inverse @ origin, (inverse.to_3x3() @ direction).normalized())
-        pieces = base["out"].get("piece")
-        if not hit or pieces is None or index >= len(pieces) or state["res"] is not base["out"] and len(state["res"]["faces"]) != len(pieces):
-            state["message"] = "No part under the click: try again"
-            return {"RUNNING_MODAL"}
-        segments.seg["sel"] = {int(pieces[index])}
-        if bpy.ops.curiomesh.seg_redo.poll():
-            bpy.ops.curiomesh.seg_redo()
-        return {"FINISHED"}
-
-
 class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
     bl_idname = "curiomesh.guided_stop_work"
     bl_label = "Stop"
@@ -3121,6 +3079,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             row.scale_y = 1.9
             row.enabled = not redoing and progress_info() is None
             row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
+            layout.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if segments.seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(segments.seg.get("reviewing")))
         else:
             row = layout.row()
             row.scale_y = 1.9
@@ -3468,7 +3427,6 @@ CLASSES = (
     CURIOMESH_OT_guided_apply,
     CURIOMESH_OT_guided_stop,
     CURIOMESH_OT_guided_auto_start,
-    CURIOMESH_OT_guided_pick_part,
     CURIOMESH_OT_guided_stop_work,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,
