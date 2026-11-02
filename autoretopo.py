@@ -24,7 +24,7 @@ from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from .triadq import cases, checks, parts, patch, patterns
+from .triadq import cases, checks, parts, patch, patterns, repair
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
@@ -70,7 +70,7 @@ USE_CASES = True  # let the table of part cases say which size of a part to look
 POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
 MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
-REPAIR_GROWTH = 1.1  # a repair may not add more than this share of faces to the whole result
+REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 
@@ -447,6 +447,8 @@ class AutoJob:
         self._kd = None
         self._kd_owner = None
         self._src_check = None
+        self._known = None  # what the source crosses itself
+        self._piece_trees: dict[int, BVHTree] = {}
         self._view = None
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
         self.tuned: dict[int, tuple] = {}  # piece -> a size made to measure, to land on a face count
@@ -1038,6 +1040,56 @@ class AutoJob:
             builds[p] = made
         return self._splice(points, faces, mats, piece, builds)
 
+    def _inspected(self, points, faces, piece):
+        """Generator: all the numbers for one mesh, the crossing test in slices and the rest on a worker thread."""
+        pairs = yield from checks.crossing_slices(points, faces)
+        out = yield from self._background(lambda: checks.inspect(points, faces, piece, pairs=pairs))
+        if self._known is not None:
+            out.new_cross, new = repair.new_by_piece(self._known, pairs, points, faces, piece)
+            out.crossing[:] = False
+            out.crossing[new.ravel()] = True
+        return out
+
+    def _near_source(self, part: int, where: np.ndarray):
+        """(closest points, normals) on one piece of the source. Each piece's tree is made once, when it is needed."""
+        tree = self._piece_trees.get(part)
+        if tree is None:
+            points, polys, _kinds = self._piece_arrays(self.pieces[part])
+            tree = self._piece_trees[part] = BVHTree.FromPolygons(points.tolist(), [list(f) for f in polys], epsilon=0.0)
+        hits = [tree.find_nearest(p) for p in np.asarray(where).tolist()]
+        return np.asarray([h[0] for h in hits]), np.asarray([h[1] for h in hits])
+
+    def _fix_locally(self, points, faces, mats, piece, view, after):
+        """Generator: clear new crossings spot by spot. Kept only if nothing got broken and the camera still agrees."""
+        same = (points, faces, mats, piece, view, after, 0)
+        if not after.new_cross or self.mirror is not None or self.outside is not None or self.guide_lines or self.strips:  # those need their seams and strokes left where they are
+            return same
+        self.stage = "Repairing crossings"
+        yield
+        fixed = yield from self._background(lambda: repair.fix_crossings(points, faces, mats, piece, after.pairs, self._known, self._near_source, self.output_kind == "TRIS", stopped=lambda: self._stopped))
+        numbers = fixed[4]
+        if not numbers["pushed"] and not numbers["filled"]:
+            return same
+        now = yield from self._inspected(fixed[0], fixed[1], fixed[3])
+        if any(getattr(now, k) > getattr(after, k) for k in ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx")):
+            return same
+        seen = yield from self._look(fixed[0], fixed[1], *self._view)
+        if seen[0] > max(1.1 * self.detail, 1.02 * view[0]):
+            return same
+        return fixed[0], fixed[1], fixed[2], fixed[3], seen, now, numbers["pushed"] + numbers["filled"]
+
+    def _affordable(self, bad: list[int], start_faces: int) -> list[int]:
+        """As many of these parts as can go one size up inside REPAIR_GROWTH, so one big part does not stop the small ones."""
+        room = (REPAIR_GROWTH - 1.0) * start_faces
+        out = []
+        for p in sorted(bad, key=lambda p: len(self.sizes[p][self.picked[p]][1])):
+            if self.picked[p] + 1 < len(self.sizes[p]):
+                room -= max(0, len(self.sizes[p][self.picked[p] + 1][1]) - len(self.sizes[p][self.picked[p]][1]))
+            if room < 0:
+                break
+            out.append(p)
+        return out
+
     def _check(self, points, faces, mats, piece, view):
         """Generator: measure the result against the source, repair the parts that got new problems, say what happened."""
         self.stage = "Checking for broken topology"
@@ -1046,16 +1098,16 @@ class AutoJob:
             source_piece = np.zeros(len(self.faces), dtype=np.int64)
             for index, ids in enumerate(self.pieces):
                 source_piece[ids] = index
-            self._src_check = checks.inspect(self.co, self.faces, source_piece)
-            yield
+            self._src_check = yield from self._inspected(self.co, self.faces, source_piece)
+            self._known = repair.Known(self.co, self.faces, source_piece, self._src_check.pairs)
         before = self._src_check
-        after = checks.inspect(points, faces, piece)
-        fixed = 0
+        after = yield from self._inspected(points, faces, piece)
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx")
         first = {k: getattr(after, k) for k in keys}
         start_faces = len(faces)
+        points, faces, mats, piece, view, after, fixed = yield from self._fix_locally(points, faces, mats, piece, view, after)
         for attempt in range(FIX_TRIES):
-            bad = checks.new_spots(before, after)[:MOST_REPAIRED]
+            bad = self._affordable(checks.new_spots(before, after)[:MOST_REPAIRED], start_faces)
             if not bad or self._stopped:
                 break
             self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
@@ -1069,8 +1121,10 @@ class AutoJob:
                 break
             points, faces, mats, piece = tried
             view = seen
-            after = checks.inspect(points, faces, piece)
+            after = yield from self._inspected(points, faces, piece)
             fixed += len(bad) - len(checks.new_spots(before, after))
+            points, faces, mats, piece, view, after, spots = yield from self._fix_locally(points, faces, mats, piece, view, after)
+            fixed += spots
         left = checks.new_spots(before, after)
         flag = np.zeros(len(faces), bool)
         for p in left:

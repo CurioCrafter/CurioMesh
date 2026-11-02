@@ -10,7 +10,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from profiles import PROFILES, detail_words, preset  # noqa: E402
-from triadq import checks  # noqa: E402
+from triadq import checks, repair  # noqa: E402
 
 CUBE = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
 POINTS = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], float)
@@ -50,6 +50,30 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(preset("LOW_POLY")[2], "TRIS")
         self.assertEqual(len({v[2:] for v in PROFILES.values()}), len(PROFILES))  # no two uses are the same preset
         self.assertNotEqual(detail_words(0.2), detail_words(40.0))
+
+
+class CrossingTests(unittest.TestCase):
+    def test_tiles_cover_every_face_once_and_stay_small(self):
+        centers = np.random.default_rng(1).random((1000, 3))
+        found = checks.tiles(centers, 64)
+        self.assertLessEqual(max(len(t) for t in found), 64)
+        self.assertEqual(np.sort(np.concatenate(found)).tolist(), list(range(1000)))
+
+    def test_short_faces_are_padded_with_their_own_corner(self):
+        self.assertEqual(checks.corner_table([(0, 1, 2), (3, 4, 5, 6)]).tolist(), [[0, 1, 2, 0], [3, 4, 5, 6]])
+
+    def test_pairs_that_share_a_face_are_one_spot(self):
+        self.assertEqual(sorted(len(s) for s in repair.spots_of([(0, 1), (1, 2), (5, 6)])), [1, 2])
+
+    def test_only_what_the_source_did_not_have_is_new(self):
+        co = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (9, 0, 0), (10, 0, 0), (10, 1, 0), (0, 5, 0), (1, 5, 0), (1, 6, 0)], float)
+        faces = [(0, 1, 2), (3, 4, 5), (6, 7, 8)]
+        known = repair.Known(co, faces, np.array([0, 0, 1]), np.array([[0, 1], [0, 2]]))  # piece 0 crosses itself, and piece 1
+        work = repair._Work(co, faces, ["0"] * 3, np.array([0, 0, 1]), known, None, False)
+        self.assertFalse(work.is_new(0, 2))  # those two pieces already cross
+        self.assertFalse(work.is_new(0, 1))  # right where the source crosses itself
+        work.piece[:] = [0, 2, 1]
+        self.assertTrue(work.is_new(1, 2))  # pieces that did not cross
 
 
 if __name__ == "__main__":
