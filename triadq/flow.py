@@ -9,10 +9,25 @@ import numpy as np
 
 from . import topology
 from .patch import quad_quality
+from .shading import corner_table
 from .types import MeshData
 
 FEATURE_TRIANGLES = 6  # with fewer source triangles around a vertex, their planes say more about noise than about shape
 MIN_QUALITY = 0.05  # a snap may not push a quad below this, unless it was already lower
+
+
+def _closest(find_nearest, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(closest source point, distance) for each of `points`, infinite where there is none. `find_nearest` is a native tree or Blender's one-at-a-time lookup."""
+
+    if hasattr(find_nearest, "nearest"):
+        at, _faces, away = find_nearest.nearest(points)
+        return at, away
+    at, away = np.array(points, dtype=np.float64), np.full(len(points), np.inf)
+    for i, point in enumerate(at.tolist()):
+        hit = find_nearest(point)
+        if hit[0] is not None:
+            at[i], away[i] = hit[0], hit[3]
+    return at, away
 
 
 def snap_new_vertices(closed: MeshData, coarse_points: np.ndarray, find_nearest) -> MeshData:
@@ -33,10 +48,10 @@ def snap_new_vertices(closed: MeshData, coarse_points: np.ndarray, find_nearest)
         np.maximum.at(reach, quads[:, k], sides[:, k])
         np.maximum.at(reach, quads[:, (k + 1) % 4], sides[:, k])
     moved = points.copy()
-    for i in np.flatnonzero(added).tolist():
-        hit = find_nearest(points[i].tolist())
-        if hit[0] is not None and hit[3] <= reach[i]:
-            moved[i] = hit[0]
+    ids = np.flatnonzero(added)
+    at, away = _closest(find_nearest, points[ids])
+    near = away <= reach[ids]
+    moved[ids[near]] = at[near]
     for _ in range(8):  # give back any vertex on a quad the move made bad
         bad = quads[quad_quality(moved[quads]) < np.minimum(quad_quality(points[quads]), MIN_QUALITY)]
         if not len(bad):
@@ -50,7 +65,7 @@ def seek_features(points: np.ndarray, source: np.ndarray, triangles: np.ndarray,
     """Move each vertex to where the planes of the source triangles around it meet, as dual contouring does.
 
     A vertex on the surface only follows it. This one finds the crease or peak in its neighbourhood, which is what the
-    camera sees. `nearest` gives the closest of `points` to a location. `pull` keeps a flat neighbourhood's vertex where
+    camera sees. `nearest` gives the closest of `points` to each of some locations. `pull` keeps a flat neighbourhood's vertex where
     it is, and `reach` limits a move to this share of the typical distance between vertices.
     """
 
@@ -61,7 +76,7 @@ def seek_features(points: np.ndarray, source: np.ndarray, triangles: np.ndarray,
     normal = cross[keep] / double_area[keep, None]
     weight = double_area[keep] * 0.5
     middle = (a[keep] + b[keep] + c[keep]) / 3.0
-    owner = np.fromiter((nearest(m) for m in middle.tolist()), dtype=np.int64, count=len(middle))
+    owner = nearest(middle)
     matrix = np.zeros((len(points), 3, 3))
     target = np.zeros((len(points), 3))
     total = np.zeros(len(points))
@@ -103,10 +118,7 @@ def _ease(moved: np.ndarray, faces: list, find_nearest, rounds: int, wider: int)
         np.add.at(total, b, moved[a])
         moved[ids] = total[ids] / np.maximum(count[ids], 1)[:, None]
         if k < rounds:
-            for i in ids.tolist():
-                found = find_nearest(moved[i].tolist())
-                if found[0] is not None:
-                    moved[i] = found[0]
+            moved[ids] = _closest(find_nearest, moved[ids])[0]
 
 
 def unfold(points: np.ndarray, faces, find_nearest, rounds: int = 6, cycles: int = 6) -> tuple[np.ndarray, list[tuple[int, ...]], list[int]]:
@@ -151,11 +163,7 @@ def unfold(points: np.ndarray, faces, find_nearest, rounds: int = 6, cycles: int
 def snap_rows(points: np.ndarray, faces, find_nearest, sharpen=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
     """Put a field-aligned mesh back on the source, and leave no quad folded."""
 
-    moved = np.array(points, dtype=np.float64)
-    for i in range(len(moved)):
-        hit = find_nearest(moved[i].tolist())
-        if hit[0] is not None:
-            moved[i] = hit[0]
+    moved = _closest(find_nearest, np.array(points, dtype=np.float64))[0]
     if sharpen is not None:
         moved = sharpen(moved)
     out_points, out_faces, _keep = unfold(moved, faces, find_nearest)
@@ -165,18 +173,18 @@ def snap_rows(points: np.ndarray, faces, find_nearest, sharpen=None) -> tuple[np
 def faces_that_gain(mesh: MeshData, find_nearest, share: float) -> set[int]:
     """Faces with a side middle or a center farther from the source than `share` of their longest side: new vertices there would carry shape."""
 
+    if not len(mesh.faces):
+        return set()
     points = np.asarray(mesh.vertices)
-    found = set()
-    for index, face in enumerate(mesh.faces):
-        p = points[list(face)]
-        tolerance = share * float(np.linalg.norm(np.roll(p, -1, axis=0) - p, axis=1).max())
-        probes = np.vstack((p.mean(axis=0, keepdims=True), (p + np.roll(p, -1, axis=0)) * 0.5))
-        for probe in probes.tolist():
-            hit = find_nearest(probe)
-            if hit[0] is not None and hit[3] > tolerance:
-                found.add(index)
-                break
-    return found
+    flat, starts, sizes = corner_table(mesh.faces)
+    following = np.arange(1, len(flat) + 1)
+    following[starts + sizes - 1] = starts
+    corners, ahead = points[flat], points[flat[following]]
+    tolerance = share * np.maximum.reduceat(np.linalg.norm(ahead - corners, axis=1), starts)
+    middles = np.add.reduceat(corners, starts) / sizes[:, None]
+    away = _closest(find_nearest, np.vstack((middles, (corners + ahead) * 0.5)))[1]
+    face = np.concatenate((np.arange(len(sizes)), np.repeat(np.arange(len(sizes)), sizes)))
+    return set(np.unique(face[np.isfinite(away) & (away > tolerance[face])]).tolist())
 
 
 def split_faces(mesh: MeshData, marked: set[int]) -> MeshData:

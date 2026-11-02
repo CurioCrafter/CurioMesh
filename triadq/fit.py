@@ -67,10 +67,10 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
     return moved
 
 
-def vertex_parts(points, faces, sample_part, nearest_sample) -> tuple[np.ndarray, np.ndarray]:
+def vertex_parts(points, faces, sample_part, nearest_samples) -> tuple[np.ndarray, np.ndarray]:
     """(result part of each vertex, source part of each result part): most vertices of a result part sit on the source part it came from.
 
-    `nearest_sample(point)` gives the index of the source sample nearest to a point.
+    `nearest_samples(points)` gives the index of the source sample nearest to each point.
     """
 
     fa, fb = face_adjacency(faces)
@@ -84,7 +84,7 @@ def vertex_parts(points, faces, sample_part, nearest_sample) -> tuple[np.ndarray
     if source_parts == 1:
         return part, np.zeros(count, dtype=np.int64)
     votes = np.zeros((count, source_parts), dtype=np.int64)
-    nearest = np.fromiter((nearest_sample(p) for p in points[flat].tolist()), dtype=np.int64, count=len(flat))
+    nearest = nearest_samples(points[flat])
     np.add.at(votes, (part[flat], sample_part[nearest]), 1)
     return part, votes.argmax(axis=1)
 
