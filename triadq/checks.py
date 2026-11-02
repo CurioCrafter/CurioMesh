@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .topology import topology_summary
+from .topology import _turbo, topology_summary
 from .types import MeshData
 
 CHUNK = 50_000
@@ -151,6 +151,9 @@ def crossing_slices(co, faces):
     co = np.asarray(co, dtype=np.float64)
     if not len(faces):
         return np.zeros((0, 2), dtype=np.int64)
+    tree = _turbo.face_tree(co, faces) if _turbo is not None else None
+    if tree is not None:  # all of it at once, on all cores, and it stops when the job does
+        return tree.crossing_pairs()
     pad = corner_table(faces)
     low, high = face_boxes(co, pad)
     found = []
@@ -181,8 +184,12 @@ def inspect(co, faces, piece, pairs=...) -> Inspect:
     """All the numbers for one mesh. `piece` gives each face's piece. `pairs` defaults to a BVH test (Blender only)."""
     faces = [tuple(f) for f in faces]
     piece = np.asarray(piece, dtype=np.int64)
-    broken, nm, flipped, dups = edge_flags(faces)
-    holes, holes_by = hole_counts(faces, piece)
+    fast = _turbo.mesh_checks(faces, piece) if _turbo is not None else None
+    if fast is not None:
+        broken, nm, flipped, dups, holes, holes_by = fast
+    else:
+        broken, nm, flipped, dups = edge_flags(faces)
+        holes, holes_by = hole_counts(faces, piece)
     summary = topology_summary(MeshData(co, faces))
     if pairs is ...:
         pairs = crossing_pairs(co, faces)
