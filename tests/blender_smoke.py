@@ -1392,6 +1392,189 @@ def run_guided_case(module):
     if runner.report["faces"] >= len(sphere.data.polygons) or runner.report["loss"] > 3 * gs.auto_detail:
         raise AssertionError(f"guided: auto segments gained no reduction or lost the shape: {guided.status()}")
     print(f"PASS guided auto segments: {guided.status()}")
+
+    # segment view: two loose parts, redo one by another method, go back to the first result
+    from curiomesh import segments
+
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=1.0)
+    bmesh.ops.create_cube(bm, size=1.0, matrix=__import__("mathutils").Matrix.Translation((4.0, 0.0, 0.0)))
+    two = bpy.data.meshes.new("CurioSmoke_TwoParts")
+    bm.to_mesh(two)
+    bm.free()
+    duo = bpy.data.objects.new("CurioSmoke_TwoParts", two)
+    bpy.context.scene.collection.objects.link(duo)
+    reset_selection(duo)
+    guided.stop_work()
+    guided.remove_preview()
+    guided.state["auto_base"] = None
+    guided.state["source"] = duo.name
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    if len(segments.seg["parts"]) != 2 or not segments.ready():
+        raise AssertionError(f"segments: expected two parts, got {len(segments.seg['parts'])}: {guided.status()}")
+    kinds = sorted(r["kind"] for r in segments.seg["parts"])
+    first_faces = len(guided.state["res"]["faces"])
+    target = max(segments.seg["parts"], key=lambda r: r["after"])["id"]
+    other = 1 - target
+    before_other = segments.seg["parts"][other]["after"]
+    segments.select([target])
+    gs.seg_method = "TRIS"
+    if "FINISHED" not in bpy.ops.curiomesh.seg_redo():
+        raise AssertionError("segments: redo did not start")
+    guided.finish_work(bpy.context)
+    record = segments.seg["parts"][target]
+    if len(record["tries"]) != 2 or record["method"] != "TRIS" or segments.seg["parts"][other]["after"] != before_other:
+        raise AssertionError(f"segments: redo changed the wrong thing: {record['method']} {len(record['tries'])}")
+    if len(guided.state["res"]["faces"]) == first_faces or len(segments.seg["piece"]) != len(guided.state["res"]["faces"]):
+        raise AssertionError("segments: the result did not take the redone part")
+    if "FINISHED" not in bpy.ops.curiomesh.seg_try(index=0):
+        raise AssertionError("segments: could not go back to the first result")
+    guided.finish_work(bpy.context)
+    if len(guided.state["res"]["faces"]) != first_faces or segments.seg["parts"][target]["method"] == "TRIS":
+        raise AssertionError("segments: going back did not restore the first result")
+    gs.seg_goal, gs.seg_method, gs.seg_goal_detail = "REDUCE", "PAIRING", 0.35
+    segments.select([other])
+    gs.seg_goal, gs.seg_method, gs.seg_goal_detail = "REDUCE", "PAIRING", 0.35
+    if "FINISHED" not in bpy.ops.curiomesh.seg_goal():  # a loose part takes a Use and Detail the same way a segment does
+        raise AssertionError("segments: Use on a loose part did not start")
+    guided.finish_work(bpy.context)
+    if segments.seg["parts"][other]["method"] != "REDUCE" or segments.seg["parts"][other]["tries"][-1].get("choice") != "PAIRING":
+        raise AssertionError(f"segments: Use on a loose part: {segments.seg['parts'][other]['method']}: {guided.status()}")
+    order = segments.P.worst_first([segments.judged(r) for r in segments.seg["parts"]])
+    segments.select([])
+    bpy.ops.curiomesh.seg_walk(step=1)
+    if segments.seg["sel"] != {order[0]}:
+        raise AssertionError("segments: Next did not start at the worst part")
+    bpy.ops.curiomesh.seg_walk(step=-1)
+    if segments.seg["sel"] != {order[-1]}:
+        raise AssertionError("segments: Previous did not wrap round")
+    bpy.ops.curiomesh.seg_select(what="ROUGH")
+    gs.seg_compare = "OVER"
+    gs.seg_heat = True
+    print(f"PASS guided segment view: two parts ({', '.join(kinds)}), redo and back, {first_faces} faces")
+    bpy.data.objects.remove(duo)
+
+    # Segments inside one connected mesh: two balls on a thin bar.
+    rings, sides = 44, 24
+    bar = lambda t: max(max(0.0, 1.0 - ((t - 0.2) / 0.2) ** 2) ** 0.5, max(0.0, 1.0 - ((t - 0.8) / 0.2) ** 2) ** 0.5, 0.12)  # noqa: E731
+    spots = [(float(np.cos(2 * np.pi * i / sides)) * bar(r / rings) * 0.4, float(np.sin(2 * np.pi * i / sides)) * bar(r / rings) * 0.4, 2.0 * r / rings) for r in range(rings + 1) for i in range(sides)]
+    spots += [(0.0, 0.0, 0.0), (0.0, 0.0, 2.0)]
+    tris = []
+    for r in range(rings):
+        for i in range(sides):
+            a, b, c, d = r * sides + i, r * sides + (i + 1) % sides, (r + 1) * sides + (i + 1) % sides, (r + 1) * sides + i
+            tris += [(a, b, c), (a, c, d)]
+    for i in range(sides):
+        tris += [(len(spots) - 2, (i + 1) % sides, i), (len(spots) - 1, rings * sides + i, rings * sides + (i + 1) % sides)]
+    bell_mesh = bpy.data.meshes.new("CurioSmoke_Bell")
+    bell_mesh.from_pydata(spots, [], tris)
+    bell_mesh.update()
+    bell = bpy.data.objects.new("CurioSmoke_Bell", bell_mesh)
+    bpy.context.scene.collection.objects.link(bell)
+    reset_selection(bell)
+    guided.stop_work()
+    guided.remove_preview()
+    guided.state["auto_base"] = None
+    guided.state["source"] = bell.name
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    goals = segments.segment_goals
+    SEG = goals.S
+    if segments.seg["src"] is None or len(segments.seg["parts"]) < 2:
+        raise AssertionError(f"segments: found no segments in a connected mesh: {guided.status()}")
+    found = len(segments.seg["parts"])
+    start_open = SEG.open_edges(guided.state["auto_base"]["out"]["faces"])
+    for use in ("ANIMATION", "REDUCE", "KEEP", "TRIS", "LOWPOLY", "SUBD"):
+        segments.select([0])
+        gs.seg_goal = use
+        gs.seg_goal_detail = 0.5
+        if "FINISHED" not in bpy.ops.curiomesh.seg_goal():
+            raise AssertionError(f"segments: {use} did not start")
+        guided.finish_work(bpy.context)
+        made = guided.state["auto_base"]["out"]
+        record = segments.seg["parts"][0]
+        if record["method"] != use or SEG.open_edges(made["faces"]) != start_open:
+            raise AssertionError(f"segments: {use} left {SEG.open_edges(made['faces'])} open edges, method {record['method']}: {guided.status()}")
+    other = segments.seg["parts"][1]["after"]
+    if "FINISHED" not in bpy.ops.curiomesh.seg_try(index=0):
+        raise AssertionError("segments: could not go back to the first try")
+    guided.finish_work(bpy.context)
+    if SEG.open_edges(guided.state["auto_base"]["out"]["faces"]) != start_open or segments.seg["parts"][1]["after"] != other:
+        raise AssertionError("segments: going back opened a seam or changed a neighbour")
+    centres_src, centres_res = goals._centres()
+    if goals.split(0, centres_src[:, 0] > 0.0, centres_res[:, 0] > 0.0) or len(segments.seg["parts"]) != found + 1:
+        raise AssertionError("segments: split")
+    segments.select([0, found])
+    if "FINISHED" not in bpy.ops.curiomesh.seg_merge() or len(segments.seg["parts"]) != found:
+        raise AssertionError("segments: merge")
+    if goals.claim(np.linalg.norm(centres_src - centres_src[0], axis=1) < 0.3, np.linalg.norm(centres_res - centres_src[0], axis=1) < 0.3):
+        raise AssertionError("segments: making one from a mask")
+    segments.select([0])
+    if "FINISHED" not in bpy.ops.curiomesh.seg_rename(name="Ball"):
+        raise AssertionError("segments: rename")
+    saved, names = goals.load(bell, guided.state["src"], len(guided.state["src"]["faces"]))
+    if saved is None or not np.array_equal(saved, segments.seg["src"]) or names["names"][0] != "Ball":
+        raise AssertionError("segments: did not come back from the object")
+    print(f"PASS guided segments: {found} found in one connected mesh, every Use closed on its seams, split, merge, paint mask, rename, saved")
+    guided.stop_work()
+    guided.state["auto_base"] = None
+    guided.remove_preview()
+    bpy.data.objects.remove(bell)
+    guided.state["source"] = sphere.name
+    # a drawn edge loop becomes a real strip, and a hand fix on the result is remembered and found again
+    import math
+    import tempfile
+    from pathlib import Path
+
+    curve = bpy.data.curves.new("CM_Loop", "CURVE")
+    curve.dimensions = "3D"
+    spline = curve.splines.new("POLY")
+    spline.points.add(48)
+    for i, point in enumerate(spline.points):
+        a = 2.0 * math.pi * i / 48
+        point.co = (math.cos(a), math.sin(a), 0.0, 1.0)
+    ring = bpy.data.objects.new("CM_Loop", curve)
+    bpy.context.scene.collection.objects.link(ring)
+    item = gs.guide_curves.add()
+    item.obj, item.kind = ring, "LOOP"
+    gs.loop_use = True
+    bpy.context.view_layer.objects.active = sphere
+    guided.state["auto_base"] = None
+    guided.run_update(bpy.context, force=True)
+    guided.finish_work(bpy.context)
+    runner = guided.state["auto_base"]["job"]
+    if not runner.bend_groups or not runner.report or not runner.report.get("bend"):
+        raise AssertionError(f"guided: the drawn edge loop was not built: {runner.why} {guided.status()}")
+    print(f"PASS guided edge loop: {runner.report['bend']['found']} of {runner.report['bend']['loops']} loops found")
+    library = str(Path(tempfile.mkdtemp()) / "fixes.json")
+    guided.library_path = lambda: library
+    res = guided.state["res"]
+    preview = bpy.data.objects[guided.PREVIEW_NAME]
+    import numpy as np
+    from curiomesh import teach
+
+    around = {}
+    for i, f in enumerate(res["faces"]):
+        for v in f:
+            around.setdefault(v, []).append(i)
+    pick = next(v for v, fl in around.items() if len(fl) == 4 and all(len(res["faces"][i]) == 4 for i in fl))
+    block = around[pick]
+    co = res["co"]
+    outline = teach.outline(res["faces"], block)
+    r = outline
+    if len(r) != 8:
+        raise AssertionError("guided: teach test block has no 8 sided outline")
+    kept = [f for i, f in enumerate(res["faces"]) if i not in block]
+    faces = kept + [(r[0], r[1], r[2], r[3]), (r[3], r[4], r[5], r[6]), (r[3], r[6], r[7], r[0])]
+    preview.data.clear_geometry()
+    preview.data.from_pydata(co.tolist(), [], faces)
+    preview.data.update()
+    if "FINISHED" not in bpy.ops.curiomesh.teach_remember():
+        raise AssertionError(f"guided: remember this fix failed: {guided.status()}")
+    if len(teach.load(library)) != 1:
+        raise AssertionError("guided: the remembered fix was not written to the library file")
+    print(f"PASS guided teach: fix remembered, {len(guided.state['found'])} place(s) offered")
     gs.scope = "WHOLE"
 
     # auto-suggest, next spot, apply

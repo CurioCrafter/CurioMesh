@@ -42,7 +42,7 @@ paints leftover triangles, n-gons and poles right on the mesh.
 ![Wireframes side by side: the original air compressor at 79,042 faces and the result at 24,222 quads, whole object and close-up](docs/images/auto_compressor.png)
 
 Choose **Auto Segments** as the Remesh mode in the Guided panel and press Update.
-There are no points to place and no face count to guess. You set **Change Allowed**,
+There are no points to place and no face count to guess. You set **Detail**,
 how much of the view may look different, and it works out the rest:
 
 1. **Split the model into its loose parts** and make each one at several sizes.
@@ -54,7 +54,7 @@ how much of the view may look different, and it works out the rest:
    amount you asked for.
 
 These are free [Poly Haven](https://polyhaven.com) models (CC0), so you can download
-them and check these numbers yourself. All ran at 6% Change Allowed and finished with
+them and check these numbers yourself. All ran at 6% Detail and finished with
 no triangles and no folded quads. They took from 15 seconds to about 24 minutes.
 
 | Model | Original faces | Result quads | Size | View changed |
@@ -81,7 +81,7 @@ areas gain the most.
 ![Dutch ship wireframes, 110,616 faces to 58,536 quads, with the sail's cloth folds simplified in the close-up](docs/images/auto_ship.png)
 
 The close-up above shows the current weak spot: at 6% the sail loses its fine cloth
-folds. Lower Change Allowed to keep more. See [Known Limits](#known-limits).
+folds. Lower Detail to keep more. See [Known Limits](#known-limits).
 
 ## Flat Quads: Huge Quads On Flat Areas, Density Only Where It's Needed
 
@@ -153,7 +153,23 @@ know:
   that off for a faster preview of big meshes; a few triangles then stay.
 - UV layers and materials carry over from your mesh in both modes. A quad
   crossing a UV seam takes its UVs from one side, so it does not stretch across
-  the atlas.
+  the atlas. **Keep UV Seams** in Auto Segments goes further: quads stay inside one
+  UV island, and seams stay in place, straightened only slightly. It's off by default
+  because a model cut into many islands needs more faces for this, up to about twice
+  as many on our test models. For textured game assets, Bake Detail **Normal + Color**
+  is the recommended route.
+- **Bake Detail**, next to Apply, bakes your mesh onto the result. **Normal Map**
+  keeps your materials and adds a normal map. **Normal + Color** makes one new
+  material and new UVs. Press Update after choosing it: seams then cost no faces.
+  Your mesh is only read. Baking blocks Blender until it's done, and it reads the
+  surface nearest to each texel, so parts that touch can bleed into each other.
+  Only the normal map and base color are baked, not roughness or metal. If your
+  UVs overlap themselves, Normal Map adds a second UV map for the normal map, and
+  most game engines need to be told to read it.
+- Applied results keep edges sharper than 60 degrees hard. Baking also makes UV
+  seams hard and adds a Triangulate modifier, so the exported triangles match the
+  bake. Export with modifiers applied, which glTF doesn't do by default. Your
+  quads stay underneath: turn the modifier off to export them to FBX.
 - A Points Only region that wraps a limb or surrounds an open hole is cut into
   pieces that are each rebuilt, so the whole ring gets new quads. The cut stays
   as a line of kept edges between the pieces.
@@ -303,13 +319,28 @@ Get them from the [latest release](https://github.com/CurioCrafter/CurioMesh/rel
 | Not sure | `...-blender-4.2-plus-extension.zip` (4.2 and newer) or `...-blender-3.6-plus-addon.zip` (any version from 3.6) | as above |
 | 3.5 and older | not supported | |
 
-Then enable **CurioMesh Quad Remesher**, select a mesh, and open
+Then enable **CurioMesh**, select a mesh, and open
 `3D View > N-panel > CurioMesh`.
 
 Every release runs the full test suite and an install test on Blender 3.6 LTS,
 4.0, 4.1, 4.2 LTS, 4.3, 4.4, 4.5 LTS, 5.0, 5.1 and 5.2 LTS. The HUD and heatmap
 draw with Blender's GPU module; if a build cannot draw them, the rest of the
 add-on keeps working.
+
+### Auto Segments: Mirror, Guide Curves, Paint Density
+
+Three optional helpers sit in step 2 of the Auto Segments panel.
+
+- **Mirror** (Auto, X, Y or Z). Solves one half of the mesh and mirrors it, so
+  both sides are identical and the seam is exact. Auto finds the plane and only
+  uses it when 90% of the surface matches its mirror (70% when you pick the axis);
+  otherwise it solves the whole mesh and tells you how well the mesh matched.
+- **Guide Curves.** Draw strokes on the mesh (**Draw Guide**) or add curves, Grease
+  Pencil drawings or edge-only meshes (**Add Selected**). The strokes become hard
+  edges the quads follow, like an edge loop round an eye or a line along a panel.
+  The result reports how far the nearest edge is from the strokes.
+- **Paint Density.** **Paint** opens Weight Paint on a vertex group; colour red the
+  parts that need more quads. Works best with **Reduce To**.
 
 ## Known Limits
 
@@ -321,11 +352,22 @@ add-on keeps working.
   55% of the original at 6%. Fine detail such as cloth folds and small rounded ends is
   simplified first. It can take many minutes on models with hundreds of parts, and
   Blender can pause for up to about 30 seconds at a time on meshes over a million faces.
-- **Don't count on kept UVs in Auto Segments yet: re-unwrap and bake instead.** It ignores
-  UV seams while reducing, so its quads can span several UV islands and textures smear
-  there. Measured on real models, those quads cover 6% of the road barrier, 27% of the
-  compressor and 36% of the treasure chest. A fix is the next update.
+- **By default Auto Segments ignores UV seams while reducing,** so its quads can span several
+  UV islands and textures smear there. Measured on real models, those quads cover 6% of
+  the road barrier, 27% of the compressor and 36% of the treasure chest. Turn on **Keep
+  UV Seams** for up to about twice the faces, or bake with **Normal + Color** instead.
 - Auto Segments was mainly tested on Blender 5.2.
+- Keep Detail spends everything Detail allows, so its quads don't run in rows: use Clean
+  Rows for that, which takes more faces and loses detail on rough scans. Quads are taken
+  away only in the Auto method, with no Mirror, strokes or paint.
+- Live Boolean refuses a redo that would make more faces than it replaces, and says so.
+  On a mesh already reduced hard, that can be most redos: slide towards Organized.
+- There is no way yet to redo only selected faces with a seam that stays closed. Use Redo
+  Inside Shapes.
+- Grid Fill and Flow Fill work only on a part with one open edge loop and an even number of
+  edges around it; otherwise Auto is used and the summary says so.
+- Repair undoes a fix that the camera dislikes or that adds over a tenth more faces, so a few
+  spots can stay. They are selected on the applied mesh and named in the summary.
 - Region patches are always all quads with an exact seam. On noisy scans a few
   quads next to the seam can still come out bent (about 3% in our noisy scan
   test); a slightly larger cage or a bigger Quad Size usually helps.
@@ -343,6 +385,10 @@ add-on keeps working.
 - Atlas-Q can run for a long time on some large scans, where PairClosure is much
   faster.
 - Live preview runs on meshes up to 8,000 faces so Blender stays responsive.
+- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a
+  Grease Pencil object are read in Blender 4.3 and later (the older data model is untested).
+  Stop is felt between steps: one Decimate on a piece of several hundred thousand faces
+  cannot be interrupted.
 
 ## What's Planned
 
@@ -364,6 +410,18 @@ Thank you to everyone who starred CurioMesh. Every star helps another Blender
 artist find a free retopology tool.
 
 [![Star History Chart](https://api.star-history.com/svg?repos=CurioCrafter/CurioMesh&type=Date)](https://star-history.com/#CurioCrafter/CurioMesh&Date)
+
+## Credits
+
+The tidiness score is based on statistics measured from hand-made meshes. It holds
+no geometry. Sources and licenses are in [docs/PATTERN_SOURCES.md](docs/PATTERN_SOURCES.md).
+Credits for the CC-BY works, changed by reducing them to statistics
+([CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)):
+
+- Sprite Rig (CC-BY) Blender Foundation, studio.blender.org
+- Rain Rig (CC) Blender Foundation, studio.blender.org
+- Pack Bot Rig (CC-BY) Blender Foundation, studio.blender.org
+- Security Bot Rig (CC-BY) Blender Foundation, studio.blender.org
 
 ## Solver Portfolio
 

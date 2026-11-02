@@ -2,11 +2,177 @@
 
 ## Unreleased
 
+- **Part cases** (Auto Segments). Each part now gets a named case from a few cheap
+  measurements: tiny part, flat plate, thin sheet, box, tube, dome, rough scan, ornament or
+  organic smooth. A small table, built from camera results on nine models, says which
+  small sizes that case doesn't hold, so the search starts above them. The camera still
+  measures the sizes it looks at and checks the whole result, and it sends the search back
+  down when a part has room to spare. Reduce To looks at every size as before. The segment
+  view says in plain words what a part was taken for and what was kept. The case names are
+  rough: a smooth chess piece can come out as a rough scan. Rebuild the table with
+  `scripts/build_case_table.py`.
+  Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r)
 - **Auto Segments makes about 20-55% fewer quads at the same Change Allowed.** Leftover
   triangles now join in twos along a short path of quads instead of splitting all
   their edges, then quads are taken away cheapest first until the camera says the
   amount asked for is used up. No connected part may pass its own limit. Big pieces
   get extra sizes between the old ones, so they no longer land far under the amount.
+- **The add-on is now named plain CurioMesh**, in Blender's add-on list and in the
+  extension listing. Its id stays `curiomesh`.
+- **Tidiness score** at the end of Auto Segments: a number from 0 to 100 for how close
+  the quads' layout is to hand-made meshes (credits and limits in `docs/PATTERN_SOURCES.md`).
+  It says nothing about shape, so read it next to the camera number. **Tidy Quads** is an
+  option, off by default: it is slow and the view changes a little more.
+- **Turned parts** (pipes, tanks, bolts, rings) are rebuilt as clean rings of quads and
+  **round and four-cornered areas** as concentric rows and grids, wherever the camera says
+  the result holds up.
+- **Keep UV Seams** is now an option, off by default, because it can nearly double the
+  faces. For textured game assets, Bake Detail Normal + Color is the recommended route.
+- **Segments inside a connected mesh** (Auto Segments, Parts panel). When the search is done, big
+  loose pieces split along concave creases, necks and thick-to-thin steps: a bust into head,
+  torso and the rings of its plinth, a horse into body, legs, tail and mane. Segment Detail chooses
+  how many. Click to select, merge, split with a drawn line, paint one, make one from the shapes,
+  rename it; all of that is saved with the object. Give a selected segment its own Use (Keep as
+  Is, Reduce, Low Poly, Animation, Subdivision, Tris) and detail, and only it is remade, with the
+  progress bar and tries to go back to. Its seam stays where it is, so it joins its neighbours with
+  no gap or T-junction, and a redo that would open an edge is refused. Each segment shows its camera
+  check and topology score; an Animation segment is ranked by its topology score. Animation lays
+  rows round the part with a small grid at the far end; a seam keeps the vertices it has, so a
+  segment far denser or coarser than its neighbours tapers towards the seam.
+  Drawn edge loops and deformation lines over an Animation or Subdivision segment become real loops
+  on sealed seams. Reduce and Low Poly close to all quads, and Reduce adds faces if a part would lose
+  its shape. Segments with few faces join a neighbour, seams without a crease run straight, and small
+  loose pieces of a big model stay whole unless you raise Segment Detail.
+- **Segment view** (Auto Segments, new Parts panel). The whole result is drawn with every part
+  in its own colour. Hover a part (Inspect Parts) to see its faces before and after, how much of
+  its view changed and its method; click to select, Shift+click to add. Pick another method for
+  the selected parts and only they are redone, with the progress bar, while Blender stays usable;
+  every result is kept, so you can go back to any earlier one at once. Select all tubes, flat or
+  rough parts in one click, or jump through "parts that changed the most". Switches for part
+  colours, a heat map of each part's camera check, the wireframe, and your original beside the
+  result or drawn over it. Part kinds are a rough guess from each part's shape. The heat map is
+  per part, not per face.
+- **A cleaner Guided panel for Auto Segments**: one big button that is always the next step
+  (Start, then Apply Result), settings under it, the result in one box, and Parts and Redo Inside
+  Shapes as sub-panels. Empty states say what to click, and a non-mesh object says how to convert it.
+- **Show it how (Teach by example)** (Auto Segments, step 4). Fix a spot by hand on the
+  preview, in Edit Mode, with any tools, then press **Remember This Fix**. It stores the
+  patch of quads you replaced and the ones you put there (positions relative to the
+  patch, no mesh) plus three numbers for the shape, in a file in Blender's user config
+  folder; nothing is uploaded, and **Export / Import** share it. **Look for Known Fixes**
+  finds the same quad pattern in a result by walking the quads, checks the shape, and
+  **Apply** puts the fix in after a camera looks at the spot from six sides and finds it
+  no further from your original. The fixed area is also put back when you press Start
+  again on the same mesh, if the quads around it come out the same. Limits: one
+  area per press, the outline must stay as it was, a mirrored copy of a fix is not found,
+  and the pattern must match exactly (the same face count and connections).
+- **Draw Edge Loops** (Auto Segments, step 2). Draw closed loops (round an eye or the
+  mouth) and open flow lines on the mesh, or add curves. Each becomes a strip of regular
+  quads: three loops by default (the one you drew and one each side), evenly spaced, cut
+  into the mesh before it is paired, so the poles end up outside the loops. The drawn
+  loop runs as one continuous edge loop and sits on the stroke. On a bust (8,579
+  faces) with two eye rings, a mouth ring and a chin line, the continuous loop along each
+  stroke was 14, 14, 10 and 10 edges long (the longest 14, 14, 12, 11) where plain guide
+  curves gave a median of 2 to 3 (longest 4 to 6); the loop lies 0.011 to 0.036 of an
+  edge from the stroke on average (0.06 to 0.18 at worst). The tidiness score went from
+  41.3 to 39.7: the strips are regular but the quads around them take the poles. Move a
+  curve (G, or Edit Curve), redraw it, or delete it and the result updates by itself.
+  Limits: a ring needs room for
+  its loops (it is told "too small" and left out; lower Loop Gap), two strips that touch
+  are not both built, and a strip that would fold on a steep surface is left out.
+- **Deformation Lines** (Auto Segments, step 2). Draw a line across a joint or crease
+  (elbow, knee, mouth corner, eyelid, knuckle) and it becomes an evenly spaced set of
+  loops, three or more, in the same strip. Optional **Crease** and **Sharp** marks go on
+  the middle loop when you Apply. A new Animation mesh type asks for these lines. Tested by
+  bending a bust at the neck 70 degrees over a short span: with a ring across the neck,
+  4.0% of the quads there collapse against 6.2% without it, and the average corner
+  loses 0.058 instead of 0.087 of its squareness; over a broad span (0.012) it made
+  no difference (4.6% without, 5.2% with). So it helps tight joints and little else.
+
+- **Faster Auto Segments** with the Turbo core, on every vendor and without any GPU. The camera pictures
+  now come from a depth buffer in Rust instead of one Python ray per pixel, and the check of quad
+  closure templates runs in Rust on all cores. The results are the same. Without the
+  Turbo core it falls back to the rays and Python as before.
+- **Paint Density** (Auto Segments, step 2). Press Paint to go to Weight Paint on a
+  vertex group and colour the parts that need more quads red; the search keeps more
+  faces there and fewer elsewhere. Uses Blender's own Weight Paint and Decimate
+  weights, so there is no brush of ours. Best with Reduce To, where the face count is
+  fixed: on a bust aimed at 3,000 faces, the painted head went from 60% to 76% of the
+  faces (81% at strength 3), and the view changed by 11.7% instead of 8.2%.
+  With Keep Detail it adds faces to the painted part instead.
+- **Guide curves** (Auto Segments, step 2). Draw strokes on the mesh with **Draw Guide**
+  (hold the left mouse button), or add curves, Grease Pencil drawings or edge-only
+  meshes with **Add Selected**. The quads follow them: an edge loop round an eye,
+  a line along a panel. The strokes are laid on the surface, the triangles near them
+  are split until they are small, and the edges that hug each stroke are kept as
+  hard edges that no quad may cross and the flow runs along. On a bust with five
+  strokes, the nearest edge was 0.30% of the size away on average (1.5% at worst)
+  without guides and 0.10% (0.5% at worst) with them, for about 27% more faces.
+  With Mirror on, a stroke on either side is used on both.
+- **Mirror** (Auto Segments, step 2). Pick Auto, X, Y or Z and it solves one half of
+  the mesh (the side with more surface) and mirrors it: the two sides are identical
+  and the seam sits exactly on the plane, with no gap. Auto finds the plane and uses
+  it only when 90% of the surface matches its mirror (70% when you pick the axis
+  yourself); otherwise it solves the whole mesh and says how well the mesh matched.
+  Tested on a mirrored bust: 100% match, watertight, all quads, nothing open on the seam.
+- **Auto Segments is much faster and Stop really stops.** Waiting for the pairing no
+  longer spins the main thread (it fought the pairing thread for Python's lock): a
+  17,000-face bust went from 37 s to 7 s and a 61,000-face barrier from 13 s to 6 s,
+  same result. Pressing Start again with another Change Allowed reuses what was
+  already measured (about 1.5 to 4 s instead of 5 to 7 s). Stop now ends the
+  pairing thread within a stopping point (0.06 s measured) instead of letting it
+  run on. The report keeps the seconds spent looking, decimating and pairing.
+- **Auto Segments by use.** Step 2 has a **Use** menu (Low Poly, Game Asset, Animation,
+  Subdivision, Scan Cleanup, Sculpt Base, Custom) that sets **Detail**, **Method** and
+  **Output**; change any of them and it becomes Custom. Game Asset is the old default.
+  Detail now runs from 0.1% to 80% with a plain-words note of what it means. Methods:
+  Auto, Pairing, Flat Quads, QuadriFlow, Grid Fill, Flow Fill, Tris Only (Grid and Flow
+  need a part with one open edge loop, QuadriFlow can fail on thin parts: Auto is used
+  then and the summary says so). Output: Triangles, Quads, or Mixed (paired quads kept,
+  leftover triangles left, no closing). **Review Segments** in the Parts panel remakes
+  just the part you click, with the chosen method, and checks the result again.
+- **The result is checked and repaired.** After every run Auto Segments counts
+  non-manifold edges and vertices, flipped edges, duplicate faces, holes and faces that pass through each other
+  (BVH overlap), on your mesh and on the result, and only what the result adds counts.
+  A part that got new problems is remade one size up, up to three times; a small part
+  may come back as your own faces. What cannot be fixed is selected on the applied mesh
+  and named in the summary ("2 spots could not be fixed and are selected for you").
+  Over 400,000 faces the crossing test is skipped and the summary says so.
+- **Auto Segments is now a guided, five-step panel**: pick the mesh, choose the aim,
+  press Start and watch, fix areas you don't like, Apply. One big button always shows
+  the next step. A real progress bar (a text bar before Blender 4.0) shows the stage
+  in words ("Looking at piece 12 of 250", "Pairing into quads, try 2") with a rough
+  time left, and a Stop button. Work Live shows the same bar. A summary at the end
+  gives faces before and after, percent fewer, and how much of the view changed.
+  Start is its own button now; changing a setting no longer restarts the search.
+- **Reduce To** (next to Keep Detail, the old Change Allowed). Ask for a percent of
+  your faces or a face count and Auto Segments lands within about 10% of it, then
+  reports how much the view changed.
+- **Live Boolean** (step 4). Put boxes, spheres or any closed mesh over parts of the
+  result, combine them with Union, Subtract or Intersect, and only the faces inside
+  are redone, live, as you move the shapes. An Organized / Detailed slider sets how
+  big the new quads are; everything outside stays as it is. Uses the Regions
+  winding-number test and the Work Live background worker; no mesh Boolean needed.
+- **Bake Detail** (Guided panel, next to Apply). Off, Normal Map, or Normal +
+  Color, at 512 to 4096 pixels. Your mesh is only read. Normal + Color makes one
+  new material with new UVs. Tested through FBX and glTF export and re-import.
+- Auto Segments keeps UVs good: quads stay inside one UV island and seams stay in
+  place, so textures land where they did. This costs faces on models cut into
+  many islands, except with Normal + Color, which doesn't need the old seams.
+- Auto Segments tries a size between two others where a piece jumps past a limit, gives
+  more faces to the spots the camera saw go wrong, and reports how much of the view
+  looks different in shape and in smooth shading.
+- **Apply** in the Guided panel now marks edges past 60 degrees sharp, so flat
+  sides stay flat under smooth shading.
+- Auto Segments fits its finished vertices to the source part by part: each source
+  point goes to its nearest vertex, and a vertex moves to best fit the surface it
+  owns, which holds ridges and corners. A part only keeps the move if it got closer
+  to the source. 2 to 10% less visible change at the same face count.
+  Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r)
+- Apply gives the result shading read from the source: each face corner takes its
+  normal from the nearest source points on its own side of a hard edge, not an average
+  across it. Hard edges stop looking melted, with no extra faces.
+  Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r)
 
 ## 0.8.0 - 2026-11-01
 

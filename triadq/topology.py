@@ -247,6 +247,9 @@ def _quad_points_valid(points: np.ndarray, epsilon: float | np.ndarray) -> np.nd
     if count == 0:
         return np.zeros(0, dtype=bool)
     epsilon = np.broadcast_to(np.asarray(epsilon, dtype=np.float64), (count,))
+    fast = _turbo.quad_points_valid(points, epsilon, math.cos(math.radians(MAX_QUAD_WARP_DEGREES))) if _turbo is not None else None
+    if fast is not None:
+        return fast
     valid = np.all(np.isfinite(points), axis=(1, 2))
     with np.errstate(all="ignore"):
         following_points = np.roll(points, -1, axis=1)
@@ -641,6 +644,13 @@ def _parity_template_validity(
     corners, as `quad_is_locally_valid` does on a local coordinate array.
     """
 
+    fast = (
+        _turbo.parity_template_validity(mesh.faces, vertices, base_coordinates, selected_edges, midpoint_indices, math.cos(math.radians(MAX_QUAD_WARP_DEGREES)))
+        if _turbo is not None
+        else None
+    )
+    if fast is not None:
+        return fast
     center_offset = len(base_coordinates)
     centers = [vertices[list(face)].mean(axis=0) for face in mesh.faces]
     quads: list[tuple[int, int, int, int]] = []
@@ -704,6 +714,7 @@ def parity_path_quad_closure(
     frozen_midpoints: dict[tuple[int, int], int] | None = None,
     validation_vertices: np.ndarray | None = None,
     validation_required: bool = True,
+    allow_invalid: bool = False,
 ) -> MeshData:
     """Convert a triangle/quad mesh with a sparse parity-path closure.
 
@@ -720,7 +731,9 @@ def parity_path_quad_closure(
     of a patch built in a planar domain. With `validation_required=False`
     that second geometry only ranks templates: a face whose templates are
     all invalid there takes its first template valid in `mesh.vertices`
-    (a later optimiser is expected to repair it) instead of failing.
+    (a later optimiser is expected to repair it) instead of failing. With
+    `allow_invalid` that goes for `mesh.vertices` too: a face with no valid
+    template takes its first one, and the caller repairs the shape.
     """
 
     if not mesh.faces:
@@ -784,6 +797,9 @@ def parity_path_quad_closure(
         template_results = both if validation_required else [
             row_both if any(row_both) else row for row_both, row in zip(both, template_results)
         ]
+
+    if allow_invalid:
+        template_results = [row if any(row) else [True] * len(row) for row in template_results]
 
     for face_index, face in enumerate(mesh.faces):
         # Results arrive in the same order the templates are tried below.
@@ -914,7 +930,8 @@ def parity_path_quad_closure(
         name=name or f"{mesh.name}_parity_path_closure",
     )
     summary = topology_summary(result)
-    if not summary.all_quads:
+    bent_only = allow_invalid and summary.quads == summary.faces and not (summary.degenerate_faces or summary.non_manifold_edges)
+    if not summary.all_quads and not bent_only:
         raise ValueError(
             "ParityPath closure failed validation: "
             f"quads={summary.quads}/{summary.faces}, degenerate={summary.degenerate_faces}, "
@@ -985,16 +1002,20 @@ def quad_only_closure(
     *,
     name: str | None = None,
     frozen_midpoints: dict[tuple[int, int], int] | None = None,
+    checked: bool = True,
 ) -> MeshData:
     """Conformingly split every polygon corner into a quad.
 
     Edge midpoints are shared globally, so adjacent faces receive matching
     topology. UV midpoints remain face-local, which preserves UV seams.
     `frozen_midpoints` reuses existing vertices as the midpoints of those edges.
+    `checked=False` skips validating the result, for a last resort that must be all quads whatever they look like.
     """
 
     fast = (
-        _turbo.quad_only_closure(mesh, name=name, frozen_midpoints=frozen_midpoints) if _turbo is not None else None
+        _turbo.quad_only_closure(mesh, name=name, frozen_midpoints=frozen_midpoints)
+        if _turbo is not None and checked
+        else None
     )
     if fast is not None:
         return fast
@@ -1063,6 +1084,8 @@ def quad_only_closure(
         face_uvs=output_face_uvs,
         name=name or f"{mesh.name}_quad_closure",
     )
+    if not checked:
+        return result
     summary = topology_summary(result)
     if not summary.all_quads:
         raise ValueError(

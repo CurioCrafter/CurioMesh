@@ -443,9 +443,13 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
                 return False
             shared.append(common.pop())
         region = set(path)
+        merged_away = {shared[0], shared[-1]}
+        if count == 3:
+            merged_away = set(shared)
 
         def free_chord(x: int, y: int) -> bool:
-            return not (set(users.get((x, y) if x < y else (y, x), ())) - region)
+            edge = (x, y) if x < y else (y, x)
+            return edge not in users or edge in merged_away
 
         size = len(points)
         middles = {}
@@ -471,6 +475,14 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
                 del points[size:]
                 return False
             made += cut[0]
+        # Faces of one path can touch away from it, so the new quads may not add a third face to any edge.
+        uses: dict[tuple[int, int], int] = {}
+        for quad in made:
+            for e in edges(quad):
+                uses[e] = uses.get(e, 0) + 1
+        if any(n + len(set(users.get(e, ())) - region) > 2 for e, n in uses.items()):
+            del points[size:]
+            return False
         for f in path:
             for e in edges(faces[f]):
                 row = users[e]

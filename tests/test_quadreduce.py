@@ -9,6 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from triadq.flatquad import _close_pieces  # noqa: E402
 from triadq.quadreduce import QuadReducer, join_loose_triangles  # noqa: E402
 from triadq.topology import topology_summary  # noqa: E402
 from triadq.types import MeshData  # noqa: E402
@@ -89,6 +90,25 @@ class JoinTests(unittest.TestCase):
             summary = topology_summary(result)
             self.assertTrue(summary.all_quads)
             self.assertEqual(summary.faces, expected)
+
+    def test_joining_never_puts_three_faces_on_an_edge(self):
+        rng = np.random.default_rng(3)
+        size = 14
+        points = [(float(i), float(j), float(rng.random()) * 0.2) for i in range(size) for j in range(size)]
+        faces = []
+        for i in range(size - 1):
+            for j in range(size - 1):
+                a, b, c, d = i * size + j, (i + 1) * size + j, (i + 1) * size + j + 1, i * size + j + 1
+                faces += [(a, b, c), (a, c, d)] if rng.random() < 0.35 else [(a, b, c, d)]
+        result, joined = join_loose_triangles(MeshData(np.asarray(points), faces, ["0"] * len(faces)))
+        self.assertGreater(joined, 0)
+        self.assertEqual(topology_summary(result).non_manifold_edges, 0)
+
+    def test_a_piece_with_a_bad_edge_still_comes_out_all_quads(self):
+        points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.5, 1.0, 0.0), (0.5, -1.0, 0.0), (0.5, 0.0, 1.0), (0.5, 0.0, -1.0)]
+        faces = [(0, 1, 2), (1, 0, 3), (0, 1, 4), (1, 0, 5)]  # four faces on one edge
+        closed = _close_pieces(MeshData(np.asarray(points), faces, ["0"] * 4))[0]
+        self.assertTrue(all(len(face) == 4 for face in closed.faces))
 
     def test_a_lone_triangle_is_left_for_closure(self):
         mesh = MeshData(np.asarray([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]), [(0, 1, 2)], ["0"])

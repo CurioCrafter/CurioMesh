@@ -408,6 +408,90 @@ def bench() -> None:
     )
 
 
+@unittest.skipUnless(turbo.available(), f"native module not built: {turbo.status()}")
+class ClosureValidityTests(unittest.TestCase):
+    def test_quad_validity_matches_python(self):
+        rng = np.random.default_rng(11)
+        square = np.array([[0.0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]])
+        points = square + rng.normal(scale=0.4, size=(20000, 4, 3))
+        points[::50, 2] = points[::50, 0]  # repeated corner
+        points[::77] = points[::77, ::-1]  # flipped
+        points[3, 1, 1] = np.nan
+        for epsilon in (1e-20, 1e-3, np.linspace(0.0, 0.2, len(points))):
+            np.testing.assert_array_equal(T._quad_points_valid(points, epsilon), py(T._quad_points_valid, points, epsilon))
+
+    def test_templates_match_python(self):
+        for mesh in meshes():
+            if any(len(face) not in (3, 4) for face in mesh.faces):
+                continue
+            selected = py(T._parity_path_edges, mesh, frozenset())
+            vertices = np.asarray(mesh.vertices, dtype=np.float64)
+            mids = {edge: len(vertices) + k for k, edge in enumerate(sorted(selected))}
+            middles = [(vertices[a] + vertices[b]) * 0.5 for a, b in sorted(selected)]
+            base = np.vstack([vertices, *middles]) if middles else vertices
+            self.assertEqual(
+                T._parity_template_validity(mesh, vertices, base, selected, mids),
+                py(T._parity_template_validity, mesh, vertices, base, selected, mids),
+            )
+
+
+class PicturesTests(unittest.TestCase):
+    def test_falls_back_without_native_or_on_ngons(self):
+        square = np.array([[0.0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0.5, 2, 0]])
+        self.assertIsNone(py(turbo.pictures, square, [(0, 1, 2)], np.zeros(3), 2.0, 8))
+        self.assertIsNone(turbo.pictures(square, [(0, 1, 2, 4, 3)], np.zeros(3), 2.0, 8))
+
+    @unittest.skipUnless(turbo.available(), f"native module not built: {turbo.status()}")
+    def test_bent_quad_reports_its_own_normal(self):
+        bent = np.array([[-1.0, -1, 0.5], [1, -1, -0.5], [1, 1, 0.5], [-1, 1, -0.5]])
+        hit, normal, _depth, _face = turbo.pictures(bent, [(0, 1, 2, 3)], np.zeros(3), 2.0, 8)[4]  # from above
+        self.assertTrue(hit.any())
+        np.testing.assert_allclose(np.abs(normal[hit]), [[0.0, 0.0, 1.0]] * int(hit.sum()), atol=1e-9)
+
+    @unittest.skipUnless(turbo.available(), f"native module not built: {turbo.status()}")
+    def test_same_as_one_ray_per_pixel(self):
+        mesh = torus(16, 10, seed=3)
+        center, half, pixels = np.array([0.1, -0.05, 0.02]), 1.6, 24
+        fast = turbo.pictures(mesh.vertices, mesh.faces, center, half, pixels)
+        tris = np.array([(f[0], f[k], f[k + 1]) for f in mesh.faces for k in range(1, len(f) - 1)])
+        a, b, c = np.moveaxis(mesh.vertices[tris], 1, 0)
+        view = 0
+        for axis in range(3):
+            u, v = (axis + 1) % 3, (axis + 2) % 3
+            for sign in (1.0, -1.0):
+                grid = ((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half
+                origins = np.zeros((pixels * pixels, 3))
+                origins[:, axis] = center[axis] + sign * 2.0 * half
+                origins[:, u] = center[u] + np.repeat(grid, pixels)
+                origins[:, v] = center[v] + np.tile(grid, pixels)
+                direction = np.zeros(3)
+                direction[axis] = -sign
+                # Moller-Trumbore, every ray against every triangle.
+                e1, e2 = b - a, c - a
+                h = np.cross(direction, e2)
+                det = (e1 * h).sum(axis=1)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    s = origins[:, None] - a
+                    bary_u = (s * h).sum(axis=2) / det
+                    q = np.cross(s, e1)
+                    bary_v = (q * direction).sum(axis=2) / det
+                    t = (q * e2).sum(axis=2) / det
+                t[~((bary_u >= 0) & (bary_v >= 0) & (bary_u + bary_v <= 1) & (t >= 0))] = np.inf
+                first = t.argmin(axis=1)
+                depth = t.min(axis=1).reshape(pixels, pixels)
+                hit = np.isfinite(depth)
+                normal = np.cross(e1, e2)[first]
+                normal = (normal / np.linalg.norm(normal, axis=1, keepdims=True)).reshape(pixels, pixels, 3)
+                got_hit, got_normal, got_depth, got_face = fast[view]
+                self.assertTrue(((got_face >= 0) & (got_face < len(mesh.faces))).all())
+                both = hit & got_hit
+                self.assertTrue(hit.any())
+                self.assertLessEqual(int((hit ^ got_hit).sum()), 1)  # a sample exactly on an outline may go either way
+                np.testing.assert_allclose(got_depth[both], depth[both], atol=1e-9)
+                self.assertGreater(float(np.abs((got_normal[both] * normal[both]).sum(axis=1)).min()), 0.999)
+                view += 1
+
+
 if __name__ == "__main__":
     if "--bench" in sys.argv:
         bench()
