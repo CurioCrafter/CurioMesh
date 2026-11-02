@@ -20,3 +20,7 @@ Only the latest release is supported with fixes.
   `.blend`) are checked before use, and no pickle or `eval` is used.
 - An exported job folder holds `run_job.py` and a copy of the add-on's Python code. It is a program: run only job
   folders you exported yourself or got from someone you trust.
+
+## Where releases come from
+
+Release zips are built only by the GitHub Actions release workflow, from the tag, with `SHA256SUMS`. A zip built on someone's own computer is a test build: its native binary holds that computer's local paths, and it should not be published.

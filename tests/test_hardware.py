@@ -131,6 +131,21 @@ class SafetyTests(unittest.TestCase):
                 jobpack.load_result(Path(root) / "float.npz", 1, 3)
 
 
+class NpzLimitTests(unittest.TestCase):
+    def test_a_file_that_unpacks_too_big_is_refused_before_reading(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            bomb = Path(folder) / "bomb.npz"
+            with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as packed:
+                packed.writestr("a.npy", bytes(hardware.MOST_NPZ_BYTES + 1))  # compresses to about a megabyte
+            with self.assertRaises(ValueError):
+                hardware.load_npz(bomb)
+            (Path(folder) / "junk.npz").write_bytes(b"not a zip")
+            with self.assertRaises(ValueError):
+                hardware.load_npz(Path(folder) / "junk.npz")
+
+
 class JobFolderTests(unittest.TestCase):
     def test_export_writes_a_runnable_folder_and_the_result_loads_back(self):
         co = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float)

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Security: any .npz read back (job results, saved parts) is refused if it unpacks past 1 GB; fixes kept in a .blend are size-capped like library files; CI installs pinned; releases come only from the release workflow (SECURITY.md).
 - Clearing crossings stops at 30 s per run and selects what's left (the crane took 215 s for it; now 103 s for the whole run). Judge After Baking is marked experimental: it can leave slivers on flat areas.
 - Redraw Messy Quads: messy parts are redrawn as pole-free grids, and quads are taken away where the camera sees least change. On for Animation and Subdivision, off for other uses and on models of more than 40 loose pieces. Tidiness roughly doubles (bust 28 to 62) for 7-50% more faces and 2-5x the time, capped at 240 s; the summary says when it ran and how long it took.
 - Heat colours are viridis (colour-blind safe) with a legend in the viewport; the time estimate is a range; Export Job copies the engine's data tables.

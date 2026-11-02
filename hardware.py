@@ -391,10 +391,28 @@ def save_piece(path: Path, detail: float, sizes: list, levels: list[tuple[int, f
         raise
 
 
+MOST_NPZ_BYTES = 2**30  # unpacked size of any .npz read back (results, saved parts): a small zip can unpack to far more
+MOST_NPZ_ENTRIES = 100_000
+
+
+def load_npz(path):
+    """np.load for a .npz that may come from anywhere: no pickles, and refused before reading if it unpacks too big."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as packed:
+            infos = packed.infolist()
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"{Path(path).name} is not a CurioMesh .npz file") from exc
+    if len(infos) > MOST_NPZ_ENTRIES or sum(info.file_size for info in infos) > MOST_NPZ_BYTES:
+        raise ValueError(f"{Path(path).name} unpacks to more than {MOST_NPZ_BYTES // 2**20:,} MB or {MOST_NPZ_ENTRIES:,} arrays: not read")
+    return np.load(path, allow_pickle=False)
+
+
 def load_piece(path: Path):
     """(detail, sizes, levels, seen) of a saved part, or None if it is missing or unreadable."""
     try:
-        with np.load(path, allow_pickle=False) as data:
+        with load_npz(path) as data:
             sizes = []
             for k in range(int(data["n"])):
                 lens, flat = data[f"l{k}"], data[f"f{k}"]

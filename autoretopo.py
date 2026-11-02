@@ -1828,7 +1828,7 @@ class AutoJob:
                 path = os.path.join(folder, f"out_{k}.npz")
                 rows = None
                 if os.path.exists(path):
-                    with np.load(path) as saved:  # an open file couldn't be deleted with the folder
+                    with hardware.load_npz(path) as saved:  # an open file couldn't be deleted with the folder
                         rows = {name: saved[name] for name in saved.files}
                 if rows is None or not len(rows["lens"]):
                     triangles = sum(len(p) - 2 for p in polys)

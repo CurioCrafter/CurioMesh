@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
+import sys
 from pathlib import Path, PurePosixPath
 import tomllib
 import zipfile
@@ -291,6 +293,8 @@ def main() -> None:
     root = Path(__file__).resolve().parents[1]
     output = args.output.resolve() if args.output else root / "dist"
     native_dir = args.native_dir.resolve() if args.native_dir else None
+    if native_dir and not os.environ.get("GITHUB_ACTIONS"):
+        print("Test build: locally built binaries hold this computer's paths. Publish only zips from the release workflow.", file=sys.stderr)
     archives = list(build_archives(root, output, native_dir))
     if args.per_version:
         archives += build_per_version(root, output, native_dir)

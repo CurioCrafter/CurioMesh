@@ -75,7 +75,7 @@ jobs:
         if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: |
-          pip install numpy
+          pip install numpy==2.2.6
           mkdir -p _native && cp -r native-out/* _native/
           python -m unittest tests.test_turbo -v
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -102,7 +102,7 @@ jobs:
           pattern: native-*
           path: native-bin
           merge-multiple: true
-      - run: pip install numpy
+      - run: pip install numpy==2.2.6
       - name: Unit tests (with the Linux native build)
         run: |
           cp -r native-bin _native

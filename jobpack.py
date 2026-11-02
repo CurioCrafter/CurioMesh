@@ -163,7 +163,12 @@ def save_result(path, output: dict, report: dict, source_faces: int, source_vert
 
 def load_result(path, source_faces: int, source_verts: int):
     """(result dict like the preview's, report). Raises ValueError when it was made from a different mesh."""
-    with np.load(path, allow_pickle=False) as data:
+    try:
+        from .hardware import load_npz
+    except ImportError:  # loaded as a plain module (tests)
+        from hardware import load_npz
+
+    with load_npz(path) as data:
         made_from = data["source"].tolist()
         if made_from != [source_faces, source_verts]:
             raise ValueError(f"This result was made from a mesh with {made_from[0]:,} faces; the selected object has {source_faces:,}")

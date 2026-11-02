@@ -1149,7 +1149,10 @@ def _adopt(context, source, co, faces, mat) -> None:
 def _kept(source) -> list[dict]:
     """The fixes kept on this object. A .blend file can come from anybody, so only valid ones count."""
     try:
-        kept = json.loads(source.get("curiomesh_kept", "[]"))
+        text = source.get("curiomesh_kept", "[]")
+        if not isinstance(text, str) or len(text) > teach.MOST_BYTES:  # a huge string would freeze Blender while parsing
+            return []
+        kept = json.loads(text)[: teach.MOST_FIXES]
     except (ValueError, TypeError, RecursionError):
         return []
     try:
