@@ -525,6 +525,109 @@ def augment_matching(mate: dict, allowed: dict, order: list) -> int | None:
     return int(rescued)
 
 
+# --------------------------------------------------------------------------- lookups
+
+
+_stop: Any = None
+
+
+def stop_native() -> None:
+    """Calls that take the stop flag and are running now end early, with `Cancelled`. Later calls are not affected."""
+
+    global _stop
+    if _stop is not None:
+        _stop.set()
+        _stop = _module.StopFlag()
+
+
+def _stoppable(call, *args):
+    """`call(*args, stop flag)`, turning a stop into the `Cancelled` the jobs already handle."""
+
+    global _stop
+    if _stop is None:
+        _stop = _module.StopFlag()
+    try:
+        return call(*args, _stop)
+    except InterruptedError:
+        try:
+            from .triadq.types import Cancelled
+        except ImportError:
+            from triadq.types import Cancelled
+        raise Cancelled() from None
+
+
+def _query(points) -> np.ndarray:
+    return np.ascontiguousarray(points, dtype=np.float64).reshape(-1)
+
+
+class PointTree:
+    """Nearest points for a whole array at once, on all cores. Exact ties go to the lowest index."""
+
+    def __init__(self, module, points):
+        self._core = module.PointLookup(_query(points))
+
+    def nearest(self, queries) -> tuple[np.ndarray, np.ndarray]:
+        """(index, distance) of the nearest point to each query."""
+
+        return _stoppable(self._core.nearest, _query(queries))
+
+    def first_of_kind(self, queries, query_kind, point_kind, count: int) -> np.ndarray:
+        """For each query, the closest of its `count` nearest points of the query's own kind, or -1."""
+
+        return _stoppable(self._core.first_of_kind, _query(queries), np.ascontiguousarray(query_kind, dtype=np.int64), np.ascontiguousarray(point_kind, dtype=np.int64), int(count))
+
+
+class FaceTree:
+    """Blender's BVHTree.FromPolygons for arrays of queries, on all cores: polygons cut the same way, single precision."""
+
+    def __init__(self, module, parts):
+        self._core = module.FaceLookup(*parts)
+
+    def nearest(self, queries) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(closest point (N, 3), polygon, distance) for each query."""
+
+        at, face, away = _stoppable(self._core.nearest, _query(queries))
+        return at.reshape(-1, 3), face, away
+
+    def crossing_pairs(self) -> np.ndarray:
+        """Polygon pairs (M, 2), lower first and sorted, that pass through each other and share no vertex."""
+
+        return _stoppable(self._core.crossing_pairs).reshape(-1, 2)
+
+
+def point_tree(points) -> PointTree | None:
+    """A `PointTree`, or None for "use Blender's KDTree"."""
+
+    module = native()
+    return None if module is None or not hasattr(module, "PointLookup") else PointTree(module, points)
+
+
+def face_tree(points, faces) -> FaceTree | None:
+    """A `FaceTree`, or None for "use Blender's BVHTree"."""
+
+    module = native()
+    if module is None or not hasattr(module, "FaceLookup"):
+        return None
+    indptr, flat = _csr(faces)
+    vertices = _query(points)
+    if len(flat) and (flat.min() < 0 or flat.max() * 3 >= len(vertices)):
+        return None
+    return FaceTree(module, (vertices, indptr, flat))
+
+
+def mesh_checks(faces, piece):
+    """Native `checks.edge_flags` and `checks.hole_counts`: (broken per face, non-manifold edges, flipped edges, duplicate faces, holes, holes per piece), or None."""
+
+    module = native()
+    if module is None or not hasattr(module, "mesh_checks"):
+        return None
+    indptr, flat = _csr(faces)
+    if len(flat) and flat.min() < 0:
+        return None
+    broken, bad_edges, flipped, dups, holes, pieces, counts = module.mesh_checks(indptr, flat, np.ascontiguousarray(piece, dtype=np.int64))
+    return broken, bad_edges, flipped, dups, holes, dict(zip(pieces.tolist(), counts.tolist()))
+
+
 # --------------------------------------------------------------------------- geometry
 
 

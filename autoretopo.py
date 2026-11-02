@@ -425,6 +425,56 @@ def _folded(points: np.ndarray, faces) -> int:
     return int((patch.quad_quality(points[quads]) <= 0.0).sum())
 
 
+def _point_tree(points: np.ndarray):
+    """A tree of points: the native one, else Blender's."""
+
+    tree = turbo.point_tree(points)
+    if tree is None:
+        tree = KDTree(len(points))
+        for index, point in enumerate(points.tolist()):
+            tree.insert(point, index)
+        tree.balance()
+    return tree
+
+
+def _nearest_points(tree, queries: np.ndarray) -> np.ndarray:
+    if isinstance(tree, KDTree):
+        return np.fromiter((tree.find(p)[1] for p in queries.tolist()), dtype=np.int64, count=len(queries))
+    return tree.nearest(queries)[0]
+
+
+def _nearest_of_kind(tree, queries: np.ndarray, query_kind: np.ndarray, point_kind: np.ndarray, count: int) -> np.ndarray:
+    """For each query, the closest of its `count` nearest points of the same kind, or -1."""
+
+    if not isinstance(tree, KDTree):
+        return tree.first_of_kind(queries, query_kind, point_kind, count)
+    owner = np.full(len(queries), -1, dtype=np.int64)
+    for index, (point, kind) in enumerate(zip(queries.tolist(), query_kind.tolist())):
+        for _found, vertex, _away in tree.find_n(point, count):
+            if point_kind[vertex] == kind:
+                owner[index] = vertex
+                break
+    return owner
+
+
+def _face_tree(points: np.ndarray, faces):
+    """A tree of faces: the native one, else Blender's."""
+
+    return turbo.face_tree(points, faces) or BVHTree.FromPolygons(points.tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+
+
+def _nearest_faces(tree, queries: np.ndarray) -> np.ndarray:
+    if isinstance(tree, BVHTree):
+        return np.fromiter((tree.find_nearest(p)[2] for p in queries.tolist()), dtype=np.int64, count=len(queries))
+    return tree.nearest(queries)[1]
+
+
+def _face_distances(tree, queries: np.ndarray) -> np.ndarray:
+    if isinstance(tree, BVHTree):
+        return np.fromiter((tree.find_nearest(p)[3] for p in queries.tolist()), dtype=np.float64, count=len(queries))
+    return tree.nearest(queries)[2]
+
+
 def _native_tree(context, co: np.ndarray, flat: np.ndarray, sizes: np.ndarray) -> BVHTree | None:
     """The BVH of a big mesh built inside Blender from arrays, with no Python lists of faces. None if this Blender won't take it."""
     mesh = obj = None
@@ -484,16 +534,19 @@ def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=No
     report = GridReport()
     if int(max(area.max(initial=-1) for area in labels)) < 0:
         return coarse, report
-    points = co.tolist()
-    whole = BVHTree.FromPolygons(points, [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+    whole = _face_tree(co, faces)
 
     def nearest(query):
+        if not isinstance(whole, BVHTree):
+            at, found, _away = whole.nearest(query)
+            return found, at
         found = [whole.find_nearest(Vector(p)) for p in query.tolist()]
         return np.asarray([row[2] for row in found], dtype=np.int64), np.asarray([row[0] for row in found], dtype=np.float64).reshape(-1, 3)
 
     def project_for(area):
-        ids = np.flatnonzero(labels[1] == area).tolist()
-        tree = BVHTree.FromPolygons(points, [list(faces[f]) for f in ids], all_triangles=False, epsilon=0.0)
+        tree = _face_tree(co, [faces[f] for f in np.flatnonzero(labels[1] == area).tolist()])
+        if not isinstance(tree, BVHTree):
+            return lambda query: tree.nearest(query)[0]
         return lambda query: np.asarray([tree.find_nearest(Vector(p))[0] for p in query.tolist()], dtype=np.float64).reshape(-1, 3)
 
     extent = float(np.ptp(co, axis=0).max())
@@ -636,6 +689,7 @@ class AutoJob:
     def stop(self) -> None:
         self._stopped = True
         self.busy = False
+        turbo.stop_native()
         self._kill_worker()
         self._search.close()  # runs what cleans up after it, such as the Clean Rows folder
         self._drop_tmp()
@@ -1071,15 +1125,15 @@ class AutoJob:
     def _source_samples(self):
         """Each source triangle as a point: (positions, normals, areas, loose parts, the source's tree). Made once."""
         if self._samples is None:
-            sizes = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
-            triangles = np.asarray([(f[0], f[i], f[i + 1]) for f in self.faces for i in range(1, len(f) - 1)], dtype=np.int64)
+            flat, starts, sizes = corner_table(self.faces)
+            first = np.repeat(starts, sizes - 2)
+            step = np.arange(len(first)) - np.repeat(np.cumsum(sizes - 2) - (sizes - 2), sizes - 2)  # 0, 1.. within each face
             parts = np.repeat(self._shell, sizes - 2)
-            a, b, c = self.co[triangles[:, 0]], self.co[triangles[:, 1]], self.co[triangles[:, 2]]
+            a, b, c = self.co[flat[first]], self.co[flat[first + step + 1]], self.co[flat[first + step + 2]]
             cross = np.cross(b - a, c - a)
             twice = np.linalg.norm(cross, axis=1)
             real = twice > 0.0
-            tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
-            self._samples = (((a + b + c) / 3.0)[real], cross[real] / twice[real][:, None], twice[real] / 2.0, parts[real], tree)
+            self._samples = (((a + b + c) / 3.0)[real], cross[real] / twice[real][:, None], twice[real] / 2.0, parts[real], _face_tree(self.co, self.faces))
         return self._samples
 
     def _fit(self, mesh: MeshData) -> MeshData:
@@ -1092,36 +1146,23 @@ class AutoJob:
             return mesh
         points = mesh.vertices
         position, normal, area, sample_part, source_tree = self._source_samples()
-        tree = KDTree(len(points))
-        for index, point in enumerate(points.tolist()):
-            tree.insert(point, index)
-        tree.balance()
+        tree = _point_tree(points)
         source_parts = int(sample_part.max()) + 1
         if source_parts == 1:
             vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, None)
-            owner = np.fromiter((tree.find(p)[1] for p in position.tolist()), dtype=np.int64, count=len(position))
+            owner = _nearest_points(tree, position)
         else:
             # A result part came from one source part, and samples of another part, however near, say nothing about it.
-            sample_tree = KDTree(len(position))
-            for index, point in enumerate(position.tolist()):
-                sample_tree.insert(point, index)
-            sample_tree.balance()
-            vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, lambda p: sample_tree.find(p)[1])
-            vertex_source = source_of[vertex_part]
-            owner = np.full(len(position), -1, dtype=np.int64)
-            for index, (point, part) in enumerate(zip(position.tolist(), sample_part.tolist())):
-                for _found, vertex, _away in tree.find_n(point, OTHER_VERTICES):
-                    if vertex_source[vertex] == part:
-                        owner[index] = vertex
-                        break
+            sample_tree = _point_tree(position)
+            vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, lambda at: _nearest_points(sample_tree, at))
+            owner = _nearest_of_kind(tree, position, sample_part, source_of[vertex_part], OTHER_VERTICES)
         count = len(source_of)
         moved = fit_vertices(points, quads, position, normal, area, owner)
 
         def gaps(where: np.ndarray) -> np.ndarray:
             """Per result part, the mean distance from its source to it plus from it to its source."""
-            result_tree = BVHTree.FromPolygons(where.tolist(), [list(f) for f in mesh.faces], all_triangles=False, epsilon=0.0)
-            to_result = np.fromiter((result_tree.find_nearest(p)[3] for p in position.tolist()), dtype=np.float64, count=len(position))
-            to_source = np.fromiter((source_tree.find_nearest(p)[3] for p in where.tolist()), dtype=np.float64, count=len(where))
+            to_result = _face_distances(_face_tree(where, mesh.faces), position)
+            to_source = _face_distances(source_tree, where)
             weighted = np.bincount(sample_part, area * to_result, minlength=source_parts) / np.maximum(np.bincount(sample_part, area, minlength=source_parts), 1e-30)
             back = np.bincount(vertex_part, to_source, minlength=count) / np.maximum(np.bincount(vertex_part, minlength=count), 1)
             return weighted[source_of] + back
@@ -1238,8 +1279,8 @@ class AutoJob:
     def _balanced(self, coarse: MeshData):
         """Balanced: leftover triangles are kept out of the closing, and only faces that gain shape are split."""
         if self._tree is None:
-            self._tree = BVHTree.FromPolygons(self.co.tolist(), [list(f) for f in self.faces], all_triangles=False, epsilon=0.0)
-        find = self._tree.find_nearest
+            self._tree = _face_tree(self.co, self.faces)
+        find = self._tree.find_nearest if isinstance(self._tree, BVHTree) else self._tree
         paired = pair_and_close(coarse, seed_count=2, force_quads=False, keep_quads=True, cancelled=lambda: self._stopped)[0]
         result = snap_new_vertices(split_faces(paired, faces_that_gain(paired, find, FLAT_SNAP_SHARE)), coarse.vertices, find)
         points, out_faces, keep = unfold(result.vertices, result.faces, find)
@@ -1528,24 +1569,26 @@ class AutoJob:
             for index, ids in enumerate(self.pieces):
                 owner[list(chain.from_iterable(self.faces[f] for f in ids.tolist()))] = index
             used = np.flatnonzero(owner >= 0)
-            kd = KDTree(len(used))
-            coordinates = self.co[used].tolist()
-            # In random order: a welded source's vertices come sorted, and Blender's balance took minutes on them, holding up everything.
-            for slot in np.random.default_rng(0).permutation(len(used)).tolist():
-                kd.insert(coordinates[slot], slot)
-            del coordinates
-            kd.balance()
+            kd = turbo.point_tree(self.co[used])
+            if kd is None:
+                kd = KDTree(len(used))
+                coordinates = self.co[used].tolist()
+                # In random order: a welded source's vertices come sorted, and Blender's balance took minutes on them, holding up everything.
+                for slot in np.random.default_rng(0).permutation(len(used)).tolist():
+                    kd.insert(coordinates[slot], slot)
+                del coordinates
+                kd.balance()
             self._kd, self._kd_owner = kd, owner[used]
         fa, fb = patch.face_adjacency(faces)
         labels = patch._labels(len(faces), fa, fb)
         order = np.argsort(labels, kind="stable")
         starts = np.concatenate(([0], np.flatnonzero(labels[order][1:] != labels[order][:-1]) + 1, [len(order)]))
         piece = np.zeros(len(faces), dtype=np.int64)
-        for a, b in zip(starts[:-1], starts[1:]):
-            ids = order[a:b]
-            sample = ids[np.linspace(0, len(ids) - 1, min(len(ids), 24)).astype(np.int64)]
-            votes = [int(self._kd_owner[self._kd.find(Vector(points[faces[f][0]]))[1]]) for f in sample.tolist()]
-            piece[ids] = np.bincount(votes).argmax()
+        samples = [order[a:b][np.linspace(0, b - a - 1, min(b - a, 24)).astype(np.int64)] for a, b in zip(starts[:-1], starts[1:])]
+        corners = points[[faces[f][0] for f in np.concatenate(samples).tolist()]]
+        votes = np.split(self._kd_owner[_nearest_points(self._kd, corners)], np.cumsum([len(s) for s in samples])[:-1])
+        for a, b, vote in zip(starts[:-1], starts[1:], votes):
+            piece[order[a:b]] = np.bincount(vote).argmax()
         return piece
 
     @staticmethod
@@ -1597,7 +1640,10 @@ class AutoJob:
 
     def _inspected(self, points, faces, piece):
         """Generator: all the numbers for one mesh, the crossing test in slices and the rest on a worker thread."""
-        pairs = yield from checks.crossing_slices(points, faces)
+        if hasattr(turbo.native(), "FaceLookup"):  # one native call on all cores, off the main thread
+            pairs = yield from self._off(lambda: checks.crossing_pairs(points, faces))
+        else:
+            pairs = yield from checks.crossing_slices(points, faces)
         out = yield from self._background(lambda: checks.inspect(points, faces, piece, pairs=pairs))
         if self._known is not None:
             out.new_cross, new = repair.new_by_piece(self._known, pairs, points, faces, piece)
@@ -1761,7 +1807,8 @@ class AutoJob:
                 for size in rows["lens"].tolist():
                     faces.append(tuple(flat[cursor : cursor + size]))
                     cursor += size
-                tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
+                tree = _face_tree(points, polys)
+                find = tree.find_nearest if isinstance(tree, BVHTree) else tree
                 triangles = np.asarray([(q[0], q[i], q[i + 1]) for q in polys for i in range(1, len(q) - 1)], dtype=np.int64)
 
                 def sharpen(moved, points=points, triangles=triangles):
@@ -1769,11 +1816,11 @@ class AutoJob:
                     for i, co in enumerate(moved.tolist()):
                         grid.insert(co, i)
                     grid.balance()
-                    return seek_features(moved, points, triangles, lambda at: grid.find(at)[1])
+                    return seek_features(moved, points, triangles, lambda at: _nearest_points(grid, at))
 
                 # With few source triangles per quad, their planes say more about noise than about shape.
                 wanted_sharp = len(triangles) >= ROWS_SHARP_INPUT * len(faces)
-                done = yield from self._in_thread(lambda: snap_rows(rows["co"], faces, tree.find_nearest, sharpen=sharpen if wanted_sharp else None))
+                done = yield from self._in_thread(lambda: snap_rows(rows["co"], faces, find, sharpen=sharpen if wanted_sharp else None))
                 if self._stopped:
                     return None
                 moved, quads = done if done is not None else (None, [])
@@ -1788,8 +1835,8 @@ class AutoJob:
                     continue
                 all_points.append(moved)
                 all_faces += [tuple(v + offset for v in q) for q in quads]
-                centers = np.asarray([moved[list(q)].mean(axis=0) for q in quads]).tolist()
-                all_kinds += [kinds[tree.find_nearest(c)[2]] for c in centers]
+                centers = np.asarray([moved[list(q)].mean(axis=0) for q in quads])
+                all_kinds += [kinds[f] for f in (_nearest_faces(tree, centers).tolist())]
                 offset += len(moved)
                 yield
         finally:
