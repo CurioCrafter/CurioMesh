@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.1
+## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other
 - **Turned parts and Field Rows face out again** on a source made of triangles. The vote that decides which
