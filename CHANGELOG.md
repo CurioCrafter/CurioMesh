@@ -23,6 +23,12 @@
   one), never past 85% of the computer's memory. The parts are taken back in order, so the sizes picked are the
   same as on one core. Small jobs stay in one Blender; Stop, an error or quitting Blender ends the helpers.
 
+### Graphics card
+- **The camera pictures of big meshes (150,000 triangles and up) are drawn on the graphics card** when the computer has one that works: NVIDIA, AMD, Intel or Apple, through Vulkan, DirectX 12 or Metal, with no CUDA and nothing to install. On an RTX 3080 Ti that is 1.1 to 1.4 times faster at 170,000 triangles and about 3 times at 1.3 million; smaller meshes stay on the processor, where the card is level or slower. A whole run is only 1 to 2% quicker, since pictures are a small part of a run.
+- **Almost the same pictures:** the card works in single precision, so on a depth tie a pixel can pick the neighbouring triangle. On real meshes the camera counts 0.02 to 0.4% of the pixels as changed at 128 to 192 pixels a side, against the processor's pictures.
+- **Use Graphics Card** in the PC section turns it off; so does `CURIOMESH_GPU=0`. If the card errors, the processor takes over for the rest of the session and the summary says so once.
+- The native core grows from 1.7 MB to 7.2 MB on Windows (wgpu and its graphics-API bindings).
+
 ## 0.9.0 - 2026-11-02
 
 ### Auto Segments: fewer faces, judged by a camera

@@ -343,7 +343,7 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-in
 - **Live Boolean** refuses a redo that would make more faces than it replaces. On a mesh already reduced hard, that can be most redos.
 - **No global patch layout.** CurioMesh has none, and it does not promise exact loops round eyes, mouths or joints without your help. An optional script, `scripts/flowtool.py`, can use QuadWild if you install it separately. It is not in the panel, it covers organic parts only, and it is untested on Linux and macOS.
 - **Native core builds.** The release workflow builds the Turbo core for Windows, Linux and macOS (Intel and Apple Silicon). The Intel Mac build is compiled but not run in CI, and the developers tried only Windows by hand. Without the core, CurioMesh falls back to Python code, which is much slower on big meshes.
-- **CPU only.** There is no GPU compute.
+- **Little GPU compute.** Only the camera pictures of meshes over 150,000 triangles run on the graphics card (NVIDIA, AMD, Intel or Apple, no CUDA). That is 1.1 to 3 times faster for that step, about 1 to 2% for a whole run. Everything else runs on the processor, and a graphics card does not speed it up.
 - **Folded slivers on some small thin parts.** A quad can come out bent about 90 degrees round an edge of a thin part. They are named in the summary and selected on Apply, so you can fix them by hand.
 - **Judge After Baking is experimental.** On big flat areas of a scan it can leave long thin slivers, which bake badly, and its score misses them. It is off by default.
 - **Redraw Messy Quads costs time.** On some models it roughly doubles the tidiness score for 7 to 50% more faces and 2 to 5 times the time, and it is left off on models of more than 40 loose pieces.

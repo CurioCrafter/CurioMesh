@@ -18,6 +18,9 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310", "generate-import-lib"] }
 numpy = "0.30"
 rayon = "1.12"
+# The graphics card: wgpu (Vulkan, DX12, Metal) with pollster to wait on it. Exact pins; no GL, web or window code.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "vulkan", "wgsl"] }
+pollster = "=0.4.0"
 
 [profile.release]
 lto = "fat"

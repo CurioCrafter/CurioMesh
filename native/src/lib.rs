@@ -8,6 +8,7 @@ mod chords;
 mod close;
 mod field;
 mod geom;
+mod gpu;
 mod join;
 mod matching;
 mod near;
@@ -261,8 +262,12 @@ fn winding_number<'py>(
         .into_pyarray(py))
 }
 
+type Pictures<'py> = (Bound<'py, PyArray1<bool>>, F64Array<'py>, F64Array<'py>, Bound<'py, PyArray1<i64>>);
+
+/// `gpu`: draw on the graphics card (raises RuntimeError when there is none or it fails; the caller falls back).
 #[pyfunction]
-#[allow(clippy::type_complexity)]
+#[pyo3(signature = (points, triangles, normals, center, half, pixels, gpu=false))]
+#[allow(clippy::too_many_arguments)]
 fn pictures<'py>(
     py: Python<'py>,
     points: PyReadonlyArray1<'py, f64>,
@@ -271,7 +276,8 @@ fn pictures<'py>(
     center: [f64; 3],
     half: f64,
     pixels: usize,
-) -> PyResult<(Bound<'py, PyArray1<bool>>, F64Array<'py>, F64Array<'py>, Bound<'py, PyArray1<i64>>)> {
+    gpu: bool,
+) -> PyResult<Pictures<'py>> {
     let (points, triangles) = (slice(&points, "points")?, slice(&triangles, "triangles")?);
     let normals = slice(&normals, "normals")?;
     let vertices = (points.len() / 3) as i64;
@@ -285,14 +291,28 @@ fn pictures<'py>(
     {
         return Err(PyValueError::new_err("picture arrays are inconsistent"));
     }
-    let (hit, normal, depth, face) =
-        py.detach(|| geom::pictures(points, triangles, normals, center, half, pixels));
+    let (hit, normal, depth, face) = if gpu {
+        py.detach(|| gpu::pictures(points, triangles, normals, center, half, pixels))
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+    } else {
+        py.detach(|| geom::pictures(points, triangles, normals, center, half, pixels))
+    };
     Ok((
         hit.into_pyarray(py),
         normal.into_pyarray(py),
         depth.into_pyarray(py),
         face.into_pyarray(py),
     ))
+}
+
+/// The graphics card pictures would be drawn on ("NVIDIA GeForce RTX 3080 Ti (Vulkan)"), or the reason there is none.
+/// The first call opens the card, which can take a second or two.
+#[pyfunction]
+fn gpu_info() -> (bool, String) {
+    match gpu::describe() {
+        Ok(name) => (true, name),
+        Err(why) => (false, why),
+    }
 }
 
 #[pyfunction]
@@ -907,6 +927,7 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(augment_matching, m)?)?;
     m.add_function(wrap_pyfunction!(winding_number, m)?)?;
     m.add_function(wrap_pyfunction!(pictures, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_info, m)?)?;
     m.add_function(wrap_pyfunction!(quad_points_valid, m)?)?;
     m.add_function(wrap_pyfunction!(parity_templates, m)?)?;
     m.add_function(wrap_pyfunction!(cross_field_jacobi, m)?)?;

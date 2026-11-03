@@ -81,9 +81,11 @@ The numbers it uses (Full effort, 12 hardware threads free):
 
 ## What a graphics card speeds up today
 
-Measured 2026-11-01 on a Ryzen 9 5900X and RTX 3080 Ti, Blender 5.2.3, Detail 6%.
+Measured 2026-11-02 on a Ryzen 9 5900X and RTX 3080 Ti, Blender 5.2.3.
 
-**No step runs on a graphics card, and CUDA was not built, on purpose.** The camera pictures were the one job that suits a GPU. They now run in the native core with no GPU, and take 2 to 17% of a run. If they took no time at all, a run would be 1.02 to 1.2 times faster. Most of the rest is graph work and Blender's own reduction, which a GPU doesn't help with.
+**One step runs on a graphics card: the camera pictures of a mesh over 150,000 triangles.** It uses wgpu (Vulkan, DirectX 12 or Metal), so an NVIDIA, AMD, Intel or Apple card works with nothing to install; CUDA was not built, on purpose. Against the 24-thread processor path, one set of six pictures is 1.1 to 1.4 times faster at 170,000 triangles, about 3 times at 1.3 million, level at 17,000 and slower below that, which is why smaller meshes stay on the processor. Pictures take 2 to 17% of a run, so even a free card would give 1.02 to 1.2 times. A 170,000-triangle model at Detail 2% took 292 s with the card and 342 s without, of which the pictures were 8.6 s and 12.0 s; the rest of the difference is run-to-run noise from other work on the PC. Most of a run is graph work and Blender's own reduction, which a GPU doesn't help with.
+
+The card works in single precision, so a pixel on a depth tie can pick the neighbouring triangle. Against the processor's pictures the camera counts 0.02 to 0.4% of the pixels as changed on real meshes (up to 1.3% on a very dense scan at 32 pixels a side). The Use Graphics Card setting, or `CURIOMESH_GPU=0`, keeps everything on the processor.
 
 **Measuring the parts uses several cores** (Use Several Cores, from 0.9.1): helper Blenders measure parts at once, as many as the free cores and memory allow. The rest of a job (pairing, the checks and repairs) still uses about one core, apart from the native steps. So a rented machine helps through a fast core, enough memory, and more cores on a job with many parts. The exported folder carries the Python code only, so a job there runs on the Python paths unless the native core is copied too.
 
@@ -91,7 +93,7 @@ Measured 2026-11-01 on a Ryzen 9 5900X and RTX 3080 Ti, Blender 5.2.3, Detail 6%
 
 Prices read on 2026-11-01. Nothing was rented, started or signed up for, and they change often, so check the live page before you rent. Cost is roughly the hours the panel estimates times the price per hour, plus the time to copy the folder both ways.
 
-**A CPU machine is the right rental today.** A GPU machine pays for a card that sits idle.
+**A CPU machine is the right rental today.** A GPU machine pays for a card that sits idle, apart from the pictures step (1 to 2% of a run).
 
 ### CPU machines (the ones that fit today's tool)
 
