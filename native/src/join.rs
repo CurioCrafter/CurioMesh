@@ -29,6 +29,11 @@ pub fn normal(p: &[P; 4]) -> P {
     unit(cross(sub(p[2], p[0]), sub(p[3], p[1])))
 }
 
+/// `quadreduce._facing`: a triangle's or a quad's normal.
+fn facing_of(p: &[P]) -> P {
+    unit(cross(sub(p[2], p[0]), sub(p[p.len() - 1], p[1])))
+}
+
 /// `quadreduce._quality`.
 pub fn quality(p: &[P; 4]) -> f64 {
     let n = normal(p);
@@ -141,11 +146,12 @@ fn with_split(outline: &[i64], edge: Edge, middle: i64) -> Option<Vec<i64>> {
 }
 
 impl Join {
-    fn worst(&self, quads: &[Vec<i64>], facing: P) -> f64 {
+    fn worst(&self, quads: &[Vec<i64>], facing: P, facings: &[P]) -> f64 {
         let mut low = 1.0f64;
         for quad in quads {
             let spots = [self.points[quad[0] as usize], self.points[quad[1] as usize], self.points[quad[2] as usize], self.points[quad[3] as usize]];
-            if dot(normal(&spots), facing) <= 0.3 {
+            let n = normal(&spots);
+            if dot(n, facing) <= 0.3 || facings.iter().any(|&other| dot(n, other) <= 0.3) {
                 return -1.0;
             }
             let value = quality(&spots);
@@ -156,7 +162,8 @@ impl Join {
         low
     }
 
-    fn cut_hexagon(&mut self, hexagon: &[i64], merged_away: &[Edge]) -> Option<Vec<Vec<i64>>> {
+    /// `facings`: the faces the hexagon was made of. A quad turned far from one of them would fold over its neighbours.
+    fn cut_hexagon(&mut self, hexagon: &[i64], merged_away: &[Edge], facings: &[P]) -> Option<Vec<Vec<i64>>> {
         let corners: Vec<P> = hexagon.iter().map(|&v| self.points[v as usize]).collect();
         let mut total = [0.0; 3];
         for k in 1..5 {
@@ -174,7 +181,7 @@ impl Join {
             let mut second = hexagon[k + 3..].to_vec();
             second.extend_from_slice(&hexagon[..=k]);
             let quads = vec![hexagon[k..k + 4].to_vec(), second];
-            let value = self.worst(&quads, facing);
+            let value = self.worst(&quads, facing, facings);
             if value >= best_worst {
                 best = Some(quads);
                 best_worst = value;
@@ -199,7 +206,7 @@ impl Join {
         for k in 0..2 {
             let ring: Vec<i64> = (0..6).map(|m| hexagon[(k + m) % 6]).collect();
             let quads = vec![vec![middle, ring[0], ring[1], ring[2]], vec![middle, ring[2], ring[3], ring[4]], vec![middle, ring[4], ring[5], ring[0]]];
-            let value = self.worst(&quads, facing);
+            let value = self.worst(&quads, facing, facings);
             if value >= best_worst {
                 best = Some(quads);
                 best_worst = value;
@@ -258,10 +265,19 @@ impl Join {
             let last = merged(self.face(path[count - 2]), self.face(path[count - 1]));
             outlines.push(last.and_then(|o| with_split(&o, shared[count - 3], middle_of(shared[count - 3]))));
         }
+        let made_of: Vec<Vec<u32>> = if count == 3 {
+            vec![path.to_vec()]
+        } else {
+            let mut rows = vec![vec![path[0], path[1]]];
+            rows.extend((2..count - 2).map(|k| vec![path[k]]));
+            rows.push(vec![path[count - 2], path[count - 1]]);
+            rows
+        };
         let mut made: Vec<Vec<i64>> = Vec::new();
-        for outline in &outlines {
+        for (outline, ids) in outlines.iter().zip(&made_of) {
+            let facings: Vec<P> = ids.iter().map(|&f| facing_of(&self.face(f).iter().map(|&v| self.points[v as usize]).collect::<Vec<P>>())).collect();
             let cut = match outline {
-                Some(o) if o.len() == 6 => self.cut_hexagon(o, &merged_away),
+                Some(o) if o.len() == 6 => self.cut_hexagon(o, &merged_away, &facings),
                 _ => None,
             };
             match cut {

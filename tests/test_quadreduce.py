@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -91,6 +92,12 @@ class JoinTests(unittest.TestCase):
             summary = topology_summary(result)
             self.assertTrue(summary.all_quads)
             self.assertEqual(summary.faces, expected)
+
+    def test_no_join_across_a_sharp_edge(self):
+        for turn, expected in ((30, 2), (160, 0)):  # the last triangle bent up round its edge, nearly back onto the quad
+            mesh = self.strip(1)
+            mesh.vertices[-1] = (1.0 + math.cos(math.radians(turn)), 0.5, math.sin(math.radians(turn)))
+            self.assertEqual(join_loose_triangles(mesh)[1], expected)
 
     def test_joining_never_puts_three_faces_on_an_edge(self):
         rng = np.random.default_rng(3)

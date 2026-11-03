@@ -378,8 +378,17 @@ def _compensated_sum(values) -> float:
     return high + low if low and math.isfinite(low) else high
 
 
-def _cut_hexagon(hexagon: list[int], points, free_chord) -> tuple[list[tuple[int, ...]], list[int]] | None:
-    """The best two quads for a six-sided polygon, or three around a new middle corner. (quads, middle's id or [])."""
+def _facing(p):
+    """The way a triangle or a quad faces (a quad's diagonals; a triangle's last corner stands in for the fourth)."""
+    return _unit(_cross(_sub(p[2], p[0]), _sub(p[-1], p[1])))
+
+
+def _cut_hexagon(hexagon: list[int], points, free_chord, facings=()) -> tuple[list[tuple[int, ...]], list[int]] | None:
+    """The best two quads for a six-sided polygon, or three around a new middle corner. (quads, middle's id or []).
+
+    Each quad must also face within about 70 degrees of every face in `facings`, the faces the polygon was made of: across
+    a sharp edge one would fold over its neighbours, so the triangle there is left for closure instead.
+    """
 
     corners = [points[v] for v in hexagon]
     total = (0.0, 0.0, 0.0)
@@ -392,7 +401,8 @@ def _cut_hexagon(hexagon: list[int], points, free_chord) -> tuple[list[tuple[int
         low = 1.0
         for quad in quads:
             spots = [points[v] for v in quad]
-            if _dot(_normal(spots), normal) <= 0.3:
+            facing = _normal(spots)
+            if _dot(facing, normal) <= 0.3 or any(_dot(facing, other) <= 0.3 for other in facings):
                 return -1.0
             low = min(low, _quality(spots))
         return low
@@ -491,6 +501,7 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
             pa, pb = points[edge[0]], points[edge[1]]
             points.append(((pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5))
         outlines = []
+        made_of = [[path[0], path[1], path[2]]] if count == 3 else [[path[0], path[1]], *([path[k]] for k in range(2, count - 2)), [path[-2], path[-1]]]
         if count == 3:
             outlines.append(merged(merged(list(faces[path[0]]), faces[path[1]]) or [], faces[path[2]]))
         else:
@@ -502,8 +513,9 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
             last = merged(list(faces[path[-2]]), faces[path[-1]])
             outlines.append(last and with_split(last, shared[-2], middles[shared[-2]]))
         made = []
-        for outline in outlines:
-            cut = _cut_hexagon(outline, points, free_chord) if outline and len(outline) == 6 else None
+        for outline, ids in zip(outlines, made_of):
+            facings = [_facing([points[v] for v in faces[f]]) for f in ids]
+            cut = _cut_hexagon(outline, points, free_chord, facings) if outline and len(outline) == 6 else None
             if cut is None:
                 del points[size:]
                 return False
