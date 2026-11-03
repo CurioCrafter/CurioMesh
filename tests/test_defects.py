@@ -42,6 +42,7 @@ class DefectTests(unittest.TestCase):
         self.assertEqual(found(checks.defects(level, faces), "folded_over"), [])
 
     @unittest.skipUnless(NATIVE, "needs the native core")
+    @unittest.skipUnless(NATIVE, "needs the native core")
     def test_turned_and_sunk_faces_against_the_source(self):
         faces = list(CUBE)
         faces[1] = faces[1][::-1]  # the top turned inward
@@ -51,6 +52,7 @@ class DefectTests(unittest.TestCase):
         self.assertEqual(found(result, "inward"), [1, 6])
         self.assertEqual(found(result, "sunk"), [6])
 
+    @unittest.skipUnless(NATIVE, "needs the native core")
     @unittest.skipUnless(NATIVE, "needs the native core")
     def test_crossing_and_overlapping_faces(self):
         co = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0.5, 0.5, -0.5), (0.5, 0.5, 0.5), (0.5, 1.5, 0.5), (0.5, 1.5, -0.5), (0.2, 0.2, 0.001), (1.2, 0.2, 0.001), (1.2, 1.2, 0.001), (0.2, 1.2, 0.001)], float)
