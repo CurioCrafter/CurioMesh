@@ -383,3 +383,84 @@ def fix_crossings(points, faces, mats, piece, pairs, known: Known, near, tris_on
         if not todo or stopped():
             break
     return (*work.finished(), {"new": found, "pushed": work.pushed, "filled": work.filled, "added": work.added})
+
+
+def _face_normal(points: np.ndarray, face) -> np.ndarray:
+    p = points[list(face)]
+    n = 0.5 * np.cross(p, np.roll(p, -1, axis=0)).sum(axis=0)
+    return n / max(float(np.linalg.norm(n)), 1e-300)
+
+
+def untangle(points, faces, piece, bad, near, rounds: int = ROUNDS, stopped=lambda: False):
+    """Move the corners of faces turned against the source or folded over a neighbour until they face out again.
+
+    `bad` marks those faces. Each of their corners tries the middle of its neighbours and its own nearest source point,
+    both put on the source, and keeps the one that leaves fewer faces around it turned against the source or folded
+    over a neighbour, if no quad there gets bent. Faces are not changed. Returns (points, corners moved).
+    """
+    points = np.array(points, dtype=np.float64)
+    faces = [tuple(f) for f in faces]
+    piece = np.asarray(piece, dtype=np.int64)
+    users: dict[int, list[int]] = {}
+    todo = {v for f in np.flatnonzero(bad).tolist() for v in faces[f]}
+    for f, face in enumerate(faces):
+        for v in face:
+            if v in todo or any(w in todo for w in face):  # the faces around a corner to move, and around its neighbours
+                users.setdefault(v, []).append(f)
+    out_of: dict[int, np.ndarray] = {}  # the source's way out at a face's middle, asked once
+
+    def outward(ids):
+        ask = [f for f in ids if f not in out_of]
+        for p in np.unique(piece[ask]).tolist() if ask else ():
+            these = [f for f in ask if piece[f] == p]
+            _at, normals = near(p, np.asarray([points[list(faces[f])].mean(axis=0) for f in these]))
+            for f, n in zip(these, np.asarray(normals).reshape(-1, 3)):
+                out_of[f] = n
+        return [out_of[f] for f in ids]
+
+    def score(v) -> float:
+        """Faces around v turned against the source, plus folds on their edges, or infinity if a quad there bends."""
+        around = users[v]
+        quads = [faces[f] for f in around if len(faces[f]) == 4]
+        if quads and (patch.quad_quality(points[np.asarray(quads, dtype=np.int64)]) <= 0.0).any():
+            return np.inf
+        normal = {f: _face_normal(points, faces[f]) for f in around}
+        turned = sum(float(normal[f] @ n) < checks.FACING for f, n in zip(around, outward(around)))
+        folds = 0
+        for i, f in enumerate(around):
+            for g in around[i + 1 :]:
+                if len(set(faces[f]) & set(faces[g])) >= 2 and float(normal[f] @ normal[g]) < checks.FOLD:
+                    folds += 1
+        return turned + folds
+
+    moved = 0
+    for _round in range(rounds):
+        changed = False
+        for v in sorted(todo):
+            if stopped():
+                return points, moved
+            ring = sorted({w for f in users[v] for w in faces[f]} - {v})
+            if not ring:
+                continue
+            here = points[v].copy()
+            best, best_at = score(v), None
+            if best == 0:
+                continue
+            part = int(piece[users[v][0]])
+            tries = np.asarray(near(part, np.vstack((points[ring].mean(axis=0), here)))[0]).reshape(-1, 3)
+            for at in tries:
+                points[v] = at
+                for f in users[v]:
+                    out_of.pop(f, None)  # the middle moved
+                value = score(v)
+                if value < best:
+                    best, best_at = value, at.copy()
+            points[v] = here if best_at is None else best_at
+            for f in users[v]:
+                out_of.pop(f, None)
+            if best_at is not None:
+                moved += 1
+                changed = True
+        if not changed:
+            break
+    return points, moved

@@ -395,8 +395,8 @@ def _consistent(polys) -> list[tuple[int, ...]]:
     return polys
 
 
-def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_polys) -> list[tuple[int, ...]]:
-    """Flip the new faces together if most of them face against the nearest source faces."""
+def facing(points: np.ndarray, polys, source_points: np.ndarray, source_polys) -> float:
+    """Above zero if these faces mostly face the way the nearest source faces do, below if they face against them."""
 
     def frames(p, f):
         p = np.asarray(p, dtype=np.float64)
@@ -413,8 +413,13 @@ def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_pol
     c1, n1 = frames(points, polys)
     pick = np.linspace(0, len(c1) - 1, min(len(c1), 64)).astype(int)
     near = np.asarray([np.argmin(((c1[k] - c0) ** 2).sum(axis=1)) for k in pick.tolist()])  # one by one: all at once wants gigabytes on a big scan
-    vote = float((np.sum(n1[pick] * n0[near], axis=1)).sum())
-    return [tuple(reversed(p)) for p in polys] if vote < 0 else list(polys)
+    return float((np.sum(n1[pick] * n0[near], axis=1)).sum())
+
+
+def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_polys) -> list[tuple[int, ...]]:
+    """Flip the new faces together if most of them face against the nearest source faces."""
+
+    return [tuple(reversed(p)) for p in polys] if facing(points, polys, source_points, source_polys) < 0 else list(polys)
 
 
 def rebuilds(points: np.ndarray, polys, kind: str = "0"):

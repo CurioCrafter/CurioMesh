@@ -9,7 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq import checks  # noqa: E402
+from triadq import checks, repair  # noqa: E402
 
 CUBE = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
 POINTS = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], float)
@@ -58,6 +58,25 @@ class DefectTests(unittest.TestCase):
         result = checks.defects(co, faces)
         self.assertEqual(result.pairs.tolist(), [[0, 1], [1, 2]])
         self.assertEqual(found(result, "overlap"), [0, 2])
+
+
+class UntangleTests(unittest.TestCase):
+    def test_a_corner_pulled_over_its_neighbours_goes_back(self):
+        co = np.array([(i, j, 0.0) for j in range(5) for i in range(5)])
+        faces = [(j * 5 + i, j * 5 + i + 1, (j + 1) * 5 + i + 1, (j + 1) * 5 + i) for j in range(4) for i in range(4)]
+        co[12] = (3.9, 3.9, 0.0)  # the middle corner dragged past a neighbour: faces turn over
+
+        def near(_piece, where):  # the source is the plane z = 0, facing up
+            where = np.asarray(where, dtype=float).reshape(-1, 3)
+            return where * (1, 1, 0), np.tile((0.0, 0.0, 1.0), (len(where), 1))
+
+        normals = checks._normals(co, checks.corner_table(faces))[0]
+        bad = normals[:, 2] < 0
+        self.assertTrue(bad.any())
+        fixed, moved = repair.untangle(co, faces, np.zeros(len(faces), int), bad, near)
+        self.assertEqual(moved, 1)
+        self.assertTrue((checks._normals(fixed, checks.corner_table(faces))[0][:, 2] > 0.99).all())
+        self.assertTrue((np.delete(fixed, 12, axis=0) == np.delete(co, 12, axis=0)).all())  # nothing else moved
 
 
 if __name__ == "__main__":

@@ -271,6 +271,7 @@ def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
 FACING = -0.5  # a face whose normal is more than 120 degrees off the source's there is turned inward
 FOLD = -0.866  # two faces on one edge more than 150 degrees apart lie folded over each other
 SUNK = 0.5  # a face whose middle is inside the source by more than this share of its longest side has sunk into it
+LOOK_AHEAD = 1e-3  # of a face's longest side: how far in front of it the source is asked which way is out
 FLAT_AREA = 1e-6  # of the mean squared side: a face without area
 MOST_SUNK = 20_000  # faces tested by winding number, deepest first: it looks at every source triangle
 OVERLAP_SPLITS = 4  # random halves tried for faces lying on each other: one misses a pair half the time
@@ -394,8 +395,9 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
         hit = np.asarray(hit, dtype=np.int64)
         source_normal = source_normals[hit]
         # Which way is out, from the middle and halfway to each corner: a face across a sharp edge of the source gets
-        # both sides' say. A face lying on two source faces back to back (a sheet with both sides) can't be turned.
-        towards = 0.5 * (middle[:, None, :] + co[pad])
+        # both sides' say. A face lying on two source faces back to back (a sheet with both sides) can't be turned. The
+        # points sit just in front of the face, so one midway between the two sides of a plate asks the side it faces.
+        towards = 0.5 * (middle[:, None, :] + co[pad]) + (LOOK_AHEAD * size)[:, None, None] * normal[:, None, :]
         _at, near, _away = tree.nearest(towards.reshape(-1, 3))
         near = np.asarray(near, dtype=np.int64).reshape(len(pad), -1)
         votes = np.where(stacked[near][:, :, None], 0.0, source_normals[near]).sum(axis=1) + np.where(stacked[hit][:, None], 0.0, source_normal)

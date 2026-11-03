@@ -110,6 +110,7 @@ POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surf
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
 MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
 REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots selected: remaking it costs minutes for a few faces
+UNTANGLE_SECONDS = 15.0  # time for turning folded faces back per run
 REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is selected on Apply (the crane spent 215 s for 71 spots)
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
@@ -845,6 +846,8 @@ class AutoJob:
             move = special.match_copy(rep_points, points)
             if move is None:
                 continue
+            if parts.facing(special.moved(rep_points, move), special.wound(rep_polys, move), points, polys) < 0:
+                move = (*move[:3], not move[3])  # a symmetric part also matches mirrored: its own faces say which way it faces
             self.twins[index] = (rep, move)
             sizes = [(special.moved(p, move), special.wound(f, move), k) for p, f, k in self.sizes[rep][:-1]]
             self.sizes.append(sizes + [(points, polys, kinds)])
@@ -1719,6 +1722,34 @@ class AutoJob:
             return same
         return fixed[0], fixed[1], fixed[2], fixed[3], seen, now, numbers["pushed"] + numbers["filled"]
 
+    def _untangle(self, points, faces, piece, view, after):
+        """Generator: corners of faces turned inward or folded over moved until they face out. Kept only if nothing got
+        broken and the camera still agrees. (points, faces, view, after, corners moved)."""
+        same = (points, faces, view, after, 0)
+        if self.mirror is not None or self.outside is not None or self.guide_lines or self.strips:  # seams and strokes stay put
+            return same
+        self.stage = "Turning folded faces back"
+        yield
+        began = time.perf_counter()
+        found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        bad = found.inward | found.folded_over
+        if not bad.any():
+            return same
+        moved, count = yield from self._background(lambda: repair.untangle(points, faces, piece, bad, self._near_source, stopped=lambda: self._stopped or time.perf_counter() > began + UNTANGLE_SECONDS))
+        self.timings["untangle"] = self.timings.get("untangle", 0.0) + time.perf_counter() - began
+        if not count:
+            return same
+        now = yield from self._inspected(moved, faces, piece)
+        if any(getattr(now, k) > getattr(after, k) for k in ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")):
+            return same
+        left = yield from self._background(lambda: checks.defects(moved, faces, self.co, self.faces, pairs=now.pairs))
+        if (left.inward | left.folded_over).sum() >= bad.sum():
+            return same
+        seen = yield from self._look(moved, faces, *self._view)
+        if seen[0] > max(1.1 * self.detail, 1.02 * view[0]):
+            return same
+        return moved, list(faces), seen, now, count  # a new list: copies placed as instances no longer match
+
     def _affordable(self, bad: list[int], start_faces: int) -> list[int]:
         """As many of these parts as can go one size up inside REPAIR_GROWTH, so one big part does not stop the small ones."""
         room = (REPAIR_GROWTH - 1.0) * start_faces
@@ -1748,6 +1779,7 @@ class AutoJob:
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
         first = {k: getattr(after, k) for k in keys}
         start_faces = len(faces)
+        points, faces, view, after, _turned = yield from self._untangle(points, faces, piece, view, after)
         points, faces, mats, piece, view, after, fixed = yield from self._fix_locally(points, faces, mats, piece, view, after)
         for attempt in range(0 if self.chunks else FIX_TRIES):  # a cut piece's parts are one surface: they can't be remade alone
             spots = checks.new_spots(before, after)
