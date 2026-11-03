@@ -26,6 +26,15 @@ CurioMesh uses it under the MIT license.
 | rawpointer | 0.2.1 | MIT OR Apache-2.0 | (c) 2015 bluss |
 | rayon, rayon-core | 1.12.0, 1.13.0 | MIT OR Apache-2.0 | (c) 2010 The Rust Project Developers |
 | rustc-hash | 2.1.3 | MIT OR Apache-2.0 | The Rust Project Developers |
+| wgpu, wgpu-core, wgpu-hal, wgpu-types, wgpu-naga-bridge, wgpu-core-deps-*, naga, naga-types | 30.0.1 | MIT OR Apache-2.0 | (c) gfx-rs developers (https://github.com/gfx-rs/wgpu). Draws the camera pictures on the graphics card (Vulkan, DX12, Metal) |
+| pollster | 0.4.0 | Apache-2.0 OR MIT | (c) Joshua Barretto |
+| ash | 0.38.0 | MIT OR Apache-2.0 | (c) Maik Klein and ash contributors |
+| gpu-allocator | 0.28.0 | MIT OR Apache-2.0 | (c) Traverse Research |
+| windows, windows-* | 0.62.2 and related | MIT OR Apache-2.0 | (c) Microsoft Corporation |
+| objc2, block2, objc2-* , dispatch2, raw-window-metal (macOS only) | 0.6.5 and related | MIT, or MIT OR Apache-2.0 OR Zlib | (c) Mads Marquart and contributors |
+| libloading | 0.8.9 | ISC | (c) Simonas Kazlauskas |
+| codespan-reporting, spirv | 0.13.1, 0.4.0 | Apache-2.0 | (c) Brendan Zabarauskas; (c) Lei Zhang |
+| arrayvec, bit-set, bit-vec, bitflags, bytemuck, document-features, equivalent, foldhash (Zlib), half, hashbrown, indexmap, litrs, lock_api, log, ordered-float (MIT), parking_lot, parking_lot_core, presser, profiling, range-alloc, raw-window-handle, renderdoc-sys, scopeguard, smallvec, static_assertions, thiserror, unicode-width, zerocopy, libm (MIT) | see Cargo.lock | MIT OR Apache-2.0 (or as marked) | (c) their authors; each crate's license file is in its source package |
 | Rust standard library | (toolchain) | MIT OR Apache-2.0 | The Rust Project Developers |
 
 Crates used only while building (proc-macro2, quote, syn, unicode-ident, heck,
@@ -60,6 +69,25 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
+
+### ISC license (libloading)
+
+```
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+```
+
+The two crates marked Apache-2.0 (and pollster, used under either license) are under the Apache License 2.0,
+https://www.apache.org/licenses/LICENSE-2.0, whose text is in each crate's source package.
 
 ### BSD 2-Clause license (rust-numpy)
 

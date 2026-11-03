@@ -494,6 +494,71 @@ class PicturesTests(unittest.TestCase):
                 view += 1
 
 
+class GraphicsCardPicturesTests(unittest.TestCase):
+    """The card draws `turbo.pictures` too. Pixels may pick a neighbouring triangle on a depth tie (the card works in f32),
+    so the check is what the camera counts: `views.picture_counts` of CPU pictures against card pictures."""
+
+    @staticmethod
+    def _inputs():
+        mesh = torus(90, 60, seed=5)
+        tris = np.array([(f[0], f[k], f[k + 1]) for f in mesh.faces for k in range(1, len(f) - 1)], dtype=np.int64)
+        a, b, c = np.moveaxis(mesh.vertices[tris], 1, 0)
+        return mesh.vertices, tris, np.cross(b - a, c - a), [0.1, -0.05, 0.02], 1.6
+
+    @unittest.skipUnless(turbo.available() and hasattr(turbo.native(), "gpu_info"), "native module has no card code")
+    def test_card_pictures_count_the_same(self):
+        module = turbo.native()
+        if not module.gpu_info()[0]:
+            self.skipTest("no graphics card: " + module.gpu_info()[1])
+        from triadq import views
+
+        vertices, tris, normals, center, half = self._inputs()
+        for pixels in (32, 96):
+            args = (vertices.reshape(-1), tris.reshape(-1), normals.reshape(-1), center, half, pixels)
+            cpu = module.pictures(*args)
+            try:
+                card = module.pictures(*args, True)
+            except RuntimeError as exc:  # an adapter that opens but cannot run the shader (a virtual machine's)
+                self.skipTest(f"graphics card failed: {exc}")
+            shape = (6, pixels, pixels)
+            as_views = lambda out: [(out[0].reshape(shape)[i], out[1].reshape((*shape, 3))[i], out[2].reshape(shape)[i], out[3].reshape(shape)[i]) for i in range(6)]
+            wrong, total = views.picture_counts(as_views(cpu), as_views(card), 2.0 * half / pixels)
+            self.assertGreater(total, 100)
+            self.assertLess(wrong / total, 0.01)
+
+    @unittest.skipUnless(turbo.available() and hasattr(turbo.native(), "gpu_info"), "native module has no card code")
+    def test_card_error_falls_back_and_says_so_once(self):
+        from unittest import mock
+
+        module = turbo.native()
+        vertices, tris, _normals, center, half = self._inputs()
+        polys = [tuple(t) for t in tris]
+        real = module.pictures
+
+        def broken(*args):
+            if len(args) > 6 and args[6]:
+                raise RuntimeError("the driver is on fire")
+            return real(*args)
+
+        want = turbo.pictures(vertices, polys, np.array(center), half, 24)
+        old = (turbo.GPU_MIN_TRIANGLES, turbo._gpu_broken, turbo._gpu_unsaid)
+        try:
+            turbo.GPU_MIN_TRIANGLES, turbo._gpu_broken, turbo._gpu_unsaid = 0, "", False
+            with mock.patch.object(module, "pictures", broken):
+                got = turbo.pictures(vertices, polys, np.array(center), half, 24)
+                self.assertIn("driver is on fire", turbo.gpu_note())
+                self.assertIsNone(turbo.gpu_note())  # told once
+                turbo.pictures(vertices, polys, np.array(center), half, 24)  # and not tried again
+                self.assertIsNone(turbo.gpu_note())
+            for a, b in zip(want, got):
+                np.testing.assert_array_equal(a[0], b[0])
+            turbo.set_gpu(False)
+            self.assertIsNone(turbo.gpu_name())
+        finally:
+            turbo.set_gpu(True)
+            turbo.GPU_MIN_TRIANGLES, turbo._gpu_broken, turbo._gpu_unsaid = old
+
+
 def _drained(generator) -> None:
     for _ in generator:
         pass

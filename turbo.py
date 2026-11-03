@@ -8,6 +8,8 @@ never raises: a missing, blocked or broken binary is logged once and every
 wrapper returns ``None``, which tells the caller to run its Python path.
 
 Set ``CURIOMESH_TURBO=0`` (or call ``set_enabled(False)``) to force Python.
+The graphics card draws the camera pictures of big meshes (``pictures``); ``CURIOMESH_GPU=0`` or ``set_gpu(False)``
+keeps them on the processor, and so does any card error.
 Wrappers take and return exactly what their Python counterparts do.
 """
 
@@ -35,6 +37,10 @@ _module: Any = None
 _tried = False
 _error = ""
 _enabled = True
+_gpu_wanted = True
+_gpu_broken = ""  # why the card was given up on, once it was
+_gpu_unsaid = False  # a reason nobody has been told yet
+GPU_MIN_TRIANGLES = 150_000  # measured on an RTX 3080 Ti: below this the card is level with the processor or slower
 
 
 def platform_tag() -> str:
@@ -83,6 +89,50 @@ def set_enabled(flag: bool) -> None:
 
     global _enabled
     _enabled = bool(flag)
+
+
+def set_gpu(flag: bool) -> None:
+    """Preference hook: False keeps the pictures on the processor."""
+
+    global _gpu_wanted
+    _gpu_wanted = bool(flag)
+
+
+def _gpu_allowed() -> bool:
+    return _gpu_wanted and not _gpu_broken and os.environ.get("CURIOMESH_GPU", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def gpu_name() -> str | None:
+    """The card that would draw pictures ("NVIDIA GeForce RTX 3080 Ti (Vulkan)"), or None. The first call opens it (about a second)."""
+
+    module = native()
+    if module is None or not hasattr(module, "gpu_info") or not _gpu_allowed():
+        return None
+    try:
+        ok, text = module.gpu_info()
+    except Exception as exc:
+        ok, text = False, str(exc)
+    if not ok:
+        _give_up_on_gpu(text, say=False)  # no card is not news: only a card that fails mid-job is
+        return None
+    return str(text)
+
+
+def _give_up_on_gpu(why: str, say: bool = True) -> None:
+    global _gpu_broken, _gpu_unsaid
+    if not _gpu_broken:
+        _gpu_broken, _gpu_unsaid = why or "unknown error", say
+        _log.info("CurioMesh graphics card not used: %s", _gpu_broken)
+
+
+def gpu_note() -> str | None:
+    """One sentence, once, saying the card failed and the processor did the work; None when there is nothing new to say."""
+
+    global _gpu_unsaid
+    if not _gpu_unsaid:
+        return None
+    _gpu_unsaid = False
+    return f"The graphics card could not draw the camera pictures ({_gpu_broken[:80]}): the processor did"
 
 
 def native() -> Any:
@@ -707,6 +757,8 @@ def pictures(points, polys, center, half: float, pixels: int) -> list | None:
     """Native `autoretopo.pictures`: the same six orthographic pictures from a depth buffer, no rays or BVH.
 
     None without the native module, or for a mesh with polygons over four sides (the rays handle those).
+    A mesh of `GPU_MIN_TRIANGLES` or more is drawn on the graphics card when there is one (see `rust gpu.rs` for how
+    its answer can differ); any card error falls back to the processor for good and sets `gpu_note`.
     """
 
     module = native()
@@ -731,7 +783,14 @@ def pictures(points, polys, center, half: float, pixels: int) -> list | None:
         tris = np.vstack((tris, quads[:, [3, 0, 1]], quads[:, [1, 2, 3]]))
         # And like the BVH, both halves report the whole quad's normal, not their own: on a bent quad that differs a lot.
         normals = np.vstack((normals, facing, facing))
-    hit, normal, depth, tri = module.pictures(points.reshape(-1), tris.reshape(-1), normals.reshape(-1), [float(x) for x in center], float(half), int(pixels))
+    args = (points.reshape(-1), tris.reshape(-1), normals.reshape(-1), [float(x) for x in center], float(half), int(pixels))
+    out = None
+    if len(tris) >= GPU_MIN_TRIANGLES and hasattr(module, "gpu_info") and _gpu_allowed():
+        try:
+            out = module.pictures(*args, True)
+        except Exception as exc:  # no card, a driver error, a mesh too big for its memory: the processor does it
+            _give_up_on_gpu(str(exc))
+    hit, normal, depth, tri = out if out is not None else module.pictures(*args)
     # Back from triangles to polygons, as the BVH reports them: the triangles came first, then both halves of each quad.
     four = np.flatnonzero(sizes == 4)
     owner = np.concatenate((np.flatnonzero(sizes == 3), four, four))
