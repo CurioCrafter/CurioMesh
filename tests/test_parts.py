@@ -62,6 +62,16 @@ class SpliceTests(unittest.TestCase):
         self.assertEqual(len(again[0]), 4)
 
 
+class OrientTests(unittest.TestCase):
+    def test_a_rebuild_faces_out_like_a_source_of_triangles_or_quads(self):
+        co, quads = cylinder()
+        tris = [t for a, b, c, d in quads for t in ((a, b, c), (a, c, d))]
+        inward = [f[::-1] for f in quads]
+        for source in (tris, quads):
+            self.assertEqual(parts.orient_like(co, inward, co, source), quads)
+            self.assertEqual(parts.orient_like(co, quads, co, source), quads)
+
+
 class WorstTests(unittest.TestCase):
     def test_order_and_unknown_last(self):
         self.assertEqual(parts.worst_first([1.0, None, 9.0, 4.0]), [2, 3, 0, 1])

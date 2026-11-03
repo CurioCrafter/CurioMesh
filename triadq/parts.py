@@ -128,9 +128,6 @@ def _cluster(values: np.ndarray, tol: float) -> np.ndarray:
     fast = _turbo.leader_clusters(values, tol) if _turbo is not None else None
     if fast is not None:
         return fast
-    fast = _turbo.leader_clusters(values, tol) if _turbo is not None else None
-    if fast is not None:
-        return fast
     cells: dict[tuple[int, int], list[int]] = {}
     leaders: list[np.ndarray] = []
     ids = np.zeros(len(values), dtype=np.int64)
@@ -409,7 +406,7 @@ def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_pol
             at = np.flatnonzero(sizes == size)
             rows = np.asarray([f[k] for k in at.tolist()], dtype=np.int64)
             c[at] = p[rows].mean(axis=1)
-            n[at] = np.cross(p[rows[:, 2]] - p[rows[:, 0]], p[rows[:, 1 if size == 3 else 3]] - p[rows[:, 0]])
+            n[at] = np.cross(p[rows[:, 2]] - p[rows[:, 0]], p[rows[:, -1]] - p[rows[:, 1]])  # a quad's diagonals; on a triangle its own normal too
         return c, n / np.maximum(np.linalg.norm(n, axis=1), 1e-30)[:, None]
 
     c0, n0 = frames(source_points, source_polys)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .parts import orient_like  # noqa: F401 (the same vote for these rebuilds)
 from .patch import quad_quality
 
 SLENDER = 0.2  # a tube's mean radius is at most this share of its length
@@ -560,21 +561,6 @@ def build_sheet(fit: dict, faces: int, kind: str = "0") -> tuple[np.ndarray, lis
     w = nv + 1
     polys = [(i * w + j, (i + 1) * w + j, (i + 1) * w + j + 1, i * w + j + 1) for i in range(nu) for j in range(nv)]
     return points, polys, [kind] * len(polys)
-
-
-def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_polys) -> list[tuple[int, ...]]:
-    """Flip the new faces together if most of them face against the nearest source faces."""
-
-    def frames(p, f):
-        c = np.asarray([p[list(x)].mean(axis=0) for x in f])
-        n = np.asarray([np.cross(p[x[1]] - p[x[0]], p[x[-1]] - p[x[0]]) for x in f])
-        return c, n / np.maximum(np.linalg.norm(n, axis=1), 1e-30)[:, None]
-
-    c0, n0 = frames(source_points, source_polys)
-    c1, n1 = frames(points, polys)
-    pick = np.linspace(0, len(c1) - 1, min(len(c1), 64)).astype(int)
-    near = np.argmin(((c1[pick][:, None, :] - c0[None]) ** 2).sum(axis=2), axis=1)
-    return [tuple(reversed(p)) for p in polys] if float((n1[pick] * n0[near]).sum()) < 0 else list(polys)
 
 
 def _nearest(a: np.ndarray, b: np.ndarray) -> np.ndarray:
