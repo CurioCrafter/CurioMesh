@@ -85,7 +85,7 @@ Measured 2026-11-01 on a Ryzen 9 5900X and RTX 3080 Ti, Blender 5.2.3, Detail 6%
 
 **No step runs on a graphics card, and CUDA was not built, on purpose.** The camera pictures were the one job that suits a GPU. They now run in the native core with no GPU, and take 2 to 17% of a run. If they took no time at all, a run would be 1.02 to 1.2 times faster. Most of the rest is graph work and Blender's own reduction, which a GPU doesn't help with.
 
-**One job uses about one CPU core**, apart from the native steps. So a rented machine helps through a fast core and enough memory. More cores help only if you run several jobs at once. The exported folder carries the Python code only, so a job there runs on the Python paths unless the native core is copied too.
+**Measuring the parts uses several cores** (Use Several Cores, from 0.9.1): helper Blenders measure parts at once, as many as the free cores and memory allow. The rest of a job (pairing, the checks and repairs) still uses about one core, apart from the native steps. So a rented machine helps through a fast core, enough memory, and more cores on a job with many parts. The exported folder carries the Python code only, so a job there runs on the Python paths unless the native core is copied too.
 
 ## Price comparison
 
