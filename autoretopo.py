@@ -1396,17 +1396,21 @@ class AutoJob:
         """Generator: `pictures`, on a worker thread in a big job."""
         baked_from = self._bake_tree if self.baked else None
         if len(self.faces) < OFF_MAIN_FROM:
-            return (yield from pictures(points, polys, center, half, pixels, baked_from=baked_from))
+            view = yield from pictures(points, polys, center, half, pixels, baked_from=baked_from)
+        else:
+            def run():
+                work = pictures(points, polys, center, half, pixels, baked_from=baked_from)
+                while True:
+                    try:
+                        next(work)
+                    except StopIteration as done:
+                        return done.value
 
-        def run():
-            work = pictures(points, polys, center, half, pixels, baked_from=baked_from)
-            while True:
-                try:
-                    next(work)
-                except StopIteration as done:
-                    return done.value
-
-        return (yield from self._background(run))
+            view = yield from self._background(run)
+        failed = turbo.gpu_note()  # said once: the graphics card gave up and the processor drew this
+        if failed:
+            self.notes.append(failed)
+        return view
 
     def _allocate(self, allowed: float, piece_share: float) -> list[int]:
         """A size per piece. Copies stay alike: a piece and its copies are chosen as one, costing and losing what they all do."""

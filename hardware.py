@@ -148,6 +148,8 @@ def describe(machine: dict, turbo: str = "") -> list[str]:
         lines.append("Graphics: " + ", ".join(machine["cycles"][:2]))
     else:
         lines.append("Graphics: no supported card found")
+    if machine.get("picture_card"):
+        lines.append(f"Draws big parts' pictures on {machine['picture_card']}")
     if turbo:
         lines.append(turbo)
     return lines

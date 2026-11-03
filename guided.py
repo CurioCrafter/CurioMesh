@@ -291,6 +291,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     ui_lod_open: bpy.props.BoolProperty(name="LOD Set", description="Make three levels of detail in one go", default=False)
     ui_teach_open: bpy.props.BoolProperty(name="Show It How", description="Fix a spot by hand and CurioMesh remembers the fix for next time", default=False)
     auto_detail: bpy.props.FloatProperty(name="Detail", description="Auto Segments: how much of the view may look different from your mesh, seen from six sides. Lower keeps more detail and uses more faces; very high gives a rough, very low-poly shape", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
+    auto_gpu: bpy.props.BoolProperty(name="Use Graphics Card", description="Draw the camera pictures of big parts on the graphics card when this computer has one that works (any NVIDIA, AMD, Intel or Apple card). Off keeps them on the processor, which gives almost the same pictures", default=True, update=_redraw_update)
     auto_effort: bpy.props.EnumProperty(name="Effort", description="How hard Auto Segments works on this computer. Light leaves it usable and works in small steps; Full finishes soonest; Auto picks from your cores and free memory", items=hardware.EFFORT_ITEMS, default="AUTO", update=_redraw_update)
     auto_style: bpy.props.EnumProperty(name="Style", description="Auto Segments: what comes first when the two disagree", items=(("DETAIL", "Keep Detail", "Holds the amount of change you allow, with the fewest faces. Quads follow the shape, so they can look slanted"), ("BALANCED", "Balanced", "Holds the same change with far fewer irregular vertices, by splitting every quad. Costs more faces"), ("ROWS", "Clean Rows", "Even, square quads in long rows. Costs more visible change, and small sharp detail softens")), default="DETAIL", update=_redraw_update)
     auto_method: bpy.props.EnumProperty(name="Method", description="How the faces are made. Auto lets the camera decide the detail of each part; the other methods change how the reduced part is turned into faces. Each part can have its own (step 4)", items=profiles.METHOD_ITEMS, default="AUTO", update=_custom_update)
@@ -1561,6 +1562,7 @@ def machine_info(refresh: bool = False) -> dict:
     if state["machine"] is None or refresh:
         state["machine"] = hardware.detect()
         state["rays"] = hardware.benchmark()
+        state["machine"]["picture_card"] = turbo.gpu_name()  # opens the card (about a second); None when there is none
     return state["machine"]
 
 
@@ -1638,6 +1640,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
     saved = hardware.checkpoint_dir(co, len(faces))
     resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
+    turbo.set_gpu(gs.auto_gpu)
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
     job = autoretopo.AutoJob(context, co, faces, mat, 3.0 if baked else gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked)
@@ -3700,6 +3703,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         sub = col.column()
         sub.enabled = not searching
         sub.prop(gs, "auto_effort")
+        sub.prop(gs, "auto_gpu", toggle=True, icon="SHADING_RENDERED")
         if machine is not None and gs.auto_effort == "AUTO":
             sub.label(text=f"Auto picked {hardware.settings_for(gs.auto_effort, machine).name}", icon="BLANK1")
         sub.operator("curiomesh.guided_check_pc", icon="FILE_REFRESH")
