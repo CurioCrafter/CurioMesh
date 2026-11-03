@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.1
+
+### Faces that turn inward, fold over or pass through each other
+- **Turned parts and Field Rows face out again** on a source made of triangles. The vote that decides which
+  way a rebuilt part faces read a triangle's normal backwards, so revolved parts (bolts, knobs, chess pieces,
+  turned legs) and their copies came out inside out.
+- **Copies face like their own source.** A part that matches its twin both turned and mirrored is now placed
+  the way its own faces say.
+- **No more quads folded across sharp edges** when leftover triangles are joined: a joined quad must face
+  close to every face it replaces, or the triangle is left for closure. This costs a few percent more faces
+  on hard-surface parts.
+- **Folded faces are turned back** before the final check: corners of faces that face against the source or
+  lie folded over a neighbour move to the middle of their neighbours, on the source. Kept only if nothing
+  gets worse and the camera agrees.
+- **A per-face defect check** (`triadq.checks.defects`): faces turned inward, sunk into the source, crossing,
+  folded over, bent, without area, duplicated or lying on another face, each against the source.
+
 ## 0.9.0 - 2026-11-02
 
 ### Auto Segments: fewer faces, judged by a camera
