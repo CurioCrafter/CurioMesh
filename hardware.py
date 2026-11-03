@@ -226,6 +226,56 @@ def settings_for(effort: str, machine: dict | None = None) -> Settings:
     return Settings(base.name, base.slice_s, base.gap_s, base.max_rays, base.max_pixels, chunk, threads, base.show_every, base.only_done)
 
 
+def busy_cores() -> float:
+    """About how many cores other programs keep busy right now (0 where it can't be read). Takes 0.2 s on Windows."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            def times():
+                idle, kernel, user = (ctypes.c_ulonglong() for _ in range(3))
+                ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user))
+                return idle.value, kernel.value + user.value  # kernel time includes idle time
+
+            idle_a, all_a = times()
+            time.sleep(0.2)
+            idle_b, all_b = times()
+            return max(0.0, 1.0 - (idle_b - idle_a) / max(all_b - all_a, 1)) * (os.cpu_count() or 1)
+        return float(os.getloadavg()[0])
+    except Exception:
+        return 0.0
+
+
+WORKER_MB = 400  # one background Blender with the add-on loaded and nothing else, measured
+WORKER_BYTES_PER_JOB_FACE = 400  # each helper holds the whole mesh (points, faces, one material string a face), measured
+RAM_CEILING = 0.85  # helpers never take the computer past this share of its memory
+PARALLEL_FROM = 40_000  # triangles in the parts left to measure: below this, starting helpers costs about what it saves (28k: 2 s of 83)
+
+
+def worker_mb(job_faces: int, biggest_part_faces: int) -> float:
+    """Memory one helper process is expected to need, in MB: Blender, the whole mesh, and the working copy of its biggest part."""
+    return WORKER_MB + (job_faces * WORKER_BYTES_PER_JOB_FACE + biggest_part_faces * BYTES_PER_FACE) / 2**20
+
+
+def worker_count(machine: dict, effort: str, job_faces: int, biggest_part_faces: int, work_triangles: int, parts: int, busy: float = 0.0, most: int = 0) -> int:
+    """How many helper processes measure parts at once: 0 means the job stays on its own.
+
+    From the free cores (Light takes a quarter of them and at most two, Normal half, Full all but the one Blender
+    runs on) and the free memory: each helper's need is estimated first, and together they never take the computer
+    past `RAM_CEILING` of its memory. One helper alone gains nothing, so that is 0 as well. `most` caps it (0 = no cap).
+    """
+    if work_triangles < PARALLEL_FROM or parts < 2:
+        return 0
+    free_cores = max(int((machine.get("cores") or 1) - 1 - busy), 0)
+    count = {"Light": min(free_cores // 4, 2), "Normal": free_cores // 2}.get(effort, free_cores)
+    total, free = machine.get("ram_gb"), machine.get("free_gb")
+    if total and free is not None:
+        room_mb = (free - (1.0 - RAM_CEILING) * total) * 1024.0
+        count = min(count, int(room_mb // worker_mb(job_faces, biggest_part_faces)))
+    count = min(count, parts, most or count)
+    return count if count >= 2 else 0
+
+
 # --------------------------------------------------------------------------- how big, how long
 
 

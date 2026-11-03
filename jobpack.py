@@ -59,7 +59,7 @@ settings = hardware.settings_for(job["effort"], machine)
 print(f"Working at {settings.name}: {len(faces):,} faces", flush=True)
 runner = autoretopo.AutoJob(
     bpy.context, data["co"], faces, data["mat"], job["detail"], job["target_faces"], mirror=mirror, guide_lines=lines, project=project, drop=drop,
-    settings=settings, checkpoint=hardware.checkpoint_dir(data["co"], len(faces), str(HERE)), keep_progress=True,
+    settings=settings, checkpoint=hardware.checkpoint_dir(data["co"], len(faces), str(HERE)), keep_progress=True, parallel=True,
 )
 while runner.busy:
     runner.wait(10.0)

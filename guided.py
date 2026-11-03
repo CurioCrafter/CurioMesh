@@ -332,6 +332,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Repeated parts become linked copies that cost no extra geometry (copies share UVs). Off: one merged mesh", default=False)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
     auto_rough: bpy.props.BoolProperty(name="Rough As Texture", description="For rough scans (rock, sea floor): judge bumps on average and merge leftover triangles. Far fewer faces; bumps smaller than a few pixels are lost", default=False)
+    auto_parallel: bpy.props.BoolProperty(name="Use Several Cores", description="Auto Segments: measure the parts in helper Blenders at once, as many as the free cores and memory allow (Effort sets how many). Small jobs stay in this Blender. The result is the same either way", default=True)
     auto_drop_hidden: bpy.props.BoolProperty(name="Leave Out Hidden Pieces", description="Auto Segments: leave out loose pieces no camera outside the model can see, from 14 directions. The count of what was left out is shown with the result", default=False)
     auto_baked: bpy.props.BoolProperty(name="Judge After Baking (Experimental)", description="Experimental. Low Poly on scans you will bake a normal map for: judge the result as it looks baked, so far fewer faces remain. It can leave long thin slivers on flat areas, which bake badly, and its score misses them: check the result. Only runs on scans, never hard-surface", default=False)
     auto_chords: bpy.props.BoolProperty(name="Redraw Messy Quads", description="Auto Segments: redraw the parts with many irregular vertices as plain grids, and take quads away where the view changes least. Far tidier loops at the same change, but it takes up to a minute or two more. On for Animation and Subdivision, where tidy loops matter more than the face count. Off on models of many loose parts, where it stalls", default=False)
@@ -1640,7 +1641,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
-    job = autoretopo.AutoJob(context, co, faces, mat, 3.0 if baked else gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked)
+    job = autoretopo.AutoJob(context, co, faces, mat, 3.0 if baked else gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel)
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
@@ -3702,6 +3703,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         sub.prop(gs, "auto_effort")
         if machine is not None and gs.auto_effort == "AUTO":
             sub.label(text=f"Auto picked {hardware.settings_for(gs.auto_effort, machine).name}", icon="BLANK1")
+        sub.prop(gs, "auto_parallel", toggle=True, icon="MOD_ARRAY")
         sub.operator("curiomesh.guided_check_pc", icon="FILE_REFRESH")
         row = sub.row(align=True)
         row.operator("curiomesh.guided_export_job", text="Export Job", icon="EXPORT")

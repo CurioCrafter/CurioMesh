@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1
+
+- **Use Several Cores** (on by default, under Effort): Auto Segments measures its parts in helper Blenders at
+  once, as many as the free cores and memory allow (Light two at most, Normal half the free cores, Full all but
+  one), never past 85% of the computer's memory. The parts are taken back in order, so the sizes picked are the
+  same as on one core. Small jobs stay in one Blender; Stop, an error or quitting Blender ends the helpers.
+
 ## 0.9.0 - 2026-11-02
 
 ### Auto Segments: fewer faces, judged by a camera

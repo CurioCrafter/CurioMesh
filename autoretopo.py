@@ -42,7 +42,7 @@ from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.fieldmesh import MOST_TARGET, field_quads, is_clean
 from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
-from . import guides, hardware, loops, symmetry, turbo
+from . import guides, hardware, loops, parallel, symmetry, turbo
 from .triadq.types import Cancelled, FlatFaces, MeshData
 from .triadq.uvs import simplify_borders
 
@@ -370,6 +370,7 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
     return np.flatnonzero((shown >= PART_PIXELS) & (wrong > limit * shown))
 
 
+KEEP_HERE = 0.5  # with helpers, a part of this share of the job's triangles or more is measured in the job itself
 OFF_MAIN_FROM = 100_000  # with this many faces in a job, its slow Python steps run on a worker thread, so Blender stays usable
 PAIR_CHUNK_FACES = 200_000  # Light only: above 0, pairing works per region of this many faces: less memory on a huge mesh, and a few more triangles at the seams
 NATIVE_FROM = 60_000  # a piece of this many triangles goes to the native reducer: Decimate would hold up Blender for seconds per size
@@ -610,7 +611,18 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False):
+        self.parallel = bool(parallel)  # measure parts in helper processes when the job and the computer suit it (parallel.py)
+        self._pool = None
+        self._copy_plan: dict | None = None  # with helpers: part -> (the part it copies, how to move onto it) or None, found ahead of time
+        self._plan_reps: list = []
+        self._plan_kinds: dict[int, str] = {}
+        self._todo: list[int] = []  # planned parts for the helpers, in order, not handed out yet
+        self._noted: set[int] = set()
+        self._done_share = None
+        self._ahead = 0  # parts before this one are planned
+        self._work = 0  # triangles in the parts to measure
+        self.spot_copies = True  # a helper measures only parts already known to be no copy
         self.chords = bool(chords)  # Redraw Messy Quads: messy parts redrawn as grids, collapses priced by the pixels they change
         self.rough = bool(rough)  # judge rough surface as texture (`views`), and let triangles walk away for fewer faces
         self.drop_hidden = bool(drop_hidden)
@@ -718,6 +730,7 @@ class AutoJob:
         self.busy = False
         turbo.stop_native()
         self._kill_worker()
+        self._close_pool()
         self._search.close()  # runs what cleans up after it, such as the Clean Rows folder
         self._drop_tmp()
 
@@ -837,14 +850,12 @@ class AutoJob:
 
     def _copy_of(self, index: int, points: np.ndarray, polys, kinds) -> bool:
         """If this piece is a copy of one already worked out, take that one's sizes, moved over. True if it was."""
-        if len(set(kinds)) > 1:
-            return False  # faces of copies don't correspond one to one, so materials could land on the wrong ones
-        for rep, rep_points, rep_polys in self.reps:
-            if len(rep_polys) != len(polys) or len(rep_points) != len(points) or self.sizes[rep][-1][2][0] != kinds[0]:
-                continue
-            move = special.match_copy(rep_points, points)
-            if move is None:
-                continue
+        if self._copy_plan is not None:
+            found = self._copy_plan.pop(index, None)
+        else:
+            found = self._find_copy(self.reps, points, polys, kinds, lambda rep: self.sizes[rep][-1][2][0])
+        if found is not None:
+            rep, move = found
             self.twins[index] = (rep, move)
             sizes = [(special.moved(p, move), special.wound(f, move), k) for p, f, k in self.sizes[rep][:-1]]
             self.sizes.append(sizes + [(points, polys, kinds)])
@@ -857,6 +868,45 @@ class AutoJob:
                 self.part_cases[index] = self.part_cases[rep]
             return True
         return False
+
+    @staticmethod
+    def _find_copy(reps, points, polys, kinds, kind_of):
+        """(the part in `reps` this one copies, how to move onto it), or None."""
+        if len(set(kinds)) > 1:
+            return None  # faces of copies don't correspond one to one, so materials could land on the wrong ones
+        for rep, rep_points, rep_polys in reps:
+            if len(rep_polys) != len(polys) or len(rep_points) != len(points) or kind_of(rep) != kinds[0]:
+                continue
+            move = special.match_copy(rep_points, points)
+            if move is not None:
+                return rep, move
+        return None
+
+    def _piece_key(self, ids: np.ndarray) -> tuple:
+        # Reduce To needs the small sizes a kept-detail search skips; sizes judged another way are no use
+        return ("piece", ids.tobytes(), (None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips), self.rough, self.baked, self.target_faces > 0))
+
+    def _plan_next(self) -> bool:
+        """Look at the next part not yet planned: is it a copy, and must it be measured? True if a helper should measure it."""
+        index, ids = self._ahead, self.pieces[self._ahead]
+        self._ahead += 1
+        points, polys, kinds = self._piece_arrays(ids)
+        if _triangle_count(polys) <= KEEP_TRIANGLES:
+            return False
+        if self.locked is None and not self.guide_lines and not self.strips and self.drop is None:
+            found = self._find_copy(self._plan_reps, points, polys, kinds, lambda rep: self._plan_kinds[rep])
+            self._copy_plan[index] = found
+            if found is not None:
+                return False
+            self._plan_reps.append((index, points, polys))
+            self._plan_kinds[index] = kinds[0]
+        if _triangle_count(polys) >= KEEP_HERE * self._work:
+            return False  # most of the job: measured here, while the helpers make its sizes and measure the rest
+        key = self._piece_key(ids)
+        if self.checkpoint is not None and hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1]).exists():
+            return False
+        known = self.cache.get(key)
+        return known is None or known[0] > self.detail
 
     def _measure_piece(self, ids: np.ndarray, pixels: int):
         """Generator: this piece at each size, smallest first, with how much each changes it."""
@@ -871,15 +921,24 @@ class AutoJob:
             self.ready.append([False])
             self.seen.append(0.0)
             return
-        if self.locked is None and not self.guide_lines and not self.strips and self.drop is None:
+        if self.spot_copies and self.locked is None and not self.guide_lines and not self.strips and self.drop is None:
             found = yield from self._off(lambda: self._copy_of(len(self.sizes), points, polys, kinds))
             if found:
                 return
-            self.reps.append((len(self.sizes), points, polys))
-        key = ("piece", ids.tobytes(), (None if self.drop is None else hash(self.drop.tobytes()), bool(self.guide_lines or self.strips), self.rough, self.baked, self.target_faces > 0))  # Reduce To needs the small sizes a kept-detail search skips; sizes judged another way are no use  # sizes judged another way are no use
+            if self._copy_plan is None:
+                self.reps.append((len(self.sizes), points, polys))
+        key = self._piece_key(ids)
         file = None
         if self.checkpoint is not None:
             file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
+        index = len(self.sizes)
+        if self._pool is not None and (index in self._todo or self._pool.waiting_for(index)):
+            result = yield from self._from_pool(index, index)
+            if result is not None:  # measured by a helper, exactly as it would have been here
+                parallel.apply_result(self, index, result)
+                self._finish_piece(key, result["sizes"], result["levels"], result["ready"], result["seen"], file, not result.get("saved"))
+                return
+        if file is not None:
             saved = hardware.load_piece(file) if file.exists() else None
             if saved is not None and saved[0] <= self.detail:  # a stopped run measured this part already
                 self.resumed += 1
@@ -887,6 +946,9 @@ class AutoJob:
                 self._finish_piece(key, saved[1] + [whole], [Level(f, w) for f, w in saved[2]] + [Level(len(polys), 0.0)], ready, saved[3], file, False)
                 return
         known = self.cache.get(key)
+        if self._pool is not None and (known is None or known[0] > self.detail) and not _native_reducible(polys, kinds, self._piece_drop(ids)):
+            # Measured here (the biggest part): the helpers make its first sizes meanwhile, each a Decimate of seconds.
+            self._todo[:0] = [("size", index, share) for share in (BAKED_LEVELS if self.baked else LEVELS) if share * triangles >= 12.0]
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
             self.sizes.append(known[1])
             self.files.append(None)
@@ -981,7 +1043,7 @@ class AutoJob:
         def look(k: int):
             """Generator: this size measured. Returns the share of its view that changed."""
             yield
-            reduced = yield from self._reduced(points, polys, kinds, shares[k], self._piece_drop(ids), self._piece_lock(ids))
+            reduced = yield from self._sized(index, shares[k], points, polys, kinds, self._piece_drop(ids), self._piece_lock(ids))
             view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = self._counts(reference, view, pixel)
             self.looks += 1
@@ -1055,6 +1117,108 @@ class AutoJob:
         order = sorted(range(len(sizes)), key=lambda k: levels[k].faces)
         sizes, levels, ready = [sizes[k] for k in order], [levels[k] for k in order], [ready[k] for k in order]
         self._finish_piece(key, sizes, levels, ready, seen, file, True)
+
+    def _start_pool(self):
+        """Generator: helper processes for measuring the parts, when this job and this computer suit them (see parallel.py)."""
+        if not self.parallel or self.guide_lines or self.strips or len(self.pieces) < 2:
+            return
+
+        def size_up():
+            sizes = np.diff(self.faces.indptr) if isinstance(self.faces, FlatFaces) else np.fromiter(map(len, self.faces), dtype=np.int64, count=len(self.faces))
+            triangles = [int(sizes[ids].sum()) - 2 * len(ids) for ids in self.pieces]
+            total, free = hardware._memory()
+            machine = {"cores": os.cpu_count() or 1, "ram_gb": total, "free_gb": free}
+            work = sum(t for t in triangles if t > KEEP_TRIANGLES)
+            measured = sum(t > KEEP_TRIANGLES for t in triangles)
+            most = int(os.environ.get("CURIOMESH_HELPERS") or 0)  # timing tests: at most this many, whatever else the computer runs
+            busy = 0.0 if most else hardware.busy_cores()
+            return hardware.worker_count(machine, self.cfg.name, len(self.faces), max(len(ids) for ids in self.pieces), work, measured, busy, most), machine, work
+
+        count, machine, self._work = yield from self._background(size_up)
+        if not count:
+            return
+        threads = max(machine["cores"] // (count + 1), 1)  # the native steps of all helpers together use the cores once
+        env = dict(os.environ, RAYON_NUM_THREADS=str(threads), OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
+        command = [bpy.app.binary_path, "--background", "--factory-startup", "--python", os.path.join(os.path.dirname(__file__), "parts_worker.py"), "--"]
+        setup = yield from self._off(lambda: parallel.setup_of(self))
+        self._pool = parallel.Pool(command, count, setup, env)
+        self._copy_plan = {}
+        self.notes.append(f"Parts were measured {count} at a time, in helper processes")
+
+    def _close_pool(self) -> None:
+        if self._pool is not None:
+            if self._pool.peak_mb:
+                self.mem["helpers"] = round(sum(self._pool.peak_mb.values()))
+            self._pool.close()
+            self._pool = None
+        self._todo = []
+
+    def _pump(self, upto: int):
+        """Generator: plan the parts up to `upto` and enough more to keep the helpers busy, hand tasks out, collect results."""
+        while self._ahead < len(self.pieces) and (self._ahead <= upto or self._pool is not None and len(self._todo) < 2 * self._pool.alive()):
+            index = self._ahead
+            wanted = yield from self._off(self._plan_next)
+            if wanted and self._pool is not None:
+                self._todo.append(index)
+        pool = self._pool
+        if pool is None:
+            return
+        self._feed()
+        if pool.failed - self._noted:
+            self._noted |= pool.failed
+            self.notes.append("A helper process could not finish a task, so it was done here")
+        if not pool.alive():
+            self.notes.append("The helper processes stopped: the rest of the parts were measured here")
+            self._close_pool()
+            return
+        if self.checkpoint is not None:  # saved as soon as they are back, so a stopped job keeps them
+            for part, result in list(pool.ready.items()):  # helpers keep adding while a part is saved
+                if isinstance(part, int) and not result.get("saved"):
+                    key = self._piece_key(self.pieces[part])
+                    file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
+                    yield from self._off(lambda: hardware.save_piece(file, self.detail, result["sizes"][:-1], [(lv.faces, lv.loss) for lv in result["levels"]][:-1], result["seen"]))
+                    result["saved"] = True
+
+    def _feed(self) -> None:
+        """Collect what the helpers finished and hand idle ones the next tasks. Quick: also called while this job waits on a thread."""
+        pool = self._pool
+        if pool is None:
+            return
+        pool.poll()
+        done = len(self.sizes)
+        for task in [t for t in pool.ready if not isinstance(t, int) and t[1] < done]:
+            del pool.ready[task]  # a size of a part that is finished: not needed
+        while self._todo and pool.idle():
+            task = self._todo.pop(0)
+            if isinstance(task, int):
+                pool.give(task, f"measure {task} {self.field_spent!r}")
+            elif task[1] >= done:
+                pool.give(task, f"size {task[1]} {task[2]!r}")
+
+    def _from_pool(self, task, index: int):
+        """Generator: the result of a helper's task for part `index`, keeping the others busy meanwhile. None if no helper did it."""
+        stage = self.stage
+        while True:
+            yield from self._pump(index)
+            pool = self._pool
+            if pool is None or task in pool.failed or not (task in self._todo or pool.waiting_for(task)):
+                return None
+            result = pool.take(task)
+            if result is not None:
+                return result
+            ahead = sum(float(self._done_share[k + 1] - self._done_share[k]) for k in pool.ready if isinstance(k, int))
+            self.fraction = MEASURE_SHARE * min(float(self._done_share[index]) + ahead, 1.0)
+            self.stage = f"{stage} ({len(pool.busy)} at once)"
+            time.sleep(0.01)  # nothing to do here but wait: leave the core to the helpers
+            yield
+
+    def _sized(self, index: int, ratio: float, points, polys, kinds, drop=None, keep=None):
+        """Generator: `_reduced` at `ratio`, from a helper when one was asked to make it, else here."""
+        if self._pool is not None:
+            result = yield from self._from_pool(("size", index, ratio), index)
+            if result is not None:
+                return result["size"]
+        return (yield from self._reduced(points, polys, kinds, ratio, drop, keep))
 
     def _field_size(self, points, polys, kinds, want, center, half, pixels, reference, pixel, margin):
         """Generator: rows of quads on this part at about `want` quads, looked at. (build, level, area seen, change) or None."""
@@ -1377,6 +1541,7 @@ class AutoJob:
         thread.start()
         while thread.is_alive():
             thread.join(0.02)
+            self._feed()
             yield
         if failed:
             raise failed[0]
@@ -2082,16 +2247,25 @@ class AutoJob:
         picture_sizes = self.picture_sizes
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         yield from self._off(self._show)
-        for index, ids in enumerate(self.pieces):
-            self.progress = (index, len(self.pieces))
-            self.fraction = MEASURE_SHARE * float(done_share[index])
-            self.stage = f"Part {index + 1} of {len(self.pieces)}: {self.names[index]}" if self.chunks or len(self.pieces) < 40 else f"Looking at piece {index + 1} of {len(self.pieces)}"
-            yield from self._measure_piece(ids, picture_sizes[index])
-            yield
-            if self._stopped:
-                return
-            if time.perf_counter() - self.shown_at > self.cfg.show_every:
-                yield from self._off(self._show)
+        measuring = time.perf_counter()
+        self._done_share = done_share
+        yield from self._start_pool()
+        try:
+            for index, ids in enumerate(self.pieces):
+                self.progress = (index, len(self.pieces))
+                self.fraction = MEASURE_SHARE * float(done_share[index])
+                self.stage = f"Part {index + 1} of {len(self.pieces)}: {self.names[index]}" if self.chunks or len(self.pieces) < 40 else f"Looking at piece {index + 1} of {len(self.pieces)}"
+                if self._copy_plan is not None:
+                    yield from self._pump(index)
+                yield from self._measure_piece(ids, picture_sizes[index])
+                yield
+                if self._stopped:
+                    return
+                if time.perf_counter() - self.shown_at > self.cfg.show_every:
+                    yield from self._off(self._show)
+        finally:
+            self._close_pool()  # also when the job is stopped or fails
+        self.timings["measure"] = time.perf_counter() - measuring
         self.progress = (len(self.pieces), len(self.pieces))
         self.fraction = MEASURE_SHARE
         self.stage = "Looking at the whole object"
