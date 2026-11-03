@@ -521,7 +521,7 @@ class GraphicsCardPicturesTests(unittest.TestCase):
             except RuntimeError as exc:  # an adapter that opens but cannot run the shader (a virtual machine's)
                 self.skipTest(f"graphics card failed: {exc}")
             shape = (6, pixels, pixels)
-            as_views = lambda out: [(out[0].reshape(shape)[i], out[1].reshape((*shape, 3))[i], out[2].reshape(shape)[i], out[3].reshape(shape)[i]) for i in range(6)]
+            as_views = lambda out: [(out[0].reshape(shape)[i], out[1].reshape((*shape, 3))[i], out[2].reshape(shape)[i], out[3].reshape(shape)[i]) for i in range(6)]  # noqa: E731
             wrong, total = views.picture_counts(as_views(cpu), as_views(card), 2.0 * half / pixels)
             self.assertGreater(total, 100)
             self.assertLess(wrong / total, 0.01)
