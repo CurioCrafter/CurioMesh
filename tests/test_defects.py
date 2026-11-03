@@ -13,7 +13,7 @@ from triadq import checks, repair  # noqa: E402
 
 CUBE = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
 POINTS = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], float)
-NATIVE = checks._turbo is not None
+NATIVE = checks._turbo is not None and checks._turbo.available()  # the wrapper loads without the binary
 
 
 def found(result, kind):
@@ -42,7 +42,6 @@ class DefectTests(unittest.TestCase):
         self.assertEqual(found(checks.defects(level, faces), "folded_over"), [])
 
     @unittest.skipUnless(NATIVE, "needs the native core")
-    @unittest.skipUnless(NATIVE, "needs the native core")
     def test_turned_and_sunk_faces_against_the_source(self):
         faces = list(CUBE)
         faces[1] = faces[1][::-1]  # the top turned inward
@@ -52,7 +51,6 @@ class DefectTests(unittest.TestCase):
         self.assertEqual(found(result, "inward"), [1, 6])
         self.assertEqual(found(result, "sunk"), [6])
 
-    @unittest.skipUnless(NATIVE, "needs the native core")
     @unittest.skipUnless(NATIVE, "needs the native core")
     def test_crossing_and_overlapping_faces(self):
         co = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0.5, 0.5, -0.5), (0.5, 0.5, 0.5), (0.5, 1.5, 0.5), (0.5, 1.5, -0.5), (0.2, 0.2, 0.001), (1.2, 0.2, 0.001), (1.2, 1.2, 0.001), (0.2, 1.2, 0.001)], float)
