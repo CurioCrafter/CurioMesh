@@ -113,6 +113,10 @@ REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots sel
 UNTANGLE_SECONDS = 15.0  # time for turning folded faces back per run
 REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is selected on Apply (the crane spent 215 s for 71 spots)
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
+if os.environ.get("CURIOMESH_NO_TIME_LIMITS", "").strip().lower() in {"1", "true", "on", "yes"}:
+    # The limits above end work by the clock, so a slower or busier computer stops at another point and the result differs a little.
+    # Set this to run to the end instead: the same model and settings then give the same result every time.
+    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = float("inf")
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 STEP = 0.8  # each size made in steps is this share of the size before it
