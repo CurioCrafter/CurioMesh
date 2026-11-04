@@ -271,6 +271,7 @@ pub fn close_polygons(points: &[f64], indptr: &[i64], flat: &[i64], material: &[
     if !tris.is_empty() {
         let (fa, fb, quads, scores) = candidates(&fixed.vertices, &tris, &tri_tag);
         let graph = pairing::allowed(tri_tag.len(), &fa, &fb, &scores, None);
+        // One order is enough: the augmenting search pairs as many as can be, so other orders leave as many triangles.
         let paired = pairing::pair(&graph, &quads, 0, &near::Watch::now()).ok_or("pairing was stopped")?;
         for q in paired.quads.chunks_exact(4) {
             out_flat.extend_from_slice(q);
@@ -423,32 +424,28 @@ fn unpack(tag: i64) -> (i64, i64) {
 const ROWS_SMALLEST: usize = 1000; // source triangles: a smaller part isn't worth a grid (the add-on's FIELD_SMALLEST)
 const ROWS_FEWEST: usize = 24; // faces a part must have in the result
 const ROWS_MOST_MISS: f64 = 0.25; // rows more than this share off the part's face count are refused
-const ROWS_SECONDS: f64 = 60.0; // time spent offering rows per run (the add-on's FIELD_SECONDS)
 
 /// Offer each big part even rows of quads (`rows.rs`) at about the faces it has now, biggest first, and keep a part's
 /// rows when the whole view stays within `limit`. Returns how many parts took rows.
 /// ponytail: one tag (material) per part's rows; a part with several materials gets its first one.
 #[allow(clippy::too_many_arguments)]
 fn rows_where_they_hold(mesh: &mut Mesh, change: &mut f64, limit: f64, source: &Mesh, tris: &[i64], tri_piece: &[i64], tags: &[i64], look: &mut dyn FnMut(&Mesh) -> f64, log: &mut dyn FnMut(&str)) -> usize {
-    let started = Instant::now();
+    use rayon::prelude::*;
     let parts = tri_piece.iter().copied().max().map_or(0, |m| m as usize + 1);
     let mut source_tris = vec![Vec::new(); parts];
     for (t, &p) in tri_piece.iter().enumerate() {
         source_tris[p as usize].push(t);
     }
-    let mut order: Vec<usize> = (0..parts).filter(|&p| source_tris[p].len() >= ROWS_SMALLEST).collect();
+    let mut faces_of = vec![Vec::new(); parts];
+    for f in 0..mesh.faces() {
+        faces_of[unpack(mesh.material[f]).1 as usize].push(f);
+    }
+    let mut order: Vec<usize> = (0..parts).filter(|&p| source_tris[p].len() >= ROWS_SMALLEST && faces_of[p].len() >= ROWS_FEWEST).collect();
     order.sort_by_key(|&p| std::cmp::Reverse(source_tris[p].len()));
-    let mut swapped = 0;
-    for p in order {
-        if started.elapsed().as_secs_f64() > ROWS_SECONDS {
-            log("  Rows: out of time, the other parts stay as they are");
-            break;
-        }
-        let mine: Vec<usize> = (0..mesh.faces()).filter(|&f| unpack(mesh.material[f]).1 == p as i64).collect();
-        if mine.len() < ROWS_FEWEST {
-            continue;
-        }
-        // The part's own copy of the source.
+    // Every part's rows are built side by side (the add-on does them one at a time on a clock, to keep Blender
+    // responsive). Parts never share faces, so each is judged against the part as it is now.
+    let made: Vec<Option<(usize, Mesh, usize, usize)>> = order.par_iter().map(|&p| {
+        let mine = &faces_of[p];
         let mut local = HashMap::new();
         let (mut points, mut part_tris) = (Vec::new(), Vec::new());
         let mut area = 0.0;
@@ -477,18 +474,24 @@ fn rows_where_they_hold(mesh: &mut Mesh, change: &mut f64, limit: f64, source: &
             }
         }
         if miss(&made) > ROWS_MOST_MISS {
-            continue;
+            return None;
         }
-        let Some((grid_points, grid_indptr, grid_flat)) = made else { continue };
+        let (grid_points, grid_indptr, grid_flat) = made?;
         let tag = tags[source_tris[p][0]];
         let quads = Mesh { material: vec![tag; grid_indptr.len() - 1], points: grid_points, indptr: grid_indptr, flat: grid_flat, materials: source.materials.clone() };
         // Rows must not bring in faces the checks call bad: compare with the part as it is.
-        let part_now = sub_mesh(mesh, &mine);
-        let (bad_now, bad_rows) = (crate::issues::check(&part_now).bad, crate::issues::check(&quads).bad);
+        let bad_now = crate::issues::check(&sub_mesh(mesh, mine)).bad;
+        let bad_rows = crate::issues::check(&quads).bad;
+        Some((p, quads, bad_now, bad_rows))
+    }).collect();
+    // Then each one is looked at in the whole view, biggest part first, and kept while the view holds.
+    let mut swapped = 0;
+    for (p, quads, bad_now, bad_rows) in made.into_iter().flatten() {
         if bad_rows > bad_now {
             log(&format!("  Rows on part {p}: {bad_rows} bad faces where it has {bad_now}, not kept"));
             continue;
         }
+        let mine: Vec<usize> = (0..mesh.faces()).filter(|&f| unpack(mesh.material[f]).1 == p as i64).collect();
         let tried = replace_faces(mesh, &mine, &quads);
         let after = look(&tried);
         let keep = after <= limit;
