@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.2 - unreleased
+
+### Bake Detail
+- **Textured models keep their colours.** A glTF material that is plainly opaque was treated as see-through
+  (it reads as blended in Blender), so the colour bake skipped it and the result kept the old texture on new
+  UVs. The chess board came out plain white. Only a really blended material, or one with alpha or
+  transmission, is kept out of the bake now.
+- **More texels per face on detailed parts.** When the new unwrap makes thousands of small islands, the gap
+  left between them used up most of the texture. The gap now shrinks until the islands fill the texture, so
+  curved parts get a sharper normal map and look less faceted.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other
