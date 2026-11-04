@@ -84,6 +84,18 @@ def allocate_to_faces(pieces: list[list[Level]], faces: float, piece_share: floa
     return best
 
 
+def next_ask(tries: list[tuple[int, int]], wanted: int, low: int, high: int) -> int:
+    """What to ask a layout for next, from (asked, got) pairs, so it gives `wanted` faces.
+
+    A part of the result doesn't scale with what is asked for (small parts paired and closed), so after two tries the
+    line through them is followed rather than the ratio of the last one.
+    """
+
+    (a0, g0), (a1, g1) = tries[-2:] if len(tries) > 1 else ((0, 0), tries[-1])
+    slope = (g1 - g0) / (a1 - a0) if a1 != a0 and g1 != g0 else g1 / max(a1, 1)
+    return min(max(int(round(a1 + (wanted - g1) / max(slope, 0.1))), low), high)
+
+
 def density_drop(paint: np.ndarray, strength: float) -> np.ndarray:
     """How far below 1 a vertex's Decimate weight goes for a painted amount 0..1.
 

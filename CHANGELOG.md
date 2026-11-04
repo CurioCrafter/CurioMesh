@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.2 - unreleased
+
+### Tidier quads
+- **Keep Detail spins edges at poles** before the final check (Tarini et al. 2010's edge rotation, as
+  Redraw Messy Quads already did): an edge between two quads turns where that leaves fewer corners with more or
+  fewer than four quads. No corner moves and no face is added, so rows run longer. Kept only if the camera
+  change stays within a point of what it was and inside what Keep Detail counts as a fit.
+- **Clean Rows lands near the face count asked for** with Reduce To. QuadriFlow is asked again, up to three
+  times, following what the earlier tries gave, since the small parts that are paired and closed don't shrink
+  with it. The try nearest the amount is kept.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other
