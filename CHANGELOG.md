@@ -3,22 +3,27 @@
 ## 0.9.3 - unreleased
 
 ### Finding what is still wrong
-- **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is found and
-  ranked, worst first. It counts faces turned inward, sunk into your mesh, crossing, folded over, bent, flat, duplicated or
-  lying on another face (the check the run already makes, not repeated), and also tight or untidy topology: slivers, pinched
-  faces, poles (a corner with seven or more edges, or two or fewer) and concave quads. Faces that touch or lie close together
-  are one spot, scored by how bad the kinds are and how many faces. **View** moves the 3D view to a spot, **Select** selects its
-  faces in Edit Mode, **Next Issue** and **Previous** step through them, and the spots are painted orange (the current one
-  yellow) with Show Bad Faces.
-- **Save Issue Report and Compare With Report...** keep a record (a JSON file next to your .blend, or where you choose) and, after
-  a fix and a new run, say how many of its spots are fixed, still there or new, with the totals per kind.
+- **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is
+  found and ranked, worst first. It counts faces turned inward, sunk into your mesh, crossing, folded over, bent,
+  flat, duplicated or lying on another face (the check the run already makes, not repeated), and also tight or
+  untidy topology: slivers, pinched faces, poles (a corner with seven or more edges, or two or fewer) and concave
+  quads. Faces that touch or lie close together are one spot, scored by how bad the kinds are and how many faces;
+  real defects are never lumped in with untidy faces next to them. **View** moves the 3D view to a spot,
+  **Select** selects its faces on the preview in Edit Mode, **Next Issue** and **Previous** step through them, and
+  with Show Bad Faces the spots are painted orange (the current one yellow). Each spot names the part it is in, as
+  the Fix Parts list numbers them.
+- **Save Issue Report and Compare With Report...** keep a record (a JSON file next to your .blend, or where you
+  choose) and, after a fix and a new run, say how many of its spots are fixed, still there or new, with the
+  totals per kind.
 
-- **Redo Rough Spots** (Auto settings, off by default: it adds up to a minute for a few percent fewer bad faces): after the final check, the spots still turned inward,
-  folded over or crossing are found and each gets a small region of its own, grown a few rings of faces round it.
-  The region's inner corners are put back towards your mesh, part or all of the way, and the way that leaves the
-  fewest bad faces there is kept, if it leaves fewer than before and bends no quad. The region's edge never moves,
-  so it joins the rest exactly, and the face count doesn't change. A round is kept only if nothing else broke and
-  the camera still agrees. The summary says how many spots were redone and how many bad faces fewer there are.
+### Fewer bad faces
+- **Redo Rough Spots** (Auto settings, off by default: it adds up to a minute for a few percent fewer bad faces):
+  after the final check, the spots it still flags get a small region each, grown a few rings of faces round the
+  spot. The region's inner corners are put back towards your mesh, part or all of the way, and the way that leaves
+  the fewest bad faces there is kept, if it leaves fewer than before and bends no quad. The region's edge never
+  moves, so it joins the rest exactly, and the face count doesn't change. If the regions together cross or bend a
+  face outside them, only the regions touching it go back; the rest are kept if nothing else broke and the camera
+  still agrees. The summary says how many spots were redone and how many bad faces fewer there are.
 - **Copies land where they fit best.** A part that is almost symmetric across its own plane also fits turned the
   wrong way onto its mirror image, within the copy tolerance, and the first placement found was taken: such a copy
   sat a little off and some of its faces turned inward. Placements are now compared and the closest is kept.
