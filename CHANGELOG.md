@@ -2,25 +2,6 @@
 
 ## 0.9.2 - unreleased
 
-### Bad faces
-- **Show Bad Faces** (the red "Bad" button in the segment view, on by default): after Auto Segments, the faces the defect check flags (turned inward, sunk into your mesh, crossing, folded over, bent, flat, duplicated or lying on another face) are painted red, and the summary line gives their count. It reuses the check the run already makes.
-- **A regression test for bad faces** (`tests/test_regression_gate.py`, runs without Blender or the native core): rebuilt parts of a triangle tube, their copies and a frozen result must come out with no faces turned inward and no defects; with the native core it also checks them against the source.
-
-### Bake Detail
-- **Textured models keep their colours.** A glTF material that is plainly opaque was treated as see-through
-  (it reads as blended in Blender), so the colour bake skipped it and the result kept the old texture on new
-  UVs. The chess board came out plain white. Only a really blended material, or one with alpha or
-  transmission, is kept out of the bake now.
-- **More texels per face on detailed parts.** When the new unwrap makes thousands of small islands, the gap
-  left between them used up most of the texture. The gap now shrinks until the islands fill the texture, so
-  curved parts get a sharper normal map and look less faceted.
-
-### Smaller native file
-- **The graphics-card code no longer bloats the native core.** Each platform now builds only its own card
-  backend (DirectX 12 on Windows, Metal on macOS, Vulkan on Linux), takes shaders in WGSL only, strips debug
-  names and builds the card libraries for size. The Windows file goes from 7.2 MB to 5.0 MB; pictures
-  are unchanged.
-
 ### Faces that turn inward or fold over
 - **Parts are reduced by CurioMesh's own reducer, not Blender's Decimate**, whenever the native core is
   there and no density is painted. Decimate lets a face turn almost 90 degrees in each collapse, and many
@@ -28,23 +9,13 @@
   once, more than 90 degrees from where it faced in the source, or more than 120 degrees from the source
   surface nearest it (a face slid over to the back of a thin plate), or folds two faces around the new
   point over each other. So fewer folds are made, and less has to be turned back at the end.
-- **Field Rows no longer stops Auto** on a part with a face that uses one corner twice.
-
-### Finding the segments
-- **A second start can no longer leave "Finding the segments" stuck.** Moving Segment Detail (or any other start of the
-  find) while a search, redo or remake is running no longer stops that job for a find that only adds labels; a find
-  started over an older find stops it completely, including its waiting loop, before the new one begins.
-
-### Graphics card
-- **The summary says when the card drew pictures** ("Camera pictures of the big parts drawn on the graphics card"),
-  not only when it failed.
-
-### Repeatable results
-- Two runs of the same model and settings can differ a little (Old Military Compressor, Game Asset: 16,149 faces
-  both times but different vertex positions, 251 and 248 self-intersections). The cause is the clock: the repair
-  (30 s), untangle (15 s), redraw (240 s) and row (60 s) time limits stop at another point on a busier computer. With
-  those limits off, two runs gave identical meshes, with 14 and 12 helpers and the graphics card on. Setting the
-  environment variable `CURIOMESH_NO_TIME_LIMITS=1` runs every step to its end for a result that repeats exactly.
+- **Show Bad Faces** (the red "Bad" button in the segment view, on by default): after Auto Segments, the faces
+  the defect check flags (turned inward, sunk into your mesh, crossing, folded over, bent, flat, duplicated or
+  lying on another face) are painted red, and the summary line gives their count. It reuses the check the run
+  already makes.
+- **A regression test for bad faces** (`tests/test_regression_gate.py`, runs without Blender or the native core):
+  rebuilt parts of a triangle tube, their copies and a frozen result must come out with no faces turned inward
+  and no defects; with the native core it also checks them against the source.
 
 ### Tidier quads
 - **Keep Detail spins edges at poles** before the final check (Tarini et al. 2010's edge rotation, as
@@ -60,10 +31,44 @@
   that the helper Blenders measure at once; before, one big part kept one core busy while the others waited.
   The region borders are kept as they are while each region is reduced, then joined again, so there are no gaps
   or T-junctions. Regions skip the wire, fin and cloth rebuilds, whose fit alone can take a minute on a part
-  this big. Results can differ a little from one core, by a few percent in faces.
+  this big, and are not looked for as copies. Results can differ a little from one core, by a few percent in faces.
+
+### Bake Detail
+- **Textured models keep their colours.** A glTF material that is plainly opaque was treated as see-through
+  (it reads as blended in Blender), so the colour bake skipped it and the result kept the old texture on new
+  UVs. The chess board came out plain white. Only a really blended material, or one with alpha or
+  transmission, is kept out of the bake now.
+- **More texels per face on detailed parts.** When the new unwrap makes thousands of small islands, the gap
+  left between them used up most of the texture. The gap now shrinks until the islands fill the texture, so
+  curved parts get a sharper normal map and look less faceted. On a model baked before, the earlier bake's UV
+  layer is left alone while it does this.
+
+### Graphics card and native core
+- **A smaller native file.** Each platform now builds only its own graphics-card backend (DirectX 12 on Windows,
+  Metal on macOS, Vulkan on Linux), takes shaders in WGSL only, strips debug names and builds the card libraries
+  for size. The Windows file goes from 7.2 MB to 5.0 MB; pictures are unchanged.
+- **The summary says when the card drew pictures** ("Camera pictures of the big parts drawn on the graphics card"),
+  not only when it failed.
+
+### Repeatable results
+- **`CURIOMESH_NO_TIME_LIMITS=1` gives the same result every time.** Two runs of the same model and settings can
+  differ a little (Old Military Compressor, Game Asset: 16,149 faces both times but different vertex positions,
+  251 and 248 self-intersections). The cause is the clock: the repair (30 s), untangle (15 s), redraw (240 s) and
+  row (60 s) time limits stop at another point on a busier computer. With this environment variable set, every
+  step runs to its end; two runs gave identical meshes, with 14 and 12 helpers and the graphics card on.
 
 ### Fixed
+- **A second start can no longer leave "Finding the segments" stuck.** Moving Segment Detail (or any other start of the
+  find) while a search, redo or remake is running no longer stops that job for a find that only adds labels; a find
+  started over an older find stops it completely, including its waiting loop, before the new one begins.
 - **Reduce To keeps the borders of a part cut into regions** (very big meshes), so it no longer opens gaps there.
+- **No gap where a UV seam crosses a region border.** Straightening the seams could merge away a border vertex of
+  a region that a seam passed through.
+- **Small pieces that touch a cut part, or each other, at one corner** are no longer treated as regions, so they
+  keep their rebuilds, copies and repair.
+- **Edge spinning and quad removal work when the biggest part was rebuilt.** Every paired corner was frozen then,
+  so neither changed anything.
+- **Field Rows no longer stops Auto** on a part with a face that uses one corner twice.
 
 ## 0.9.1 - 2026-11-02
 
