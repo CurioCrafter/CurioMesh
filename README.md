@@ -30,6 +30,8 @@ model, a sculpt or a photogrammetry scan, and want to fix single parts instead o
 Auto picks the Use and settings from your mesh and free memory, says why, and starts. Or follow the numbered steps yourself:
 choose what it is for, **Start**, fix parts in **Review Segments**, then **Apply**. Nothing changes in your scene until Apply.
 
+**If CurioMesh saved you time, please [⭐ star it on GitHub](https://github.com/CurioCrafter/CurioMesh/stargazers).** It is free and made by one person, and stars are how other artists find it. Something broke? [Open an issue](https://github.com/CurioCrafter/CurioMesh/issues/new) (the add-on's **Report a Problem** button fills in your versions).
+
 **Honest limits:** quads can look slanted on smooth surfaces, fine ornaments go jagged at high reduction, it does not find edge
 loops for faces and joints on its own, and big scans take minutes, sometimes tens of minutes. See [Known limits](#known-limits).
 

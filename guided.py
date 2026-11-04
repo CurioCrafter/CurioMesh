@@ -3865,6 +3865,33 @@ class CURIOMESH_PT_guided_parts(_AutoSub, bpy.types.Panel):
         segments.draw_parts(self.layout, context, context.scene.curiomesh_guided)
 
 
+REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
+
+
+def problem_url() -> str:
+    """New-issue link with Blender, OS and CurioMesh versions already filled in."""
+    import platform
+    import sys
+    from urllib.parse import urlencode
+
+    info = getattr(sys.modules.get(__package__), "bl_info", {}) or {}
+    version = ".".join(str(v) for v in info.get("version", ())) or "?"
+    body = (
+        f"CurioMesh {version}, Blender {bpy.app.version_string}, {platform.system()} {platform.release()}\n\n"
+        "What I did:\n\nWhat happened:\n\nWhat I expected:\n"
+    )
+    return f"{REPO_URL}/issues/new?" + urlencode({"title": "Problem: ", "body": body})
+
+
+def _draw_thanks(layout) -> None:
+    """Shown once a result is applied: the moment the tool has just helped."""
+    box = layout.box()
+    box.label(text="Did CurioMesh help? A star helps others find it.", icon="SOLO_ON")
+    row = box.row(align=True)
+    row.operator("wm.url_open", text="Star on GitHub", icon="SOLO_ON").url = REPO_URL
+    row.operator("wm.url_open", text="Report a Problem", icon="ERROR").url = problem_url()
+
+
 class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
     bl_label = "5. Apply"
     bl_idname = "CURIOMESH_PT_guided_apply"
@@ -3883,6 +3910,7 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
         row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
         if not done and state["applied"]:
             overlay.wrap_label(layout, f"Applied: {state['applied']}. Select a mesh and Start for another.", icon="CHECKMARK", width=30, limit=4)
+            _draw_thanks(layout)
         elif not done:
             overlay.wrap_label(layout, "Available once the search has finished. Nothing changes until you press Apply.", icon="LOCKED", width=30, limit=3)
         elif not busy:
