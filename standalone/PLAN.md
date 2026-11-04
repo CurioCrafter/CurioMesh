@@ -195,3 +195,22 @@ count is kept, and rows more than 25% off are refused.
 - `src/retopo.rs`: camera, pairing scores, pair and close, the search on detail or face count.
 - `src/issues.rs`: checks and spots. `src/io.rs`: files. `src/main.rs`: the command line.
 - `Cargo.lock` started from `native/Cargo.lock`, so shared crates have the same versions (and build on Rust 1.88).
+
+### What the standalone can do that Blender held back (2026-11-04)
+
+Three ideas the add-on can't afford inside Blender, each measured on the bench models:
+
+- **Rows on all parts at once: kept.** The add-on tries rows one part at a time on a 60 s clock to keep Blender
+  responsive. Building them in parallel gave the same results 2.5-8 times faster (chess set 35 s to 4.6 s, drill
+  press 56 s to 18 s, hydrant 44 s to 17 s).
+- **Eight pairing orders per look: dropped.** Identical results: the pairing's augmenting search already pairs as
+  many triangles as can be, so every order leaves the same number.
+- **Each part sized by its own camera loss (the add-on's Auto Segments allocation): dropped.** Parts were reduced
+  in parallel to 8 sizes each, judged alone at the whole view's pixel size, and faces given by best gain per face,
+  with the add-on's rounds. The one global reduction order did better on 5 of 6 runs. Game asset: chess set 5,717
+  faces against 7,091 for the same 6.1%, drill press 20,080 against 28,111, hydrant 25,310 against 47,076. At a face
+  count: drill press 8.2% against 10.2% change, hydrant 10.2% against 14.7%. Only the chess set at a count came out
+  slightly ahead (4.37% at 9,851 faces against 4.65% at 9,491). The global quadric error compares every part on one
+  scale, while small parts cover only a few pixels at the whole view's pixel size, so their camera numbers are coarse.
+  This is also likely why the standalone loses less view than the add-on at the add-on's own face counts. Worth
+  trying in the add-on: one global reduction order instead of sizes per part.
