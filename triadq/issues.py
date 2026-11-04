@@ -25,6 +25,7 @@ POLE_HIGH_TRIS = 9  # the same where triangles meet (six is normal there)
 POLE_LOW = 2  # an interior vertex with this many edges or fewer
 JOIN_EDGES = 1.5  # flagged faces closer than this many average edge lengths belong to one spot
 MIN_RADIUS_EDGES = 1.5  # a spot is never smaller than this many average edge lengths, so a re-run's spot still matches it
+SERIOUS = 3.0  # kinds weighing this much or more are defects; lighter ones are untidiness
 WEIGHTS = {  # how bad one kind is; a spot's score adds weight * (1 + log2(faces of that kind)) over its kinds
     "inward": 10.0, "crossing": 10.0, "folded_over": 10.0,
     "sunk": 5.0, "overlap": 5.0, "duplicate": 4.0,
@@ -183,7 +184,14 @@ def find_spots(verts, faces, flags: dict[str, np.ndarray], part_of_face=None, ma
                 found = rkey[at] == want
                 ja.append(rep[found])
                 jb.append(rep[at[found]])
-    label = components(len(ids), np.concatenate(ja), np.concatenate(jb))
+    # a face with a real defect never joins one that is only untidy, so widespread slivers don't swallow the defects
+    serious = np.zeros(count, bool)
+    for k, v in flags.items():
+        if WEIGHTS[k] >= SERIOUS:
+            serious |= v
+    ja, jb = np.concatenate(ja), np.concatenate(jb)
+    same_class = serious[ids][ja] == serious[ids][jb]
+    label = components(len(ids), ja[same_class], jb[same_class])
     groups = np.unique(label, return_inverse=True)[1]
     parts = None if part_of_face is None else np.asarray(part_of_face)
     spots = []
