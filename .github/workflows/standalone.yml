@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
+# The standalone program (standalone/): the CurioMesh app and the curiomesh command line, for Windows, Linux and macOS.
+# A tag standalone-vX.Y.Z publishes them as a pre-release; the add-on's own releases (tags v*) are left alone.
+name: standalone
+
+on:
+  push:
+    tags: ["standalone-v*"]
+    branches: [standalone]
+    paths: ["standalone/**", "native/src/**", ".github/workflows/standalone.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+            exe: .exe
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            name: macos-apple-silicon
+          # Built on Apple Silicon, so not run in CI.
+          - os: macos-15
+            target: x86_64-apple-darwin
+            name: macos-intel
+            cross: true
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Linux libraries for the window and dialogs
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+      - name: Tests
+        if: ${{ !matrix.cross }}
+        run: cargo test --release --manifest-path standalone/Cargo.toml --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --manifest-path standalone/Cargo.toml --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#standalone-v}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) version="dev-${GITHUB_SHA::7}";; esac
+          dir="CurioMesh-${version}-${{ matrix.name }}"
+          mkdir -p "dist/$dir"
+          for bin in curiomesh curiomesh-gui; do
+            cp "standalone/target/${{ matrix.target }}/release/$bin${{ matrix.exe }}" "dist/$dir/"
+          done
+          cp standalone/README.md "dist/$dir/README.md"
+          cp LICENSE "dist/$dir/LICENSE.txt"
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then 7z a -tzip "$dir.zip" "$dir" > /dev/null; else zip -qr "$dir.zip" "$dir"; fi
+          ls -la
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: standalone-${{ matrix.name }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    # The only job that can write, and only for a tag.
+    if: startsWith(github.ref, 'refs/tags/standalone-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: standalone-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums, so a download can be checked against the release
+        run: cd dist && sha256sum *.zip > SHA256SUMS.txt
+      - id: version
+        run: echo "number=${GITHUB_REF_NAME#standalone-v}" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CurioMesh Standalone ${{ steps.version.outputs.number }} (preview)
+          prerelease: true
+          body_path: standalone/RELEASE_NOTES.md
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt

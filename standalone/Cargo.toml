@@ -17,6 +17,10 @@ path = "src/lib.rs"
 name = "curiomesh"
 path = "src/main.rs"
 
+[[bin]]
+name = "curiomesh-gui"
+path = "src/gui.rs"
+
 [dependencies]
 rayon = "1.12"
 pollster = "=0.4.0"
@@ -26,6 +30,14 @@ numpy = { package = "num-complex", version = "0.4" }
 tobj = "4.0"
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 serde_json = "1.0"
+# The desktop app. 0.33.3 is the newest eframe that builds on Rust 1.88; it draws with OpenGL (glow), so it doesn't
+# pull in a second wgpu next to the pinned one above.
+eframe = "=0.33.3"
+rfd = "=0.15.4" # native open and save dialogs
+image = { version = "0.25", default-features = false, features = ["png"] } # the window icon and screenshots
+
+[build-dependencies]
+embed-resource = "3.0" # the icon in the Windows .exe files
 
 # Same graphics stack and pins as native/Cargo.toml.
 [target.'cfg(windows)'.dependencies]

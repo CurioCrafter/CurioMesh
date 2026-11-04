@@ -35,7 +35,7 @@ loops for faces and joints on its own, and big scans take minutes, sometimes ten
 
 ## Contents
 
-[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install-the-blender-retopology-add-on) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
+[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Without Blender](#curiomesh-without-blender-the-standalone-app-preview) · [Install](#download-and-install-the-blender-retopology-add-on) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
 
 ## What it does
 
@@ -270,31 +270,27 @@ Whole-mesh Atlas-Q, **Regions** (redo any selection or cage with an exact seam),
 CurioMesh. They are described in [docs/OLDER_FEATURES.md](docs/OLDER_FEATURES.md). The solvers, controls and maths of the whole-mesh remesher
 are in [docs/ATLAS_Q_REFERENCE.md](docs/ATLAS_Q_REFERENCE.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
-## Standalone program (no Blender), early preview
+## CurioMesh without Blender: the standalone app (preview)
 
-The `standalone` branch has `curiomesh`, a command-line program that does CurioMesh's automatic retopology without
-Blender. It also scores any retopology against its source. It uses the add-on's own Rust core (`native/`), so both
-run the same reducer, pairing, closing and camera code. Plan, legal notes and what's still missing:
+![CurioMesh Standalone: drag the line to compare the original with its new quads](docs/images/standalone_app.png)
+
+Turn a heavy scan, CAD export or sculpt into clean quads with a desktop app for Windows, macOS and Linux. Drop
+a model in, say what it's for, and drag the line across it to compare the original with the new quads. You choose
+how much of the view may change; CurioMesh keeps the fewest faces that hold it and lists the spots worth a look.
+
+- **Download:** the zip for your system from the [standalone releases](https://github.com/CurioCrafter/CurioMesh/releases?q=standalone).
+  Unpack it and start `curiomesh-gui`.
+- **Opens** OBJ, glTF, GLB and PLY. **Saves** OBJ and a JSON issue report.
+- **Command line for pipelines:** `curiomesh model.glb -o low.obj --use game-asset`, and
+  `curiomesh measure model.glb any_retopo.obj --max-loss 6 --max-bad 0` to stop a build on a broken asset from any
+  tool.
+- **Same core** as the add-on: its Rust reducer, quad pairing and closing, and its six-view camera.
+
+On three free test models at about the same face count, it kept far more of the shape than AutoRemesher 1.2.0
+(drill press: 8.2% of the view changed against 32.8%, 0 bad faces against 1,219). AutoRemesher's quads are more
+even on smooth, organic shapes. The full table, the guide and the limits are in
+[standalone/README.md](standalone/README.md); the plan and the legal notes are in
 [standalone/PLAN.md](standalone/PLAN.md).
-
-```
-curiomesh model.glb -o model_low.obj --use game-asset --report issues.json
-curiomesh model.ply -o model_low.obj --reduce-to 5000
-curiomesh measure model.glb any_retopo.obj --max-loss 6 --max-bad 0
-```
-
-- **Reads** OBJ, glTF/GLB and PLY (ASCII and binary). **Writes** OBJ with materials kept per face.
-- **`--detail P`** keeps the fewest faces whose view changes at most P percent, judged with six camera pictures, as
-  in the add-on. `--use game-asset` is 6%, `--use scan` 2%. **`--reduce-to N`** aims for about N faces instead.
-- **`measure`** prints the view change, bad faces (broken edges, flipped, duplicate, bent or concave quads) and the
-  worst issue spots for any result, whether from CurioMesh, another tool or done by hand. `--max-loss` and `--max-bad`
-  make it exit with code 1 when the result is over, so it can guard an asset pipeline.
-- **Not there yet:** part-by-part sizing, smooth grids, fitting, spinning edges at poles, repair and Redo Rough Spots,
-  so the quad layout is plainer than the add-on's. There's no GUI yet. First numbers against the add-on are in
-  [standalone/PLAN.md](standalone/PLAN.md#first-comparison-2026-11-04).
-
-Build it with Rust 1.88 or newer: `cd standalone && cargo build --release`. The program is `target/release/curiomesh`.
-Licence: GPL-3.0-or-later, like the add-on.
 
 ## Download and install the Blender retopology add-on
 
