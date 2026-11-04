@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.3 - unreleased
+## 0.9.3 - 2026-11-04
 
 ### Finding what is still wrong
 - **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is
