@@ -9,7 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.fit import corner_normals, fit_vertices  # noqa: E402
+from triadq.fit import corner_normals, fit_vertices, untangled  # noqa: E402
 
 
 def grid(count: int, z: float = 0.0):
@@ -49,6 +49,17 @@ class FitVerticesTests(unittest.TestCase):
         sample = np.array([[1.0, 1.0, 100.0]])
         moved = fit_vertices(points, quads, sample, np.array([[0.0, 0.0, 1.0]]), np.ones(1), np.array([4]))
         self.assertLessEqual(np.linalg.norm(moved[4] - points[4]), 0.3 + 1e-9)
+
+    def test_corners_that_fold_a_quad_over_its_neighbour_go_back(self):
+        points, quads = grid(4)
+        after = points.copy()
+        far = [12, 13, 14, 15]
+        after[far, 0] = 1.5  # the far row of quads swung back over the row before it
+        after[far, 2] = 0.2
+        after[0, 2] = 0.01  # a harmless move away from it stays
+        kept = untangled(points, after, quads)
+        np.testing.assert_allclose(kept[far], points[far])
+        self.assertEqual(kept[0, 2], 0.01)
 
 
 class CornerNormalTests(unittest.TestCase):

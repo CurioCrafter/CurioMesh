@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from .checks import FOLD, _edge_faces, _normals
 from .patch import _labels, face_adjacency, quad_quality
+from .topology import _turbo
 
 DOMINANT = 0.2  # a plane direction counts if it is this strong against the strongest: 1 on flat, 2 on a ridge, 3 at a corner
 MOST_MOVE = 0.3  # share of a vertex's shortest side it may move
@@ -30,7 +32,7 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
 
     Solving for the planes together holds a ridge or corner where blending normals would round it off, and weak
     directions are left alone, so a vertex on a flat area only moves along its normal. Any vertex on a quad the move
-    made bad goes back.
+    made bad goes back, and so does any corner of quads the move folded over each other or pushed through each other.
     """
 
     points = np.asarray(points, dtype=np.float64)
@@ -74,6 +76,45 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
         given[ids] = True
         touched = np.flatnonzero(given[quads].any(axis=1))  # only these quads' corners changed
         now[touched] = quad_quality(moved[quads[touched]])
+    return untangled(points, moved, quads)
+
+
+def _crossings(points: np.ndarray, quads: np.ndarray) -> np.ndarray:
+    """Each pair of quads that pass through each other, as one number (lower * count + higher). Empty without the native core."""
+
+    if _turbo is None or not len(quads):
+        return np.zeros(0, dtype=np.int64)
+    pairs = np.asarray(_turbo.face_tree(points, quads).crossing_pairs(), dtype=np.int64).reshape(-1, 2)
+    return pairs.min(axis=1) * len(quads) + pairs.max(axis=1)
+
+
+def untangled(before: np.ndarray, after: np.ndarray, quads: np.ndarray, rounds: int = 6) -> np.ndarray:
+    """`after` with the corners put back of every quad the move folded over its neighbour, bent across a diagonal, or
+    pushed through another quad, where `before` had none of that. Fitting each corner to its own share of the source
+    pulls neighbouring corners different ways on thin walls and in creases, which tangles the faces between them."""
+
+    moved = after.copy()
+    if not len(quads):
+        return moved
+    edge = _edge_faces(quads)
+
+    def folded(at: np.ndarray) -> np.ndarray:
+        normal = _normals(at, quads)[0]
+        return (normal[edge[:, 0]] * normal[edge[:, 1]]).sum(axis=1) < FOLD
+
+    was_folded, was_bent, was_crossing = folded(before), quad_quality(before[quads]) <= 0.0, _crossings(before, quads)
+    for _ in range(rounds):
+        bad = np.zeros(len(quads), dtype=bool)
+        bad[edge[folded(moved) & ~was_folded].ravel()] = True
+        bad |= (quad_quality(moved[quads]) <= 0.0) & ~was_bent
+        crossing = _crossings(moved, quads)
+        new = crossing[~np.isin(crossing, was_crossing)]
+        bad[new // len(quads)] = bad[new % len(quads)] = True
+        ids = np.unique(quads[bad])
+        ids = ids[(moved[ids] != before[ids]).any(axis=1)]
+        if not len(ids):
+            break
+        moved[ids] = before[ids]
     return moved
 
 
