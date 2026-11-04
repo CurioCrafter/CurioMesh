@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.2 - unreleased
+
+### Bad faces
+- **Show Bad Faces** (the red "Bad" button in the segment view, on by default): after Auto Segments, the faces the defect check flags (turned inward, sunk into your mesh, crossing, folded over, bent, flat, duplicated or lying on another face) are painted red, and the summary line gives their count. It reuses the check the run already makes.
+- **A regression test for bad faces** (`tests/test_regression_gate.py`, runs without Blender or the native core): rebuilt parts of a triangle tube, their copies and a frozen result must come out with no faces turned inward and no defects; with the native core it also checks them against the source.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other

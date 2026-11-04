@@ -46,6 +46,8 @@ seg = {
     "whole": None,  # pictures of the whole original
     "batch": None,
     "batch_key": None,
+    "bad": None,  # batch of the faces the defect check flagged
+    "bad_key": None,
     "tris": None,
     "lines": None,
     "lines_key": None,
@@ -64,7 +66,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None)
+    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None)
 
 
 def ready() -> bool:
@@ -154,7 +156,7 @@ def build_table(base: dict) -> None:
             "change": change, "method": method, "tries": [{"method": method, "after": int(counts[index]), "change": change, "build": None}], "cur": 0,
             "name": f"Part {index + 1}", "goal": "REDUCE", "goal_detail": 0.5, "choice": "AUTO", "whole": True, "loose": index, "source": ids, "topology": None,
         })
-    seg.update(base=base["id"], piece=piece, parts=records, ref={}, whole=None, batch_key=None, tris=None, hover=None, src=None, surface=False)
+    seg.update(base=base["id"], piece=piece, parts=records, ref={}, whole=None, batch_key=None, bad_key=None, tris=None, hover=None, src=None, surface=False)
     seg["sel"] = {p for p in seg["sel"] if p < len(records)}
     refresh_list()
 
@@ -518,6 +520,19 @@ def _triangles(guided, res, piece):
     return seg["tris"][:3]
 
 
+BAD_COLOUR = (1.0, 0.05, 0.05, 0.85)
+
+
+def bad_corners(guided, res) -> np.ndarray:
+    """Triangle corner ids of the faces the defect check flagged (res["bad"]), 3 per triangle; empty if none or if the result was edited since."""
+    bad = res.get("bad")
+    if bad is None or len(bad) != len(res["faces"]) or not bad.any():
+        return np.zeros(0, dtype=np.int64)
+    corners = guided._fan(res["faces"]).reshape(-1, 3)
+    owner = np.repeat(np.arange(len(res["faces"])), [len(f) - 2 for f in res["faces"]])
+    return corners[bad[owner]].reshape(-1)
+
+
 def _draw_view() -> None:
     try:
         guided = _g()
@@ -549,6 +564,15 @@ def _draw_view() -> None:
         if seg["batch"] is not None:
             flat.bind()
             seg["batch"].draw(flat)
+        if gs.seg_bad:
+            bad_key = (id(res), matrix)
+            if seg.get("bad_key") != bad_key:
+                corners = bad_corners(guided, res)
+                seg["bad"] = batch_for_shader(flat, "TRIS", {"pos": guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32), "color": np.tile(np.float32(BAD_COLOUR), (len(corners), 1))}) if len(corners) else None
+                seg["bad_key"] = bad_key
+            if seg.get("bad") is not None:
+                flat.bind()
+                seg["bad"].draw(flat)
         segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
         if gs.seg_compare == "OVER":
             lines_key = (source.name, len(source.data.edges), tuple(round(x, 5) for row in source.matrix_world for x in row))
@@ -834,6 +858,7 @@ def draw_parts(layout, context, gs) -> None:
     row.prop(gs, "seg_colors", text="Colors", toggle=True, icon="COLOR")
     row.prop(gs, "seg_heat", text="Heat", toggle=True, icon="SEQ_HISTOGRAM")
     row.prop(gs, "seg_wire", text="Wire", toggle=True, icon="SHADING_WIRE")
+    row.prop(gs, "seg_bad", text="Bad", toggle=True, icon="ERROR")
     col.row(align=True).prop(gs, "seg_compare", expand=True)
     if gs.seg_heat:
         overlay.wrap_label(layout, "Heat: purple looks the same, yellow changed most (bar at the bottom right)", icon="INFO", width=36, limit=2)

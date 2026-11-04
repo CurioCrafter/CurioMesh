@@ -675,6 +675,8 @@ class AutoJob:
         self.notes: list[str] = []
         self.face_piece = np.zeros(0, dtype=np.int64)
         self.flag = np.zeros(0, dtype=bool)
+        self.bad = np.zeros(0, dtype=bool)  # faces the defect check flags in the result, for the red overlay
+        self._defects = None  # (points, faces, checks.Defects) of the last defect check, so the end of the run does not repeat it
         self._kd = None
         self._unmeasured: dict = {}  # piece -> its arrays, as `_piece_arrays` gives them, until the piece is measured
         self._kd_owner = None
@@ -1321,6 +1323,7 @@ class AutoJob:
         if final is not None and self.mirror is None:
             self.output["piece"] = self.face_piece  # the source piece each face came from
             self.output["flag"] = self.flag  # faces still broken after the repair tries
+            self.output["bad"] = self.bad  # faces the defect check flags (red in the segment view)
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
@@ -1901,6 +1904,7 @@ class AutoJob:
         yield
         began = time.perf_counter()
         found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        self._defects = (points, faces, found)
         bad = found.inward | found.folded_over
         if not bad.any():
             return same
@@ -1914,10 +1918,12 @@ class AutoJob:
         left = yield from self._background(lambda: checks.defects(moved, faces, self.co, self.faces, pairs=now.pairs))
         if (left.inward | left.folded_over).sum() >= bad.sum():
             return same
+        kept = list(faces)  # a new list: copies placed as instances no longer match
+        self._defects = (moved, kept, left)
         seen = yield from self._look(moved, faces, *self._view)
         if seen[0] > max(1.1 * self.detail, 1.02 * view[0]):
             return same
-        return moved, list(faces), seen, now, count  # a new list: copies placed as instances no longer match
+        return moved, kept, seen, now, count
 
     def _affordable(self, bad: list[int], start_faces: int) -> list[int]:
         """As many of these parts as can go one size up inside REPAIR_GROWTH, so one big part does not stop the small ones."""
@@ -1979,10 +1985,16 @@ class AutoJob:
             mask = here & (after.broken | after.crossing)
             flag |= mask if mask.any() else here
         self.face_piece, self.flag = piece, flag
+        seen_before = self._defects
+        if seen_before is None or seen_before[0] is not points or seen_before[1] is not faces:  # the repairs changed it, or it was never checked
+            found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        else:
+            found = seen_before[2]
+        self.bad = found.any()
         self.timings["check and repair"] = self.timings.get("check and repair", 0.0) + time.perf_counter() - began
         if left and time.perf_counter() > self._repair_until:
             self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
-        check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left)}
+        check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
         return points, faces, mats, view, check
 
     def _kill_worker(self) -> None:
@@ -2555,6 +2567,8 @@ class AutoJob:
         shade = "" if r.get("shading") is None else f", {r['shading']:.1f}% in smooth shading"
         tidy = "" if r.get("topology") is None else f"Tidiness: {r['topology']:.0f}/100. "
         text = f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape{' once baked' if r.get('baked') else ''}{shade}. {tidy}{r['seconds']:.0f} s{extra}"
+        bad = r.get("check") and r["check"].get("bad")
+        text += f" | {bad:,} bad face{'s' if bad != 1 else ''} (red under Show Bad Faces)" if bad else ""
         return text + (f" | {r['check']['text']}" if r.get("check") else "") + "".join(f" | {n}" for n in r.get("notes", []))
 
 
