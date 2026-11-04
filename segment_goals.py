@@ -791,6 +791,8 @@ def relabel(src_labels, piece, touched, lock=(), store: bool = True) -> str:
     src_links = view.seg["tree"].links if view.seg.get("tree") is not None else S.face_links(job.faces)
     src_labels = S.one_piece_each(src_labels, src_links[0], src_links[1], smallest=1)
     only_source = np.setdiff1d(np.unique(src_labels), np.unique(piece))
+    # A loose piece the result left out has no faces there and no neighbour to join: it was like that before this edit.
+    only_source = np.setdiff1d(only_source, np.setdiff1d(np.unique(view.seg["src"]), np.unique(view.seg["piece"])))
     if len(only_source):
         return "Too small for the result: it has no faces of its own at this density"
     only_result = np.setdiff1d(np.unique(piece), np.unique(src_labels))
