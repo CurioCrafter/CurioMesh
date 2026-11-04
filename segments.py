@@ -292,6 +292,10 @@ class PartJob:
     def stop(self) -> None:
         self._stopped = True
         self.busy = False
+        try:
+            self._search.close()  # a stopped search never resumes, and its thread wait ends here
+        except ValueError:  # stopped from inside its own step
+            pass
 
     def step(self, seconds: float = 0.04) -> None:
         if not self.busy:

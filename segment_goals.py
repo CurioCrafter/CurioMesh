@@ -25,7 +25,7 @@ import bpy
 import numpy as np
 from mathutils import Vector
 
-from . import autoretopo, guides, loops, overlay, region
+from . import autoretopo, guides, loops, overlay, parallel, region
 from . import segments as view
 from .triadq import parts as P
 from .triadq import patch
@@ -296,6 +296,8 @@ def transfer(src: dict, bvh, src_labels, co, faces) -> np.ndarray:
 class FindJob(view.PartJob):
     """Find the segments on a thread (plain NumPy and read-only ray casts), show them, then measure them in slices."""
 
+    is_find = True
+
     def __init__(self, context, fresh: bool = False):
         self.fresh = fresh
         super().__init__(context, [], "AUTO")
@@ -412,6 +414,9 @@ def start_find(context, fresh: bool = False) -> bool:
     guided = _g()
     base = guided.state["auto_base"]
     if base is None or view.mirrored():  # a mirrored or Clean Rows result has no sizes or one-sided seams to work from
+        return False
+    work = guided.state["work"]
+    if not parallel.find_may_start(work and work["runner"]):
         return False
     guided.stop_work()
     runner = FindJob(context, fresh)

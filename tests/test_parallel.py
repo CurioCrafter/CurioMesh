@@ -133,5 +133,14 @@ class MergeTests(unittest.TestCase):
         self.assertIn("error", parallel.measure_in_worker(job, 1, 0.0))
 
 
+class FindMayStartTests(unittest.TestCase):
+    def test_find_replaces_only_a_find(self):
+        busy = lambda find: SimpleNamespace(busy=True, is_find=find)  # noqa: E731
+        self.assertTrue(parallel.find_may_start(None))
+        self.assertTrue(parallel.find_may_start(SimpleNamespace(busy=False)))
+        self.assertTrue(parallel.find_may_start(busy(True)))
+        self.assertFalse(parallel.find_may_start(SimpleNamespace(busy=True)))  # a search or a redo
+
+
 if __name__ == "__main__":
     unittest.main()

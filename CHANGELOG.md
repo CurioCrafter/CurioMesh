@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.2 - unreleased
+
+### Finding the segments
+- **A second start can no longer leave "Finding the segments" stuck.** Moving Segment Detail (or any other start of the
+  find) while a search, redo or remake is running no longer stops that job for a find that only adds labels; a find
+  started over an older find stops it completely, including its waiting loop, before the new one begins.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other
