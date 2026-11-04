@@ -3914,6 +3914,8 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
         elif not done:
             overlay.wrap_label(layout, "Available once the search has finished. Nothing changes until you press Apply.", icon="LOCKED", width=30, limit=3)
         elif not busy:
+            if state["res"].get("issue_spots"):
+                layout.operator("curiomesh.keep_original_bad", icon="LOOP_BACK")
             layout.operator("curiomesh.guided_stop", text="Discard Result", icon="X")
         layout.prop(gs, "apply_mode", text="Write to")
         layout.prop(gs, "bake_detail", text="Bake")

@@ -211,6 +211,7 @@ def draw(layout) -> None:
         return
     for kind, count in sorted(totals.items(), key=lambda kv: -issues.WEIGHTS.get(kv[0], 0)):
         box.label(text=f"{count:,} {KIND_WORDS.get(kind, kind)}")
+    box.operator("curiomesh.keep_original_bad", icon="LOOP_BACK")
     row = box.row(align=True)
     row.operator("curiomesh.issue_step", text="Previous", icon="TRIA_LEFT").step = -1
     row.operator("curiomesh.issue_step", text="Next Issue", icon="TRIA_RIGHT").step = 1

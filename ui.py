@@ -14,7 +14,7 @@ from .operators import (
     TEXTURE_ITEMS,
     TOPOLOGY_ITEMS,
 )
-from . import guided, live, overlay, region
+from . import fix_select, guided, live, overlay, region
 from .batch import CURIOMESH_PG_batch_item
 
 
@@ -643,7 +643,7 @@ PANEL_CLASSES = (
 
 def panel_classes() -> list:
     """Every CurioMesh sidebar panel in display order (Classic Remesh and its folds, then Regions)."""
-    return [cls for cls in (*PANEL_CLASSES, *region.PANEL_CLASSES, *guided.PANEL_CLASSES) if issubclass(cls, bpy.types.Panel)]
+    return [cls for cls in (*PANEL_CLASSES, *region.PANEL_CLASSES, *guided.PANEL_CLASSES, fix_select.CURIOMESH_PT_fix) if issubclass(cls, bpy.types.Panel)]
 
 
 def apply_category(name: str | None = None) -> str:

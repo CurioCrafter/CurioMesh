@@ -16,6 +16,21 @@
   choose) and, after a fix and a new run, say how many of its spots are fixed, still there or new, with the
   totals per kind.
 
+### Fixing bad faces yourself
+- **Keep Original Where Bad** (in the Issues box, and in step 5, Apply, when problem spots were found): every part
+  with a problem spot gets your original faces back, unchanged. The reduced version stays in that part's tries, so
+  Fix Parts switches it back with one click. After any part is redone or put back, the problem spots are looked for
+  again, so the Issues box always matches the result on screen.
+- **Fix Selection** (a new panel in Edit Mode, CurioMesh tab), for any mesh: select a rough area, or nothing for the
+  whole mesh. **Find Bad Faces** checks it (plus a few rings around it, set by Grow) and leaves only the bad faces
+  selected, with a count per kind. Then fix only those: **Clean Up** (duplicate and flat faces), **Flip Inward**
+  (only where that makes a face point out), **Untangle** (corners moved back onto your original), **Relax** (corners
+  smoothed, then put back on the original) or **Patch** (bad faces removed and the hole filled again from its edge).
+  **Fix All** runs them in turn and undoes any move that leaves more bad faces. Each is one Undo step and says how
+  many bad faces there were before and after. The original is the mesh Auto last worked on, or the one you pick.
+- After Apply, a small box links to the GitHub page and to a problem report with your Blender, CurioMesh and system
+  versions already filled in.
+
 ### Fewer bad faces
 - **Redo Rough Spots** (Auto settings, off by default: it adds up to a minute for a few percent fewer bad faces):
   after the final check, the spots it still flags get a small region each, grown a few rings of faces round the

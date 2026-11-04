@@ -22,7 +22,7 @@ from .operators import (
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
-from . import batch, guided, live, overlay, region
+from . import batch, fix_select, guided, live, overlay, region
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
 D = overlay.PREF_DEFAULTS
@@ -271,10 +271,12 @@ def register():
     live.register()
     region.register()
     guided.register()
+    fix_select.register()
     apply_category()
 
 
 def unregister():
+    fix_select.unregister()
     guided.unregister()
     region.unregister()
     live.unregister()

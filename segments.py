@@ -14,6 +14,7 @@ the Method setting and this view agree on the names. Everything here works on `g
 
 from __future__ import annotations
 
+import threading
 import time
 
 import bpy
@@ -22,13 +23,15 @@ from mathutils import Vector
 from mathutils.kdtree import KDTree
 
 from . import autoretopo, overlay
+from .triadq import checks, issues
 from .triadq import parts as P
 from .triadq import segment as S
 
 from .profiles import METHOD_ITEMS
 
 METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
-METHOD_NAMES.update(KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
+ORIGINAL = "ORIGINAL"  # a try that is your own faces, untouched
+METHOD_NAMES.update(ORIGINAL="Original", KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
 KIND_ITEMS = [(k, P.KIND_WORDS[k], "") for k in P.KINDS]
 MAX_TRIES = 6  # results kept per part
 LIST_ROWS = 300  # parts shown in the worst-first list
@@ -260,6 +263,26 @@ def _faces_for(job, method: str, co, polys, kinds):
     return (yield from job._build(co, polys, kinds, method, len(polys) // 2))
 
 
+def _threaded(work):
+    """Generator: `work()` on a worker thread, yielding so Blender stays responsive. Returns its result."""
+    out, failed = [], []
+
+    def run():
+        try:
+            out.append(work())
+        except BaseException as exc:  # raised again on the main thread
+            failed.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True, name="CurioMeshCheck")
+    thread.start()
+    while thread.is_alive():
+        thread.join(0.02)
+        yield
+    if failed:
+        raise failed[0]
+    return out[0]
+
+
 class PartJob:
     """Remake some parts by a chosen method on the main thread's timer, then look at the whole object again."""
 
@@ -391,7 +414,11 @@ class PartJob:
             co, faces, mat, piece = splice(co, faces, mat, piece, {p: self.new_tries[p]["build"] for p in builds})
         loss = yield from self._whole_loss(co, faces)
         count = len(faces)
-        self.output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
+        output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
+        self.stage = "Looking for problem spots"
+        found = yield from _threaded(lambda: checks.defects(np.asarray(co), faces, job.co, job.faces))
+        output["issue_spots"], output["issues"] = issues.analyse(np.asarray(co), faces, {k: getattr(found, k) for k in checks.Defects.KINDS}, piece, {"source_faces": len(job.faces)})
+        self.output = output  # issues are in before the panel can see the new output
         self.output_id += 1
         before = self.base["report"]
         self.report = dict(before, shading=None, shading_soft=None, topology=None, faces=count, quads=sum(1 for f in faces if len(f) == 4), tris=sum(1 for f in faces if len(f) == 3), loss=loss, seconds=time.perf_counter() - self.started)
@@ -453,22 +480,33 @@ def start_redo(context, pieces, method: str) -> bool:
 
 def use_try(context, piece: int, index: int) -> bool:
     """Go back to a result you tried: shown at once, then the whole view is checked again in the background."""
+    return use_tries(context, {piece: index})
+
+
+def use_tries(context, wanted: dict) -> bool:
+    """`use_try` for several parts at once ({piece: try index}): one splice, one preview, one check."""
     guided = _g()
     base = guided.state["auto_base"]
-    record = seg["parts"][piece]
-    if base is None or not 0 <= index < len(record["tries"]) or index == record["cur"]:
+    if base is None:
         return False
-    chosen = record["tries"][index]
+    wanted = {p: i for p, i in wanted.items() if 0 <= i < len(seg["parts"][p]["tries"]) and i != seg["parts"][p]["cur"]}
+    if not wanted:
+        return False
     out = base["out"]
-    if record["tries"][record["cur"]]["build"] is None:
-        record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
-    co, faces, mat, face_piece = splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], {piece: chosen["build"]})
+    builds = {}
+    methods = getattr(base["job"], "methods", None)
+    for piece, index in wanted.items():
+        record = seg["parts"][piece]
+        if record["tries"][record["cur"]]["build"] is None:
+            record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
+        chosen = record["tries"][index]
+        builds[piece] = chosen["build"]
+        record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"], topology=chosen.get("topology"))
+        if methods is not None and chosen["method"] != ORIGINAL:
+            methods[piece] = chosen["method"]
+    co, faces, mat, face_piece = splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], builds)
     count = len(faces)
     new = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": mat, "parts": face_piece, "piece": face_piece}
-    record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"], topology=chosen.get("topology"))
-    methods = getattr(base["job"], "methods", None)
-    if methods is not None:
-        methods[piece] = chosen["method"]
     guided.stop_work()
     base.update(out=new, id=time.perf_counter_ns())
     base.pop("area", None)
@@ -477,12 +515,65 @@ def use_try(context, piece: int, index: int) -> bool:
     guided._build_preview(context, guided.state_source(), new, uvs=False)
     guided.state["draw_key"] = None
     refresh_list()
-    runner = PartJob(context, [], chosen["method"])  # no part to remake: only the whole-object check
+    runner = PartJob(context, [], base["job"].method if base["job"] is not None else "AUTO")  # no part to remake: only the whole-object check
     guided.state["work"] = {"key": base.get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     if not bpy.app.timers.is_registered(guided._auto_slice):
         bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
     overlay.tag_redraw()
     return True
+
+
+def bad_parts() -> list[int]:
+    """Parts holding a problem spot the checks found (inward, folded, crossing...), worst spot's part first."""
+    res = _g().state["res"]
+    if res is None or not seg["parts"]:
+        return []
+    found = []
+    for spot in res.get("issue_spots") or []:
+        p = int(spot.get("part", -1))
+        if 0 <= p < len(seg["parts"]) and p not in found and seg["parts"][p]["method"] != ORIGINAL:
+            found.append(p)
+    return found
+
+
+def keep_original(context, pieces) -> int:
+    """Put your own faces back on these parts, as one more try each (so the reduced result stays one click away). Returns how many changed."""
+    base = _g().state["auto_base"]
+    if base is None or base["job"] is None or mirrored():
+        return 0
+    job, wanted = base["job"], {}
+    for p in pieces:
+        record = seg["parts"][p]
+        index = next((i for i, t in enumerate(record["tries"]) if t["method"] == ORIGINAL), None)
+        if index is None:
+            points, polys, mats = job._piece_arrays(record["source"])
+            faces = [tuple(int(v) for v in polys.flat[a:b]) for a, b in zip(polys.indptr[:-1].tolist(), polys.indptr[1:].tolist())]
+            mats = np.asarray(mats).astype(np.asarray(base["out"]["mat"]).dtype)
+            record["tries"].append({"method": ORIGINAL, "after": len(faces), "change": 0.0, "build": (points, faces, mats)})
+            index = len(record["tries"]) - 1
+        wanted[p] = index
+    return len(wanted) if use_tries(context, wanted) else 0
+
+
+class CURIOMESH_OT_keep_original_bad(bpy.types.Operator):
+    bl_idname = "curiomesh.keep_original_bad"
+    bl_label = "Keep Original Where Bad"
+    bl_description = ("Every part with a problem spot (inward, folded or crossing faces) gets your original faces back, unchanged. "
+                      "The reduced version stays in that part's tries, so Fix Parts can switch it back")
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        ensure()
+        return ready() and not mirrored() and _g().progress_info() is None and bool(bad_parts())
+
+    def execute(self, context):
+        changed = keep_original(context, bad_parts())
+        if not changed:
+            self.report({"WARNING"}, "No part could be put back")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Original faces kept on {changed} part{'s' if changed != 1 else ''}")
+        return {"FINISHED"}
 
 
 # --------------------------------------------------------------------------- drawing
@@ -895,6 +986,7 @@ CLASSES = (
     CURIOMESH_OT_seg_redo,
     CURIOMESH_OT_seg_try,
     CURIOMESH_OT_seg_frame,
+    CURIOMESH_OT_keep_original_bad,
     *segment_goals.CLASSES,
     *issue_panel.CLASSES,
 )
