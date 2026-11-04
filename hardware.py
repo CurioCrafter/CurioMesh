@@ -376,9 +376,17 @@ def _tuples(sizes: np.ndarray, flat: np.ndarray) -> list:
     return out
 
 
-def weld(points: np.ndarray, faces: list) -> tuple[np.ndarray, list]:
-    """Merge vertices at exactly the same place (the chunk borders, which were kept unmoved)."""
-    unique, inverse = np.unique(points, axis=0, return_inverse=True)
+def weld(points: np.ndarray, faces: list, only: np.ndarray | None = None) -> tuple[np.ndarray, list]:
+    """Merge vertices at exactly the same place (the chunk borders, which were kept unmoved). `only`: just these may merge."""
+    if only is None:
+        unique, inverse = np.unique(points, axis=0, return_inverse=True)
+    else:  # the rest keep their own vertex even where another sits on it
+        some = np.flatnonzero(only)
+        _same, first, back = np.unique(points[some], axis=0, return_index=True, return_inverse=True)
+        target = np.arange(len(points))
+        target[some] = some[first[back.reshape(-1)]]
+        kept, inverse = np.unique(target, return_inverse=True)
+        unique = points[kept]
     sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
     flat = np.fromiter((v for f in faces for v in f), dtype=np.int64, count=int(sizes.sum()))
     return unique, _tuples(sizes, inverse.reshape(-1)[flat])

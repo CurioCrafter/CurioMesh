@@ -55,6 +55,16 @@
   times, following what the earlier tries gave, since the small parts that are paired and closed don't shrink
   with it. The try nearest the amount is kept.
 
+### Faster
+- **Use Several Cores also shares out big parts.** A loose part of more than 120,000 faces is cut into regions
+  that the helper Blenders measure at once; before, one big part kept one core busy while the others waited.
+  The region borders are kept as they are while each region is reduced, then joined again, so there are no gaps
+  or T-junctions. Regions skip the wire, fin and cloth rebuilds, whose fit alone can take a minute on a part
+  this big. Results can differ a little from one core, by a few percent in faces.
+
+### Fixed
+- **Reduce To keeps the borders of a part cut into regions** (very big meshes), so it no longer opens gaps there.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other
