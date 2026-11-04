@@ -642,8 +642,14 @@ impl Reducer {
 
     /// (points, triangles) of the piece at `wanted` triangles, or as near as the run could get.
     fn level<'py>(&self, py: Python<'py>, wanted: u32) -> (F64Array<'py>, I64Array<'py>) {
-        let (points, tris) = py.detach(|| self.0.level(wanted));
+        let (points, tris, _) = py.detach(|| self.0.level(wanted));
         (points.into_pyarray(py), tris.into_pyarray(py))
+    }
+
+    /// `level`, and the input triangle each output triangle is.
+    fn level_owned<'py>(&self, py: Python<'py>, wanted: u32) -> (F64Array<'py>, I64Array<'py>, I64Array<'py>) {
+        let (points, tris, owner) = py.detach(|| self.0.level(wanted));
+        (points.into_pyarray(py), tris.into_pyarray(py), owner.into_pyarray(py))
     }
 
     fn smallest(&self) -> u32 {

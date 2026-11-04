@@ -395,12 +395,16 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
     mesh.update()
+    painted = drop is not None and float(drop.max(initial=0.0)) > 0.0
+    out = None if painted else _native_decimate(mesh, points, kinds, ratio, free)
+    if out is not None:
+        bpy.data.meshes.remove(mesh)
+        return out
     obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
     context.scene.collection.objects.link(obj)
     try:
         modifier = obj.modifiers.new("Reduce", "DECIMATE")
         modifier.ratio = ratio
-        painted = drop is not None and float(drop.max(initial=0.0)) > 0.0
         if free is not None or painted:  # Decimate never collapses a vertex outside the group or of weight 0
             group = obj.vertex_groups.new(name="CurioMesh_Density")
             group.add(list(range(len(points))) if free is None else free.tolist(), 1.0, "REPLACE")
@@ -421,6 +425,29 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh)
     return co.reshape(-1, 3), faces, materials
+
+
+def _native_decimate(mesh, points, kinds, ratio, free):
+    """Decimate's job done by the native reducer, which refuses the collapses that fold a face over (Decimate lets a face
+    turn almost 90 degrees per collapse, and many such turns put it inside out). None without the native core."""
+
+    mesh.calc_loop_triangles()
+    count = len(mesh.loop_triangles)
+    wanted = max(int(ratio * count), 1)
+    if wanted >= count or not turbo.available():
+        return None
+    tris, owner = np.empty(count * 3, dtype=np.int32), np.empty(count, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("vertices", tris)
+    mesh.loop_triangles.foreach_get("polygon_index", owner)
+    keep = None
+    if free is not None:
+        keep = np.ones(len(points), dtype=bool)
+        keep[free] = False
+    run = turbo.reducer(points, FlatFaces(np.arange(0, 3 * count + 1, 3), tris.astype(np.int64)), keep, wanted)
+    if run is None or not hasattr(run, "level_owned"):  # an older binary
+        return None
+    co, flat, source = run.level_owned(wanted)
+    return co.reshape(-1, 3), [tuple(t) for t in flat.reshape(-1, 3).tolist()], [kinds[i] for i in owner[source].tolist()]
 
 
 def _triangle_count(polys) -> int:
@@ -790,7 +817,7 @@ class AutoJob:
         return not self.busy
 
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
-        """Generator: this piece reduced to `ratio`. A huge piece goes to the native reducer on a worker thread, anything else to Decimate.
+        """Generator: this piece reduced to `ratio`. A huge piece goes to the native reducer on a worker thread, anything else to `_decimate`.
 
         The first size of a huge piece takes it all the way down, and every other size is then a quick replay. `one_off` doesn't keep that.
         """

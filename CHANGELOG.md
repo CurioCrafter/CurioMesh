@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.2 - unreleased
+
+### Faces that turn inward or fold over
+- **Parts are reduced by CurioMesh's own reducer, not Blender's Decimate**, whenever the native core is
+  there and no density is painted. Decimate lets a face turn almost 90 degrees in each collapse, and many
+  such turns fold it over. The reducer now refuses a collapse that turns a face more than 60 degrees at
+  once, more than 90 degrees from where it faced in the source, or more than 120 degrees from the source
+  surface nearest it (a face slid over to the back of a thin plate), or folds two faces around the new
+  point over each other. So fewer folds are made, and less has to be turned back at the end.
+- **Field Rows no longer stops Auto** on a part with a face that uses one corner twice.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other

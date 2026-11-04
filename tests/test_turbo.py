@@ -689,6 +689,19 @@ class SpeedPathTests(unittest.TestCase):
             counts = T.topology_summary(MeshData(points.reshape(-1, 3), [tuple(t) for t in tris.tolist()]))
             self.assertEqual((counts.non_manifold_edges, counts.boundary_edges, counts.euler_characteristic), (0, 0, 0))  # still a closed torus
 
+    def test_reducer_never_turns_a_face_away_from_the_source(self) -> None:
+        mesh = torus(60, 40, noise=0.3, seed=9)
+        tris = np.asarray(mesh.faces, dtype=np.int64)
+
+        def normals(points, faces):
+            a, b, c = np.moveaxis(points[faces], 1, 0)
+            n = np.cross(b - a, c - a)
+            return n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-300)
+
+        points, out, source = turbo.reducer(mesh.vertices, mesh.faces, None, 300).level_owned(300)
+        turned = (normals(points.reshape(-1, 3), out.reshape(-1, 3)) * normals(np.asarray(mesh.vertices), tris)[source]).sum(axis=1)
+        self.assertGreaterEqual(float(turned.min()), -1e-9)  # at most 90 degrees from the triangle it was in the source
+
     def test_reducer_keeps_locked_vertices(self) -> None:
         mesh = torus(40, 24, noise=0.2, seed=7)
         locked = np.zeros(len(mesh.vertices), dtype=bool)

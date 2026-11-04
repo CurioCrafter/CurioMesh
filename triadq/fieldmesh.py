@@ -977,9 +977,9 @@ def _edge_map(faces) -> dict[tuple[int, int], list[int]]:
 def _join(first, second, x: int, y: int) -> tuple[int, int, int, int] | None:
     """Two triangles, `first` holding x -> y and `second` y -> x, as one quad."""
 
-    a = next(v for v in first if v != x and v != y)
-    b = next(v for v in second if v != x and v != y)
-    return None if a == b else (x, b, y, a)
+    a = next((v for v in first if v != x and v != y), None)  # None on a face with a corner twice
+    b = next((v for v in second if v != x and v != y), None)
+    return None if a is None or b is None or a == b else (x, b, y, a)
 
 
 def _turned(face, x: int, y: int) -> tuple[int, ...]:

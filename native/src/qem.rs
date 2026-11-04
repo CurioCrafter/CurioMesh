@@ -14,6 +14,11 @@ const BORDER_WEIGHT: f64 = 100.0; // Decimate's BOUNDARY_PRESERVE_WEIGHT, per un
 const FLAT_COST: f64 = 1e-12; // where every error is about zero, the shortest edge goes first (Decimate's TOPOLOGY_FALLBACK_EPS)
 const SINGULAR: f64 = 1e-8; // Decimate's OPTIMIZE_EPS
 const MOST_VALENCE: usize = 64; // a collapse past this builds a fan nothing good comes out of
+// Stricter than Decimate, whose test lets a face turn almost 90 degrees per collapse and so, over many collapses, fold over.
+const STEP_TURN: f64 = 0.5; // a face may turn at most 60 degrees in one collapse
+const SOURCE_TURN: f64 = 0.0; // nor ever end up more than 90 degrees from where it faced in the source
+const NEAREST_TURN: f64 = -0.5; // nor face more than 120 degrees from the source nearest its middle (triadq.checks.FACING)
+const FOLD: f64 = -0.866; // two faces around the new point more than 150 degrees apart fold over each other (triadq.checks.FOLD)
 
 type Q = [f64; 10]; // the upper triangle of the symmetric 4x4 matrix, row by row
 
@@ -109,6 +114,8 @@ struct State {
     stamp: Vec<u32>,
     dead: Vec<bool>,
     blocked: Vec<Vec<u32>>, // edges refused because of a flip, tried again when something near them changes
+    facing: Vec<[f64; 3]>,  // each triangle's unit normal in the source (zero for a degenerate one)
+    source: crate::near::FaceTree, // the source's triangles, which say which way is out near a moved one
     heap: BinaryHeap<Entry>,
     scale: f64,
     mark: Vec<u32>, // scratch: neighbour marks by generation
@@ -211,8 +218,14 @@ impl State {
         shared
     }
 
-    /// Would moving these two to `at` turn a triangle over or squash it? (Decimate's degenerate-flip test.)
+    /// Would moving these two to `at` turn a triangle over or squash it (Decimate's degenerate-flip test), turn it far
+    /// in one go, away from the source or the source nearest it, or fold two of the moved triangles over each other?
     fn flips(&self, a: u32, b: u32, at: [f64; 3]) -> bool {
+        let unit = |n: [f64; 3]| {
+            let l = dot(n, n).sqrt();
+            if l > 0.0 { [n[0] / l, n[1] / l, n[2] / l] } else { [0.0; 3] }
+        };
+        let mut fan: Vec<([u32; 2], [f64; 3], [f64; 3])> = Vec::new(); // (far corners, old normal, new normal)
         for (v, other) in [(a, b), (b, a)] {
             let old = self.p[v as usize];
             for &t in &self.around[v as usize] {
@@ -222,15 +235,32 @@ impl State {
                 }
                 let k = tri.iter().position(|&x| x == v).unwrap();
                 let (p, n) = (self.p[tri[(k + 2) % 3] as usize], self.p[tri[(k + 1) % 3] as usize]);
-                let side = sub(n, p);
+                let side = sub(p, n); // so these are the triangle's own normals, which way it faces
                 let before = cross(side, sub(old, p));
                 let after = cross(side, sub(at, p));
-                if dot(before, after) <= (dot(before, before) + dot(after, after)) * 0.01 {
+                let both = dot(before, before) * dot(after, after);
+                if dot(before, after) <= (dot(before, before) + dot(after, after)) * 0.01 || dot(before, after) < STEP_TURN * both.sqrt() {
                     return true;
                 }
+                let after = unit(after);
+                if dot(after, self.facing[t as usize]) < SOURCE_TURN && self.facing[t as usize] != [0.0; 3] {
+                    return true;
+                }
+                // Slid over to another side of the source (a thin plate's back, a wall behind): inside out there.
+                let middle = [(at[0] + p[0] + n[0]) / 3.0, (at[1] + p[1] + n[1]) / 3.0, (at[2] + p[2] + n[2]) / 3.0];
+                if let Some((_, f, _)) = self.source.nearest(middle) {
+                    if dot(after, self.facing[f as usize]) < NEAREST_TURN {
+                        return true;
+                    }
+                }
+                fan.push(([tri[(k + 1) % 3], tri[(k + 2) % 3]], unit(before), after));
             }
         }
-        false
+        // Around the new point, triangles next to each other share a far corner. A pair already that far apart (a thin
+        // blade's edge) may stay so.
+        fan.iter().enumerate().any(|(i, x)| {
+            fan[i + 1..].iter().any(|y| (x.0[0] == y.0[1] || x.0[1] == y.0[0]) && dot(x.2, y.2) < FOLD && dot(x.1, y.1) >= FOLD)
+        })
     }
 
     fn apply(&mut self, a: u32, b: u32, at: [f64; 3], collapses: &mut Vec<Collapse>, alive: &mut u32, shared: usize) {
@@ -322,6 +352,12 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
     let span = dot(sub(high, low), sub(high, low)).sqrt().max(1e-300);
     // Worked out in a box of size one, so the constants mean the same on a bolt and on a cliff.
     let p: Vec<[f64; 3]> = points.chunks_exact(3).map(|c| [(c[0] - low[0]) / span, (c[1] - low[1]) / span, (c[2] - low[2]) / span]).collect();
+    let source = {
+        let flat: Vec<f64> = p.iter().flatten().copied().collect();
+        let indptr: Vec<i64> = (0..=nf as i64).map(|f| 3 * f).collect();
+        let corners: Vec<i64> = tris.iter().map(|&v| v as i64).collect();
+        crate::near::FaceTree::new(&flat, &indptr, &corners)
+    };
     let mut s = State {
         p,
         q: vec![[0.0; 10]; nv],
@@ -332,11 +368,22 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         stamp: vec![0; nv],
         dead: vec![false; nv],
         blocked: vec![Vec::new(); nv],
+        facing: Vec::new(),
+        source,
         heap: BinaryHeap::new(),
         scale: 1.0,
         mark: vec![0; nv],
         generation: 0,
     };
+    s.facing = s
+        .tris
+        .iter()
+        .map(|t| {
+            let n = cross(sub(s.p[t[1] as usize], s.p[t[0] as usize]), sub(s.p[t[2] as usize], s.p[t[0] as usize]));
+            let l = dot(n, n).sqrt();
+            if l > 0.0 { [n[0] / l, n[1] / l, n[2] / l] } else { [0.0; 3] }
+        })
+        .collect();
     let mut edges: Vec<(u32, u32, u32)> = Vec::with_capacity(tris.len());
     for (t, tri) in s.tris.iter().enumerate() {
         let (pa, pb, pc) = (s.p[tri[0] as usize], s.p[tri[1] as usize], s.p[tri[2] as usize]);
@@ -456,8 +503,8 @@ impl Run {
         self.collapses.last().map_or(self.faces, |c| c.faces_left)
     }
 
-    /// The first collapses that bring the piece down to `wanted` triangles: (points, triangles, the vertex each came from).
-    pub fn level(&self, wanted: u32) -> (Vec<f64>, Vec<i64>) {
+    /// The first collapses that bring the piece down to `wanted` triangles: (points, triangles, the source triangle each is).
+    pub fn level(&self, wanted: u32) -> (Vec<f64>, Vec<i64>, Vec<i64>) {
         let nv = self.points.len() / 3;
         let mut parent: Vec<u32> = (0..nv as u32).collect();
         let mut points = self.points.clone();
@@ -481,10 +528,12 @@ impl Run {
         }
         let mut number = vec![-1i64; nv];
         let mut flat = Vec::with_capacity(wanted as usize * 3 + 3);
-        for tri in self.tris.chunks_exact(3) {
+        let mut owner = Vec::with_capacity(wanted as usize + 1);
+        for (t, tri) in self.tris.chunks_exact(3).enumerate() {
             let (x, y, z) = (root(&mut parent, tri[0]), root(&mut parent, tri[1]), root(&mut parent, tri[2]));
             if x != y && y != z && x != z {
                 flat.extend_from_slice(&[x as i64, y as i64, z as i64]);
+                owner.push(t as i64);
                 number[x as usize] = 0;
                 number[y as usize] = 0;
                 number[z as usize] = 0;
@@ -502,6 +551,6 @@ impl Run {
         for v in &mut flat {
             *v = number[*v as usize];
         }
-        (out, flat)
+        (out, flat, owner)
     }
 }
