@@ -78,6 +78,22 @@ class UntangleTests(unittest.TestCase):
         self.assertTrue((checks._normals(fixed, checks.corner_table(faces))[0][:, 2] > 0.99).all())
         self.assertTrue((np.delete(fixed, 12, axis=0) == np.delete(co, 12, axis=0)).all())  # nothing else moved
 
+    def test_corners_sharing_faces_both_go_back(self):
+        co = np.array([(i, j, 0.0) for j in range(6) for i in range(6)])
+        faces = [(j * 6 + i, j * 6 + i + 1, (j + 1) * 6 + i + 1, (j + 1) * 6 + i) for j in range(5) for i in range(5)]
+        co[14] = (2.6, 2.4, 0.0)  # two neighbouring corners dragged: they share faces, so they are judged in different groups
+        co[15] = (1.5, 2.3, 0.0)
+
+        def near(_piece, where):
+            where = np.asarray(where, dtype=float).reshape(-1, 3)
+            return where * (1, 1, 0), np.tile((0.0, 0.0, 1.0), (len(where), 1))
+
+        bad = checks._normals(co, checks.corner_table(faces))[0][:, 2] < 0
+        self.assertTrue(bad.any())
+        fixed, moved = repair.untangle(co, faces, np.zeros(len(faces), int), bad, near)
+        self.assertGreaterEqual(moved, 1)
+        self.assertTrue((checks._normals(fixed, checks.corner_table(faces))[0][:, 2] > 0.5).all())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,11 @@
 - **Copies land where they fit best.** A part that is almost symmetric across its own plane also fits turned the
   wrong way onto its mirror image, within the copy tolerance, and the first placement found was taken: such a copy
   sat a little off and some of its faces turned inward. Placements are now compared and the closest is kept.
+- **Turning folded faces back now finishes on big scans.** The step that moves the corners of inward and folded-over
+  faces back used to stop at a 15 second limit on very big rough scans, so many spots were never visited and two runs
+  could differ. Corners that share no face are now judged together, which makes the step 10 to 30 times faster (a
+  few seconds on a 200,000-face scan). It always does its full rounds, so the same model gives the same result; a
+  60 second limit stays as a safety net.
 
 ## 0.9.2 - 2026-11-03
 
