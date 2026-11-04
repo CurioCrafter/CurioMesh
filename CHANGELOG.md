@@ -14,8 +14,10 @@
 - **Edit segments by hand.** **Split in Two** cuts the selected segment along its own natural border, no line needed.
   **Grow** and **Shrink** move a segment's border with a brush (Ctrl paints the other way). **Lock** keeps a segment
   face for face when the size settings change; segments you merge, split, grow, shrink or paint are locked for you.
-  In Review Segments, M merges, K splits in two, L locks, G and S grow and shrink. Hand edits can be undone with
-  Ctrl+Z, and the next Auto run uses the edited segments.
+  In Review Segments, M merges, K splits in two, L locks, G and S grow and shrink. **Undo Edit** (Ctrl+Z in
+  Review Segments) goes back through the last 20 hand edits, and the next Auto run uses the edited segments.
+- **Redo and Use remakes run to the end again.** A part redo stopped after its first step and sat at "Remaking..."
+  for good.
 
 ### Finding what is still wrong
 - **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is
