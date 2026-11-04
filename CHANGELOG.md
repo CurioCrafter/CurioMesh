@@ -30,6 +30,22 @@
   point over each other. So fewer folds are made, and less has to be turned back at the end.
 - **Field Rows no longer stops Auto** on a part with a face that uses one corner twice.
 
+### Finding the segments
+- **A second start can no longer leave "Finding the segments" stuck.** Moving Segment Detail (or any other start of the
+  find) while a search, redo or remake is running no longer stops that job for a find that only adds labels; a find
+  started over an older find stops it completely, including its waiting loop, before the new one begins.
+
+### Graphics card
+- **The summary says when the card drew pictures** ("Camera pictures of the big parts drawn on the graphics card"),
+  not only when it failed.
+
+### Repeatable results
+- Two runs of the same model and settings can differ a little (Old Military Compressor, Game Asset: 16,149 faces
+  both times but different vertex positions, 251 and 248 self-intersections). The cause is the clock: the repair
+  (30 s), untangle (15 s), redraw (240 s) and row (60 s) time limits stop at another point on a busier computer. With
+  those limits off, two runs gave identical meshes, with 14 and 12 helpers and the graphics card on. Setting the
+  environment variable `CURIOMESH_NO_TIME_LIMITS=1` runs every step to its end for a result that repeats exactly.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other

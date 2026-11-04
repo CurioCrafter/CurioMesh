@@ -287,3 +287,9 @@ def worker_main(argv: list[str]) -> None:
         if "error" in result:
             print(result["error"], flush=True)
         _write(folder / f"{name}.pkl", result)
+
+
+def find_may_start(runner) -> bool:
+    """Finding the segments may start when nothing runs or only an older find does (that one is stopped first).
+    It never takes over a running search, redo or Use remake: they would be stopped for a job that only adds labels."""
+    return runner is None or not runner.busy or getattr(runner, "is_find", False)
