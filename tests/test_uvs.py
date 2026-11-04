@@ -32,6 +32,13 @@ class UvHelpersTest(unittest.TestCase):
             shared = {v for p, k in zip(out_polys, out_kinds) if k == "a" for v in p} & {v for p, k in zip(out_polys, out_kinds) if k == "b" for v in p}
             self.assertEqual(shared, on_border)
 
+    def test_fixed_vertex_on_a_border_stays(self):
+        # A region's border vertex sits on the straight UV border: it must survive, or the neighbour region gets a gap.
+        points = np.array([[x, y, 0.0] for y in range(3) for x in range(5)], dtype=float)
+        polys = [(y * 5 + x, y * 5 + x + 1, (y + 1) * 5 + x + 1, (y + 1) * 5 + x) for y in range(2) for x in range(4)]
+        out_points, _polys, _kinds, free, _used = simplify_borders(points, polys, ["a"] * 4 + ["b"] * 4, 0.01, fixed=[6])
+        self.assertIn([1.0, 1.0, 0.0], out_points.tolist())
+        self.assertEqual(len(set(range(len(out_points))) - set(free)), 3)
 
     def test_overlap(self):
         left = [[0.0, 0.0], [0.5, 0.0], [0.0, 1.0]]

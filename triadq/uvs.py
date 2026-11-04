@@ -39,8 +39,9 @@ def _straighten(points: np.ndarray, chain: list[int], tolerance: float) -> list[
     return sorted(keep)
 
 
-def simplify_borders(points: np.ndarray, polys, kinds, tolerance: float):
+def simplify_borders(points: np.ndarray, polys, kinds, tolerance: float, fixed=()):
     """Straighten the borders between kinds of face, along themselves, so each side still shares the same vertices.
+    Vertices in `fixed` (a region's border) are never merged away.
 
     Returns (points, polys, kinds, free, used): free lists the vertices not on a border, which are the ones allowed to
     move; used lists the input vertices that are left, in their new order.
@@ -59,7 +60,7 @@ def simplify_borders(points: np.ndarray, polys, kinds, tolerance: float):
                 links.setdefault(w, set()).add(v)
             if seen.setdefault(v, kind) != kind:
                 corner.add(v)
-    stops = {v for v in corner if len(links.get(v, ())) != 2} | {v for v, near in links.items() if len(near) != 2}
+    stops = {v for v in corner if len(links.get(v, ())) != 2} | {v for v, near in links.items() if len(near) != 2} | (set(fixed) & set(links))
     target = np.arange(len(points))
     kept = set(stops)
     done: set[int] = set()

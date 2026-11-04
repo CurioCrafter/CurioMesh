@@ -394,7 +394,7 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
         triangles = sum(len(p) - 2 for p in polys)
         wanted = max(ratio * triangles, 1.0)
         triangle = float(_face_areas(points, polys).sum()) / wanted
-        points, polys, kinds, unbound, used = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle))
+        points, polys, kinds, unbound, used = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle), () if keep is None else np.flatnonzero(keep).tolist())
         drop = None if drop is None else drop[used]
         unbound = np.asarray(unbound, dtype=np.int64)
         free = unbound if keep is None else np.intersect1d(unbound, np.flatnonzero(~keep[used]))
