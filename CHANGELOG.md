@@ -32,6 +32,12 @@
   each other or passed through each other. Corners of a quad the fit folded, bent or pushed through another quad now
   stay where they were. On big rough scans this leaves far fewer crossings for the final check to untangle.
 
+- **Turning folded faces back now finishes on big scans.** The step that moves the corners of inward and folded-over
+  faces back used to stop at a 15 second limit on very big rough scans, so many spots were never visited and two runs
+  could differ. Corners that share no face are now judged together, which makes the step 10 to 30 times faster (a
+  few seconds on a 200,000-face scan) with exactly the result the old step reached when it had the time. It always
+  does its full rounds, so the same model gives the same result; a 60 second limit stays as a safety net.
+
 ## 0.9.2 - 2026-11-03
 
 ### Faces that turn inward or fold over
