@@ -217,7 +217,7 @@ def bake_detail(
             if margin <= 2 or _uv_fill(mesh) >= MIN_UV_FILL:
                 break
             # Thousands of small islands: the gaps between them would eat the texture, and every face gets a few texels.
-            mesh.uv_layers.remove(mesh.uv_layers[BAKE_LAYER])
+            mesh.uv_layers.remove(mesh.uv_layers.active)  # the one just made: on a second bake it is named BAKE_LAYER.001
             margin //= 2
     uv_layer = mesh.uv_layers.active.name
     keep_render = next((layer.name for layer in mesh.uv_layers if layer.active_render), uv_layer)
