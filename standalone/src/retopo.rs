@@ -23,6 +23,7 @@ pub struct Settings {
     pub reduce_to: Option<usize>,  // a face count instead
     pub pixels: usize,             // a side of one picture (the add-on's Normal setting: 192)
     pub gpu: bool,
+    pub rows: bool,                // offer even rows of quads to smooth parts
 }
 
 pub struct Outcome {
@@ -235,31 +236,55 @@ fn candidates(points: &[f64], tris: &[i64], material: &[i64]) -> (Vec<i64>, Vec<
 
 /// `flatquad.pair_and_close` for triangles: repair, pair into quads, then close every piece to all quads.
 pub fn pair_and_close(points: &[f64], tris: &[i64], material: &[i64], materials: &[String]) -> Result<Mesh, String> {
-    let nf = tris.len() / 3;
+    let indptr: Vec<i64> = (0..=(tris.len() / 3) as i64).map(|f| f * 3).collect();
+    close_polygons(points, &indptr, tris, material, materials)
+}
+
+/// The same for polygons, with `keep_quads`: quads stay whole, larger faces are cut into triangles from their first
+/// corner, and only the triangles are paired before every piece is closed to all quads.
+pub fn close_polygons(points: &[f64], indptr: &[i64], flat: &[i64], material: &[i64], materials: &[String]) -> Result<Mesh, String> {
     let span = 2.0 * view_of(points, 1, false).half / 0.55 * 3f64.sqrt();
-    let source = close::Mesh { vertices: points.to_vec(), indptr: (0..=nf as i64).map(|f| f * 3).collect(), flat: tris.to_vec(), origin: material.to_vec() };
+    let source = close::Mesh { vertices: points.to_vec(), indptr: indptr.to_vec(), flat: flat.to_vec(), origin: material.to_vec() };
     let (fixed, _added) = close::make_closable(&source, span);
     let count = fixed.indptr.len() - 1;
     if count == 0 {
         return Ok(Mesh { indptr: vec![0], materials: materials.to_vec(), ..Default::default() });
     }
-    let (fa, fb, quads, scores) = candidates(&fixed.vertices, &fixed.flat, &fixed.origin);
-    let graph = pairing::allowed(count, &fa, &fb, &scores, None);
-    let paired = pairing::pair(&graph, &quads, 0, &near::Watch::now()).ok_or("pairing was stopped")?;
-    let mut indptr = vec![0i64];
-    let mut flat = Vec::with_capacity(fixed.flat.len());
-    for q in paired.quads.chunks_exact(4) {
-        flat.extend_from_slice(q);
-        indptr.push(flat.len() as i64);
+    let (mut kept_flat, mut kept_tag) = (Vec::new(), Vec::new());
+    let (mut tris, mut tri_tag) = (Vec::new(), Vec::new());
+    for f in 0..count {
+        let face = &fixed.flat[fixed.indptr[f] as usize..fixed.indptr[f + 1] as usize];
+        if face.len() == 4 {
+            kept_flat.extend_from_slice(face);
+            kept_tag.push(fixed.origin[f]);
+        } else {
+            for k in 1..face.len() - 1 {
+                tris.extend_from_slice(&[face[0], face[k], face[k + 1]]);
+                tri_tag.push(fixed.origin[f]);
+            }
+        }
     }
-    for &t in &paired.tris {
-        flat.extend_from_slice(&fixed.flat[t as usize * 3..t as usize * 3 + 3]);
-        indptr.push(flat.len() as i64);
+    let (mut out_indptr, mut out_flat, mut out_tag) = (vec![0i64], kept_flat, kept_tag);
+    for _ in 0..out_tag.len() {
+        out_indptr.push(out_indptr.last().unwrap() + 4);
     }
-    let paired_material: Vec<i64> = paired.owner.iter().map(|&f| fixed.origin[f as usize]).collect();
-    let (closed, _counts) = close::close_pieces(&topo::Faces { indptr: &indptr, flat: &flat }, &fixed.vertices, MAX_QUAD_WARP_DEGREES.to_radians().cos())?;
+    if !tris.is_empty() {
+        let (fa, fb, quads, scores) = candidates(&fixed.vertices, &tris, &tri_tag);
+        let graph = pairing::allowed(tri_tag.len(), &fa, &fb, &scores, None);
+        let paired = pairing::pair(&graph, &quads, 0, &near::Watch::now()).ok_or("pairing was stopped")?;
+        for q in paired.quads.chunks_exact(4) {
+            out_flat.extend_from_slice(q);
+            out_indptr.push(out_flat.len() as i64);
+        }
+        for &t in &paired.tris {
+            out_flat.extend_from_slice(&tris[t as usize * 3..t as usize * 3 + 3]);
+            out_indptr.push(out_flat.len() as i64);
+        }
+        out_tag.extend(paired.owner.iter().map(|&f| tri_tag[f as usize]));
+    }
+    let (closed, _counts) = close::close_pieces(&topo::Faces { indptr: &out_indptr, flat: &out_flat }, &fixed.vertices, MAX_QUAD_WARP_DEGREES.to_radians().cos())?;
     Ok(Mesh {
-        material: closed.origin.iter().map(|&f| paired_material[f as usize]).collect(),
+        material: closed.origin.iter().map(|&f| out_tag[f as usize]).collect(),
         points: closed.vertices,
         indptr: closed.indptr,
         flat: closed.flat,
@@ -273,6 +298,10 @@ pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> 
     let started = Instant::now();
     let (tris, owner) = triangles(source);
     let tri_material: Vec<i64> = owner.iter().map(|&f| source.material[f as usize]).collect();
+    let tri_piece = pieces(&tris, source.points.len() / 3);
+    // Faces carry (material, part) packed in one tag through pairing and closing; parts never touch, so pairing,
+    // which won't join faces with different tags, is unchanged.
+    let tags: Vec<i64> = tri_material.iter().zip(&tri_piece).map(|(&m, &p)| pack(m, p)).collect();
     let view = view_of(&source.points, settings.pixels, settings.gpu);
     let reference = pictures(&source.points, &tris, &view);
     log(&format!("Reducing {} triangles", tris.len() / 3));
@@ -283,7 +312,7 @@ pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> 
     let mut looks = 0;
     let mut make = |wanted: usize| -> Result<(Mesh, f64), String> {
         let (points, level_tris, from) = run.level(wanted as u32);
-        let material: Vec<i64> = from.iter().map(|&t| tri_material[t as usize]).collect();
+        let material: Vec<i64> = from.iter().map(|&t| tags[t as usize]).collect();
         let out = pair_and_close(&points, &level_tris, &material, &source.materials)?;
         let seen = pictures(&out.points, &triangles(&out).0, &view);
         looks += 1;
@@ -334,10 +363,22 @@ pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> 
             None => make(high as usize)?,
         }
     };
-    // Even the quads out. A step stays if the view changes at most TURN_LOSS points more, and within 110% of the detail
-    // asked for unless it was already over (the add-on's rule for spinning edges at poles).
     let (mut mesh, mut change) = (mesh, change);
     let source_tree = near::FaceTree::new(&source.points, &source.indptr, &source.flat);
+    // Rows and evening out together may add at most TURN_LOSS points, and stay within 110% of the detail asked for
+    // unless the search result was already over (the add-on's rule for spinning edges at poles).
+    let limit = if settings.reduce_to.is_some() { change + TURN_LOSS } else { (change + TURN_LOSS).min(change.max(1.1 * settings.detail)) };
+    if settings.rows {
+        let mut look = |m: &Mesh| {
+            looks += 1;
+            loss(&reference, &pictures(&m.points, &triangles(m).0, &view), &view)
+        };
+        let swapped = rows_where_they_hold(&mut mesh, &mut change, limit, source, &tris, &tri_piece, &tags, &source_tree, &mut look, &mut log);
+        if swapped > 0 {
+            log(&format!("  Rows of quads on {swapped} smooth part(s): {change:.2}% of the view changed"));
+        }
+    }
+    // Even the quads out.
     let steps: [(&str, &dyn Fn(&mut Mesh) -> usize); 2] = [("Spinning edges at poles", &|m| crate::layout::spin_edges(m)), ("Relaxing the quads on the source", &|m| crate::layout::relax(m, &source_tree))];
     for (name, step) in steps {
         let mut tried = mesh.clone();
@@ -346,14 +387,147 @@ pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> 
         }
         let after = loss(&reference, &pictures(&tried.points, &triangles(&tried).0, &view), &view);
         looks += 1;
-        let limit = if settings.reduce_to.is_some() { change + TURN_LOSS } else { (change + TURN_LOSS).min(change.max(1.1 * settings.detail)) };
         let keep = after <= limit;
         log(&format!("  {name}: {:.2}% of the view changed, {}", after, if keep { "kept" } else { "not kept" }));
         if keep {
             (mesh, change) = (tried, after);
         }
     }
-    Ok(Outcome { mesh, loss: change, looks, seconds: started.elapsed().as_secs_f64() })
+    mesh.material = mesh.material.iter().map(|&t| unpack(t).0).collect();
+    Ok(Outcome { mesh: crate::io::compact(&mesh), loss: change, looks, seconds: started.elapsed().as_secs_f64() })
+}
+
+/// Part number per triangle: triangles sharing a corner are one part.
+fn pieces(tris: &[i64], points: usize) -> Vec<i64> {
+    let mut sets = topo::Dsu::new(points);
+    for t in tris.chunks_exact(3) {
+        sets.union(t[0] as u32, t[1] as u32);
+        sets.union(t[1] as u32, t[2] as u32);
+    }
+    let mut number = HashMap::new();
+    tris.chunks_exact(3).map(|t| {
+        let root = sets.find(t[0] as u32);
+        let next = number.len() as i64;
+        *number.entry(root).or_insert(next)
+    }).collect()
+}
+
+const PART_BITS: i64 = 1 << 32;
+fn pack(material: i64, part: i64) -> i64 {
+    (material + 1) * PART_BITS + part
+}
+fn unpack(tag: i64) -> (i64, i64) {
+    (tag / PART_BITS - 1, tag % PART_BITS)
+}
+
+const ROWS_SMALLEST: usize = 1000; // source triangles: a smaller part isn't worth a grid (the add-on's FIELD_SMALLEST)
+const ROWS_FEWEST: usize = 24; // faces a part must have in the result
+const ROWS_SECONDS: f64 = 60.0; // time spent offering rows per run (the add-on's FIELD_SECONDS)
+
+/// Offer each big part even rows of quads (`rows.rs`) at about the faces it has now, biggest first, and keep a part's
+/// rows when the whole view stays within `limit`. Returns how many parts took rows.
+/// ponytail: one tag (material) per part's rows; a part with several materials gets its first one.
+#[allow(clippy::too_many_arguments)]
+fn rows_where_they_hold(mesh: &mut Mesh, change: &mut f64, limit: f64, source: &Mesh, tris: &[i64], tri_piece: &[i64], tags: &[i64], tree: &near::FaceTree, look: &mut dyn FnMut(&Mesh) -> f64, log: &mut dyn FnMut(&str)) -> usize {
+    let started = Instant::now();
+    let parts = tri_piece.iter().copied().max().map_or(0, |m| m as usize + 1);
+    let mut source_tris = vec![Vec::new(); parts];
+    for (t, &p) in tri_piece.iter().enumerate() {
+        source_tris[p as usize].push(t);
+    }
+    let mut order: Vec<usize> = (0..parts).filter(|&p| source_tris[p].len() >= ROWS_SMALLEST).collect();
+    order.sort_by_key(|&p| std::cmp::Reverse(source_tris[p].len()));
+    let mut swapped = 0;
+    for p in order {
+        if started.elapsed().as_secs_f64() > ROWS_SECONDS {
+            log("  Rows: out of time, the other parts stay as they are");
+            break;
+        }
+        let mine: Vec<usize> = (0..mesh.faces()).filter(|&f| unpack(mesh.material[f]).1 == p as i64).collect();
+        if mine.len() < ROWS_FEWEST {
+            continue;
+        }
+        // The part's own copy of the source.
+        let mut local = HashMap::new();
+        let (mut points, mut part_tris) = (Vec::new(), Vec::new());
+        let mut area = 0.0;
+        for &t in &source_tris[p] {
+            let c = &tris[t * 3..t * 3 + 3];
+            let corner = |v: i64| [source.points[v as usize * 3], source.points[v as usize * 3 + 1], source.points[v as usize * 3 + 2]];
+            area += 0.5 * norm(cross(sub(corner(c[1]), corner(c[0])), sub(corner(c[2]), corner(c[0]))));
+            for &v in c {
+                let id = *local.entry(v).or_insert_with(|| {
+                    points.extend_from_slice(&source.points[v as usize * 3..v as usize * 3 + 3]);
+                    (points.len() / 3 - 1) as i64
+                });
+                part_tris.push(id);
+            }
+        }
+        let cell = (area / mine.len() as f64).sqrt();
+        let Some((mut grid_points, grid_indptr, grid_flat)) = crate::rows::field_quads(&points, &part_tris, cell, p as u64) else { continue };
+        if grid_flat.is_empty() {
+            continue;
+        }
+        let (_, found) = near::nearest_faces(tree, &grid_points, &std::sync::atomic::AtomicBool::new(false));
+        for (k, hit) in found.iter().enumerate() {
+            grid_points[k * 3..k * 3 + 3].copy_from_slice(&hit.0);
+        }
+        let tag = tags[source_tris[p][0]];
+        let quads = Mesh { material: vec![tag; grid_indptr.len() - 1], points: grid_points, indptr: grid_indptr, flat: grid_flat, materials: source.materials.clone() };
+        // Rows must not bring in faces the checks call bad: compare with the part as it is.
+        let part_now = sub_mesh(mesh, &mine);
+        let rows_check = crate::issues::check(&quads);
+        let (bad_now, bad_rows) = (crate::issues::check(&part_now).bad, rows_check.bad);
+        if bad_rows > bad_now {
+            log(&format!("  Rows on part {p}: {bad_rows} bad faces where it has {bad_now}, not kept"));
+            continue;
+        }
+        let tried = replace_faces(mesh, &mine, &quads);
+        let after = look(&tried);
+        let keep = after <= limit;
+        log(&format!("  Rows on part {} ({} faces -> {}): {:.2}% of the view changed, {}", p, mine.len(), quads.faces(), after, if keep { "kept" } else { "not kept" }));
+        if keep {
+            *mesh = tried;
+            *change = after;
+            swapped += 1;
+        }
+    }
+    swapped
+}
+
+/// Just these faces of `mesh`, with all its points.
+fn sub_mesh(mesh: &Mesh, faces: &[usize]) -> Mesh {
+    let mut out = Mesh { points: mesh.points.clone(), indptr: vec![0], materials: mesh.materials.clone(), ..Default::default() };
+    for &f in faces {
+        out.flat.extend_from_slice(mesh.face(f));
+        out.indptr.push(out.flat.len() as i64);
+        out.material.push(mesh.material[f]);
+    }
+    out
+}
+
+/// `mesh` without the faces `gone`, with `added`'s faces (and points) appended.
+fn replace_faces(mesh: &Mesh, gone: &[usize], added: &Mesh) -> Mesh {
+    let mut drop = vec![false; mesh.faces()];
+    for &f in gone {
+        drop[f] = true;
+    }
+    let mut out = Mesh { points: mesh.points.clone(), indptr: vec![0], materials: mesh.materials.clone(), ..Default::default() };
+    for f in 0..mesh.faces() {
+        if !drop[f] {
+            out.flat.extend_from_slice(mesh.face(f));
+            out.indptr.push(out.flat.len() as i64);
+            out.material.push(mesh.material[f]);
+        }
+    }
+    let offset = (out.points.len() / 3) as i64;
+    out.points.extend_from_slice(&added.points);
+    for f in 0..added.faces() {
+        out.flat.extend(added.face(f).iter().map(|&v| v + offset));
+        out.indptr.push(out.flat.len() as i64);
+        out.material.push(added.material[f]);
+    }
+    out
 }
 
 /// The view change of `result` against `source`, with the same camera as `retopo`.
@@ -407,7 +581,7 @@ mod tests {
     #[test]
     fn a_box_comes_out_all_quads_and_unchanged_in_view() {
         let source = cube();
-        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false };
+        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true };
         let out = retopo(&source, &settings, |_| {}).unwrap();
         assert!(out.mesh.faces() > 0);
         assert!((0..out.mesh.faces()).all(|f| out.mesh.face(f).len() == 4), "all quads");

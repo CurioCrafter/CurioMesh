@@ -10,7 +10,7 @@ use std::process::ExitCode;
 const HELP: &str = "CurioMesh standalone: automatic quad retopology that keeps how the model looks, and a check for any retopology.
 
 Usage:
-  curiomesh IN -o OUT [--detail PERCENT] [--use game-asset|scan] [--reduce-to FACES] [--report FILE.json] [--cpu]
+  curiomesh IN -o OUT [--detail PERCENT] [--use game-asset|scan] [--reduce-to FACES] [--report FILE.json] [--no-rows] [--cpu]
   curiomesh measure SOURCE RESULT [--max-loss PERCENT] [--max-bad FACES] [--report FILE.json] [--cpu]
 
   IN, SOURCE, RESULT   .obj, .gltf, .glb or .ply.   OUT: .obj
@@ -19,6 +19,7 @@ Usage:
   --reduce-to N   aim for about N faces instead of a view change
   --report F      write the numbers and the issue spots as JSON
   --pixels N      camera picture size per side (default 192, as the add-on)
+  --no-rows       keep every part as reduced: don't offer even rows of quads to smooth parts
   --cpu           make the camera pictures on the processor, not the graphics card
   measure         compare RESULT (from CurioMesh or any other tool) with SOURCE: view change, bad faces, issue spots.
                   With --max-loss / --max-bad it exits with code 1 when RESULT is over, for build pipelines.
@@ -32,12 +33,13 @@ struct Args {
     report: Option<PathBuf>,
     pixels: usize,
     gpu: bool,
+    rows: bool,
     max_loss: Option<f64>,
     max_bad: Option<usize>,
 }
 
 fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
-    let mut a = Args { files: vec![], out: None, detail: 6.0, reduce_to: None, report: None, pixels: 192, gpu: true, max_loss: None, max_bad: None };
+    let mut a = Args { files: vec![], out: None, detail: 6.0, reduce_to: None, report: None, pixels: 192, gpu: true, rows: true, max_loss: None, max_bad: None };
     while let Some(w) = words.next() {
         let mut value = |name: &str| words.next().ok_or(format!("{name} needs a value"));
         let number = |s: String, name: &str| s.parse::<f64>().map_err(|_| format!("{name}: not a number: {s}"));
@@ -50,6 +52,7 @@ fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
             "--max-loss" => a.max_loss = Some(number(value("--max-loss")?, "--max-loss")?),
             "--max-bad" => a.max_bad = Some(number(value("--max-bad")?, "--max-bad")? as usize),
             "--cpu" => a.gpu = false,
+            "--no-rows" => a.rows = false,
             "--use" => {
                 a.detail = match value("--use")?.to_ascii_lowercase().as_str() {
                     "game-asset" | "game" => 6.0,
@@ -105,7 +108,7 @@ fn run(a: Args) -> Result<ExitCode, String> {
     let out = a.out.clone().ok_or("-o OUT is needed")?;
     let source = load(input)?;
     println!("{}: {} faces, {} vertices", input.display(), source.faces(), source.points.len() / 3);
-    let settings = retopo::Settings { detail: a.detail, reduce_to: a.reduce_to, pixels: a.pixels, gpu: a.gpu };
+    let settings = retopo::Settings { detail: a.detail, reduce_to: a.reduce_to, pixels: a.pixels, gpu: a.gpu, rows: a.rows };
     let done = retopo::retopo(&source, &settings, |line| println!("{line}"))?;
     io::write_obj(&done.mesh, &out)?;
     let check = issues::check(&done.mesh);

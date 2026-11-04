@@ -309,6 +309,20 @@ pub fn weld(mesh: &Mesh) -> Mesh {
     Mesh { points, flat: mesh.flat.iter().map(|&v| remap[v as usize]).collect(), ..mesh.clone() }
 }
 
+/// The same mesh without unused vertices.
+pub fn compact(mesh: &Mesh) -> Mesh {
+    let mut number = vec![-1i64; mesh.points.len() / 3];
+    let mut points = Vec::new();
+    let flat = mesh.flat.iter().map(|&v| {
+        if number[v as usize] < 0 {
+            number[v as usize] = (points.len() / 3) as i64;
+            points.extend_from_slice(&mesh.points[v as usize * 3..v as usize * 3 + 3]);
+        }
+        number[v as usize]
+    }).collect();
+    Mesh { points, flat, ..mesh.clone() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

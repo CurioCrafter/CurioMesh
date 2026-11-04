@@ -11,6 +11,8 @@
 mod chords;
 #[path = "../../native/src/close.rs"]
 pub mod close;
+#[path = "../../native/src/field.rs"]
+pub mod field;
 #[path = "../../native/src/geom.rs"]
 pub mod geom;
 #[path = "../../native/src/gpu.rs"]
@@ -32,3 +34,4 @@ pub mod io;
 pub mod issues;
 pub mod layout;
 pub mod retopo;
+pub mod rows;

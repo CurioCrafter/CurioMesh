@@ -131,6 +131,33 @@ mean minimum scaled Jacobian of the quads: 1 is a square, 0 is folded.
   native in `field.rs`, the Instant Meshes method) and reduction kept on hard and flat parts. That needs the per-part
   segmenting first. It's the biggest piece of work left.
 
+### Hybrid, first version (`rows.rs`): built, guarded, not yet winning
+
+Each loose part with at least 1,000 source triangles is offered even rows of quads at about the faces it has after
+reduction, biggest part first, within 60 s. The rows are built like this:
+
+- A direction field and a grid are grown coarse to fine with the add-on's native sweeps.
+- Cells shrink to half where the surface turns fast.
+- Creases sharper than 60 degrees, and borders, are pinned.
+- Points sharing a grid corner become one corner.
+- Corners one cell apart are linked and the faces walked (Instant Meshes' extraction). Small holes are filled.
+- Every face is split into quads (their pure-quad mode), and the quads are snapped back onto the source.
+
+A part keeps its rows only if the view holds and the rows add no bad faces. `--no-rows` turns the step off.
+
+- **On a clean surface it works.** A sphere comes out closed and all quads, with 9-12% irregular corners against
+  roughly 40% for pairing, in under a second.
+- **On the bench models it is refused almost everywhere.** The rows of nearly every part have 2-54 quads bent past 60
+  degrees at tight curves, necks and rims. Every bad face is a bent quad; none are broken edges. The guard therefore
+  refuses them: 33 of 35 parts on the chess set, all 10 tried on the drill press, 16 of 17 on the hydrant. Results are
+  unchanged: same view change, 0 bad faces, layout as before. Only one hydrant part took rows.
+- Small parts also come out with too few corners: 44-79 where 99 were expected on one chess piece. Pinning creases
+  makes this worse (44 with it, 79 without). Relaxing the rows on the source fixed almost none of the bent quads.
+- What the add-on does that this doesn't: it cuts parts into limbs with their own cell size (`segment_limits`), pins
+  only long creases (`CREASE_LENGTH`), tidies the corners after extraction (`_split_rings`, `_merge_small`,
+  `_clean_regions`), fits every corner to the planes of the source near it (`fit_regions`), and untangles folds
+  (`untangle`, `_even_out_folds`). Porting `fit_regions` and `untangle` comes first: those target the bent quads.
+
 ## Code layout
 
 - `src/lib.rs` compiles `native/src/*.rs` with `#[path]`, so the add-on's kernels and this program run the same code
