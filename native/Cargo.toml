@@ -18,11 +18,22 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310", "generate-import-lib"] }
 numpy = "0.30"
 rayon = "1.12"
-# The graphics card: wgpu (Vulkan, DX12, Metal) with pollster to wait on it. Exact pins; no GL, web or window code.
-wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "vulkan", "wgsl"] }
 pollster = "=0.4.0"
+# The graphics card: wgpu with one backend per platform (DX12 on Windows, Metal on macOS, Vulkan elsewhere),
+# WGSL input only. Exact pins; no GL, web or window code.
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
+[target.'cfg(target_vendor = "apple")'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+[target.'cfg(not(any(windows, target_vendor = "apple")))'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "unwind"
+panic = "unwind" # abort would kill Blender on a Rust panic instead of raising in Python
+strip = true
+
+# Size-optimise the graphics stack and other dependencies; our own crate (and the rayon/ndarray code it instantiates) stays at opt-level 3.
+[profile.release.package."*"]
+opt-level = "s"
