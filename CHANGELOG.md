@@ -15,6 +15,12 @@
   left between them used up most of the texture. The gap now shrinks until the islands fill the texture, so
   curved parts get a sharper normal map and look less faceted.
 
+### Smaller native file
+- **The graphics-card code no longer bloats the native core.** Each platform now builds only its own card
+  backend (DirectX 12 on Windows, Metal on macOS, Vulkan on Linux), takes shaders in WGSL only, strips debug
+  names and builds the card libraries for size. The Windows file goes from 7.2 MB to 5.0 MB; pictures
+  are unchanged.
+
 ## 0.9.1 - 2026-11-02
 
 ### Faces that turn inward, fold over or pass through each other
