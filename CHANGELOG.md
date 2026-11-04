@@ -7,6 +7,10 @@
   find) while a search, redo or remake is running no longer stops that job for a find that only adds labels; a find
   started over an older find stops it completely, including its waiting loop, before the new one begins.
 
+### Graphics card
+- **The summary says when the card drew pictures** ("Camera pictures of the big parts drawn on the graphics card"),
+  not only when it failed.
+
 ### Repeatable results
 - Two runs of the same model and settings can differ a little (Old Military Compressor, Game Asset: 16,149 faces
   both times but different vertex positions, 251 and 248 self-intersections). The cause is the clock: the repair

@@ -40,6 +40,7 @@ _enabled = True
 _gpu_wanted = True
 _gpu_broken = ""  # why the card was given up on, once it was
 _gpu_unsaid = False  # a reason nobody has been told yet
+_gpu_drawn = 0  # pictures the card has drawn so far
 GPU_MIN_TRIANGLES = 150_000  # measured on an RTX 3080 Ti: below this the card is level with the processor or slower
 
 
@@ -123,6 +124,10 @@ def _give_up_on_gpu(why: str, say: bool = True) -> None:
     if not _gpu_broken:
         _gpu_broken, _gpu_unsaid = why or "unknown error", say
         _log.info("CurioMesh graphics card not used: %s", _gpu_broken)
+
+
+def gpu_drawn() -> int:
+    return _gpu_drawn
 
 
 def gpu_note() -> str | None:
@@ -761,6 +766,7 @@ def pictures(points, polys, center, half: float, pixels: int) -> list | None:
     its answer can differ); any card error falls back to the processor for good and sets `gpu_note`.
     """
 
+    global _gpu_drawn
     module = native()
     if module is None or not hasattr(module, "pictures"):  # an older binary
         return None
@@ -788,6 +794,7 @@ def pictures(points, polys, center, half: float, pixels: int) -> list | None:
     if len(tris) >= GPU_MIN_TRIANGLES and hasattr(module, "gpu_info") and _gpu_allowed():
         try:
             out = module.pictures(*args, True)
+            _gpu_drawn += 1
         except Exception as exc:  # no card, a driver error, a mesh too big for its memory: the processor does it
             _give_up_on_gpu(str(exc))
     hit, normal, depth, tri = out if out is not None else module.pictures(*args)

@@ -1567,6 +1567,7 @@ class AutoJob:
     def _pictures(self, points, polys, center, half, pixels):
         """Generator: `pictures`, on a worker thread in a big job."""
         baked_from = self._bake_tree if self.baked else None
+        drawn = turbo.gpu_drawn()
         if len(self.faces) < OFF_MAIN_FROM:
             view = yield from pictures(points, polys, center, half, pixels, baked_from=baked_from)
         else:
@@ -1579,6 +1580,8 @@ class AutoJob:
                         return done.value
 
             view = yield from self._background(run)
+        if turbo.gpu_drawn() > drawn and not any("graphics card" in note for note in self.notes):
+            self.notes.append("Camera pictures of the big parts drawn on the graphics card")
         failed = turbo.gpu_note()  # said once: the graphics card gave up and the processor drew this
         if failed:
             self.notes.append(failed)
