@@ -31,7 +31,7 @@ from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from .triadq import bakescore, cases, checks, detail, parts, patch, patterns, repair, special, views
+from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patterns, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
@@ -718,6 +718,8 @@ class AutoJob:
         self.face_piece = np.zeros(0, dtype=np.int64)
         self.flag = np.zeros(0, dtype=bool)
         self.bad = np.zeros(0, dtype=bool)  # faces the defect check flags in the result, for the red overlay
+        self.issues = None  # (spots, report) of the Issue Finder, once the run is done
+        self.found = None  # checks.Defects of the final result
         self._defects = None  # (points, faces, checks.Defects) of the last defect check, so the end of the run does not repeat it
         self._kd = None
         self._unmeasured: dict = {}  # piece -> its arrays, as `_piece_arrays` gives them, until the piece is measured
@@ -2055,6 +2057,7 @@ class AutoJob:
         else:
             found = seen_before[2]
         self.bad = found.any()
+        self.found = found
         self.timings["check and repair"] = self.timings.get("check and repair", 0.0) + time.perf_counter() - began
         if left and time.perf_counter() > self._repair_until:
             self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
@@ -2573,6 +2576,7 @@ class AutoJob:
         self.fraction = 1.0
         yield from self._off(last_look)
         shown = self.output["faces"]
+        self._find_issues(shown)
         follows = None
         if self.guide_lines:  # how far, along each stroke, the nearest edge of the result is: mean and worst, as a share of the size
             size = float(np.linalg.norm(np.ptp(self.co, axis=0))) or 1.0
@@ -2585,6 +2589,18 @@ class AutoJob:
         if self.checkpoint is not None and not self.keep_progress:
             shutil.rmtree(self.checkpoint, ignore_errors=True)  # finished: nothing left to resume
         self._drop_tmp()
+
+    def _find_issues(self, shown) -> None:
+        """Group the faces the checks flag into ranked spots (triadq.issues), reusing the defect masks the check cached. A mirrored or joined result has other faces than were checked: then only the topology kinds are looked for."""
+        began = time.perf_counter()
+        masks = {}
+        if self.found is not None and len(self.found.inward) == len(shown):
+            masks = {k: getattr(self.found, k) for k in checks.Defects.KINDS}
+        spots, record = issues.analyse(self.output["co"], shown, masks, self.output["parts"], {"source_faces": len(self.faces)})
+        self.issues = spots, record
+        self.output["issues"] = record
+        self.output["issue_spots"] = spots
+        self.timings["issues"] = time.perf_counter() - began
 
     def _make_all(self, co, faces, kinds):
         """Generator: the faces for the whole object. Pieces on the usual method go in one call; others one by one."""

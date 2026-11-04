@@ -577,6 +577,7 @@ def _draw_view() -> None:
             if seg.get("bad") is not None:
                 flat.bind()
                 seg["bad"].draw(flat)
+            issue_panel.draw_overlay(guided, preview, res, flat, batch_for_shader)
         segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
         if gs.seg_compare == "OVER":
             lines_key = (source.name, len(source.data.edges), tuple(round(x, 5) for row in source.matrix_world for x in row))
@@ -867,6 +868,7 @@ def draw_parts(layout, context, gs) -> None:
     if gs.seg_heat:
         overlay.wrap_label(layout, "Heat: purple looks the same, yellow changed most (bar at the bottom right)", icon="INFO", width=36, limit=2)
     segment_goals.draw_tools(layout, gs)
+    issue_panel.draw(layout)
 
     layout.label(text=f"{len(seg['parts']):,} parts, {len(seg['sel'])} selected")
     row = layout.row(align=True)
@@ -884,7 +886,7 @@ def draw_parts(layout, context, gs) -> None:
 
 # --------------------------------------------------------------------------- registration
 
-from . import segment_goals  # noqa: E402  (it builds on PartJob above)
+from . import issue_panel, segment_goals  # noqa: E402  (segment_goals builds on PartJob above)
 
 PRE_CLASSES = (CURIOMESH_PG_segpart,)
 CLASSES = (
@@ -894,6 +896,7 @@ CLASSES = (
     CURIOMESH_OT_seg_try,
     CURIOMESH_OT_seg_frame,
     *segment_goals.CLASSES,
+    *issue_panel.CLASSES,
 )
 _handles: list = []
 

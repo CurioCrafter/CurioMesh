@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.3 - unreleased
+
+### Finding what is still wrong
+- **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is found and
+  ranked, worst first. It counts faces turned inward, sunk into your mesh, crossing, folded over, bent, flat, duplicated or
+  lying on another face (the check the run already makes, not repeated), and also tight or untidy topology: slivers, pinched
+  faces, poles (a corner with seven or more edges, or two or fewer) and concave quads. Faces that touch or lie close together
+  are one spot, scored by how bad the kinds are and how many faces. **View** moves the 3D view to a spot, **Select** selects its
+  faces in Edit Mode, **Next Issue** and **Previous** step through them, and the spots are painted orange (the current one
+  yellow) with Show Bad Faces.
+- **Save Issue Report and Compare With Report...** keep a record (a JSON file next to your .blend, or where you choose) and, after
+  a fix and a new run, say how many of its spots are fixed, still there or new, with the totals per kind.
+
 ## 0.9.2 - 2026-11-03
 
 ### Faces that turn inward or fold over
