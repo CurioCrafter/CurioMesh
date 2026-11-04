@@ -2,7 +2,7 @@
 
 ## 0.9.3 - unreleased
 
-- **Redo Rough Spots** (Auto settings, on by default): after the final check, the spots still turned inward,
+- **Redo Rough Spots** (Auto settings, off by default: it adds up to a minute for a few percent fewer bad faces): after the final check, the spots still turned inward,
   folded over or crossing are found and each gets a small region of its own, grown a few rings of faces round it.
   The region's inner corners are put back towards your mesh, part or all of the way, and the way that leaves the
   fewest bad faces there is kept, if it leaves fewer than before and bends no quad. The region's edge never moves,

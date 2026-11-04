@@ -659,7 +659,7 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = True):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False):
         self.redo_rough = bool(redo_rough)  # Redo Rough Spots: regions round the spots still bad after the repairs are made again, finer
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
         self.redo_counts = {"regions": 0, "no better": 0, "kept": 0}  # what happened to the regions tried, for the bench
@@ -2099,20 +2099,33 @@ class AutoJob:
                 break
             spots = issues.find_spots(points, faces, {k: getattr(found, k) for k in checks.Defects.KINDS}, piece, REDO_SPOTS)
             rings = REDO_RINGS + round_index
-            moved, count = yield from self._background(lambda: self._redo_spots(points, faces, piece, spots, rings, until))
-            if not count:
+            moved, regions = yield from self._background(lambda: self._redo_spots(points, faces, piece, spots, rings, until))
+            if not regions:
                 break
             now = yield from self._inspected(moved, faces, piece)
             if any(getattr(now, k) > getattr(after, k) for k in keys):
-                self.redo_counts["broke"] = {k: (getattr(after, k), getattr(now, k)) for k in keys if getattr(now, k) != getattr(after, k)}
-                break
+                # A moved corner can pass through a face outside its region's window: those regions go back, the rest stay.
+                touched = np.zeros(len(points), bool)
+                for f in np.flatnonzero(now.crossing | now.bent if len(now.bent) == len(faces) else now.crossing).tolist():
+                    touched[list(faces[f])] = True
+                kept = [ids for ids in regions if not touched[ids].any()]
+                back = np.array(points, dtype=np.float64)
+                for ids in kept:
+                    back[ids] = moved[ids]
+                self.redo_counts["undone"] = self.redo_counts.get("undone", 0) + len(regions) - len(kept)
+                moved, regions = back, kept
+                if kept:
+                    now = yield from self._inspected(moved, faces, piece)
+                if not kept or any(getattr(now, k) > getattr(after, k) for k in keys):
+                    self.redo_counts["broke"] = {k: (getattr(after, k), getattr(now, k)) for k in keys if getattr(now, k) != getattr(after, k)}
+                    break
             seen = yield from self._look(moved, faces, *self._view)
             if seen[0] > max(1.1 * self.detail, 1.02 * view[0]):
                 self.redo_counts["view"] = (view[0], seen[0])
                 break
             points, view, after = moved, seen, now
             faces = list(faces)  # a new list: copies placed as instances no longer match
-            redone += count
+            redone += len(regions)
         self.timings["redo rough spots"] = time.perf_counter() - began
         if redone:
             self.redo_numbers = (redone, bad_before)
@@ -2120,8 +2133,8 @@ class AutoJob:
         return points, faces, mats, piece, view, after
 
     def _redo_spots(self, points, faces, piece, spots, rings: int, until: float):
-        """(points, regions redone): each spot's region with its inner corners laid out the way that leaves the fewest
-        bad faces round it, where that is fewer than now. Worker thread."""
+        """(points, the corners moved in each region redone): each spot's region with its inner corners laid out the way
+        that leaves the fewest bad faces round it, where that is fewer than now. Worker thread."""
         if self._src_middles is None:
             sizes = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
             flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes.sum()))
@@ -2129,7 +2142,7 @@ class AutoJob:
         taken = np.zeros(len(faces), bool)
         users = redo.corner_users(faces)
         points = np.array(points, dtype=np.float64)
-        count = 0
+        regions = []
         for spot in spots:
             if self._stopped or time.perf_counter() > until:
                 break
@@ -2162,9 +2175,9 @@ class AutoJob:
                 self.redo_counts["no better"] += 1
                 continue
             points[used[free]] = best_co[free]
-            count += 1
+            regions.append(used[free])
             self.redo_counts["kept"] += 1
-        return points, count
+        return points, regions
 
     def _bad_here(self, points, faces) -> tuple[int, int]:
         """(bad faces, bent quads) of this patch of the result, against the source round it. Sunk is not asked: that needs the whole source."""
