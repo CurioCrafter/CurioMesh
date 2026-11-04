@@ -374,8 +374,18 @@ class FindJob(view.PartJob):
         links = S.face_links(faces)
         raw = piece
         piece = S.tidy(faces, S.even_borders(faces, piece, normals, areas, rounds=1), links)
-        held = list(carried(labels, box["old"], locked))
-        if held:  # a locked segment keeps its faces on the result too: tidying could take a small one away
+        carry = carried(labels, box["old"], locked)
+        if carry:  # a locked segment keeps its faces on the result too: the nearest-face map or tidying could take a thin one away
+            held = list(carry)
+            old_piece = box["old_piece"]
+            if old_piece is not None and len(old_piece) == len(raw):  # the same result: its faces as they were
+                back = np.full(int(max(old_piece.max(), max(carry.values()))) + 1, -1, dtype=np.int64)
+                for new, before in carry.items():
+                    back[before] = new
+                mapped = back[old_piece]
+                raw = np.where(mapped >= 0, mapped, np.where(np.isin(raw, held), -1, raw))
+                gone = raw < 0  # was not locked, but the map gave it a locked segment: tidying decides
+                raw[gone] = piece[gone]
             fix = np.isin(raw, held) | np.isin(piece, held)
             piece[fix] = raw[fix]
         missing = np.setdiff1d(np.unique(labels), np.unique(piece))
@@ -414,7 +424,8 @@ class FindJob(view.PartJob):
         old = old if old is not None and len(old) == len(job.faces) else None
         records = list(view.seg["parts"]) if old is not None else []
         settings = view.seglive.snapshot(source)
-        box = {"settings": settings, "paint": view.seglive.paint_for(source, src) if settings["paint"] else None, "old": old, "records": records, "locked": {r["id"] for r in records if r.get("locked")}}
+        old_piece = view.seg.get("piece") if old is not None and view.ready() else None  # ready: it is the result on screen, face for face
+        box = {"old_piece": None if old_piece is None else np.asarray(old_piece).copy(), "settings": settings, "paint": view.seglive.paint_for(source, src) if settings["paint"] else None, "old": old, "records": records, "locked": {r["id"] for r in records if r.get("locked")}}
 
         def work():
             try:
