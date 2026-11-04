@@ -9,10 +9,21 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat  # noqa: E402
+from triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat  # noqa: E402
 
 
 class AllocateTests(unittest.TestCase):
+    def test_next_ask_lands_on_the_amount_despite_a_part_that_does_not_scale(self):
+        def layout(asked):  # 1,500 faces of paired small parts, plus QuadriFlow 15% over what it's asked for
+            return 1500 + int(1.15 * asked)
+
+        tries = [(4000, layout(4000))]
+        for _ in range(2):
+            ask = next_ask(tries, 5000, 64, 10**6)
+            tries.append((ask, layout(ask)))
+        self.assertLess(abs(tries[-1][1] - 5000), 0.1 * 5000)
+        self.assertEqual(next_ask([(100, 9000)], 5000, 64, 10**6), 64)  # can't go below the floor
+
     def test_heat_finds_the_vertices_near_the_spots(self):
         vertices = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [9.0, 9.0, 9.0]])
         heat = vertex_heat(vertices, np.array([[0.1, 0.0, 0.0], [0.2, 0.0, 0.0]]), 1.0)

@@ -33,7 +33,7 @@ from mathutils.kdtree import KDTree
 
 from .triadq import bakescore, cases, checks, detail, parts, patch, patterns, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
-from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, vertex_heat
+from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
 from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces, unfold
@@ -82,6 +82,7 @@ ROWS_TIME = 600.0  # Clean Rows: a denser layout is only asked for if it should 
 ROWS_SECONDS_ESTIMATE = 0.003  # Clean Rows: rough QuadriFlow time per quad, measured on a 74,000 quad rock
 ROWS_SHARP_INPUT = 6  # Clean Rows: source triangles per quad needed before vertices seek creases
 ROWS_BAD = 0.05  # Clean Rows: a piece where repair leaves more than this many triangles per quad gets paired instead
+ROWS_ROUNDS = 3  # Clean Rows: layouts tried, at most
 CLOSE_ENOUGH = 0.10  # Reduce To: a face count this near the one asked for is a hit
 PAIRED_SHARE = 0.6  # first guess of faces after pairing per face before it, corrected after each try
 TURNED_DEG = 20.0
@@ -101,6 +102,8 @@ ROOM = 0.5  # a start this close to the amount asked for is good enough: taking 
 CHORDS_START = (0.4, 0.5, 0.25)  # with Redraw Messy Quads: start share, AIM and ROOM. Starting well inside what was asked for leaves the redraw room
 CHORDS_SECONDS = 240.0  # time for redrawing and judging per run; plain collapses go on after it
 CHORDS_MESSY = 0.3  # a part is redrawn when more than this share of its corners are poles
+TURN_UP_TO = 150_000  # quads: edges are spun at poles up to here (plain Python, about 3 s per 15,000 quads)
+TURN_LOSS = 1.0  # points of view change spinning edges may add, staying within what Keep Detail counts as a fit
 PART_PIXELS = 100  # a part showing fewer pixels than this over the six views can't be judged by itself
 REFINE_PIECES = 8
 REFINE_COVER = 0.8  # share of the faces the extra sizes need to cover
@@ -1547,6 +1550,15 @@ class AutoJob:
         except Exception as exc:  # a thread has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
 
+    def _turn_poles(self, mesh: MeshData, owner: np.ndarray) -> MeshData:
+        """The same corners with edges spun where that leaves fewer poles (Tarini et al. 2010), or `mesh` if none was. Rebuilt parts stay as they are."""
+        reducer = ChordReducer(mesh)
+        rebuilt = [i for i, k in enumerate(self.picked) if self.ready[i][k]]
+        reducer.freeze(np.flatnonzero(np.isin(owner, rebuilt)).tolist(), renamed=True)
+        if not reducer.turn_poles():
+            return mesh
+        return MeshData(mesh.vertices, [tuple(face) for face in reducer.faces], list(reducer.materials))
+
     def _score(self, points, faces) -> None:
         try:
             self.topology = patterns.score(patterns.measure(points, faces))["score"]
@@ -2176,20 +2188,36 @@ class AutoJob:
 
         def judge(points, out_faces, kinds, loss):
             nonlocal best
-            fits = loss <= 1.1 * self.detail
-            rank = (not fits, len(out_faces) if fits else loss)  # as in Keep Detail: fits first, then the fewest faces
+            if self.target_faces:  # Reduce To: the nearest to the amount asked for
+                rank = (abs(len(out_faces) - self.target_faces),)
+            else:
+                fits = loss <= 1.1 * self.detail
+                rank = (not fits, len(out_faces) if fits else loss)  # as in Keep Detail: fits first, then the fewest faces
             if best is None or rank < best[0]:
                 best = (rank, points, out_faces, kinds, loss)
 
-        for _round in range(3):
+        tries = []  # Reduce To: (layout asked for, faces it gave)
+        for _round in range(ROWS_ROUNDS):
             built = yield from self._rows_once(areas, target)
             if built is None:
                 return
             points, out_faces, kinds = built
+            if self.target_faces:
+                # QuadriFlow lands near what it is asked for, but the paired small parts and their closure don't scale with it.
+                judge(points, out_faces, kinds, None)
+                got = len(out_faces)
+                if abs(got - self.target_faces) <= CLOSE_ENOUGH * self.target_faces:
+                    break
+                tries.append((target, got))
+                wanted = next_ask(tries, self.target_faces, 64, most)
+                if wanted == target:
+                    break
+                target = wanted
+                continue
             self.stage = "Checking the result..."
             loss, _shading, _soft = yield from self._look(points, out_faces, *self._view)
             judge(points, out_faces, kinds, loss)
-            if self.target_faces or abs(loss - self.detail) <= 0.1 * self.detail:
+            if abs(loss - self.detail) <= 0.1 * self.detail:
                 break
             # Change falls about as the square root of the faces. A denser layout also has to fit in the time allowed.
             room = (ROWS_TIME - (time.perf_counter() - self.started)) / ROWS_SECONDS_ESTIMATE
@@ -2467,6 +2495,18 @@ class AutoJob:
                 fit_loss, fit_shading, fit_soft = yield from self._look(fitted_points, out_faces, center, half, reference, reference_shaded, pixel)
                 if fit_loss <= max(self.detail, loss) and fit_shading is not None and (shading is None or fit_shading < shading):
                     worked, points, loss, shading, soft = fitted, fitted_points, fit_loss, fit_shading, fit_soft
+        if self.style == "DETAIL" and self.method == "AUTO" and self.output_kind != "TRIS" and not self.chords and not self.guide_lines and not self.strips and len(worked.faces) <= TURN_UP_TO:
+            # Rows of quads break wherever a corner has more or fewer than four. Spinning an edge moves no corner, so the shape stays.
+            # Balanced splits every quad, which leaves few poles: spinning there gained under a point.
+            self.stage = "Spinning edges at poles"
+            turned = yield from self._background(lambda: self._turn_poles(worked, owner))
+            if turned is not worked:
+                full, _back = yield from self._off(lambda: self._with_copies(turned, owner))
+                turned_points, turned_faces = np.asarray(full.vertices, dtype=np.float64), [tuple(face) for face in full.faces]
+                turned_loss, turned_shading, turned_soft = yield from self._look(turned_points, turned_faces, center, half, reference, reference_shaded, pixel)
+                if turned_loss <= min(loss + TURN_LOSS, max(loss, 1.1 * self.detail)):
+                    worked, points, out_faces, materials = turned, turned_points, turned_faces, list(full.face_materials)
+                    loss, shading, soft = turned_loss, turned_shading, turned_soft
         plain_faces = out_faces
         if self.twins and self.mirror is None:
             self.instances = yield from self._off(lambda: self._instances(worked, owner))

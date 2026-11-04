@@ -333,7 +333,7 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-in
 
 ## Known limits
 
-- **Keep Detail quads are not always tidy.** It spends everything Detail allows, so on smooth surfaces quads can look slanted or scattered instead of running in rows. Use Balanced or Clean Rows for that, at the cost of more faces. Clean Rows also loses small sharp detail, and on some models it lands over the amount you asked for.
+- **Keep Detail quads are not always tidy.** It spends everything Detail allows, so on smooth surfaces quads can look slanted or scattered instead of running in rows. Spinning edges at poles helps (Tidiness about 28 to 39 on smooth busts), but it is still far from hand-made. Use Balanced or Clean Rows for that, at the cost of more faces. Clean Rows also loses small sharp detail.
 - **Soft faces and fine detail go first.** At 6%, cloth folds, small rounded ends and fine ornaments are simplified. Lower Detail to keep more. CurioMesh does not give you a hand-made low poly yet.
 - **UV seams.** By default quads may span several UV islands, so textures can smear there. Turn on Keep UV Seams (up to about twice the faces) or bake with Normal + Color.
 - **Big scans are slow.** A scan of over a million faces can take a long time on a busy PC, and Blender can pause for a few seconds at a time. Use Effort, or Export Job.
