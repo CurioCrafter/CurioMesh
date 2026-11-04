@@ -69,13 +69,12 @@ def _select(context, spot) -> bool:
     preview = bpy.data.objects.get(_g().PREVIEW_NAME)
     if preview is None:
         return False
-    for o in context.view_layer.objects:
-        o.select_set(False)
-    context.view_layer.objects.active = preview
-    preview.select_set(True)
+    if preview.mode != "EDIT":  # leaves any other mode first, and makes the preview (unselectable otherwise) active, faces mode
+        bpy.ops.curiomesh.guided_edit_preview()
     if preview.mode != "EDIT":
-        bpy.ops.object.mode_set(mode="EDIT")
+        return False
     bm = bmesh.from_edit_mesh(preview.data)
+    bm.select_mode = {"FACE"}
     bm.faces.ensure_lookup_table()
     for f in bm.faces:
         f.select_set(False)
@@ -128,7 +127,9 @@ class CURIOMESH_OT_issue_select(_IssueOp, bpy.types.Operator):
         if not 0 <= self.index < len(found):
             return {"CANCELLED"}
         ui["cur"] = self.index
-        _select(context, found[self.index])
+        if not _select(context, found[self.index]):
+            self.report({"WARNING"}, "The preview is gone: run Auto again")
+            return {"CANCELLED"}
         overlay.tag_redraw()
         return {"FINISHED"}
 
@@ -160,7 +161,7 @@ class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
     filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
 
     def invoke(self, context, event):
-        name = f"curiomesh_issues_{_g().state['source']}.json"
+        name = f"curiomesh_issues_{bpy.path.clean_name(_g().state['source'] or 'mesh')}.json"  # an object name can hold : or /
         if bpy.data.filepath:  # next to the .blend: no question asked
             self.filepath = os.path.join(os.path.dirname(bpy.data.filepath), name)
             return self.execute(context)
@@ -168,8 +169,12 @@ class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
         return super().invoke(context, event)
 
     def execute(self, context):
-        with open(self.filepath, "w", encoding="utf-8") as fh:
-            json.dump(_record(context), fh, indent=1)
+        try:
+            with open(self.filepath, "w", encoding="utf-8") as fh:
+                json.dump(_record(context), fh, indent=1)
+        except OSError as exc:
+            self.report({"ERROR"}, f"Could not save the issue report: {exc}")
+            return {"CANCELLED"}
         self.report({"INFO"}, f"Issue report saved: {self.filepath}")
         return {"FINISHED"}
 
@@ -186,7 +191,7 @@ class CURIOMESH_OT_issue_compare(_IssueOp, bpy.types.Operator, ImportHelper):
             with open(self.filepath, encoding="utf-8") as fh:
                 old = json.load(fh)
             ui["diff"] = issues.compare(old, _record(context))
-        except (OSError, ValueError, KeyError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:  # not a report, or not one of ours
             self.report({"ERROR"}, f"Could not read that report: {exc}")
             return {"CANCELLED"}
         overlay.tag_redraw()

@@ -913,3 +913,4 @@ def unregister() -> None:
         except Exception:
             pass
     reset()
+    issue_panel.ui.update(res=None, cur=-1, diff=None, batch=None, batch_key=None)  # its GPU batches go with the draw handler
