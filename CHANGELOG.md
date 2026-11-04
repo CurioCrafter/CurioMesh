@@ -27,6 +27,10 @@
 - **Copies land where they fit best.** A part that is almost symmetric across its own plane also fits turned the
   wrong way onto its mirror image, within the copy tolerance, and the first placement found was taken: such a copy
   sat a little off and some of its faces turned inward. Placements are now compared and the closest is kept.
+- **Fitting to your mesh no longer tangles the quads.** Each corner is pulled onto its own share of your mesh, so on
+  thin walls and in creases neighbouring corners were pulled different ways and the quads between them folded over
+  each other or passed through each other. Corners of a quad the fit folded, bent or pushed through another quad now
+  stay where they were. On big rough scans this leaves far fewer crossings for the final check to untangle.
 
 ## 0.9.2 - 2026-11-03
 
