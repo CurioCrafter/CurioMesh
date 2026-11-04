@@ -3874,7 +3874,12 @@ def problem_url() -> str:
     import sys
     from urllib.parse import urlencode
 
-    info = getattr(sys.modules.get(__package__), "bl_info", {}) or {}
+    info = getattr(sys.modules.get(__package__), "bl_info", None) or {}
+    if not info.get("version"):  # an extension keeps its version in the manifest
+        import addon_utils
+
+        module = sys.modules.get(__package__)
+        info = addon_utils.module_bl_info(module) if module is not None else {}
     version = ".".join(str(v) for v in info.get("version", ())) or "?"
     body = (
         f"CurioMesh {version}, Blender {bpy.app.version_string}, {platform.system()} {platform.release()}\n\n"
