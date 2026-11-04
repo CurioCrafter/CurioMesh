@@ -1388,6 +1388,8 @@ class AutoJob:
             self.output["piece"] = self.face_piece  # the source piece each face came from
             self.output["flag"] = self.flag  # faces still broken after the repair tries
             self.output["bad"] = self.bad  # faces the defect check flags (red in the segment view)
+        if final is not None:  # before output_id moves on: the panel copies the output as soon as it does
+            self._find_issues(faces)
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
@@ -2705,7 +2707,6 @@ class AutoJob:
         self.fraction = 1.0
         yield from self._off(last_look)
         shown = self.output["faces"]
-        self._find_issues(shown)
         follows = None
         if self.guide_lines:  # how far, along each stroke, the nearest edge of the result is: mean and worst, as a share of the size
             size = float(np.linalg.norm(np.ptp(self.co, axis=0))) or 1.0
@@ -2725,7 +2726,9 @@ class AutoJob:
         masks = {}
         if self.found is not None and len(self.found.inward) == len(shown):
             masks = {k: getattr(self.found, k) for k in checks.Defects.KINDS}
-        spots, record = issues.analyse(self.output["co"], shown, masks, self.output["parts"], {"source_faces": len(self.faces)})
+        piece = self.output.get("piece")  # the parts Fix Parts lists, so "part 3" there is part 3 here
+        parts = piece if piece is not None and len(piece) == len(shown) else self.output["parts"]
+        spots, record = issues.analyse(self.output["co"], shown, masks, parts, {"source_faces": len(self.faces)})
         self.issues = spots, record
         self.output["issues"] = record
         self.output["issue_spots"] = spots
