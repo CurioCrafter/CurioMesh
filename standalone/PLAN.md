@@ -106,6 +106,31 @@ standalone ran with `--reduce-to` AutoRemesher's first count. All results were m
 - The standalone landed 5-9% above the count asked for, so its columns have slightly more faces.
 - AutoRemesher was not tuned (sharp edge 90 degrees, adaptivity 1). Tuning could narrow the shape gap. This was not tried.
 
+### Layout: spinning edges and relaxing (`layout.rs`)
+
+After closing, the standalone now spins edges at poles (edge rotation, as the add-on's `turn_poles` does) and slides
+corners on smooth ground toward their neighbours' middle, snapping them back onto the source. Each step is kept only
+if the view holds. On all three models both steps were kept. The view change went from 4.58 to 4.22% on the chess
+set, 8.12 to 8.37% on the drill press and 9.69 to 9.53% on the fire hydrant.
+
+Layout measured on every result. "Irregular" is the share of inner corners without 4 edges. "Squareness" is the
+mean minimum scaled Jacobian of the quads: 1 is a square, 0 is folded.
+
+| Model | Add-on 0.9.2 | AutoRemesher (scaled target) | Standalone before | Standalone with layout step |
+|---|---|---|---|---|
+| chess set | 0.445 irregular, 0.036 slivers, 0.656 square | 0.020, 0.077, 0.964 | 0.416, 0.033, 0.669 | 0.388, 0.031, 0.679 |
+| drill press | 0.397, 0.203, 0.617 | 0.095, 0.088, 0.827 | 0.434, 0.240, 0.533 | 0.431, 0.219, 0.548 |
+| fire hydrant | 0.411, 0.160, 0.634 | 0.017, 0.041, 0.947 | 0.423, 0.211, 0.539 | 0.405, 0.196, 0.547 |
+
+- The layout step helps a little: up to 7% fewer irregular corners and 7-10% fewer slivers.
+- The add-on is just as irregular (40-45%), so this gap comes from the method, not the port. Quads made by pairing
+  a reduced triangle mesh keep the triangles' poles. More relaxing doesn't fix that: 10 passes gave the same numbers
+  as 3.
+- AutoRemesher's even layout comes from a field-aligned remesher. The way to get close without losing the shape lead is
+  a hybrid: field-aligned rows on smooth, curved parts (the add-on's Field Rows, `fieldmesh.py`; its sweeps are already
+  native in `field.rs`, the Instant Meshes method) and reduction kept on hard and flat parts. That needs the per-part
+  segmenting first. It's the biggest piece of work left.
+
 ## Code layout
 
 - `src/lib.rs` compiles `native/src/*.rs` with `#[path]`, so the add-on's kernels and this program run the same code

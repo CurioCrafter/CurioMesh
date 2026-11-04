@@ -16,6 +16,7 @@ const PAIRED_SHARE: f64 = 0.6; // first guess of faces after pairing per triangl
 const CLOSE_ENOUGH: f64 = 0.10; // Reduce To: this near the face count asked for is a hit
 const ROUNDS: usize = 4;
 const MOST_LOOKS: usize = 12;
+const TURN_LOSS: f64 = 1.0; // points of view change evening the quads out may add
 
 pub struct Settings {
     pub detail: f64,               // percent of the view that may change
@@ -333,6 +334,25 @@ pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> 
             None => make(high as usize)?,
         }
     };
+    // Even the quads out. A step stays if the view changes at most TURN_LOSS points more, and within 110% of the detail
+    // asked for unless it was already over (the add-on's rule for spinning edges at poles).
+    let (mut mesh, mut change) = (mesh, change);
+    let source_tree = near::FaceTree::new(&source.points, &source.indptr, &source.flat);
+    let steps: [(&str, &dyn Fn(&mut Mesh) -> usize); 2] = [("Spinning edges at poles", &|m| crate::layout::spin_edges(m)), ("Relaxing the quads on the source", &|m| crate::layout::relax(m, &source_tree))];
+    for (name, step) in steps {
+        let mut tried = mesh.clone();
+        if step(&mut tried) == 0 {
+            continue;
+        }
+        let after = loss(&reference, &pictures(&tried.points, &triangles(&tried).0, &view), &view);
+        looks += 1;
+        let limit = if settings.reduce_to.is_some() { change + TURN_LOSS } else { (change + TURN_LOSS).min(change.max(1.1 * settings.detail)) };
+        let keep = after <= limit;
+        log(&format!("  {name}: {:.2}% of the view changed, {}", after, if keep { "kept" } else { "not kept" }));
+        if keep {
+            (mesh, change) = (tried, after);
+        }
+    }
     Ok(Outcome { mesh, loss: change, looks, seconds: started.elapsed().as_secs_f64() })
 }
 
