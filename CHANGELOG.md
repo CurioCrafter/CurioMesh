@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.3 - unreleased
+
+- **Redo Rough Spots** (Auto settings, on by default): after the final check, the spots still turned inward,
+  folded over or crossing are found and each gets a small region of its own, grown a few rings of faces round it.
+  The region's inner corners are put back towards your mesh, part or all of the way, and the way that leaves the
+  fewest bad faces there is kept, if it leaves fewer than before and bends no quad. The region's edge never moves,
+  so it joins the rest exactly, and the face count doesn't change. A round is kept only if nothing else broke and
+  the camera still agrees. The summary says how many spots were redone and how many bad faces fewer there are.
+- **Copies land where they fit best.** A part that is almost symmetric across its own plane also fits turned the
+  wrong way onto its mirror image, within the copy tolerance, and the first placement found was taken: such a copy
+  sat a little off and some of its faces turned inward. Placements are now compared and the closest is kept.
+
 ## 0.9.2 - 2026-11-03
 
 ### Faces that turn inward or fold over

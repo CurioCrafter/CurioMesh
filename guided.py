@@ -339,6 +339,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_baked: bpy.props.BoolProperty(name="Judge After Baking (Experimental)", description="Experimental. Low Poly on scans you will bake a normal map for: judge the result as it looks baked, so far fewer faces remain. It can leave long thin slivers on flat areas, which bake badly, and its score misses them: check the result. Only runs on scans, never hard-surface", default=False)
     auto_chords: bpy.props.BoolProperty(name="Redraw Messy Quads", description="Auto Segments: redraw the parts with many irregular vertices as plain grids, and take quads away where the view changes least. Far tidier loops at the same change, but it takes up to a minute or two more. On for Animation and Subdivision, where tidy loops matter more than the face count. Off on models of many loose parts, where it stalls", default=False)
     auto_tidy: bpy.props.BoolProperty(name="Tidy Quads", description="Auto Segments: after the search, try to make the quads tidier, like hand-made meshes. Slow, and the view changes a little more, so it is off unless you want it", default=False)
+    auto_redo_rough: bpy.props.BoolProperty(name="Redo Rough Spots", description="Auto Segments: after the final check, the spots still turned inward, folded over or crossing are laid out again in a small region round each, its edge kept so it joins exactly. Kept only where it leaves fewer bad faces and the view still holds", default=True)
     keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Keep quads inside UV islands so textures stay put. Costs faces, up to double. For most game assets, Bake Normal + Color is better", default=False)
     lod0_percent: bpy.props.FloatProperty(name="LOD0", description="Faces of the first LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[0], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
     lod1_percent: bpy.props.FloatProperty(name="LOD1", description="Faces of the second LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[1], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
@@ -1614,7 +1615,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
     chords = gs.auto_chords and not baked and loose_pieces(src) <= CHORDS_MOST_PIECES
-    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
+    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
     state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
         return True
@@ -1645,7 +1646,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     turbo.set_gpu(gs.auto_gpu)
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
-    job = autoretopo.AutoJob(context, co, faces, mat, 3.0 if baked else gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel)
+    job = autoretopo.AutoJob(context, co, faces, mat, 3.0 if baked else gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel, redo_rough=gs.auto_redo_rough)
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
@@ -3684,6 +3685,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             col.prop(gs, "keep_uvs", toggle=True, icon="UV")
         col.prop(gs, "auto_chords", toggle=True, icon="MOD_REMESH")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
+        col.prop(gs, "auto_redo_rough", toggle=True, icon="MOD_SMOOTH")
         col.prop(gs, "auto_rough", toggle=True, icon="TEXTURE")
         col.prop(gs, "auto_drop_hidden", toggle=True, icon="HIDE_ON")
         if gs.auto_profile == "LOW_POLY":
