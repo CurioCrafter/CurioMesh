@@ -373,7 +373,7 @@ pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> 
             looks += 1;
             loss(&reference, &pictures(&m.points, &triangles(m).0, &view), &view)
         };
-        let swapped = rows_where_they_hold(&mut mesh, &mut change, limit, source, &tris, &tri_piece, &tags, &source_tree, &mut look, &mut log);
+        let swapped = rows_where_they_hold(&mut mesh, &mut change, limit, source, &tris, &tri_piece, &tags, &mut look, &mut log);
         if swapped > 0 {
             log(&format!("  Rows of quads on {swapped} smooth part(s): {change:.2}% of the view changed"));
         }
@@ -422,13 +422,14 @@ fn unpack(tag: i64) -> (i64, i64) {
 
 const ROWS_SMALLEST: usize = 1000; // source triangles: a smaller part isn't worth a grid (the add-on's FIELD_SMALLEST)
 const ROWS_FEWEST: usize = 24; // faces a part must have in the result
+const ROWS_MOST_MISS: f64 = 0.25; // rows more than this share off the part's face count are refused
 const ROWS_SECONDS: f64 = 60.0; // time spent offering rows per run (the add-on's FIELD_SECONDS)
 
 /// Offer each big part even rows of quads (`rows.rs`) at about the faces it has now, biggest first, and keep a part's
 /// rows when the whole view stays within `limit`. Returns how many parts took rows.
 /// ponytail: one tag (material) per part's rows; a part with several materials gets its first one.
 #[allow(clippy::too_many_arguments)]
-fn rows_where_they_hold(mesh: &mut Mesh, change: &mut f64, limit: f64, source: &Mesh, tris: &[i64], tri_piece: &[i64], tags: &[i64], tree: &near::FaceTree, look: &mut dyn FnMut(&Mesh) -> f64, log: &mut dyn FnMut(&str)) -> usize {
+fn rows_where_they_hold(mesh: &mut Mesh, change: &mut f64, limit: f64, source: &Mesh, tris: &[i64], tri_piece: &[i64], tags: &[i64], look: &mut dyn FnMut(&Mesh) -> f64, log: &mut dyn FnMut(&str)) -> usize {
     let started = Instant::now();
     let parts = tri_piece.iter().copied().max().map_or(0, |m| m as usize + 1);
     let mut source_tris = vec![Vec::new(); parts];
@@ -463,21 +464,27 @@ fn rows_where_they_hold(mesh: &mut Mesh, change: &mut f64, limit: f64, source: &
                 part_tris.push(id);
             }
         }
+        // Cleaning merges some faces, so a count far off is tried once more with the cell corrected by what came out;
+        // the try nearer the part's count is kept, and rows far off it are refused, so the face count stays honest.
+        let miss = |made: &Option<(Vec<f64>, Vec<i64>, Vec<i64>)>| made.as_ref().map_or(f64::INFINITY, |m| ((m.1.len() - 1) as f64 / mine.len() as f64 - 1.0).abs());
         let cell = (area / mine.len() as f64).sqrt();
-        let Some((mut grid_points, grid_indptr, grid_flat)) = crate::rows::field_quads(&points, &part_tris, cell, p as u64) else { continue };
-        if grid_flat.is_empty() {
+        let mut made = crate::rows::field_quads(&points, &part_tris, cell, p as u64);
+        if (CLOSE_ENOUGH..f64::INFINITY).contains(&miss(&made)) {
+            let faces = (made.as_ref().unwrap().1.len() - 1) as f64;
+            let again = crate::rows::field_quads(&points, &part_tris, cell * (faces / mine.len() as f64).sqrt(), p as u64);
+            if miss(&again) < miss(&made) {
+                made = again;
+            }
+        }
+        if miss(&made) > ROWS_MOST_MISS {
             continue;
         }
-        let (_, found) = near::nearest_faces(tree, &grid_points, &std::sync::atomic::AtomicBool::new(false));
-        for (k, hit) in found.iter().enumerate() {
-            grid_points[k * 3..k * 3 + 3].copy_from_slice(&hit.0);
-        }
+        let Some((grid_points, grid_indptr, grid_flat)) = made else { continue };
         let tag = tags[source_tris[p][0]];
         let quads = Mesh { material: vec![tag; grid_indptr.len() - 1], points: grid_points, indptr: grid_indptr, flat: grid_flat, materials: source.materials.clone() };
         // Rows must not bring in faces the checks call bad: compare with the part as it is.
         let part_now = sub_mesh(mesh, &mine);
-        let rows_check = crate::issues::check(&quads);
-        let (bad_now, bad_rows) = (crate::issues::check(&part_now).bad, rows_check.bad);
+        let (bad_now, bad_rows) = (crate::issues::check(&part_now).bad, crate::issues::check(&quads).bad);
         if bad_rows > bad_now {
             log(&format!("  Rows on part {p}: {bad_rows} bad faces where it has {bad_now}, not kept"));
             continue;

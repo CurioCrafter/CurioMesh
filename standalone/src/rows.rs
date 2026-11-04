@@ -120,7 +120,402 @@ pub fn field_quads(points: &[f64], tris: &[i64], cell: f64, seed: u64) -> Option
             q_indptr.push(q_flat.len() as i64);
         }
     }
+    let q_flat = finish(&mut out, q_flat, points, tris);
+    let q_indptr = (0..=(q_flat.len() / 4) as i64).map(|f| 4 * f).collect();
     Some((out, q_indptr, q_flat))
+}
+
+const MOST_FIT: f64 = 0.75; // share of a side a corner may move while fitting
+const FIT_STRONG: f64 = 0.05; // a plane direction counts if this strong against the strongest: flat moves only along the normal
+const GUARD_QUALITY: f64 = 0.1;
+const UNTANGLE_BELOW: f64 = 0.05;
+const FINISH_ROUNDS: usize = 4;
+
+/// `patch.quad_quality`: > 0 means convex and warped under 60 degrees. min(minimum scaled Jacobian about the mean
+/// normal, (cos warp - 0.5) / 0.5), the warp being the larger fold of the two diagonal splits.
+pub fn quad_quality(q: &[V3; 4]) -> f64 {
+    let normal = unit(cross(sub(q[2], q[0]), sub(q[3], q[1])));
+    let mut jac = f64::INFINITY;
+    for k in 0..4 {
+        let following = sub(q[(k + 1) % 4], q[k]);
+        let previous = sub(q[(k + 3) % 4], q[k]);
+        let length = (dot(following, following) * dot(previous, previous)).sqrt();
+        jac = jac.min(if length > 1e-30 { dot(cross(following, previous), normal) / length } else { -1.0 });
+    }
+    let fold_a = dot(unit(cross(sub(q[1], q[0]), sub(q[2], q[0]))), unit(cross(sub(q[2], q[0]), sub(q[3], q[0]))));
+    let fold_b = dot(unit(cross(sub(q[2], q[1]), sub(q[3], q[1]))), unit(cross(sub(q[3], q[1]), sub(q[0], q[1]))));
+    jac.min((fold_a.min(fold_b) - 0.5) * 2.0)
+}
+
+fn quad_at(points: &[f64], flat: &[i64], f: usize) -> [V3; 4] {
+    [0, 1, 2, 3].map(|k| at(points, flat[f * 4 + k] as usize))
+}
+
+/// Eigenvalues (ascending) and unit eigenvectors (as rows) of a symmetric 3x3 matrix, by Jacobi rotations.
+fn eigh3(mut m: [[f64; 3]; 3]) -> ([f64; 3], [V3; 3]) {
+    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..50 {
+        let (mut p, mut q, mut big) = (0, 1, m[0][1].abs());
+        for (i, j) in [(0, 2), (1, 2)] {
+            if m[i][j].abs() > big {
+                (p, q, big) = (i, j, m[i][j].abs());
+            }
+        }
+        if big < 1e-300 {
+            break;
+        }
+        let theta = (m[q][q] - m[p][p]) / (2.0 * m[p][q]);
+        let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+        let t = if theta == 0.0 { 1.0 } else { t };
+        let (c, s) = (1.0 / (t * t + 1.0).sqrt(), t / (t * t + 1.0).sqrt());
+        for k in 0..3 {
+            let (mkp, mkq) = (m[k][p], m[k][q]);
+            m[k][p] = c * mkp - s * mkq;
+            m[k][q] = s * mkp + c * mkq;
+        }
+        for k in 0..3 {
+            let (mpk, mqk) = (m[p][k], m[q][k]);
+            m[p][k] = c * mpk - s * mqk;
+            m[q][k] = s * mpk + c * mqk;
+        }
+        for row in v.iter_mut() {
+            let (vp, vq) = (row[p], row[q]);
+            row[p] = c * vp - s * vq;
+            row[q] = s * vp + c * vq;
+        }
+    }
+    let mut order = [0usize, 1, 2];
+    order.sort_by(|&x, &y| m[x][x].total_cmp(&m[y][y]));
+    (order.map(|k| m[k][k]), order.map(|k| [v[0][k], v[1][k], v[2][k]]))
+}
+
+/// The quads' corners onto the source, the add-on's way (`fieldmesh.quads_from`'s last steps): `refit` gives each
+/// corner the patch of source nearest to it and fits it to the planes there, `untangle` slides the corners of nearly
+/// folded quads toward their neighbours along the surface, and `_even_out_folds` irons out what is still folded.
+fn finish(points: &mut Vec<f64>, mut quads: Vec<i64>, source: &[f64], source_tris: &[i64]) -> Vec<i64> {
+    if quads.is_empty() {
+        return quads;
+    }
+    let side = {
+        let mut sides: Vec<f64> = quads.chunks_exact(4).map(|q| {
+            let d = sub(at(points, q[0] as usize), at(points, q[1] as usize));
+            dot(d, d).sqrt()
+        }).collect();
+        sides.sort_by(f64::total_cmp);
+        sides[sides.len() / 2]
+    };
+    refit(points, &quads, source, source_tris, side, 3);
+    quads = clean(points, quads);
+    untangle(points, &quads, 12);
+    refit(points, &quads, source, source_tris, side, 1);
+    for _ in 0..FINISH_ROUNDS {
+        quads = clean(points, quads);
+        untangle(points, &quads, 24);
+        if !(0..quads.len() / 4).any(|f| quad_quality(&quad_at(points, &quads, f)) <= 0.0) {
+            break;
+        }
+    }
+    even_out_folds(points, &quads, 40);
+    clean(points, quads)
+}
+
+/// `fieldmesh.clean`: a corner in only two quads adds nothing, so those two become one (`_dissolve_doublets`); a folded
+/// quad goes by merging two of its opposite corners, which leaves the faces round it quads (`_merge_folded`).
+fn clean(points: &mut [f64], mut quads: Vec<i64>) -> Vec<i64> {
+    for _ in 0..6 {
+        let count = quads.len() / 4;
+        // Doublets.
+        let mut around: HashMap<i64, Vec<usize>> = HashMap::new();
+        for f in 0..count {
+            for &v in &quads[f * 4..f * 4 + 4] {
+                around.entry(v).or_default().push(f);
+            }
+        }
+        let mut corners: Vec<i64> = around.iter().filter(|(_, f)| f.len() == 2).map(|(&v, _)| v).collect();
+        corners.sort_unstable();
+        let mut gone = vec![false; count];
+        let mut added: Vec<[i64; 4]> = Vec::new();
+        let turned = |f: usize, v: i64, quads: &[i64]| -> [i64; 4] {
+            let q = &quads[f * 4..f * 4 + 4];
+            let k = q.iter().position(|&x| x == v).unwrap();
+            [0, 1, 2, 3].map(|i| q[(k + i) % 4])
+        };
+        for v in corners {
+            let ids = &around[&v];
+            if gone[ids[0]] || gone[ids[1]] {
+                continue;
+            }
+            let (first, second) = (turned(ids[0], v, &quads), turned(ids[1], v, &quads));
+            if first[1] != second[3] || first[3] != second[1] {
+                continue; // not two faces sharing both edges at this corner
+            }
+            let merged = [first[1], first[2], first[3], second[2]];
+            let mut sorted = merged;
+            sorted.sort_unstable();
+            if sorted.windows(2).any(|w| w[0] == w[1]) {
+                continue;
+            }
+            gone[ids[0]] = true;
+            gone[ids[1]] = true;
+            added.push(merged);
+        }
+        let doublets = added.len();
+        let mut next: Vec<i64> = (0..count).filter(|&f| !gone[f]).flat_map(|f| quads[f * 4..f * 4 + 4].to_vec()).collect();
+        next.extend(added.iter().flatten());
+        quads = next;
+        // Folded quads.
+        let count = quads.len() / 4;
+        let mut neighbours: HashMap<i64, std::collections::BTreeSet<i64>> = HashMap::new();
+        for q in quads.chunks_exact(4) {
+            for k in 0..4 {
+                neighbours.entry(q[k]).or_default().insert(q[(k + 1) % 4]);
+                neighbours.entry(q[(k + 1) % 4]).or_default().insert(q[k]);
+            }
+        }
+        let mut rename: HashMap<i64, i64> = HashMap::new();
+        let mut touched = std::collections::HashSet::new();
+        let mut gone = vec![false; count];
+        for f in 0..count {
+            if quad_quality(&quad_at(points, &quads, f)) > 0.0 {
+                continue;
+            }
+            let [a, b, c, d] = [0, 1, 2, 3].map(|k| quads[f * 4 + k]);
+            if [a, b, c, d].iter().any(|v| touched.contains(v)) {
+                continue;
+            }
+            let distance = |x: i64, y: i64| {
+                let e = sub(at(points, x as usize), at(points, y as usize));
+                dot(e, e)
+            };
+            let options = if distance(a, c) <= distance(b, d) { [(a, c, [b, d]), (b, d, [a, c])] } else { [(b, d, [a, c]), (a, c, [b, d])] };
+            for (x, y, side) in options {
+                let shared: std::collections::BTreeSet<i64> = neighbours[&x].intersection(&neighbours[&y]).copied().collect();
+                let wanted: std::collections::BTreeSet<i64> = side.into_iter().collect();
+                if shared == wanted && neighbours[&side[0]].len() > 2 && neighbours[&side[1]].len() > 2 {
+                    rename.insert(y, x);
+                    let middle = [0, 1, 2].map(|i| 0.5 * (points[x as usize * 3 + i] + points[y as usize * 3 + i]));
+                    points[x as usize * 3..x as usize * 3 + 3].copy_from_slice(&middle);
+                    touched.extend([a, b, c, d]);
+                    touched.extend(neighbours[&x].iter().copied());
+                    touched.extend(neighbours[&y].iter().copied());
+                    gone[f] = true;
+                    break;
+                }
+            }
+        }
+        let folded = gone.iter().filter(|&&g| g).count();
+        quads = (0..count).filter(|&f| !gone[f]).flat_map(|f| quads[f * 4..f * 4 + 4].iter().map(|v| *rename.get(v).unwrap_or(v)).collect::<Vec<_>>()).collect();
+        if doublets == 0 && folded == 0 {
+            break;
+        }
+    }
+    quads
+}
+
+/// `fieldmesh.refit`: each corner takes the source points nearer to it than to any other corner (measured along the
+/// source), and moves to where it best fits their triangles' planes; a move that makes a quad bad goes back.
+fn refit(points: &mut [f64], quads: &[i64], source: &[f64], source_tris: &[i64], side: f64, rounds: usize) {
+    let n_out = points.len() / 3;
+    let n_src = source.len() / 3;
+    let indptr: Vec<i64> = (0..=(source_tris.len() / 3) as i64).map(|f| 3 * f).collect();
+    let tree = crate::near::FaceTree::new(source, &indptr, source_tris);
+    let (a, b) = edges_of(source_tris);
+    let mut around: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_src];
+    for (&x, &y) in a.iter().zip(&b) {
+        let d = sub(at(source, x as usize), at(source, y as usize));
+        let length = dot(d, d).sqrt();
+        around[x as usize].push((y as usize, length));
+        around[y as usize].push((x as usize, length));
+    }
+    let face_normal = |t: &[i64]| {
+        let (p, q, r) = (at(source, t[0] as usize), at(source, t[1] as usize), at(source, t[2] as usize));
+        cross(sub(q, p), sub(r, p)) // length is twice the area
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    for _ in 0..rounds {
+        // Seeds: each corner's nearest source point, then every source point to the corner whose seed is nearest.
+        let (_, found) = crate::near::nearest_faces(&tree, points, &stop);
+        let mut owner = vec![usize::MAX; n_src];
+        let mut far = vec![f64::INFINITY; n_src];
+        let mut heap = std::collections::BinaryHeap::new();
+        for (v, hit) in found.iter().enumerate() {
+            let t = &source_tris[hit.1 as usize * 3..hit.1 as usize * 3 + 3];
+            let seed = *t.iter().min_by(|&&x, &&y| {
+                let (dx, dy) = (sub(at(source, x as usize), hit.0), sub(at(source, y as usize), hit.0));
+                dot(dx, dx).total_cmp(&dot(dy, dy))
+            }).unwrap() as usize;
+            if owner[seed] == usize::MAX {
+                owner[seed] = v;
+                far[seed] = 0.0;
+                heap.push((std::cmp::Reverse(0u64), seed));
+            }
+        }
+        while let Some((std::cmp::Reverse(d), x)) = heap.pop() {
+            let d = f64::from_bits(d);
+            if d > far[x] {
+                continue;
+            }
+            for &(y, length) in &around[x] {
+                if d + length < far[y] {
+                    far[y] = d + length;
+                    owner[y] = owner[x];
+                    heap.push((std::cmp::Reverse((d + length).to_bits()), y));
+                }
+            }
+        }
+        // Fit: planes and pull per corner from the triangles its source points own, a third each.
+        let mut planes = vec![[[0.0; 3]; 3]; n_out];
+        let mut pull = vec![[0.0; 3]; n_out];
+        for t in source_tris.chunks_exact(3) {
+            let doubled = face_normal(t);
+            let area = dot(doubled, doubled).sqrt() / 2.0;
+            if area <= 0.0 {
+                continue;
+            }
+            let nrm = unit(doubled);
+            let middle = [0, 1, 2].map(|k| (source[t[0] as usize * 3 + k] + source[t[1] as usize * 3 + k] + source[t[2] as usize * 3 + k]) / 3.0);
+            for &c in t {
+                let o = owner[c as usize];
+                if o == usize::MAX {
+                    continue;
+                }
+                for i in 0..3 {
+                    for j in 0..3 {
+                        planes[o][i][j] += area / 3.0 * nrm[i] * nrm[j];
+                    }
+                }
+                let reach = area / 3.0 * dot(nrm, sub(middle, at(points, o)));
+                for i in 0..3 {
+                    pull[o][i] += reach * nrm[i];
+                }
+            }
+        }
+        let mut moved = points.to_vec();
+        for v in 0..n_out {
+            if planes[v][0][0] + planes[v][1][1] + planes[v][2][2] <= 0.0 {
+                continue; // no source of its own
+            }
+            let (values, vectors) = eigh3(planes[v]);
+            let strongest = values[2].max(1e-30);
+            let mut step = [0.0; 3];
+            for k in 0..3 {
+                if values[k] > FIT_STRONG * strongest {
+                    let along = dot(vectors[k], pull[v]) / values[k].max(1e-30);
+                    for i in 0..3 {
+                        step[i] += vectors[k][i] * along;
+                    }
+                }
+            }
+            let length = dot(step, step).sqrt();
+            let scale = if length > 1e-30 { (MOST_FIT * side / length).min(1.0) } else { 1.0 };
+            for i in 0..3 {
+                moved[v * 3 + i] += step[i] * scale;
+            }
+        }
+        // Any corner of a quad the move made bad goes back.
+        let before: Vec<f64> = (0..quads.len() / 4).map(|f| quad_quality(&quad_at(points, quads, f))).collect();
+        for _ in 0..8 {
+            let mut reverted = false;
+            for f in 0..quads.len() / 4 {
+                if quad_quality(&quad_at(&moved, quads, f)) < before[f].min(GUARD_QUALITY) {
+                    for &v in &quads[f * 4..f * 4 + 4] {
+                        let v = v as usize;
+                        if moved[v * 3..v * 3 + 3] != points[v * 3..v * 3 + 3] {
+                            moved[v * 3..v * 3 + 3].copy_from_slice(&points[v * 3..v * 3 + 3]);
+                            reverted = true;
+                        }
+                    }
+                }
+            }
+            if !reverted {
+                break;
+            }
+        }
+        points.copy_from_slice(&moved);
+    }
+}
+
+/// Neighbours' middle per corner over the quads' sides, and how many sides each corner has.
+fn neighbour_middles(points: &[f64], quads: &[i64]) -> Vec<V3> {
+    let n = points.len() / 3;
+    let (mut sum, mut uses) = (vec![[0.0; 3]; n], vec![0.0; n]);
+    for q in quads.chunks_exact(4) {
+        for k in 0..4 {
+            for (x, y) in [(q[k], q[(k + 1) % 4]), (q[(k + 1) % 4], q[k])] {
+                let p = at(points, y as usize);
+                for i in 0..3 {
+                    sum[x as usize][i] += p[i];
+                }
+                uses[x as usize] += 1.0;
+            }
+        }
+    }
+    sum.iter().zip(&uses).map(|(s, &u)| if u > 0.0 { s.map(|x| x / u) } else { [0.0; 3] }).collect()
+}
+
+/// `fieldmesh.untangle`: only the corners of folded or nearly folded quads move, toward their neighbours' middle,
+/// along the surface.
+fn untangle(points: &mut [f64], quads: &[i64], rounds: usize) {
+    let n = points.len() / 3;
+    for _ in 0..rounds {
+        let mut moving = vec![false; n];
+        let mut any = false;
+        for f in 0..quads.len() / 4 {
+            if quad_quality(&quad_at(points, quads, f)) < UNTANGLE_BELOW {
+                for &v in &quads[f * 4..f * 4 + 4] {
+                    moving[v as usize] = true;
+                }
+                any = true;
+            }
+        }
+        if !any {
+            return;
+        }
+        let mut normal = vec![[0.0; 3]; n];
+        for f in 0..quads.len() / 4 {
+            let q = quad_at(points, quads, f);
+            let area = cross(sub(q[2], q[0]), sub(q[3], q[1]));
+            for &v in &quads[f * 4..f * 4 + 4] {
+                for i in 0..3 {
+                    normal[v as usize][i] += area[i];
+                }
+            }
+        }
+        let target = neighbour_middles(points, quads);
+        for v in (0..n).filter(|&v| moving[v]) {
+            let step = tangent(sub(target[v], at(points, v)), unit(normal[v]));
+            for i in 0..3 {
+                points[v * 3 + i] += 0.7 * step[i];
+            }
+        }
+    }
+}
+
+/// `fieldmesh._even_out_folds`: the last resort for what is still folded. Each corner of a folded quad, and every
+/// corner reached before, goes halfway to its neighbours' middle in all directions, until none is folded.
+fn even_out_folds(points: &mut [f64], quads: &[i64], rounds: usize) {
+    let n = points.len() / 3;
+    let mut reach = vec![false; n];
+    for _ in 0..rounds {
+        let mut any = false;
+        for f in 0..quads.len() / 4 {
+            if quad_quality(&quad_at(points, quads, f)) <= 0.0 {
+                for &v in &quads[f * 4..f * 4 + 4] {
+                    reach[v as usize] = true;
+                }
+                any = true;
+            }
+        }
+        if !any {
+            return;
+        }
+        let target = neighbour_middles(points, quads);
+        for v in (0..n).filter(|&v| reach[v]) {
+            for i in 0..3 {
+                points[v * 3 + i] += 0.5 * (target[v][i] - points[v * 3 + i]);
+            }
+        }
+    }
 }
 
 /// splitmix64: a seeded stream, so the same part gives the same rows every run.

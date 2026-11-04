@@ -158,6 +158,36 @@ A part keeps its rows only if the view holds and the rows add no bad faces. `--n
   `_clean_regions`), fits every corner to the planes of the source near it (`fit_regions`), and untangles folds
   (`untangle`, `_even_out_folds`). Porting `fit_regions` and `untangle` comes first: those target the bent quads.
 
+### Hybrid, second version: the add-on's finishing steps ported
+
+After the split into quads, the rows now go through the add-on's last steps:
+- `refit`: each corner gets the patch of source nearest to it and fits that patch's planes, with a guard against new
+  bad quads.
+- `untangle`, then `clean`: doublets dissolved, folded quads merged away.
+- `_even_out_folds` at the end.
+
+A part's rows that miss its face count by more than 10% are tried once more with a corrected cell. The try nearer the
+count is kept, and rows more than 25% off are refused.
+
+`--reduce-to` at AutoRemesher's counts, measured as before:
+
+| Model | Before the hybrid | Hybrid now |
+|---|---|---|
+| chess set | 9,462 faces, 4.22%, 0 bad; irregular 0.388, 0.031 slivers, 0.679 square, 5.7% under 0.3 | 9,491 faces, 4.65%, 0 bad; 0.334, 0.022, 0.753, 3.5%; rows on 18 parts |
+| drill press | 16,688 faces, 8.37%, 0 bad; 0.431, 0.219, 0.548 | 16,716 faces, 8.19%, 0 bad; 0.433, 0.217, 0.547; rows on 1 part |
+| fire hydrant | 18,897 faces, 9.53%, 0 bad; 0.405, 0.196, 0.547 | 18,920 faces, 10.15%, 0 bad; 0.405, 0.194, 0.551; rows on 1 part |
+
+- The ports cut bent quads per part from 2-54 to mostly 1-7. On the smooth, turned chess pieces most parts now take
+  rows, and the layout gets clearly better at the same face count, for 0.4 points more view change.
+- The machined drill press and hydrant keep the reduction almost everywhere: their parts' rows still have a few bent
+  quads or miss the count. That is the hybrid doing what it should, rows where smooth and reduction where hard. Their
+  layout stays where the add-on's is.
+- It costs time: 35-56 s a model instead of about 4 s. Most of it goes on parts whose rows end up refused, within the
+  60 s budget (the add-on's FIELD_SECONDS). A cheap first check that a part is smooth enough would save most of it.
+- Still far from AutoRemesher's evenness on the chess set: 0.334 irregular against 0.045. The add-on's other
+  extraction steps (`_split_rings`, `_merge_small`, `pair_along_rows`, `pair_by_paths`) and per-limb cell sizes would
+  be next.
+
 ## Code layout
 
 - `src/lib.rs` compiles `native/src/*.rs` with `#[path]`, so the add-on's kernels and this program run the same code
