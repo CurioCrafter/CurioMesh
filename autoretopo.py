@@ -2450,7 +2450,7 @@ class AutoJob:
                 if result is None:
                     return
             points, out_faces, out_kinds = result
-            owner = np.zeros(len(points), dtype=np.int64)
+            owner = np.full(len(points), -1, dtype=np.int64)  # unknown: part 0 being rebuilt must not freeze every paired corner
             if self.twins and out_faces:
                 owner = yield from self._off(lambda: special.vertex_owners(points, out_faces, input_co, input_faces, from_part))
             rebuilt_owner = np.zeros(len(rco), dtype=np.int64)
