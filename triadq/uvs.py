@@ -144,7 +144,8 @@ def is_see_through(material) -> bool:
 
     if material is None:
         return False
-    if getattr(material, "blend_method", "OPAQUE") in {"BLEND", "HASHED"} or getattr(material, "surface_render_method", "DITHERED") == "BLENDED":
+    method = getattr(material, "surface_render_method", None)  # Blender 4.2+; blend_method is legacy and glTF opaque still reads HASHED
+    if method == "BLENDED" if method else getattr(material, "blend_method", "OPAQUE") in {"BLEND", "HASHED"}:
         return True
     tree = material.node_tree if material.use_nodes else None
     for node in tree.nodes if tree is not None else ():

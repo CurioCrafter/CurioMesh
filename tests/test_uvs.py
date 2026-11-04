@@ -54,6 +54,9 @@ class SeeThroughTests(unittest.TestCase):
         shader = SimpleNamespace(type="BSDF_PRINCIPLED", inputs={"Alpha": _plug(1.0), "Transmission Weight": _plug(0.0)})
         self.assertFalse(is_see_through(_material(shader, blend_method="OPAQUE")))
         self.assertFalse(is_see_through(None))
+        # glTF opaque materials come in with the legacy blend_method HASHED
+        self.assertFalse(is_see_through(_material(shader, blend_method="HASHED", surface_render_method="DITHERED")))
+        self.assertTrue(is_see_through(_material(shader, blend_method="OPAQUE", surface_render_method="BLENDED")))
 
     def test_glass_is_kept_out_of_the_bake(self):
         glass = SimpleNamespace(type="BSDF_GLASS", inputs={})

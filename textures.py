@@ -11,6 +11,7 @@ import numpy as np
 from .triadq.uvs import is_see_through, uv_overlap
 
 BAKE_LAYER = "CurioMesh_Bake"
+MIN_UV_FILL = 0.4  # share of the UV square a new unwrap must use before its island gaps are accepted
 MOST_OVERLAP = 0.01  # share of texels a UV map may reuse and still hold a bake
 
 
@@ -78,6 +79,17 @@ def _uv_layer_can_hold_bake(mesh: bpy.types.Mesh) -> bool:
     uv = np.empty(len(mesh.loops) * 2, dtype=np.float64)
     layer.data.foreach_get("uv", uv)
     return uv_overlap(uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)) <= MOST_OVERLAP
+
+
+def _uv_fill(mesh: bpy.types.Mesh) -> float:
+    """The share of the UV square the active layer's triangles cover. Padding between many small islands eats the rest."""
+    mesh.calc_loop_triangles()
+    loops = np.empty(len(mesh.loop_triangles) * 3, dtype=np.int64)
+    mesh.loop_triangles.foreach_get("loops", loops)
+    uv = np.empty(len(mesh.loops) * 2, dtype=np.float64)
+    mesh.uv_layers.active.data.foreach_get("uv", uv)
+    a, b, c = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2).transpose(1, 0, 2)
+    return float(np.abs(np.cross(b - a, c - a)).sum() / 2)
 
 
 def _harden_uv_seams(mesh: bpy.types.Mesh) -> int:
@@ -200,7 +212,13 @@ def bake_detail(
     glass = {i: m for i, m in enumerate(mesh.materials) if with_color and is_see_through(m)}
     margin = max(4, int(resolution) // 128)  # padding that survives the texture's smaller mip levels
     if new_uvs or not _uv_layer_can_hold_bake(mesh):
-        ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
+        while True:
+            ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
+            if margin <= 2 or _uv_fill(mesh) >= MIN_UV_FILL:
+                break
+            # Thousands of small islands: the gaps between them would eat the texture, and every face gets a few texels.
+            mesh.uv_layers.remove(mesh.uv_layers[BAKE_LAYER])
+            margin //= 2
     uv_layer = mesh.uv_layers.active.name
     keep_render = next((layer.name for layer in mesh.uv_layers if layer.active_render), uv_layer)
     mesh.uv_layers.active.active_render = True
