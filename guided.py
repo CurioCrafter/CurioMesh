@@ -1744,7 +1744,8 @@ def _auto_slice():
     if work is None or not isinstance(work["runner"], (autoretopo.AutoJob, segments.PartJob)) or not work["runner"].busy:
         return None
     work["runner"].step()
-    return work["runner"].cfg.gap_s
+    cfg = getattr(work["runner"], "cfg", None)  # a part redo has no effort settings of its own: it ran once and the timer died
+    return cfg.gap_s if cfg is not None else 0.0
 
 
 def _collect_work(context) -> None:

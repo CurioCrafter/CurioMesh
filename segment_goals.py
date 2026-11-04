@@ -40,6 +40,7 @@ LOW_POLY_EDGE = 2.2  # Low Poly's quads against the sizes the others use at the 
 SMALLEST_RESULT = 60  # a found segment with fewer faces in the result joins a neighbour: too few to be worth remaking
 WORSE_TIMES, WORSE_BY = 1.5, 4.0  # Reduce may change the view this many times, and this many points, more than the part had before
 CLOSED_SHARE, STROKE_SHARE = 1.3, 0.8  # triangles to reduce to, per quad wanted, with closure and with drawn lines
+HISTORY = 20  # hand edits Undo Edit can go back through
 FIELD_MOST = 300_000  # faces of your mesh above which a part is too slow for the field mesher
 LAY_ROUNDS = 3  # steps pulling a run of edges onto a drawn line
 SHARPEN_DROP = 8.0  # topology score a sheet may give up for following the camera's misses
@@ -803,6 +804,10 @@ def relabel(src_labels, piece, touched, lock=(), store: bool = True) -> str:
             record["locked"] = True
         records.append(record)
     selected = {int(np.searchsorted(values, p)) for p in view.seg["sel"] if p in values}
+    if store:  # Undo Edit goes back to this
+        history = view.seg.setdefault("history", [])
+        history.append((base["out"], view.seg["piece"], view.seg["parts"], view.seg["src"], set(view.seg["sel"])))
+        del history[:-HISTORY]
     out = dict(out, piece=new_piece, parts=new_piece)
     base.update(out=out, id=time.perf_counter_ns())
     job._face_piece = new_src
@@ -811,6 +816,28 @@ def relabel(src_labels, piece, touched, lock=(), store: bool = True) -> str:
     view.refresh_list()
     if store:
         save()
+    overlay.tag_redraw()
+    return ""
+
+
+def undo_edit() -> str:
+    """Put the segments back as they were before the last hand edit."""
+    guided = _g()
+    base = guided.state["auto_base"]
+    history = view.seg.get("history") or []
+    while history and (base is None or history[-1][0]["faces"] is not base["out"]["faces"]):
+        history.pop()  # made for a result that has been remade since
+    if not history:
+        return "No hand edit to undo"
+    out, piece, parts, src, sel = history.pop()
+    base.update(out=out, id=time.perf_counter_ns())
+    base["job"]._face_piece = src
+    for k, record in enumerate(parts):
+        record["id"] = k
+    view.seg.update(base=base["id"], piece=piece, parts=parts, src=src, sel=sel, ref={}, batch_key=None, tris=None, hover=None, live=None, live_count=None)
+    guided.state["res"] = out
+    view.refresh_list()
+    save()
     overlay.tag_redraw()
     return ""
 
@@ -981,6 +1008,19 @@ class CURIOMESH_OT_seg_halve(_SegmentOp, bpy.types.Operator):
 
     def execute(self, context):
         return self._done(halve(next(iter(view.seg["sel"]))))
+
+
+class CURIOMESH_OT_seg_undo(_SegmentOp, bpy.types.Operator):
+    bl_idname = "curiomesh.seg_undo"
+    bl_label = "Undo Edit"
+    bl_description = "Put the segments back as they were before the last merge, split, grow, shrink or paint (Ctrl+Z in Review Segments)"
+
+    @classmethod
+    def poll(cls, context):
+        return view.ready() and bool(view.seg.get("history"))
+
+    def execute(self, context):
+        return self._done(undo_edit())
 
 
 class CURIOMESH_OT_seg_lock(bpy.types.Operator):
@@ -1376,6 +1416,7 @@ def draw_tools(layout, gs) -> None:
     row = col.row(align=True)
     row.operator("curiomesh.seg_paint", text="Paint New", icon="BRUSH_DATA").mode = "NEW"
     row.operator("curiomesh.seg_rename", text="Rename", icon="GREASEPENCIL")
+    col.operator("curiomesh.seg_undo", icon="LOOP_BACK")
 
 
 def draw_selected(layout, gs) -> None:
@@ -1494,7 +1535,7 @@ class CURIOMESH_OT_seg_review(bpy.types.Operator):
         if context.space_data is not None and hasattr(context.space_data, "show_region_ui"):
             context.space_data.show_region_ui = True
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set("Review Segments   Click: select   Shift+Click: add   Left, Right: worst first   M: merge   K: split in two   L: lock   G, S: grow, shrink   Esc: done")
+        context.workspace.status_text_set("Review Segments   Click: select   Shift+Click: add   Left, Right: worst first   M: merge   K: split in two   L: lock   G, S: grow, shrink   Ctrl+Z: undo edit   Esc: done")
         overlay.tag_redraw()
         return {"RUNNING_MODAL"}
 
@@ -1532,6 +1573,11 @@ class CURIOMESH_OT_seg_review(bpy.types.Operator):
         if event.type in {"RIGHT_ARROW", "LEFT_ARROW"} and event.value == "PRESS":
             walk(context, 1 if event.type == "RIGHT_ARROW" else -1)
             return {"RUNNING_MODAL"}
+        if event.type == "Z" and event.value == "PRESS" and (event.ctrl or event.oskey) and not event.shift:
+            if bpy.ops.curiomesh.seg_undo.poll():
+                bpy.ops.curiomesh.seg_undo()
+                return {"RUNNING_MODAL"}
+            return {"PASS_THROUGH"}
         tool = {"M": "merge", "K": "halve", "L": "lock", "G": "GROW", "S": "SHRINK"}.get(event.type) if event.value == "PRESS" and not (event.ctrl or event.alt or event.oskey) else None
         if tool is not None:
             if tool in {"GROW", "SHRINK"}:
@@ -1630,6 +1676,7 @@ CLASSES = (
     CURIOMESH_OT_seg_merge,
     CURIOMESH_OT_seg_halve,
     CURIOMESH_OT_seg_lock,
+    CURIOMESH_OT_seg_undo,
     CURIOMESH_OT_seg_rename,
     CURIOMESH_OT_seg_from_shapes,
     CURIOMESH_OT_seg_split,
