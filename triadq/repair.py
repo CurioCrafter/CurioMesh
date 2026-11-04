@@ -392,8 +392,9 @@ def untangle(points, faces, piece, bad, near, rounds: int = ROUNDS, stopped=lamb
     both put on the source, and keeps the one that leaves fewer faces around it turned against the source or folded
     over a neighbour, if no quad there gets bent. Faces are not changed. Returns (points, corners moved).
 
-    The corners go in groups that share no face, so a whole group is judged at once; `rounds` passes over every corner
-    is the whole budget, which makes the result the same on any computer. `stopped` is only a safety net.
+    The corners go in groups that share no face, so a whole group is judged at once, with the same result as one by one;
+    `rounds` passes over every corner is the whole budget, which makes the result the same on any computer. `stopped` is
+    only a safety net.
     """
     points = np.array(points, dtype=np.float64)
     faces = [tuple(int(v) for v in f) for f in faces]
@@ -413,11 +414,11 @@ def untangle(points, faces, piece, bad, near, rounds: int = ROUNDS, stopped=lamb
     out_of = np.zeros((len(faces), 3))  # the source's way out at a face's middle, asked once per position
     fresh = np.zeros(len(faces), dtype=bool)
 
-    # Groups of corners that share no face: one corner's move never changes another's faces in its group.
+    # Groups of corners that share no face, in waves: a corner goes one wave after the latest lower-numbered corner it
+    # shares a face with. Judging the waves in turn is the same as judging the corners one by one in number order.
     group: dict[int, int] = {}
     for v in todo:
-        taken = {group[w] for f in users[v] for w in faces[f] if w in group}
-        group[v] = next(c for c in range(len(taken) + 1) if c not in taken)
+        group[v] = 1 + max((group[w] for f in users[v] for w in faces[f] if w in group), default=-1)
     batches = []
     for c in range(max(group.values()) + 1):
         vs = [v for v in todo if group[v] == c]
