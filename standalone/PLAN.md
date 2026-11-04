@@ -83,7 +83,28 @@ Read with care:
 - "Bad" here counts broken-edge faces and quads that `quad_valid` rejects (bent past 60 degrees or concave). The add-on's
   own folded count for the drill press was 0, so the two definitions differ.
 - `--reduce-to` lands within 3-9% of the count asked for, in up to 4 looks.
-- Not compared yet: AutoRemesher (3.6k stars, MIT, active). It is needed for the release gate.
+
+### Against AutoRemesher 1.2.0 (release gate)
+
+AutoRemesher 1.2.0 for Windows came from the official GitHub release (huxingyi/autoremesher: 3.6k stars, MIT).
+VirusTotal: 0 of 66 vendors flagged it. It ran from its command line with default settings and `--target-quads`. It
+undershoots the target, so it ran twice: at the add-on's count, then with the target scaled up to land near it. The
+standalone ran with `--reduce-to` AutoRemesher's first count. All results were measured by `curiomesh measure`.
+
+| Model | AutoRemesher, 1st | AutoRemesher, scaled target | Standalone at AutoRemesher's 1st count |
+|---|---|---|---|
+| chess set | 8,974 faces, 8.34%, 113 bad, 35 spots, 5 s | 21,338 faces, 4.85%, 71 bad, 43 spots, 16 s | 9,462 faces, 4.58%, 0 bad, 152 spots, 2 s |
+| drill press | 15,455 faces, 32.80%, 1,219 bad, 326 spots, 10 s | 21,967 faces, 26.77%, 1,620 bad, 393 spots, 12 s | 16,688 faces, 8.12%, 34 bad, 260 spots, 2 s |
+| fire hydrant | 17,335 faces, 20.64%, 462 bad, 127 spots, 7 s | 35,084 faces, 14.60%, 601 bad, 175 spots, 7 s | 18,897 faces, 9.69%, 0 bad, 418 spots, 2 s |
+
+- **Shape and defects:** the standalone wins on all three. On the hard-surface drill press it keeps 4x more of the view
+  than AutoRemesher at the same count, and even with AutoRemesher given 30% more faces. It also leaves 0-34 bad faces
+  where AutoRemesher leaves hundreds. AutoRemesher also leaves a few triangles. That fits the angle: hard-surface parts
+  and assemblies.
+- **Layout:** AutoRemesher wins. Its even field quads have far fewer issue spots on the chess set and the hydrant (fewer
+  poles and slivers). The standalone's layout is the next thing to improve: smooth grids, pole spinning, the cross field.
+- The standalone landed 5-9% above the count asked for, so its columns have slightly more faces.
+- AutoRemesher was not tuned (sharp edge 90 degrees, adaptivity 1). Tuning could narrow the shape gap. This was not tried.
 
 ## Code layout
 
