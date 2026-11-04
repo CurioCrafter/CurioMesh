@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.2 - unreleased
+## 0.9.2 - 2026-11-03
 
 ### Faces that turn inward or fold over
 - **Parts are reduced by CurioMesh's own reducer, not Blender's Decimate**, whenever the native core is
