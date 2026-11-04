@@ -375,6 +375,7 @@ KEEP_HERE = 0.5  # with helpers, a part of this share of the job's triangles or 
 OFF_MAIN_FROM = 100_000  # with this many faces in a job, its slow Python steps run on a worker thread, so Blender stays usable
 PAIR_CHUNK_FACES = 200_000  # Light only: above 0, pairing works per region of this many faces: less memory on a huge mesh, and a few more triangles at the seams
 NATIVE_FROM = 60_000  # a piece of this many triangles goes to the native reducer: Decimate would hold up Blender for seconds per size
+SPLIT_FACES = 2 * NATIVE_FROM  # with helpers, a piece of more faces is cut into regions of half to all of this: still big enough for the native reducer
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
 
@@ -425,6 +426,12 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
 
 def _triangle_count(polys) -> int:
     return len(polys.flat) - 2 * len(polys) if isinstance(polys, FlatFaces) else sum(len(p) - 2 for p in polys)
+
+
+def _same_points(points: np.ndarray, these: np.ndarray) -> np.ndarray:
+    """True for each of `points` exactly at one of `these`."""
+    seen = set(map(tuple, these.tolist()))
+    return np.fromiter((p in seen for p in map(tuple, points.tolist())), dtype=bool, count=len(points))
 
 
 def _native_reducible(polys, kinds, drop) -> bool:
@@ -663,6 +670,7 @@ class AutoJob:
         self.names: list[str] = []  # where each part is, in words
         self.locked: np.ndarray | None = None  # vertices on a chunk border: never moved, so neighbours join without a gap
         self.chunks = 0  # how many regions a huge piece was cut into
+        self.split = 0  # with helpers: how many regions the big pieces were cut into, so the helpers share them
         self.losses: list[float] = []  # the view change measured after each try
         self.first: list = []  # per piece, its smallest size (what the preview shows before sizes are picked)
         self.files: list = []  # per piece, the file that holds its sizes when they are kept on disk, not in memory
@@ -798,7 +806,7 @@ class AutoJob:
         out = None
         if _native_reducible(polys, kinds, drop) and turbo.available():
             wanted = max(int(ratio * len(polys)), 1)
-            key = None if keep is not None or one_off else (len(polys), hash(points.tobytes()))
+            key = None if one_off else (len(polys), hash(points.tobytes()), None if keep is None else hash(keep.tobytes()))
             run = self._runs.get(key)
             if run is None:
                 run = yield from self._background(lambda: turbo.reducer(points, polys, keep, wanted if key is None else 12))
@@ -834,6 +842,10 @@ class AutoJob:
     def _piece_lock(self, ids: np.ndarray):
         """Which vertices of a piece sit on a chunk border (or None when nothing was cut)."""
         return self._piece_vertex(ids, self.locked)
+
+    def _cut(self, ids: np.ndarray) -> bool:
+        """A region of a cut piece, whose border must not move. When a piece was cut for memory, every part counts as one."""
+        return bool(self.chunks) or (self.locked is not None and bool(self._piece_lock(ids).any()))
 
     def _piece_vertex(self, ids: np.ndarray, per_vertex):
         if per_vertex is None:
@@ -896,7 +908,7 @@ class AutoJob:
         points, polys, kinds = self._piece_arrays(ids)
         if _triangle_count(polys) <= KEEP_TRIANGLES:
             return False
-        if self.locked is None and not self.guide_lines and not self.strips and self.drop is None:
+        if not self._cut(ids) and not self.guide_lines and not self.strips and self.drop is None:
             found = self._find_copy(self._plan_reps, points, polys, kinds, lambda rep: self._plan_kinds[rep])
             self._copy_plan[index] = found
             if found is not None:
@@ -916,6 +928,8 @@ class AutoJob:
         points, polys, kinds = yield from self._off(lambda: self._piece_arrays(ids))
         whole = (points, polys, kinds)
         triangles = _triangle_count(polys)
+        cut = self._cut(ids)
+        lock = self._piece_lock(ids)
         if triangles <= KEEP_TRIANGLES:
             self.sizes.append([whole])
             self.files.append(None)
@@ -924,7 +938,7 @@ class AutoJob:
             self.ready.append([False])
             self.seen.append(0.0)
             return
-        if self.spot_copies and self.locked is None and not self.guide_lines and not self.strips and self.drop is None:
+        if self.spot_copies and not cut and not self.guide_lines and not self.strips and self.drop is None:
             found = yield from self._off(lambda: self._copy_of(len(self.sizes), points, polys, kinds))
             if found:
                 return
@@ -967,7 +981,7 @@ class AutoJob:
         turned_sizes, turned_levels = [], []
         seen = 0.0
         enough = GOOD_ENOUGH * self.detail / 100.0
-        if self.locked is None and self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
+        if not cut and self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
             tries = parts.rebuilds(points, polys, max(set(kinds), key=kinds.count))
             while True:
                 out = yield from self._off(lambda: next(tries, False))
@@ -1000,7 +1014,7 @@ class AutoJob:
                     turned_sizes.append(rebuilt)
                     turned_levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
         method_here = self._method(len(self.sizes))
-        plain = self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and self.drop is None and self.locked is None and len(set(kinds)) == 1
+        plain = self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and self.drop is None and not cut and len(set(kinds)) == 1
         if method_here == "FIELD" and plain:
             want = max(min(FIELD_START * triangles, FIELD_FIRST), 24.0)
             asked = self.detail / 100.0
@@ -1046,7 +1060,7 @@ class AutoJob:
         def look(k: int):
             """Generator: this size measured. Returns the share of its view that changed."""
             yield
-            reduced = yield from self._sized(index, shares[k], points, polys, kinds, self._piece_drop(ids), self._piece_lock(ids))
+            reduced = yield from self._sized(index, shares[k], points, polys, kinds, self._piece_drop(ids), lock)
             view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, shown = self._counts(reference, view, pixel)
             self.looks += 1
@@ -1067,14 +1081,14 @@ class AutoJob:
         seen = max([seen] + [looked[k][3] for k in order])
         if case is not None:
             self.part_cases[len(self.sizes)] = (case, order[0], len(order))
-        if triangles >= FINER_TRIANGLES and seen > 0.0 and self.drop is None and not self.chunks:  # painted vertices would not survive the first pass
+        if triangles >= FINER_TRIANGLES and seen > 0.0 and self.drop is None and not self.chunks:  # painted vertices would not survive the first pass (a region's border is kept)
             asked = self.detail / 100.0
             uppers = {next((k for k, level in enumerate(levels) if level.loss <= limit * seen), 0) for limit in (asked, PIECE_LIMIT * asked)} - {0}
             for upper in sorted(uppers):
                 # A size halfway across the jump, so a piece doesn't get twice the faces to clear a limit.
                 yield
                 faces = math.sqrt(levels[upper - 1].faces * levels[upper].faces)
-                reduced = yield from self._reduced(points, polys, kinds, faces / len(polys))
+                reduced = yield from self._reduced(points, polys, kinds, faces / len(polys), keep=lock)
                 view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
                 sizes.append(reduced)
                 levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
@@ -1083,8 +1097,9 @@ class AutoJob:
                 for k in (upper - 1, upper, len(levels) - 1):
                     yield
                     keep = yield from self._off(lambda: hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0))
-                    held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep)
-                    reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), one_off=True)
+                    held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep if lock is None else keep | lock, one_off=True)
+                    border = None if lock is None else (yield from self._off(lambda: _same_points(held[0], points[lock])))  # a region's border never moved
+                    reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), keep=border, one_off=True)
                     view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
                     sizes.append(reduced)
                     levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
@@ -1258,8 +1273,9 @@ class AutoJob:
 
     def _combined(self, rebuilt: bool | None = None, join: bool = False, only_done: bool = False, firsts: bool = False) -> tuple[np.ndarray, list[tuple[int, ...]], list[str], np.ndarray]:
         """Every piece at its picked size, and any not measured yet as it is. `rebuilt` True or False keeps only those."""
-        all_points, all_faces, all_kinds, owner = [], [], [], []
+        all_points, all_faces, all_kinds, owner, seams = [], [], [], [], []
         offset = 0
+        join = join and self.locked is not None
         for index, ids in enumerate(self.pieces):
             if only_done and index >= len(self.sizes):
                 continue
@@ -1283,6 +1299,8 @@ class AutoJob:
             if index < len(self.sizes):
                 self._unmeasured.pop(index, None)
             all_points.append(points)
+            if join:
+                seams.append(np.full(len(points), self._cut(ids)))
             all_faces += turbo.shifted_faces(polys, offset)
             all_kinds += kinds
             owner += [index] * len(polys)
@@ -1290,8 +1308,8 @@ class AutoJob:
         if not all_points:
             return np.zeros((0, 3)), [], [], np.zeros(0, dtype=np.int64)
         points = np.vstack(all_points)
-        if join and self.locked is not None:  # the chunk borders were never moved, so a cut piece is one surface again
-            points, all_faces = hardware.weld(points, all_faces)
+        if join:  # the chunk borders were never moved, so a cut piece is one surface again
+            points, all_faces = hardware.weld(points, all_faces, np.concatenate(seams))
         return points, all_faces, all_kinds, np.asarray(owner, dtype=np.int64)
 
     def _show(self, final=None) -> None:
@@ -1493,7 +1511,7 @@ class AutoJob:
         try:
             coarse = MeshData(co, faces, kinds)
             # Rows of quads would ignore the strokes and the paint, and they are what Auto means.
-            if method == "AUTO" and self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.drop is None and self.locked is None:
+            if method == "AUTO" and self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.drop is None and not self.chunks:
                 if self._labels is None:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
@@ -1622,7 +1640,7 @@ class AutoJob:
             self.stage = f"Trying one more size of piece {index + 1}"
             reference = yield from self._reference(center, half, pixels, whole[0], whole[1])
             yield
-            reduced = yield from self._reduced(whole[0], whole[1], whole[2], share)
+            reduced = yield from self._reduced(whole[0], whole[1], whole[2], share, keep=self._piece_lock(self.pieces[index]))
             view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
             wrong, _shown = self._counts(reference, view, pixel)
             where = max(at, other)
@@ -1862,7 +1880,7 @@ class AutoJob:
 
     def _near_source(self, part: int, where: np.ndarray):
         """(closest points, normals) on one piece of the source. Each piece's tree is made once, when it is needed."""
-        part = -1 if self.chunks else part  # a cut piece came back as one surface
+        part = -1 if self.locked is not None else part  # a cut piece came back as one surface
         tree = self._piece_trees.get(part)
         if tree is None:
             points, polys, _kinds = (self.co, self.faces, None) if part < 0 else self._piece_arrays(self.pieces[part])
@@ -1954,7 +1972,7 @@ class AutoJob:
             spots = checks.new_spots(before, after)
             bent = set(np.unique(piece[after.bent]).tolist()) if len(after.bent) == len(piece) else set()
             spots = sorted(spots, key=lambda p: p not in bent)  # folded quads first: small thin parts, cheap to remake a size up
-            bad = self._affordable([p for p in spots[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES], start_faces)
+            bad = self._affordable([p for p in spots[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES and not self._cut(self.pieces[p])], start_faces)
             if not bad or self._stopped or time.perf_counter() > self._repair_until:
                 break
             self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
@@ -2251,17 +2269,22 @@ class AutoJob:
         flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes_f.sum()))
         centers = np.add.reduceat(self.co[flat], np.concatenate(([0], np.cumsum(sizes_f)[:-1])), axis=0) / sizes_f[:, None]
         cut = []  # a piece with more faces than the machine should hold at once is cut into regions
+        # With helpers a big piece is cut too, so they share it: in one piece it would be measured by one core alone.
+        limit = min(self.cfg.chunk_faces, SPLIT_FACES) if self.parallel and not self.guide_lines and not self.strips else self.cfg.chunk_faces
         for ids in shells:
-            if len(ids) > self.cfg.chunk_faces:
-                regions = hardware.split_chunks(centers[ids], self.cfg.chunk_faces)
+            if len(ids) > limit:
+                regions = hardware.split_chunks(centers[ids], limit)
                 cut += [ids[r] for r in regions]
-                self.chunks += len(regions)
+                if len(ids) > self.cfg.chunk_faces:
+                    self.chunks += len(regions)
+                else:
+                    self.split += len(regions)
             else:
                 cut.append(ids)
         cut.sort(key=len, reverse=True)
         self.pieces = cut
         self.names = [hardware.region_name(centers[ids].mean(axis=0), low, high) for ids in cut]
-        if self.chunks:
+        if self.chunks or self.split:
             label = np.zeros(len(self.faces), dtype=np.int64)
             for number, ids in enumerate(cut):
                 label[ids] = number
@@ -2472,7 +2495,7 @@ class AutoJob:
         whole = self.mirror[3] if self.mirror is not None else len(self.faces)
         quads = sum(1 for face in shown if len(face) == 4)
         bend = guides.bend_stats([group for _tag, group in self.bend_groups], self.output["co"], shown, self.gap) if self.bend_groups else None
-        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "dropped": len(self.dropped), "dropped_faces": sum(len(ids) for ids in self.dropped), "baked": self.baked, "copies": len(self.twins), "instanced": self.instances is not None, "check": check, "notes": list(dict.fromkeys(self.notes)), "chunks": self.chunks, "resumed": self.resumed, "memory_mb": dict(self.mem), "guides": follows}
+        self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "bend": bend, "dropped": len(self.dropped), "dropped_faces": sum(len(ids) for ids in self.dropped), "baked": self.baked, "copies": len(self.twins), "instanced": self.instances is not None, "check": check, "notes": list(dict.fromkeys(self.notes)), "chunks": self.chunks, "split": self.split, "resumed": self.resumed, "memory_mb": dict(self.mem), "guides": follows}
         if self.checkpoint is not None and not self.keep_progress:
             shutil.rmtree(self.checkpoint, ignore_errors=True)  # finished: nothing left to resume
         self._drop_tmp()
@@ -2530,7 +2553,7 @@ class AutoJob:
         goal = self.levels[index][self.picked[index]].faces + miss
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:
             return
-        self.tuned[index] = yield from self._reduced(points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]))
+        self.tuned[index] = yield from self._reduced(points, polys, kinds, goal / triangles, self._piece_drop(self.pieces[index]), self._piece_lock(self.pieces[index]))
 
     def explain_piece(self, index: int) -> str:
         """In plain words, for the segment view: what this part was taken for and what was kept. Empty before that."""

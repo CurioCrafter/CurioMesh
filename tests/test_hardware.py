@@ -34,6 +34,17 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(len(welded), 4)
         self.assertEqual(len(set(joined[0]) & set(joined[1])), 2)
 
+    def test_a_piece_split_for_helpers_joins_at_its_border_and_leaves_other_pieces_alone(self):
+        sizes = [len(c) for c in hardware.split_chunks(np.random.default_rng(2).random((380_000, 3)), 120_000)]
+        self.assertTrue(all(60_000 <= n <= 120_000 for n in sizes))  # every region stays big enough for the native reducer
+        points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [1, 0, 0], [2, 0, 0], [1, 1, 0]], float)
+        only = np.array([True] * 6 + [False] * 3)  # two regions of a cut piece, then a loose piece touching them
+        welded, joined = hardware.weld(points, [(0, 1, 2), (3, 4, 5), (6, 7, 8)], only)
+        self.assertEqual(len(welded), 7)
+        self.assertEqual(len(set(joined[0]) & set(joined[1])), 2)
+        self.assertFalse(set(joined[2]) & (set(joined[0]) | set(joined[1])))
+        self.assertTrue(np.array_equal(welded[list(joined[2])], points[6:]))
+
     def test_region_names_say_where_the_part_is(self):
         low, high = np.zeros(3), np.ones(3)
         self.assertEqual(hardware.region_name(np.array([0.5, 0.5, 0.5]), low, high), "middle")
