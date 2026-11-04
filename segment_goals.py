@@ -371,7 +371,12 @@ class FindJob(view.PartJob):
         piece = labels[near]
         normals, areas, _centres = S.face_frames(co, faces)
         links = S.face_links(faces)
+        raw = piece
         piece = S.tidy(faces, S.even_borders(faces, piece, normals, areas, rounds=1), links)
+        held = list(carried(labels, box["old"], locked))
+        if held:  # a locked segment keeps its faces on the result too: tidying could take a small one away
+            fix = np.isin(raw, held) | np.isin(piece, held)
+            piece[fix] = raw[fix]
         missing = np.setdiff1d(np.unique(labels), np.unique(piece))
         if len(missing):  # too small to have a face of its own in the result
             labels = _drop_labels(labels, missing.tolist(), tree.links[0], tree.links[1])

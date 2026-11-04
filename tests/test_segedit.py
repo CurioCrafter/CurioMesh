@@ -133,6 +133,14 @@ class DebounceTests(unittest.TestCase):
         d.poke(1.4)
         self.assertTrue(d.stale(ticket))
 
+    def test_a_long_drag_still_runs(self):
+        d = parallel.Debounce(0.05, most=0.1)
+        for k in range(5):
+            d.poke(k * 0.016)
+        self.assertFalse(d.due(0.07))
+        d.poke(0.1)
+        self.assertTrue(d.due(0.11))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,10 +3,11 @@
 
 """Live segments: each mesh's own segment settings, and a coloured preview that follows them while you drag.
 
-A change asks for a preview. When the asking has been quiet for a moment, a thread cuts the merge tree kept from the
-last find at the new settings (Crease Strength merges it again first) and marks the result's faces through a map of
-the nearest face of your mesh, which is worked out once per result. That is all a preview needs, so it lands in a few
-milliseconds on a big mesh; a newer change makes the running one stop. When the changes have stopped for longer,
+A change asks for a preview. When the asking has been quiet for a moment (or every tenth of a second during a long
+drag), a thread cuts the merge tree kept from the last find at the new settings (Crease Strength merges it again
+first) and marks the result's faces through a map of the nearest face of your mesh, worked out once per result. That
+is all a preview needs, so it lands in well under a second; one preview runs at a time, and the newest change is
+always the next one shown. When the changes have stopped for longer,
 `FindJob` finds the segments for real (borders settled on the creases, seams laid on the result) and keeps them.
 
 Paint Size is the `CM_SegmentSize` vertex group: red makes smaller segments there, blue larger. Strokes in Weight
@@ -28,12 +29,13 @@ from .triadq import segment as S
 
 SIZE_GROUP = "CM_SegmentSize"
 PREVIEW_WAIT = 0.03  # quiet before a preview: a drag sends many changes a second
+PREVIEW_MOST = 0.1  # a drag that never pauses still gets a preview this often
 PAINT_WAIT = 0.3  # after a stroke: reading the paint of a big mesh takes a moment, so not after every dab
 KEEP_WAIT = 0.8  # quiet before the segments are found for real and kept
 TICK = 0.02
 
 live = {
-    "preview": parallel.Debounce(PREVIEW_WAIT),
+    "preview": parallel.Debounce(PREVIEW_WAIT, PREVIEW_MOST),
     "keep": parallel.Debounce(KEEP_WAIT),
     "thread": None,
     "box": None,
@@ -43,6 +45,7 @@ live = {
     "paint": None,  # (key, per face of your mesh)
     "paint_serial": 0,
     "error": "",
+    "shown": 0,  # ticket of the preview on screen
 }
 
 
@@ -100,6 +103,7 @@ def request(paint: bool = False) -> None:
     if paint:
         live["paint_serial"] += 1
     live["preview"].wait = PAINT_WAIT if paint else PREVIEW_WAIT
+    live["preview"].most = None if paint else PREVIEW_MOST  # not mid-stroke: reading the paint would make painting stutter
     live["poked"] = now
     live["preview"].poke(now)
     live["keep"].poke(now)
@@ -138,15 +142,12 @@ def _start() -> None:
     mapping = res_map()
     locked = {r["id"] for r in view.seg["parts"] if r.get("locked")}
     box = {"ticket": ticket, "asked": live["poked"], "base": base, "faces": base["out"]["faces"]}
-    stale = lambda: live["preview"].stale(ticket)  # noqa: E731
 
     def work():
         try:
             cut_tree = tree
             if abs(cut_tree.creases - settings["creases"]) > 1e-9:
-                cut_tree = box["tree"] = S.remerge(tree, settings["creases"], stale)
-            if stale():
-                return
+                cut_tree = box["tree"] = S.remerge(tree, settings["creases"])
             scale = S.patch_scale(cut_tree, paint) if paint is not None else None
             labels = S.cut(cut_tree, settings["detail"], scale, settings["largest"], settings["smallest"])[cut_tree.leaf]
             labels = S.keep_locked(labels, old, locked, None, None, tidy_up=False)
@@ -167,8 +168,10 @@ def _finished(box) -> None:
     if box.get("tree") is not None and base is box["base"]:
         view.seg["tree"] = box["tree"]  # merged again for this Crease Strength: the next drag starts from it
     live["error"] = box.get("error", "")
-    if "res" not in box or live["preview"].stale(box["ticket"]) or base is not box["base"] or base["out"]["faces"] is not box["faces"]:
+    # Shown even when a newer change came in meanwhile: it is newer than what is on screen, and the newer one follows.
+    if "res" not in box or box["ticket"] <= live["shown"] or base is not box["base"] or base["out"]["faces"] is not box["faces"]:
         return
+    live["shown"] = box["ticket"]
     view.seg.update(live=box["res"], live_count=box["count"], batch_key=None)
     live.update(count=box["count"], ms=1000.0 * (time.perf_counter() - box["asked"]))
     overlay.tag_redraw()
