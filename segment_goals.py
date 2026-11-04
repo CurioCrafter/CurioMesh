@@ -428,6 +428,7 @@ class FindJob(view.PartJob):
         if "labels" not in box:
             if box.get("error") != "cancelled":
                 self.warnings = [f"Finding segments failed: {box.get('error', 'no result')}"]
+                view.seglive.clear()  # the kept segments are what holds now
             return
         old = self.base["out"]
         out = dict(old, co=box["co"], piece=box["piece"], parts=box["piece"])
