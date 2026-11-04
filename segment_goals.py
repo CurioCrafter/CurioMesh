@@ -58,12 +58,6 @@ def _g():
     return view._g()
 
 
-def on_detail(self, context) -> None:
-    """Segment Detail: cut the merge tree at another height. Hand-made changes to the segments start over."""
-    if view.ready():
-        start_find(context, fresh=True)
-
-
 # --------------------------------------------------------------------------- saved with the object
 
 
@@ -89,6 +83,7 @@ def save() -> None:
         "details": [r["goal_detail"] for r in view.seg["parts"]],
         "methods": [r.get("choice", "AUTO") for r in view.seg["parts"]],
         "multires": [r.get("multires", True) for r in view.seg["parts"]],
+        "locked": [bool(r.get("locked")) for r in view.seg["parts"]],
         "sel": sorted(view.seg["sel"]),
     })
 
@@ -139,7 +134,7 @@ def _record(job, label: int, ids: np.ndarray, count: int, saved=None) -> dict:
     return {
         "id": label, "name": pick("names", f"Segment {label + 1}"), "kind": P.classify(points, polys), "before": len(ids), "after": count,
         "change": change, "topology": None, "method": "AUTO", "goal": pick("goals", "REDUCE"), "goal_detail": pick("details", 0.5), "multires": pick("multires", True),
-        "loose": loose, "whole": whole, "source": ids, "choice": pick("methods", "AUTO"),
+        "loose": loose, "whole": whole, "source": ids, "choice": pick("methods", "AUTO"), "locked": bool(pick("locked", False)),
         "tries": [{"method": "AUTO", "after": count, "change": change, "topology": None, "detail": None, "build": None}], "cur": 0,
     }
 
@@ -159,7 +154,7 @@ def install(base: dict, src_labels: np.ndarray, out: dict, saved=None) -> None:
     base["id"] = time.perf_counter_ns()
     base.pop("area", None)
     job._face_piece = src_labels
-    view.seg.update(base=base["id"], piece=np.asarray(out["piece"]), parts=records, src=src_labels, ref={}, batch_key=None, tris=None, hover=None, surface=True)
+    view.seg.update(base=base["id"], piece=np.asarray(out["piece"]), parts=records, src=src_labels, ref={}, batch_key=None, tris=None, hover=None, surface=True, live=None, live_count=None)
     view.seg["sel"] = {p for p in (saved or {}).get("sel", []) if p < count}
     view.refresh_list()
     _g().state["res"] = out
@@ -194,8 +189,8 @@ def _drop_labels(labels, gone, fa, fb) -> np.ndarray:
     return labels
 
 
-def _tiny_segments(job, labels, piece) -> list[int]:
-    """Segments with few faces in the result, that are only part of a loose piece (a whole loose piece has no neighbour to join)."""
+def _tiny_segments(job, labels, piece, keep=()) -> list[int]:
+    """Segments with few faces in the result, that are only part of a loose piece (a whole loose piece has no neighbour to join). Never one in `keep`."""
     loose = _loose_of(job)
     count = int(labels.max()) + 1
     made = np.bincount(piece, minlength=count)
@@ -205,7 +200,7 @@ def _tiny_segments(job, labels, piece) -> list[int]:
     order = np.argsort(made)
     tiny = []
     for k in order.tolist():  # never the last segment of a loose piece
-        if made[k] < SMALLEST_RESULT and per_loose[pieces[k]] > 1:
+        if made[k] < SMALLEST_RESULT and per_loose[pieces[k]] > 1 and k not in keep:
             tiny.append(k)
             per_loose[pieces[k]] -= 1
     return tiny
@@ -280,8 +275,8 @@ def _misses(reference, view, center, half, pixels) -> np.ndarray:
     return np.vstack(out) if out else np.zeros((0, 3))
 
 
-def transfer(src: dict, bvh, src_labels, co, faces) -> np.ndarray:
-    """The segment of each result face: that of the face of your mesh nearest to it."""
+def nearest_faces(src: dict, bvh, co, faces) -> np.ndarray:
+    """Per result face: the face of your mesh nearest to its middle."""
     centres = S.face_frames(co, faces)[2]
     face_of_tri = src["tri_face"]
     out = np.zeros(len(faces), dtype=np.int64)
@@ -289,8 +284,44 @@ def transfer(src: dict, bvh, src_labels, co, faces) -> np.ndarray:
     for k, p in enumerate(centres.tolist()):
         hit = find(Vector(p))
         if hit[0] is not None:
-            out[k] = src_labels[face_of_tri[hit[2]]]
+            out[k] = face_of_tri[hit[2]]
     return out
+
+
+def transfer(src: dict, bvh, src_labels, co, faces) -> np.ndarray:
+    """The segment of each result face: that of the face of your mesh nearest to it."""
+    return np.asarray(src_labels)[nearest_faces(src, bvh, co, faces)]
+
+
+def carried(labels, old, locked) -> dict:
+    """{new segment: the locked old one it is}, for new segments made almost wholly of one locked segment's faces."""
+    if old is None or not locked or len(old) != len(labels):
+        return {}
+    labels, old = np.asarray(labels), np.asarray(old)
+    out = {}
+    for k in sorted(locked):
+        held = old == k
+        if not held.any():
+            continue
+        values, counts = np.unique(labels[held], return_counts=True)
+        best = int(values[np.argmax(counts)])
+        if counts.max() >= 0.9 * held.sum() and (labels == best).sum() <= 1.1 * held.sum():
+            out[best] = k
+    return out
+
+
+def _kept_records(count: int, carry: dict, records: list) -> dict:
+    """What `_record` reads, for segments found again: the locked ones keep their names, Uses and lock."""
+    saved = {key: [] for key in ("names", "goals", "details", "methods", "multires", "locked")}
+    for k in range(count):
+        old = records[carry[k]] if k in carry and carry[k] < len(records) else None
+        saved["names"].append(old["name"] if old else f"Segment {k + 1}")
+        saved["goals"].append(old["goal"] if old else "REDUCE")
+        saved["details"].append(old["goal_detail"] if old else 0.5)
+        saved["methods"].append(old.get("choice", "AUTO") if old else "AUTO")
+        saved["multires"].append(old.get("multires", True) if old else True)
+        saved["locked"].append(old is not None)
+    return saved
 
 
 class FindJob(view.PartJob):
@@ -319,17 +350,25 @@ class FindJob(view.PartJob):
         job = self.job
         cancelled = lambda: self._stopped  # noqa: E731
         tree = view.seg.get("tree")
+        st = box["settings"]
         labels, saved = (None, None) if self.fresh else load(source, src, len(job.faces))
         if tree is None or view.seg.get("tree_job") is not job:
-            tree = S.build(job.co, job.faces, _thickness(bvh, float(np.ptp(job.co, axis=0).max()) or 1.0), cancelled=cancelled)
+            tree = S.build(job.co, job.faces, _thickness(bvh, float(np.ptp(job.co, axis=0).max()) or 1.0), cancelled=cancelled, creases=st["creases"])
             box["tree"] = tree
+        elif abs(tree.creases - st["creases"]) > 1e-9:
+            tree = box["tree"] = S.remerge(tree, st["creases"], cancelled)
+        locked = box["locked"] if labels is None else set()
         if labels is None:
             self.fraction = 0.4
-            labels = S.find(tree, job.faces, box["detail"], cancelled=cancelled)
+            scale = S.patch_scale(tree, box["paint"]) if box["paint"] is not None else None
+            labels = S.find(tree, job.faces, st["detail"], cancelled, scale, st["largest"], st["smallest"], st["smooth"])
+            labels = S.keep_locked(labels, box["old"], locked, tree.links[0], tree.links[1])
         out = self.base["out"]
         co, faces = out["co"], out["faces"]
         self.fraction, self.stage = 0.5, "Marking the segments on the result"
-        piece = transfer(src, bvh, labels, co, faces)
+        near = nearest_faces(src, bvh, co, faces)
+        box["res_src"] = near
+        piece = labels[near]
         normals, areas, _centres = S.face_frames(co, faces)
         links = S.face_links(faces)
         piece = S.tidy(faces, S.even_borders(faces, piece, normals, areas, rounds=1), links)
@@ -340,7 +379,7 @@ class FindJob(view.PartJob):
         piece = np.searchsorted(values, piece)
         labels = labels.reshape(-1)
         if saved is None:  # segments found here, not ones you kept, painted or split
-            tiny = _tiny_segments(job, labels, piece)
+            tiny = _tiny_segments(job, labels, piece, set(carried(labels, box["old"], locked)))
             if tiny:
                 labels = _drop_labels(labels, tiny, tree.links[0], tree.links[1])
                 piece = _drop_labels(piece, tiny, links[0], links[1])
@@ -351,6 +390,8 @@ class FindJob(view.PartJob):
         project = region._projector(bvh)
         moved = S.straighten_seams(moved, faces, piece, project)
         moved = moved.astype(np.float32).astype(np.float64)  # what the preview mesh will hold, so comparing it with this later finds no false change
+        if saved is None and locked:
+            saved = _kept_records(int(labels.max()) + 1, carried(labels, box["old"], locked), box["records"])
         box.update(labels=labels, piece=piece, co=moved, saved=saved)
 
     def _run(self):
@@ -363,7 +404,11 @@ class FindJob(view.PartJob):
         if len(job.faces) != len(src["faces"]):
             return  # the search ran on something other than your mesh's faces: only loose pieces can be told apart then
         bvh = guided._bvh(src)
-        box = {"detail": self.context.scene.curiomesh_guided.seg_detail}
+        old = view.seg.get("src")
+        old = old if old is not None and len(old) == len(job.faces) else None
+        records = list(view.seg["parts"]) if old is not None else []
+        settings = view.seglive.snapshot(source)
+        box = {"settings": settings, "paint": view.seglive.paint_for(source, src) if settings["paint"] else None, "old": old, "records": records, "locked": {r["id"] for r in records if r.get("locked")}}
 
         def work():
             try:
@@ -387,6 +432,7 @@ class FindJob(view.PartJob):
         old = self.base["out"]
         out = dict(old, co=box["co"], piece=box["piece"], parts=box["piece"])
         install(self.base, box["labels"], out, box["saved"])
+        view.seg["res_src"] = (out["faces"], box["res_src"])
         self.output = out
         self.output_id += 1
         self.committed = True
@@ -716,8 +762,9 @@ def _fresh_record(job, label, ids, count, like=None) -> dict:
     return record
 
 
-def relabel(src_labels, piece, touched) -> str:
-    """Hand edits go in: `src_labels` and `piece` hold the new segments, and old segments in `touched` lose their tries. Returns a problem, or ''."""
+def relabel(src_labels, piece, touched, lock=(), store: bool = True) -> str:
+    """Hand edits go in: `src_labels` and `piece` hold the new segments, and old segments in `touched` lose their tries.
+    Segments in `lock` (by their label before renumbering) are locked, so a size change keeps them. Returns a problem, or ''."""
     guided = _g()
     base = guided.state["auto_base"]
     out, job = base["out"], base["job"]
@@ -743,17 +790,21 @@ def relabel(src_labels, piece, touched) -> str:
             record = _fresh_record(job, k, ids, int(made[k]), record)
             if label in old:
                 record["name"] = old[label]["name"]
+                record["locked"] = old[label].get("locked", False)
         else:
             record["id"] = k
+        if label in lock:
+            record["locked"] = True
         records.append(record)
     selected = {int(np.searchsorted(values, p)) for p in view.seg["sel"] if p in values}
     out = dict(out, piece=new_piece, parts=new_piece)
     base.update(out=out, id=time.perf_counter_ns())
     job._face_piece = new_src
-    view.seg.update(base=base["id"], piece=new_piece, parts=records, src=new_src, sel=selected, ref={}, batch_key=None, tris=None, hover=None, surface=True)
+    view.seg.update(base=base["id"], piece=new_piece, parts=records, src=new_src, sel=selected, ref={}, batch_key=None, tris=None, hover=None, surface=True, live=None, live_count=None)
     guided.state["res"] = out
     view.refresh_list()
-    save()
+    if store:
+        save()
     overlay.tag_redraw()
     return ""
 
@@ -767,7 +818,7 @@ def merge_selected() -> str:
     src[np.isin(src, selected)] = first
     piece[np.isin(piece, selected)] = first
     view.seg["sel"] = {first}
-    return relabel(src, piece, set(selected))
+    return relabel(src, piece, set(selected), lock={first})
 
 
 def new_label() -> int:
@@ -785,7 +836,7 @@ def split(segment: int, source_side: np.ndarray, result_side: np.ndarray) -> str
     src[moved_src] = fresh
     piece[moved_res] = fresh
     view.seg["sel"] = {segment}
-    return relabel(src, piece, {segment})
+    return relabel(src, piece, {segment}, lock={segment, fresh})
 
 
 def claim(source_mask: np.ndarray, result_mask: np.ndarray) -> str:
@@ -797,10 +848,87 @@ def claim(source_mask: np.ndarray, result_mask: np.ndarray) -> str:
     touched = set(np.unique(piece[result_mask]).tolist()) | set(np.unique(src[source_mask]).tolist())
     src[source_mask] = fresh
     piece[result_mask] = fresh
-    problem = relabel(src, piece, touched)
+    problem = relabel(src, piece, touched, lock={fresh})
     if not problem:
         view.select([len(view.seg["parts"]) - 1])
     return problem
+
+
+def grow(segment: int, source_mask: np.ndarray, result_mask: np.ndarray) -> str:
+    """Faces in the masks join `segment`, taken from whatever held them."""
+    src, piece = view.seg["src"].copy(), view.seg["piece"].copy()
+    touched = {segment} | set(np.unique(src[source_mask]).tolist()) | set(np.unique(piece[result_mask]).tolist())
+    src[source_mask] = segment
+    piece[result_mask] = segment
+    return relabel(src, piece, touched, lock={segment})
+
+
+def shrink(segment: int, source_mask: np.ndarray, result_mask: np.ndarray) -> str:
+    """Faces of `segment` in the masks go to the neighbours beside them."""
+    base = _g().state["auto_base"]
+    tree = view.seg.get("tree")
+    src_links = tree.links if tree is not None else S.face_links(base["job"].faces)
+    res_links = S.face_links(base["out"]["faces"])
+    old_src, old_piece = view.seg["src"], view.seg["piece"]
+    src = S.shrink_into(old_src, source_mask, segment, src_links[0], src_links[1])
+    piece = S.shrink_into(old_piece, result_mask, segment, res_links[0], res_links[1])
+    if np.array_equal(src, old_src) and np.array_equal(piece, old_piece):
+        return "Nothing to give away there: paint over the segment's border"
+    touched = {segment} | set(np.unique(src[src != old_src]).tolist()) | set(np.unique(piece[piece != old_piece]).tolist())
+    return relabel(src, piece, touched, lock={segment})
+
+
+def halve(segment: int) -> str:
+    """Split a segment where the merge tree last joined it: its own natural border, no line needed."""
+    tree = view.seg.get("tree")
+    if tree is None:
+        return "Find the segments first"
+    side = S.split_in_two(tree, view.seg["src"], segment)
+    mapping = view.seglive.res_map()
+    if side is None or mapping is None:
+        return "This segment has no smaller parts inside: draw a line with Split"
+    return split(segment, side, side[mapping])
+
+
+def set_locked(pieces, on: bool) -> None:
+    for p in pieces:
+        view.seg["parts"][p]["locked"] = on
+    save()
+    view.seg["batch_key"] = None
+    overlay.tag_redraw()
+
+
+def reload_saved() -> None:
+    """After an undo or redo: the segments saved on the mesh at that step come back."""
+    guided = _g()
+    source, base = guided.state_source(), guided.state["auto_base"]
+    if source is None or base is None or not view.ready() or view.seg.get("src") is None:
+        return
+    view.seglive.clear()
+    src = guided._source_data(source)
+    labels, data = load(source, src, len(base["job"].faces))
+    if labels is None:
+        return
+    current = view.seg["src"]
+    locks = [bool(x) for x in data.get("locked", [])]
+    if len(current) == len(labels) and np.array_equal(labels, current):
+        if locks != [bool(r.get("locked")) for r in view.seg["parts"]]:
+            for record, on in zip(view.seg["parts"], locks):
+                record["locked"] = on
+            overlay.tag_redraw()
+        return
+    mapping = view.seglive.res_map()
+    if mapping is None:
+        return
+    differ = labels != current if len(current) == len(labels) else np.ones(len(labels), dtype=bool)
+    touched = set(np.unique(labels[differ]).tolist()) | (set(np.unique(current[differ]).tolist()) if len(current) == len(labels) else set())
+    if relabel(labels, labels[mapping], touched, store=False):
+        return
+    for k, record in enumerate(view.seg["parts"]):
+        if k < len(data.get("names", ())):
+            record["name"] = data["names"][k]
+        if k < len(locks):
+            record["locked"] = locks[k]
 
 
 def _centres():
@@ -824,7 +952,8 @@ class _SegmentOp:
 class CURIOMESH_OT_seg_merge(_SegmentOp, bpy.types.Operator):
     bl_idname = "curiomesh.seg_merge"
     bl_label = "Merge"
-    bl_description = "Make the selected segments one"
+    bl_description = "Make the selected segments one (Shift+click two in Review Segments, then M). The merged segment is locked, so size changes keep it"
+    bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
     def poll(cls, context):
@@ -834,11 +963,41 @@ class CURIOMESH_OT_seg_merge(_SegmentOp, bpy.types.Operator):
         return self._done(merge_selected())
 
 
+class CURIOMESH_OT_seg_halve(_SegmentOp, bpy.types.Operator):
+    bl_idname = "curiomesh.seg_halve"
+    bl_label = "Split in Two"
+    bl_description = "Split the selected segment in two along its own natural border, the one the finder would cut next. Both halves are locked"
+    bl_options = {"INTERNAL", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return view.ready() and view.seg.get("src") is not None and len(view.seg["sel"]) == 1 and view.seg.get("tree") is not None
+
+    def execute(self, context):
+        return self._done(halve(next(iter(view.seg["sel"]))))
+
+
+class CURIOMESH_OT_seg_lock(bpy.types.Operator):
+    bl_idname = "curiomesh.seg_lock"
+    bl_label = "Lock"
+    bl_description = "Lock the selected segments: changing the size settings keeps them face for face. Segments you merge, split or paint are locked for you. Click again to unlock"
+    bl_options = {"INTERNAL", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return view.ready() and view.seg.get("src") is not None and bool(view.seg["sel"])
+
+    def execute(self, context):
+        selected = sorted(view.seg["sel"])
+        set_locked(selected, not all(view.seg["parts"][p].get("locked") for p in selected))
+        return {"FINISHED"}
+
+
 class CURIOMESH_OT_seg_rename(bpy.types.Operator):
     bl_idname = "curiomesh.seg_rename"
     bl_label = "Rename Segment"
     bl_description = "Give the selected segment a name of your own"
-    bl_options = {"INTERNAL"}
+    bl_options = {"INTERNAL", "UNDO"}
 
     name: bpy.props.StringProperty(name="Name", default="")
 
@@ -915,8 +1074,8 @@ def _hit_object(context, region_, event):
 class CURIOMESH_OT_seg_split(bpy.types.Operator):
     bl_idname = "curiomesh.seg_split"
     bl_label = "Split"
-    bl_description = "Draw a line across a segment to cut it in two, on the side you see and through to the back. Esc cancels"
-    bl_options = {"INTERNAL"}
+    bl_description = "Draw a line across a segment to cut it in two, on the side you see and through to the back. Both halves are locked. Esc cancels"
+    bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
     def poll(cls, context):
@@ -978,32 +1137,74 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
     bl_idname = "curiomesh.seg_paint"
     bl_label = "Paint"
     bl_description = "Paint a new segment on the mesh with the left mouse button. [ and ] change the brush. Enter or right-click ends, Esc cancels"
-    bl_options = {"INTERNAL"}
+    bl_options = {"INTERNAL", "UNDO"}
+
+    mode: bpy.props.EnumProperty(items=[
+        ("NEW", "New", "Paint a new segment"),
+        ("GROW", "Grow", "Brush over the border of the selected segment to move it outwards. Ctrl paints the other way"),
+        ("SHRINK", "Shrink", "Brush over the selected segment to give its faces to the neighbours beside them. Ctrl paints the other way"),
+    ], default="NEW", options={"SKIP_SAVE"})
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.mode == "GROW":
+            return "Grow the selected segment: brush over its border to move it outwards. Ctrl shrinks. [ ] brush size, Enter or right-click ends, Esc cancels"
+        if properties.mode == "SHRINK":
+            return "Shrink the selected segment: brush over it to give its faces to the neighbours. Ctrl grows. [ ] brush size, Enter or right-click ends, Esc cancels"
+        return cls.bl_description
 
     @classmethod
     def poll(cls, context):
         return view.ready() and view.seg.get("src") is not None and context.area is not None and context.area.type == "VIEW_3D"
 
     def invoke(self, context, event):
+        self.target = None
+        if self.mode != "NEW":
+            if len(view.seg["sel"]) != 1:
+                self.report({"WARNING"}, "Select one segment first")
+                return {"CANCELLED"}
+            self.target = next(iter(view.seg["sel"]))
+            self.src_old = view.seg["src"]
         self.src_centres, self.res_centres = _centres()
         self.src_mask = np.zeros(len(self.src_centres), dtype=bool)
         self.res_mask = np.zeros(len(self.res_centres), dtype=bool)
         self.saved = view.seg["piece"]
+        self.src_take = np.zeros(len(self.src_centres), dtype=bool)
+        self.res_take = np.zeros(len(self.res_centres), dtype=bool)
         self.fresh = new_label()
         self.size = float(np.ptp(self.src_centres, axis=0).max()) * 0.04
         self.painting = False
+        self.shrinking = self.mode == "SHRINK"
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set("Paint a segment: left mouse paints   [ ] brush size   Enter or right-click ends   Esc cancels")
+        what = {"NEW": "Paint a segment", "GROW": "Grow the segment (Ctrl: shrink)", "SHRINK": "Shrink the segment (Ctrl: grow)"}[self.mode]
+        context.workspace.status_text_set(f"{what}: left mouse paints   [ ] brush size   Enter or right-click ends   Esc cancels")
         return {"RUNNING_MODAL"}
 
     def _dab(self, context, region_, event):
         hit = _hit_object(context, region_, event)
         if hit is None:
             return
-        self.src_mask |= np.linalg.norm(self.src_centres - hit[1], axis=1) < self.size
-        self.res_mask |= np.linalg.norm(self.res_centres - hit[1], axis=1) < self.size
+        src_dab = np.linalg.norm(self.src_centres - hit[1], axis=1) < self.size
+        res_dab = np.linalg.norm(self.res_centres - hit[1], axis=1) < self.size
+        if self.target is not None and self.shrinking != bool(event.ctrl):  # a shrink stroke only takes the segment's own faces
+            src_dab &= self.src_old == self.target
+            res_dab &= self.saved == self.target
+            self.src_take |= src_dab
+            self.res_take |= res_dab
+            self.src_mask &= ~src_dab
+            self.res_mask &= ~res_dab
+        else:
+            self.src_mask |= src_dab
+            self.res_mask |= res_dab
+            if self.target is not None:
+                self.src_take &= ~src_dab
+                self.res_take &= ~res_dab
         piece = self.saved.copy()
-        piece[self.res_mask] = self.fresh
+        if self.target is None:
+            piece[self.res_mask] = self.fresh
+        else:
+            piece[self.res_mask] = self.target
+            piece[self.res_take] = self.fresh  # given away: shown in the paint colour until it ends
         # Show the dabs in the selection colour: painted faces look like one part until it is made one.
         view.seg["piece"] = piece
         view.seg["painted"] = self.fresh
@@ -1026,7 +1227,15 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
             return {"CANCELLED"}
         if event.type in {"RET", "NUMPAD_ENTER", "RIGHTMOUSE"} and event.value == "PRESS":
             self._end(context)
-            problem = claim(self.src_mask, self.res_mask)
+            if self.target is None:
+                problem = claim(self.src_mask, self.res_mask)
+            else:
+                problem = ""
+                if self.src_mask.any() or self.res_mask.any():
+                    problem = grow(self.target, self.src_mask, self.res_mask)
+                if not problem and (self.src_take.any() or self.res_take.any()):
+                    target = next(iter(view.seg["sel"]), self.target)  # grown first: the numbers may have moved
+                    problem = shrink(target, self.src_take, self.res_take)
             if problem:
                 self.report({"WARNING"}, problem)
             return {"FINISHED"}
@@ -1140,16 +1349,26 @@ class CURIOMESH_OT_seg_multires(bpy.types.Operator):
 
 
 def draw_tools(layout, gs) -> None:
-    """Segment Detail and the hand tools, for the top of the Parts panel."""
-    if view.seg["src"] is None:
+    """The size settings of this mesh and the hand tools, for the top of the Parts panel."""
+    source = _g().state_source()
+    if view.seg["src"] is None or source is None:
         return
-    col = layout.column(align=True)
-    col.prop(gs, "seg_detail", slider=True)
-    row = col.row(align=True)
+    box = layout.box()
+    view.seglive.draw(box, source)
+    col = box.column(align=True)
+    row = col.row(align=True)  # two by two: four buttons in one row were cut to "Ren..." in a narrow sidebar
     row.operator("curiomesh.seg_merge", icon="AUTOMERGE_ON")
     row.operator("curiomesh.seg_split", icon="SCULPTMODE_HLT")
-    row = col.row(align=True)  # two by two: four buttons in one row were cut to "Ren..." in a narrow sidebar
-    row.operator("curiomesh.seg_paint", icon="BRUSH_DATA")
+    row = col.row(align=True)
+    row.operator("curiomesh.seg_halve", icon="MOD_EDGESPLIT")
+    selected = view.seg["sel"]
+    on = bool(selected) and all(view.seg["parts"][p].get("locked") for p in selected if p < len(view.seg["parts"]))
+    row.operator("curiomesh.seg_lock", text="Locked" if on else "Lock", icon="LOCKED" if on else "UNLOCKED", depress=on)
+    row = col.row(align=True)
+    row.operator("curiomesh.seg_paint", text="Grow", icon="ADD").mode = "GROW"
+    row.operator("curiomesh.seg_paint", text="Shrink", icon="REMOVE").mode = "SHRINK"
+    row = col.row(align=True)
+    row.operator("curiomesh.seg_paint", text="Paint New", icon="BRUSH_DATA").mode = "NEW"
     row.operator("curiomesh.seg_rename", text="Rename", icon="GREASEPENCIL")
 
 
@@ -1269,7 +1488,7 @@ class CURIOMESH_OT_seg_review(bpy.types.Operator):
         if context.space_data is not None and hasattr(context.space_data, "show_region_ui"):
             context.space_data.show_region_ui = True
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set("Review Segments   Hover: outline and numbers   Click: select   Shift+Click: add   Left, Right: previous, next, worst first   Esc: done")
+        context.workspace.status_text_set("Review Segments   Click: select   Shift+Click: add   Left, Right: worst first   M: merge   K: split in two   L: lock   G, S: grow, shrink   Esc: done")
         overlay.tag_redraw()
         return {"RUNNING_MODAL"}
 
@@ -1306,6 +1525,16 @@ class CURIOMESH_OT_seg_review(bpy.types.Operator):
             return {"PASS_THROUGH"}
         if event.type in {"RIGHT_ARROW", "LEFT_ARROW"} and event.value == "PRESS":
             walk(context, 1 if event.type == "RIGHT_ARROW" else -1)
+            return {"RUNNING_MODAL"}
+        tool = {"M": "merge", "K": "halve", "L": "lock", "G": "GROW", "S": "SHRINK"}.get(event.type) if event.value == "PRESS" and not (event.ctrl or event.alt or event.oskey) else None
+        if tool is not None:
+            if tool in {"GROW", "SHRINK"}:
+                if bpy.ops.curiomesh.seg_paint.poll():
+                    bpy.ops.curiomesh.seg_paint("INVOKE_DEFAULT", mode=tool)
+            else:
+                op = getattr(bpy.ops.curiomesh, "seg_" + tool)
+                if op.poll():
+                    op()
             return {"RUNNING_MODAL"}
         region_ = view._region_under_mouse(context, event)
         if region_ is None:
@@ -1393,6 +1622,8 @@ def draw_highlight(guided, preview, res, piece, flat, batch_for_shader) -> None:
 
 CLASSES = (
     CURIOMESH_OT_seg_merge,
+    CURIOMESH_OT_seg_halve,
+    CURIOMESH_OT_seg_lock,
     CURIOMESH_OT_seg_rename,
     CURIOMESH_OT_seg_from_shapes,
     CURIOMESH_OT_seg_split,

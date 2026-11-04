@@ -189,8 +189,11 @@ and after, how much of the view it changed, and its method. Click a part (Shift+
 it, and press Redo. Only that part is remade, while Blender stays usable. Its seam stays where it was, so it joins its neighbours with
 no gap. **Next** and **Previous** jump to the parts that changed the most. Every try is kept, so you can go back to any earlier one at once.
 
-Big loose pieces are also split along necks and creases, so a bust can become head, torso and plinth. You can merge, split with a
-drawn line, paint or rename segments. Part kinds (tube, flat plate, rough scan) are a rough guess from the shape, and the guess can be wrong.
+Big loose pieces are also split along necks and creases, so a bust can become head, torso and plinth. How they split is up to you,
+per mesh: **Segment Detail**, **Largest** and **Smallest Segment**, **Crease Strength** and **Border Smoothness** recolour the segments
+live while you drag, and **Paint Size** lets you paint red where you want smaller segments and blue where you want larger ones. By hand
+you can merge, split with a drawn line or in two along the segment's own border, grow or shrink a segment with a brush, paint a new one,
+rename and lock them. Edited segments are locked, so later size changes keep them, and the next run uses them. Part kinds (tube, flat plate, rough scan) are a rough guess from the shape, and the guess can be wrong.
 The [CHANGELOG](CHANGELOG.md) has the full list.
 
 ## Draw edge loops, mirror, guide curves, paint density

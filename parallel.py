@@ -293,3 +293,27 @@ def find_may_start(runner) -> bool:
     """Finding the segments may start when nothing runs or only an older find does (that one is stopped first).
     It never takes over a running search, redo or Use remake: they would be stopped for a job that only adds labels."""
     return runner is None or not runner.busy or getattr(runner, "is_find", False)
+
+
+class Debounce:
+    """The newest request wins. `poke` asks for a run; `due` says when the asking has been quiet for `wait` seconds;
+    `take` starts one and hands it a ticket; `stale(ticket)` tells a running one that a newer request came in."""
+
+    def __init__(self, wait: float):
+        self.wait = wait
+        self.asked = None  # time of the last request not yet taken
+        self.serial = 0
+
+    def poke(self, now: float) -> None:
+        self.asked = now
+        self.serial += 1
+
+    def due(self, now: float) -> bool:
+        return self.asked is not None and now - self.asked >= self.wait
+
+    def take(self) -> int:
+        self.asked = None
+        return self.serial
+
+    def stale(self, ticket: int) -> bool:
+        return ticket != self.serial

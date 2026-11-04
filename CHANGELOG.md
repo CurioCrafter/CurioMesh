@@ -2,6 +2,21 @@
 
 ## 0.9.3 - unreleased
 
+### Segments you shape yourself
+- **Live segment size.** Segment Detail and the new **Largest Segment**, **Smallest Segment** and **Crease Strength**
+  sliders recolour the segments while you drag, with the segment count beside them. The colours come from the merge
+  tree the last find kept, so a change shows in milliseconds even on a big mesh; a moment after you stop, the
+  segments are found for real (borders settled on the creases) and kept. **Border Smoothness** sets how round the
+  borders are where no crease holds them; it shows when the segments are kept.
+- **Each mesh keeps its own segment settings.** They are stored on the object and saved with the .blend.
+- **Paint Size.** Paint the CM_SegmentSize vertex group in Weight Paint: red makes smaller segments there, blue
+  larger ones, green leaves it to the sliders. The colours follow each stroke.
+- **Edit segments by hand.** **Split in Two** cuts the selected segment along its own natural border, no line needed.
+  **Grow** and **Shrink** move a segment's border with a brush (Ctrl paints the other way). **Lock** keeps a segment
+  face for face when the size settings change; segments you merge, split, grow, shrink or paint are locked for you.
+  In Review Segments, M merges, K splits in two, L locks, G and S grow and shrink. Hand edits can be undone with
+  Ctrl+Z, and the next Auto run uses the edited segments.
+
 ### Finding what is still wrong
 - **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is
   found and ranked, worst first. It counts faces turned inward, sunk into your mesh, crossing, folded over, bent,
