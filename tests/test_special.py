@@ -81,6 +81,18 @@ class SpecialPartsTest(unittest.TestCase):
         self.assertIsNotNone(special.match_copy(points, shuffled * np.array([-1.0, 1.0, 1.0])))
         self.assertIsNone(special.match_copy(points, shuffled * np.array([1.3, 1.0, 1.0])))
 
+    def test_nearly_symmetric_copy_is_placed_mirrored_not_turned(self):
+        # A part almost symmetric across its own plane also fits a turn onto its mirror image, within tolerance, with
+        # the faces then landing a little off: the placement that fits exactly must win.
+        rng = np.random.default_rng(3)
+        half = rng.uniform(-1.0, 1.0, (120, 3)) * np.array([1.0, 2.0, 0.3])
+        points = np.vstack((half, half * np.array([1.0, 1.0, -1.0])))
+        points[:20, 2] += 0.002  # bumps on one side only, under the tolerance
+        mirrored = rng.permutation(points * np.array([-1.0, 1.0, 1.0]) + np.array([4.0, 0.0, 0.0]))
+        move = special.match_copy(points, mirrored)
+        self.assertIsNotNone(move)
+        self.assertLess(special._nearest(special.moved(points, move), mirrored).max(), 1e-9)
+
 
 if __name__ == "__main__":
     unittest.main()

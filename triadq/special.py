@@ -33,6 +33,7 @@ BLUR = 2  # fine cells to either side a sheet's row looks at
 SHEETS = (0.03, 0.06, 0.12, 0.25, 0.5)  # shares of a sheet's triangles to try as quads
 COPY_TOLERANCE = 0.002  # copies' vertices agree to about this share of the piece's size
 MOST_TRIES = 48  # placements to try before giving up on two pieces being copies
+COPY_EXACT = 0.05  # of the tolerance: a placement this close is the copy, so no other is tried
 
 
 def _edges(polys) -> np.ndarray:
@@ -596,6 +597,7 @@ def match_copy(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
         return None
     sample = np.linspace(0, len(p) - 1, min(len(p), 48)).astype(int)
     tried = 0
+    best = None  # (mean distance of the sample, placement): a nearly symmetric part also fits turned the wrong way, within tolerance
     apart = float(np.linalg.norm(p[one] - p[two]))
     for i in np.flatnonzero(np.abs(radius_b - radius_a[one]) <= 2.0 * tol)[:64].tolist():
         for j in np.flatnonzero((np.abs(radius_b - radius_a[two]) <= 2.0 * tol) & (np.abs(np.linalg.norm(q - q[i], axis=1) - apart) <= 2.0 * tol))[:64].tolist():
@@ -609,11 +611,16 @@ def match_copy(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
                     continue
                 tried += 1
                 if tried > MOST_TRIES:
-                    return None
+                    return None if best is None else best[1]
                 moved_a = p @ turn.T
-                if _nearest(moved_a[sample], q).max() <= 2.0 * tol and _nearest(moved_a, q).max() <= 2.0 * tol:
-                    return turn, centre_a, centre_b, mirror
-    return None
+                near = _nearest(moved_a[sample], q)
+                if near.max() > 2.0 * tol or (best is not None and near.mean() >= best[0]):
+                    continue
+                if _nearest(moved_a, q).max() <= 2.0 * tol:
+                    best = (float(near.mean()), (turn, centre_a, centre_b, mirror))
+                    if best[0] <= COPY_EXACT * tol:
+                        return best[1]
+    return None if best is None else best[1]
 
 
 def _frame(a: np.ndarray, b: np.ndarray) -> np.ndarray | None:
