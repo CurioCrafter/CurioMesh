@@ -2343,12 +2343,15 @@ class AutoJob:
         flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes_f.sum()))
         centers = np.add.reduceat(self.co[flat], np.concatenate(([0], np.cumsum(sizes_f)[:-1])), axis=0) / sizes_f[:, None]
         cut = []  # a piece with more faces than the machine should hold at once is cut into regions
+        label = np.full(len(self.faces), -1, dtype=np.int64)  # region number; loose pieces left whole share -1, so one touching another at a corner isn't locked
         # With helpers a big piece is cut too, so they share it: in one piece it would be measured by one core alone.
         limit = min(self.cfg.chunk_faces, SPLIT_FACES) if self.parallel and not self.guide_lines and not self.strips else self.cfg.chunk_faces
         for ids in shells:
             if len(ids) > limit:
                 regions = hardware.split_chunks(centers[ids], limit)
-                cut += [ids[r] for r in regions]
+                for r in regions:
+                    label[ids[r]] = len(cut)
+                    cut.append(ids[r])
                 if len(ids) > self.cfg.chunk_faces:
                     self.chunks += len(regions)
                 else:
@@ -2359,9 +2362,6 @@ class AutoJob:
         self.pieces = cut
         self.names = [hardware.region_name(centers[ids].mean(axis=0), low, high) for ids in cut]
         if self.chunks or self.split:
-            label = np.zeros(len(self.faces), dtype=np.int64)
-            for number, ids in enumerate(cut):
-                label[ids] = number
             self.locked = hardware.border_vertices(self.faces, label, len(self.co))
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
         sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
