@@ -377,6 +377,24 @@ def cut(tree: Tree, detail: float, scale=None, largest: float = 1.0, smallest: f
     return _flatten(parent)
 
 
+def view_kept(before: float, after: float, times: float, more: float) -> bool:
+    """A remade segment's camera check against what it had: it may differ `times` as much, or `more` points more."""
+    return after <= max(times * before, before + more)
+
+
+def shape_kept(points, faces, made_points, made_faces, area_share: float = 0.7, extent_share: float = 0.8) -> bool:
+    """False when a remake has lost the segment's shape: its surface area or its size along an axis fell far below
+    the original's (a round tank crushed into a few flat triangles has much less of both)."""
+    area = face_frames(points, faces)[1].sum()
+    made = face_frames(made_points, made_faces)[1].sum()
+    if not (area_share * area <= made <= area / area_share):
+        return False
+    points, made_points = np.asarray(points, dtype=np.float64), np.asarray(made_points, dtype=np.float64)
+    extent, made_extent = np.ptp(points, axis=0), np.ptp(made_points, axis=0)
+    real = extent > 0.01 * float(np.linalg.norm(extent))
+    return bool(np.all(made_extent[real] >= extent_share * extent[real]))
+
+
 SIZE_RANGE = 8.0  # Paint Size at full red or full blue changes the detail there this many times
 
 

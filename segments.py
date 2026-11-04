@@ -387,6 +387,11 @@ class PartJob:
             if made is None:
                 continue
             change = yield from self._change(p, made[0], made[1])
+            had = current["change"] if current["change"] is not None else (yield from self._change(p, current["build"][0], current["build"][1]))
+            src_points, src_polys, _kinds = job._piece_arrays(record.get("source", job.pieces[p]))
+            if not S.view_kept(had, change, segment_goals.WORSE_TIMES, segment_goals.WORSE_BY) or not S.shape_kept(src_points, src_polys, made[0], made[1]):
+                self.warnings = [f"{name_of(p)}: {method_name(self.method)} would lose its shape ({change:.0f}% of its view changes, it had {had:.0f}%), so it stays as it was"]
+                continue
             builds[p] = made
             self.new_tries[p] = {"method": self.method, "after": len(made[1]), "change": change, "build": (made[0], made[1], kinds_back(made[2], self.base.get("charts")))}
         self.progress = (len(self.pieces), len(self.pieces))

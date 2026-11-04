@@ -39,6 +39,7 @@ MOST_MEASURED = 60  # segments looked at by the camera after finding them: a mod
 LOW_POLY_EDGE = 2.2  # Low Poly's quads against the sizes the others use at the same detail
 SMALLEST_RESULT = 60  # a found segment with fewer faces in the result joins a neighbour: too few to be worth remaking
 WORSE_TIMES, WORSE_BY = 1.5, 4.0  # Reduce may change the view this many times, and this many points, more than the part had before
+LOOSE_TIMES, LOOSE_BY = 3.0, 15.0  # the other Uses change more on purpose, but never this much: past it the part has lost its shape
 CLOSED_SHARE, STROKE_SHARE = 1.3, 0.8  # triangles to reduce to, per quad wanted, with closure and with drawn lines
 HISTORY = 20  # hand edits Undo Edit can go back through
 FIELD_MOST = 300_000  # faces of your mesh above which a part is too slow for the field mesher
@@ -177,16 +178,19 @@ def _thickness(bvh, size: float):
     return measure
 
 
-def _drop_labels(labels, gone, fa, fb) -> np.ndarray:
-    """Faces of labels that can't stay join the neighbour they touch most."""
+def _drop_labels(labels, gone, fa, fb, avoid=()) -> np.ndarray:
+    """Faces of labels that can't stay join the neighbour they touch most, never one in `avoid` (a locked segment keeps its faces)."""
     labels = np.asarray(labels).copy()
+    avoid = np.asarray(sorted(avoid), dtype=np.int64)
     for value in gone:
         ids = labels == value
         crossing = ids[fa] ^ ids[fb]
         if not crossing.any():
             continue
         other = np.where(ids[fa[crossing]], labels[fb[crossing]], labels[fa[crossing]])
-        labels[ids] = np.bincount(other).argmax()
+        other = other[~np.isin(other, avoid)]
+        if len(other):
+            labels[ids] = np.bincount(other).argmax()
     return labels
 
 
@@ -389,16 +393,19 @@ class FindJob(view.PartJob):
             fix = np.isin(raw, held) | np.isin(piece, held)
             piece[fix] = raw[fix]
         missing = np.setdiff1d(np.unique(labels), np.unique(piece))
+        box["debug"] = {"locked": sorted(locked), "carry": dict(carry), "missing": missing.tolist()[:20], "old_piece": box["old_piece"] is not None}
         if len(missing):  # too small to have a face of its own in the result
-            labels = _drop_labels(labels, missing.tolist(), tree.links[0], tree.links[1])
+            labels = _drop_labels(labels, missing.tolist(), tree.links[0], tree.links[1], set(carry))
         values, labels = np.unique(labels, return_inverse=True)
         piece = np.searchsorted(values, piece)
         labels = labels.reshape(-1)
         if saved is None:  # segments found here, not ones you kept, painted or split
-            tiny = _tiny_segments(job, labels, piece, set(carried(labels, box["old"], locked)))
+            keep = set(carried(labels, box["old"], locked))
+            tiny = _tiny_segments(job, labels, piece, keep)
+            box["debug"]["tiny"] = list(tiny)[:20]
             if tiny:
-                labels = _drop_labels(labels, tiny, tree.links[0], tree.links[1])
-                piece = _drop_labels(piece, tiny, links[0], links[1])
+                labels = _drop_labels(labels, tiny, tree.links[0], tree.links[1], keep)
+                piece = _drop_labels(piece, tiny, links[0], links[1], keep)
                 values, labels = np.unique(labels, return_inverse=True)
                 labels = labels.reshape(-1)
                 piece = np.searchsorted(values, piece)
@@ -449,6 +456,7 @@ class FindJob(view.PartJob):
             return
         old = self.base["out"]
         out = dict(old, co=box["co"], piece=box["piece"], parts=box["piece"])
+        self.debug = box.get("debug")
         install(self.base, box["labels"], out, box["saved"])
         view.seg["res_src"] = (out["faces"], box["res_src"])
         self.output = out
@@ -696,6 +704,10 @@ class GoalJob(view.PartJob):
             current = record["tries"][record["cur"]]
             if current["build"] is None:
                 current["build"] = P.cut(co, faces, mat, piece, p)
+            if current["change"] is None:  # the guard below needs what it has now: a hand-made or unmeasured segment is measured first
+                current["change"] = yield from self._change(p, current["build"][0], current["build"][1])
+                if record["cur"] == 0 and record["change"] is None:
+                    record["change"] = current["change"]
             if "edge" not in record:
                 area_of = area_of if area_of is not None else S.face_frames(co, faces)[1]
                 record["edge"] = float(np.sqrt(area_of[ids].sum() / max(len(ids), 1)))
@@ -707,7 +719,7 @@ class GoalJob(view.PartJob):
                 continue
             change = yield from self._change(p, made[0], made[1])
             before = current["change"]
-            if record["goal"] == "REDUCE" and before is not None:  # a part this small can lose its shape: more faces, up to twice
+            if record["goal"] == "REDUCE":  # a part this small can lose its shape: more faces, up to twice
                 for _again in range(2):
                     if change <= max(WORSE_TIMES * before, before + WORSE_BY):
                         break
@@ -734,6 +746,11 @@ class GoalJob(view.PartJob):
                     old, new = S.topology_score(made[0], made[1]) or 0.0, S.topology_score(sharper[0], sharper[1]) or 0.0
                     if tried < change and new >= old - SHARPEN_DROP:
                         made, change = sharper, tried
+            times, more = (WORSE_TIMES, WORSE_BY) if record["goal"] in {"REDUCE", "TRIS"} else (LOOSE_TIMES, LOOSE_BY)
+            src_points, src_polys, _kinds = self.job._piece_arrays(record["source"])
+            if not S.view_kept(before, change, times, more) or not S.shape_kept(src_points, src_polys, made[0], made[1], 0.4 if record["goal"] == "LOWPOLY" else 0.7):
+                self.warnings = [f"{record['name']}: {GOAL_NAMES.get(record['goal'], record['goal'])} would lose its shape ({change:.0f}% of its view changes, it had {before:.0f}%), so it stays as it was. Try more Detail"]
+                continue
             trial = view.splice(co, faces, mat, piece, {p: (made[0], made[1], made[2])})[1]
             if S.open_edges(trial) > S.open_edges(faces):  # never hand back a mesh with a new hole, whatever went wrong above
                 self.warnings = [f"{record['name']}: the new faces did not close on the seam, so it stays as it was"]

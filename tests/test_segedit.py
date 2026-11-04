@@ -119,6 +119,30 @@ class EditTests(unittest.TestCase):
         np.testing.assert_array_equal(out, 0)
 
 
+def tank(sides=24, rings=10, radius=1.0, length=4.0):
+    """An open cylinder along x, as quads."""
+    co = np.array([(length * r / rings, radius * np.cos(2 * np.pi * i / sides), radius * np.sin(2 * np.pi * i / sides)) for r in range(rings + 1) for i in range(sides)])
+    faces = [(r * sides + i, r * sides + (i + 1) % sides, (r + 1) * sides + (i + 1) % sides, (r + 1) * sides + i) for r in range(rings) for i in range(sides)]
+    return co, faces
+
+
+class WreckTests(unittest.TestCase):
+    def test_a_fair_reduce_keeps_its_shape(self):
+        co, faces = tank()
+        fewer = tank(sides=12, rings=4)
+        self.assertTrue(segment.shape_kept(co, faces, *fewer))
+        self.assertTrue(segment.view_kept(4.0, 7.5, 1.5, 4.0))
+
+    def test_a_crushed_tank_is_refused(self):
+        co, faces = tank()
+        wedge = (np.array([(0, 1, 0), (4, 1, 0), (4, -1, 0), (0, -1, 0), (0, 0, 1), (4, 0, 1)], dtype=float), [(0, 1, 5, 4), (3, 4, 5, 2), (0, 3, 2, 1)])
+        self.assertFalse(segment.shape_kept(co, faces, *wedge))
+        flat = co.copy()
+        flat[:, 2] *= 0.1  # squashed
+        self.assertFalse(segment.shape_kept(co, faces, flat, faces))
+        self.assertFalse(segment.view_kept(4.0, 30.0, 1.5, 4.0))
+
+
 class DebounceTests(unittest.TestCase):
     def test_waits_for_quiet_and_newest_wins(self):
         d = parallel.Debounce(0.2)

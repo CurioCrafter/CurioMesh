@@ -16,6 +16,13 @@
   face for face when the size settings change; segments you merge, split, grow, shrink or paint are locked for you.
   In Review Segments, M merges, K splits in two, L locks, G and S grow and shrink. **Undo Edit** (Ctrl+Z in
   Review Segments) goes back through the last 20 hand edits, and the next Auto run uses the edited segments.
+- **A remade segment never loses its shape.** A Redo or Use remake whose camera check is much worse than the
+  segment had (or whose surface or size shrinks far below your mesh there) is refused: the segment keeps what it
+  had and the panel says so. Before, the check only asked for more faces, and a segment that had never been
+  measured (one you split, merged or painted) had no check at all, so a round tank could come back as a few flat
+  triangles.
+- **Locked segments stay locked when the size changes.** A small segment that is dropped no longer joins a locked
+  neighbour, which made the locked one bigger and lose its lock.
 - **Redo and Use remakes run to the end again.** A part redo stopped after its first step and sat at "Remaking..."
   for good.
 
