@@ -1,0 +1,10 @@
+{
+  "name": "curiomesh-skills",
+  "description": "Skills that let an AI agent use CurioMesh, the free Blender auto-retopology add-on: retopo, fix bad faces, batch and LODs, Blender MCP.",
+  "author": { "name": "CurioCrafter" },
+  "homepage": "https://github.com/CurioCrafter/CurioMesh",
+  "repository": "https://github.com/CurioCrafter/CurioMesh",
+  "license": "GPL-3.0-or-later",
+  "keywords": ["blender", "retopology", "quad-remesh", "3d", "game-assets"],
+  "skills": "./skills"
+}

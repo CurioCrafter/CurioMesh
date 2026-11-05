@@ -121,7 +121,7 @@ jobs:
         run: |
           cp -r native-bin _native
           python -m unittest discover -s tests -p "test_*.py" -v
-      - name: Build all zips with every platform's binary
+      - name: Build all zips with every platform's binary, and the agent-skills zip (never in the extensions.blender.org listing)
         run: python scripts/build_release.py --per-version --native-dir native-bin --output dist
       - name: Checksums, so a download can be checked against the release
         run: cd dist && sha256sum *.zip > SHA256SUMS.txt

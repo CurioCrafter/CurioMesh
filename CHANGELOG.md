@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.4 - unreleased
+
+### Skills for AI agents
+- **Agent skills** in `skills/`: `curiomesh-retopo`, `curiomesh-fix-bad-faces`, `curiomesh-batch-and-lods` and
+  `curiomesh-blender-mcp`. An agent can retopologise a file headless, read a JSON report (faces, quads, view changed,
+  Issue Finder totals per part), fix bad faces in a measure-fix-measure loop that keeps a change only when it lowers the
+  bad-face count, make LOD sets and batch many files.
+- Two headless scripts, `curiomesh_run.py` (Auto Segments to a .glb/.fbx/.obj/.blend plus a report) and `curiomesh_fix.py`
+  (Fix Selection tools on any mesh, before and after counts per kind).
+- Install in Claude Code with `/plugin marketplace add CurioCrafter/CurioMesh` then `/plugin install curiomesh-skills@curiomesh`,
+  or unzip the new `curiomesh-<version>-agent-skills.zip` from a release into a skills folder. It is not in the
+  extensions.blender.org zip.
+
 ## 0.9.3 - 2026-11-04
 
 ### Finding what is still wrong
