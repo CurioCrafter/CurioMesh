@@ -110,6 +110,36 @@ def choice_frames():
     return out
 
 
+# ---------- the Quad Size slider: real results from the add-on ----------
+SIZES = [("bust_size0_detail.jpg", "6,077 quads", "1.6% of the view changed"),
+         ("bust_size3_detail.jpg", "2,515 quads", "6.5%"),
+         ("bust_size6_detail.jpg", "492 quads", "24%")]
+
+
+def size_frame(k):
+    im, d = canvas()
+    center(d, "Drag Quad Size: the preview follows live", 22, 40, ACC, True)
+    center(d, "Real results from the slider on the same bust, no restart", 76, 22, DIM)
+    pic = Image.open(OUT / SIZES[k][0]).convert("RGB")
+    pic.thumbnail((W - 120, 430))
+    im.paste(pic, ((W - pic.width) // 2, 120))
+    center(d, f"{SIZES[k][1]}  ·  {SIZES[k][2]}", 565, 30, TXT, True)
+    t = k / (len(SIZES) - 1)
+    x0, x1, y = 260, 1020, 640
+    d.rounded_rectangle([x0, y - 5, x1, y + 5], 5, fill=(70, 74, 82))
+    d.rounded_rectangle([x0, y - 5, x0 + (x1 - x0) * t, y + 5], 5, fill=ACC)
+    kx = x0 + (x1 - x0) * t
+    d.ellipse([kx - 14, y - 14, kx + 14, y + 14], fill=TXT, outline=ACC, width=4)
+    f = font(19)
+    d.text((x0 - 10 - d.textlength("more quads", font=f), y - 12), "more quads", font=f, fill=DIM)
+    d.text((x1 + 10, y - 12), "fewer quads", font=f, fill=DIM)
+    return im
+
+
+def size_frames():
+    return [(size_frame(k), 1600) for k in range(len(SIZES))]
+
+
 # ---------- trailer scenes ----------
 def title():
     im, d = canvas()
@@ -180,6 +210,7 @@ def build_trailer():
     scenes = [(title(), 2.5),
               (before_after(IMG / "marble_bust_01.jpg", "A 17,456-face sculpt in 2,508 quads", "Keep Detail: the fewest faces that keep the shape"), 3.0),
               (choice_frames(), None),
+              (size_frames(), None),
               (before_after(IMG / "barrier_rows.jpg", "Clean Rows: a photo scan", "60,928 faces to 2,486 quads"), 3.0),
               (choose(), 3.5),
               (game_asset(), 4.5),

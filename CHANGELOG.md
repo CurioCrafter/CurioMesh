@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.7 - unreleased
+## 0.9.7 - 2026-11-05
 
 ### Auto Segments
 - **Fewer long thin quads on flat areas** (Keep Detail; Balanced uses the same step): before pairing, flat areas that reduction left as
