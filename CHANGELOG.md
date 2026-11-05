@@ -21,6 +21,9 @@
   had and the panel says so. Before, the check only asked for more faces, and a segment that had never been
   measured (one you split, merged or painted) had no check at all, so a round tank could come back as a few flat
   triangles.
+- **No segment finer than the result can hold.** Where the result's quads are bigger than a found segment (painted
+  very small, for example), the segment joins a neighbour instead of being marked on faces that are not it. Grow,
+  Shrink and Paint New mark the result through the faces of your mesh, so a segment covers the same surface on both.
 - **Locked segments stay locked when the size changes.** A small segment that is dropped no longer joins a locked
   neighbour, which made the locked one bigger and lose its lock.
 - **Redo and Use remakes run to the end again.** A part redo stopped after its first step and sat at "Remaking..."
