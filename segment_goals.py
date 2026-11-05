@@ -39,6 +39,7 @@ MOST_MEASURED = 60  # segments looked at by the camera after finding them: a mod
 LOW_POLY_EDGE = 2.2  # Low Poly's quads against the sizes the others use at the same detail
 SMALLEST_RESULT = 60  # a found segment with fewer faces in the result joins a neighbour: too few to be worth remaking
 WORSE_TIMES, WORSE_BY = 1.5, 4.0  # Reduce may change the view this many times, and this many points, more than the part had before
+MATCH_SHARE = 0.6  # a segment's surface on the result may be this share of its surface on your mesh, or its inverse
 LOOSE_TIMES, LOOSE_BY = 3.0, 15.0  # the other Uses change more on purpose, but never this much: past it the part has lost its shape
 CLOSED_SHARE, STROKE_SHARE = 1.3, 0.8  # triangles to reduce to, per quad wanted, with closure and with drawn lines
 HISTORY = 20  # hand edits Undo Edit can go back through
@@ -209,6 +210,15 @@ def _tiny_segments(job, labels, piece, keep=()) -> list[int]:
             tiny.append(k)
             per_loose[pieces[k]] -= 1
     return tiny
+
+
+def _mismatched(labels, piece, src_areas, res_areas, share: float = MATCH_SHARE) -> list[int]:
+    """Segments whose faces on the result cover far more or far less surface than on your mesh: the result is too coarse there to hold them."""
+    count = int(max(labels.max(), piece.max())) + 1
+    on_src = np.bincount(labels, src_areas, count)
+    on_res = np.bincount(piece, res_areas, count)
+    ratio = on_res / np.maximum(on_src, 1e-30)
+    return np.flatnonzero((on_src > 0) & ((ratio < share) | (ratio > 1.0 / share))).tolist()
 
 
 def _is_closed(line) -> bool:
@@ -406,6 +416,16 @@ class FindJob(view.PartJob):
             if tiny:
                 labels = _drop_labels(labels, tiny, tree.links[0], tree.links[1], keep)
                 piece = _drop_labels(piece, tiny, links[0], links[1], keep)
+                values, labels = np.unique(labels, return_inverse=True)
+                labels = labels.reshape(-1)
+                piece = np.searchsorted(values, piece)
+            for _round in range(2):  # a segment finer than the result's faces gets result faces that are not it: it joins a neighbour
+                keep = set(carried(labels, box["old"], locked))
+                off = [k for k in _mismatched(labels, piece, tree.areas, areas) if k not in keep]
+                if not off:
+                    break
+                labels = _drop_labels(labels, off, tree.links[0], tree.links[1], keep)
+                piece = _drop_labels(piece, off, links[0], links[1], keep)
                 values, labels = np.unique(labels, return_inverse=True)
                 labels = labels.reshape(-1)
                 piece = np.searchsorted(values, piece)
