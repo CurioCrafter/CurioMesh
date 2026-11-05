@@ -3,7 +3,7 @@
 **A free, open source Blender retopology add-on. It turns a dense sculpt, scan or high-poly game asset into a clean all-quad, low-poly mesh.**
 
 [![Download CurioMesh](https://img.shields.io/badge/Download-free%20add--on-2ea44f?style=for-the-badge&logo=blender&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
-[![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-24292f?style=for-the-badge&logo=github&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/stargazers)
+[![Star on GitHub](https://img.shields.io/github/stars/CurioCrafter/CurioMesh?style=for-the-badge&logo=github&label=Star%20on%20GitHub&color=24292f)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 
 [![Latest release](https://img.shields.io/github/v/release/CurioCrafter/CurioMesh?label=release)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
 [![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
@@ -411,7 +411,7 @@ python scripts\build_release.py
 
 If CurioMesh saved you time, a [star on GitHub](https://github.com/CurioCrafter/CurioMesh/stargazers) helps other Blender artists find a free retopology tool.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=CurioCrafter/CurioMesh&type=Date)](https://star-history.com/#CurioCrafter/CurioMesh&Date)
+[![Stars over time](docs/stars.svg)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 
 ## Credits
 
