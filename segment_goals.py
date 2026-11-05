@@ -942,21 +942,35 @@ def claim(source_mask: np.ndarray, result_mask: np.ndarray) -> str:
     src, piece = view.seg["src"].copy(), view.seg["piece"].copy()
     fresh = new_label()
     touched = set(np.unique(piece[result_mask]).tolist()) | set(np.unique(src[source_mask]).tolist())
+    old_src, old_piece = view.seg["src"], view.seg["piece"]
     src[source_mask] = fresh
     piece[result_mask] = fresh
-    problem = relabel(src, piece, touched, lock={fresh})
+    problem = relabel(src, _follow(src, old_src, old_piece, piece), touched, lock={fresh})
     if not problem:
         view.select([len(view.seg["parts"]) - 1])
     return problem
 
 
+def _follow(src, old_src, old_piece, result_piece):
+    """The result's segments after a brush: where the face of your mesh nearest a result face changed segment, the
+    result face follows it, so the segment covers the same surface on both. Without that map, the brushed result."""
+    mapping = view.seglive.res_map()
+    if mapping is None:
+        return result_piece
+    piece = old_piece.copy()
+    moved = src[mapping] != old_src[mapping]
+    piece[moved] = src[mapping][moved]
+    return piece
+
+
 def grow(segment: int, source_mask: np.ndarray, result_mask: np.ndarray) -> str:
     """Faces in the masks join `segment`, taken from whatever held them."""
-    src, piece = view.seg["src"].copy(), view.seg["piece"].copy()
+    old_src, old_piece = view.seg["src"], view.seg["piece"]
+    src, piece = old_src.copy(), old_piece.copy()
     touched = {segment} | set(np.unique(src[source_mask]).tolist()) | set(np.unique(piece[result_mask]).tolist())
     src[source_mask] = segment
     piece[result_mask] = segment
-    return relabel(src, piece, touched, lock={segment})
+    return relabel(src, _follow(src, old_src, old_piece, piece), touched, lock={segment})
 
 
 def shrink(segment: int, source_mask: np.ndarray, result_mask: np.ndarray) -> str:
@@ -970,6 +984,7 @@ def shrink(segment: int, source_mask: np.ndarray, result_mask: np.ndarray) -> st
     piece = S.shrink_into(old_piece, result_mask, segment, res_links[0], res_links[1])
     if np.array_equal(src, old_src) and np.array_equal(piece, old_piece):
         return "Nothing to give away there: paint over the segment's border"
+    piece = _follow(src, old_src, old_piece, piece)
     touched = {segment} | set(np.unique(src[src != old_src]).tolist()) | set(np.unique(piece[piece != old_piece]).tolist())
     return relabel(src, piece, touched, lock={segment})
 
