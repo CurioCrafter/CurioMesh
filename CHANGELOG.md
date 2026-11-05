@@ -9,6 +9,26 @@
   test models the face count stayed within 2%, thin quads on flat areas dropped by a third or more on two of them (the
   other two barely changed), and the Issue Finder total went down or stayed level.
 
+### Symmetrize, Detail Markers and Tweak
+- **Symmetrize** (next to Mirror): mirrors even when the two sides differ, as on scans and sculpts. The result is built
+  on one side (Keep Side: Auto, + or -) and mirrored, so it is exactly symmetric. **Set Plane** puts the plane at an
+  offset you type instead of finding it. The panel says how far apart the sides were ("the sides differ by up to
+  38.8 mm") and, with a result, how clean the seam is.
+- **A cleaner mirror seam**: a vertex that strayed over the plane goes back, seam vertices closer than a tenth of an
+  edge are merged, and faces left without area or lying in the plane are dropped. The Issue Finder's seam counts on a
+  horse statue: 4 faces crossing the plane and 2 concave faces before, none after; no open, non-manifold or duplicate
+  seam edges on it or a bust, at every Quad Size.
+- **Detail Markers** (was Paint Density): paint **More** or **Less Detail** in Weight Paint, or add marker balls at the
+  3D cursor and scale them. They steer where the faces go at every Quad Size: on a bust, a ball on the mouth and one
+  on the hair doubled the faces per area in the mouth against the hair at all three sizes measured. With Mirror,
+  markers on either side count.
+- With markers, the search now also tries sizes in between its steps, so it lands closer to the Detail.
+- **Tweak** (a fold under the result): **Rows on Round Areas** (how readily round, smooth areas become rows of quads
+  that follow their curve), **Flat Area Size** (how big the quads inside flat areas may get) and **Avoid Poles** (spin
+  edges at poles, Keep Detail). Each reruns the search with Auto-Update; what was measured is kept, so it takes
+  seconds on a bust. On a sofa Rows on Round Areas gave 1,741 / 1,682 / 1,866 faces at 0 / 0.5 / 1; Avoid Poles off
+  left 22% more poles on a bust.
+
 ### Know the cost before you press Start
 - **Cost tags** in the panel: Bake Detail, LOD Set, Clean Rows / Field Rows / QuadriFlow and Multires say "Slow" or
   "Heavy" with the time they add on this computer, and whether they block Blender.

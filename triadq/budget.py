@@ -101,8 +101,12 @@ def density_drop(paint: np.ndarray, strength: float) -> np.ndarray:
 
     Decimate leaves a vertex alone at weight 0 and collapses it freely at 1, and the pull is steep: 0.99 keeps about
     three times the faces, 0.98 four times, 0.9 six times. So a full coat of paint at strength 1 drops the weight by 0.02.
+
+    Less Detail markers are negative paint. Decimate can't collapse more freely than at weight 1, so then everything
+    is lifted by the deepest Less Detail: that area collapses freely and the rest, unmarked or More Detail, holds on.
     """
-    return np.clip(0.02 * strength * np.clip(paint, 0.0, 1.0), 0.0, 0.5)
+    paint = np.clip(paint, -1.0, 1.0)
+    return np.clip(0.02 * strength * (paint - min(float(paint.min(initial=0.0)), 0.0)), 0.0, 0.5)
 
 
 def best_levels(levels: list[Level]) -> list[int]:
