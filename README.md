@@ -37,7 +37,7 @@ loops for faces and joints on its own, and big scans take minutes, sometimes ten
 
 ## Contents
 
-[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install-the-blender-retopology-add-on) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
+[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install-the-blender-retopology-add-on) · [AI agents](#use-it-with-claude-and-other-ai-agents) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
 
 ## What it does
 
@@ -300,6 +300,34 @@ by the release workflow from the tag, and each comes with `SHA256SUMS.txt` so yo
 
 The last full test on every Blender version from 3.6 to 5.2 was for 0.8.0. The checks for this version ran on 3.6 LTS, 4.2 LTS and 5.2 LTS, and most of the work on Auto Segments
 was done on 5.2. The viewport overlays draw with Blender's GPU module. If a build cannot draw them, the rest of the add-on keeps working.
+
+## Use it with Claude and other AI agents
+
+The `skills/` folder holds skills (the open Agent Skills format: one folder with a `SKILL.md`) that teach an AI agent to run CurioMesh on its own, with no
+Blender window, and to fix what comes out. The agent reads the skill, runs Blender in the background, reads a JSON report (faces, quads, how much the view
+changed, bad faces per part) and retries with other settings.
+
+| Skill | What the agent can do with it |
+| --- | --- |
+| `curiomesh-retopo` | Turn a file (.obj .fbx .glb .blend) into a clean quad mesh, pick the Use and Detail, check the report, retry. |
+| `curiomesh-fix-bad-faces` | Find inward, folded, crossing and flat faces, fix them (Clean Up, Flip Inward, Untangle, Relax, Patch), measure again, and never keep a change that makes it worse. |
+| `curiomesh-batch-and-lods` | Many files in a row, `_LOD0` to `_LOD2` sets, normal-map baking. |
+| `curiomesh-blender-mcp` | Drive CurioMesh in a Blender that is already open, through the Blender MCP server. |
+
+Install, in Claude Code:
+
+```
+/plugin marketplace add CurioCrafter/CurioMesh
+/plugin install curiomesh-skills@curiomesh
+```
+
+Any other agent (or Claude Code without plugins): download `curiomesh-<version>-agent-skills.zip` from the [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest)
+and unzip it into your skills folder, or copy all four `skills/curiomesh-*` folders there yourself (`~/.claude/skills/` for Claude Code). The skills share one set of
+scripts, so keep the four folders together. You still need CurioMesh installed in Blender (above), and Blender 3.6 to 5.2.
+
+Then ask, for example: *"Retopologise `crate.fbx` for a game with CurioMesh, about 3,000 faces, and fix any bad faces."*
+
+The scripts also work by hand: `blender -b --factory-startup --python skills/curiomesh-retopo/scripts/curiomesh_run.py -- model.obj --use GAME --detail 6 --out model_low.glb --report report.json`.
 
 ## Frequently asked questions about free Blender retopology
 
