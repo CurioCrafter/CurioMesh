@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.4 - unreleased
+## 0.9.4 - 2026-11-04
 
 ### Skills for AI agents
 - **Agent skills** in `skills/`: `curiomesh-retopo`, `curiomesh-fix-bad-faces`, `curiomesh-batch-and-lods` and
