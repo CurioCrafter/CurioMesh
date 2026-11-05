@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.7 - unreleased
+
+### Quad Size and Organization sliders
+- **Quad Size**, under the result: smaller quads to the left, bigger to the right. Each step is a whole result of the
+  search at another Detail, so it holds its own amount of change and puts the faces where the shape needs them. The
+  sizes are worked out in the background once the search is done, reusing what it measured, so most take seconds;
+  until they are ready the nearest finished one is shown, with a note.
+- **Organization**: fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the
+  right. In between, loose pieces change over one at a time, smallest first, and the whole object is looked at again.
+- Moving either slider swaps the result on screen at once; the segments of the new result are found after it.
+- **Bigger Quads / Smaller Quads** for the selected parts only, the rest stays: a whole loose piece takes its faces
+  from the next size, a segment of a bigger piece is remade for Reduce at a lower or higher Detail and kept only if it
+  really has fewer (or more) faces.
+
 ## 0.9.6 - 2026-11-05
 
 ### Game engines

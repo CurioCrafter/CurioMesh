@@ -28,7 +28,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, hardware, jobpack, multires, profiles, teach, turbo
+from . import autoretopo, blockout, hardware, jobpack, ladder, multires, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -142,6 +142,7 @@ state = {
     "curve_sig": None,  # what the drawn curves looked like when the search last started: a change restarts it
     "curve_at": 0.0,
     "auto_base": None,  # the finished Auto Segments result that step 4 (Live Boolean) works on
+    "auto_inputs": None,  # what the last search was started with, so the size ladder can run it again at other sizes
     "machine": None,  # what this computer is (hardware.detect), read on demand
     "rays": 0.0,  # camera rays per second measured on it
     "parts": None,  # (mesh signature, loose pieces) counted by Check This Computer
@@ -328,6 +329,8 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redo the part of the result inside the shapes, live, while everything outside stays as it is. Move or resize a shape and the new quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
+    quad_size: bpy.props.FloatProperty(name="Quad Size", description="After a search: smaller quads to the left keep more detail, bigger quads to the right make fewer faces. Each step is a full result that holds its own amount of change, with the faces where the shape needs them. Sizes appear as they are worked out in the background", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
+    quad_order: bpy.props.FloatProperty(name="Organization", description="After a search: fewest faces to the left (Keep Detail), even rows to the right (Clean Rows), Balanced in the middle. In between, loose pieces change over one at a time, smallest first", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
     blockout_sides: bpy.props.IntProperty(name="Primitive Sides", description="Blockout and Hulls: sides of each cylinder and detail of each ball (small parts get half). Hulls: about four faces per side for the biggest part, fewer for small ones", default=12, min=4, max=32, step=2)
@@ -1624,7 +1627,24 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     if state["work"] is not None and state["work"]["key"] == key:
         return True
     stop_work()
+    ladder.cancel()
     state["auto_base"] = None
+    inputs = (target, lines, drawn, paint, charts, codes, settings, baked, chords)
+    state["auto_inputs"] = inputs
+    job = make_job(context, gs, src, inputs)
+    state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
+    state.update(ms=0.0, spot=None)
+    state["message"] = job.status()
+    if not bpy.app.timers.is_registered(_auto_slice):
+        bpy.app.timers.register(_auto_slice, first_interval=0.0)
+    return True
+
+
+def make_job(context, gs, src, inputs, detail: float | None = None, style: str | None = None, quiet: bool = False):
+    """The search job for these inputs (what `_start_segments` gathered). The size ladder asks for others at its own
+    Detail and Style, `quiet`: no helper Blenders and no saved progress, so it never competes with what you do."""
+    target, lines, drawn, paint, charts, codes, settings, baked, chords = inputs
+    detail = (3.0 if baked else gs.auto_detail) if detail is None else detail
     half, note = _mirror_half(gs, src, codes)
     co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], codes, None)
     outside = None
@@ -1645,22 +1665,17 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     cache_key = (src["sig"], mirror[:2] if mirror else None, charts is None)
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
-    saved = hardware.checkpoint_dir(co, len(faces))
+    saved = None if quiet else hardware.checkpoint_dir(co, len(faces))
     resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
     turbo.set_gpu(gs.auto_gpu)
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
-    job = autoretopo.AutoJob(context, co, faces, mat, 3.0 if baked else gs.auto_detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel, redo_rough=gs.auto_redo_rough)
+    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough)
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
         job.note = (job.note + " | " if job.note else "") + f"{resume} finished parts from an earlier run will be reused"
-    state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
-    state.update(ms=0.0, spot=None)
-    state["message"] = job.status()
-    if not bpy.app.timers.is_registered(_auto_slice):
-        bpy.app.timers.register(_auto_slice, first_interval=0.0)
-    return True
+    return job
 
 
 def _start_blockout(gs, src) -> bool:
@@ -1817,6 +1832,7 @@ def _collect_work(context) -> None:
                 _scan(state["res"])
             segments.ensure()
             segments.segment_goals.start_find(context)
+            ladder.start(context)
         elif not runner.busy and runner.report is None and state["lod"] is not None:  # the search failed: nothing more to come
             state["lod"] = None
         overlay.tag_redraw()
@@ -3654,6 +3670,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
 
         if done:
             self._draw_summary(layout, gs, base["report"], len(res["faces"]))
+            ladder.draw(layout, gs)
             body = fold(layout, gs, "ui_teach_open", "Show It How (optional)")
             if body is not None:
                 self._draw_teach(body, obj)
@@ -4116,6 +4133,7 @@ _draw_handles: list = []
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
     stop_work()
+    ladder.cancel()
     segments.reset()
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None, curve_sig=None, region=None, found=[])
     for sc in bpy.data.scenes:
@@ -4125,7 +4143,7 @@ def _on_load_post(*_args):
 
 
 def register() -> None:
-    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES):
+    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES):
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_guided = bpy.props.PointerProperty(type=CURIOMESH_PG_guided)
     bpy.types.Object.curiomesh_points = bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_point)
@@ -4147,6 +4165,7 @@ def unregister() -> None:
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
     stop_work()
+    ladder.cancel()
     try:
         remove_preview()
     except Exception:
@@ -4155,5 +4174,5 @@ def unregister() -> None:
     for owner, name in ((bpy.types.Scene, "curiomesh_guided"), (bpy.types.Object, "curiomesh_points"), (bpy.types.Object, "curiomesh_point_index")):
         if hasattr(owner, name):
             delattr(owner, name)
-    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES)):
+    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES)):
         bpy.utils.unregister_class(cls)

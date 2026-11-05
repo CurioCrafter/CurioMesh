@@ -540,6 +540,7 @@ class GoalJob(view.PartJob):
     def __init__(self, context, pieces):
         super().__init__(context, pieces, "AUTO")
         self.opened = 0
+        self.direction = 0  # Bigger Quads (-1) keeps a remake only with fewer faces, Smaller Quads (+1) only with more
 
     def _in_thread(self, call):
         """Generator: run `call` on a thread. Returns its result, or None after noting what went wrong."""
@@ -783,6 +784,9 @@ class GoalJob(view.PartJob):
             src_points, src_polys, _kinds = self.job._piece_arrays(record["source"])
             if not S.view_kept(before, change, times, more) or not S.shape_kept(src_points, src_polys, made[0], made[1], 0.4 if record["goal"] == "LOWPOLY" else 0.7):
                 self.warnings = [f"{record['name']}: {GOAL_NAMES.get(record['goal'], record['goal'])} would lose its shape ({change:.0f}% of its view changes, it had {before:.0f}%), so it stays as it was. Try more Detail"]
+                continue
+            if self.direction and (len(made[1]) - len(current["build"][1])) * self.direction <= 0:
+                self.warnings = [f"{record['name']}: no {'bigger' if self.direction < 0 else 'smaller'} quads that keep its shape here, so it stays as it was"]
                 continue
             trial = view.splice(co, faces, mat, piece, {p: (made[0], made[1], made[2])})[1]
             if S.open_edges(trial) > S.open_edges(faces):  # never hand back a mesh with a new hole, whatever went wrong above
@@ -1539,6 +1543,9 @@ def draw_selected(layout, gs) -> None:
     row = box.row(align=True)
     row.scale_y = 1.3
     row.operator("curiomesh.seg_goal", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
+    row = box.row(align=True)
+    row.operator("curiomesh.part_size", text="Bigger Quads", icon="REMOVE").bigger = True
+    row.operator("curiomesh.part_size", text="Smaller Quads", icon="ADD").bigger = False
     if guided.progress_info() is not None:
         guided.draw_progress(box, *guided.progress_info())
         box.operator("curiomesh.guided_stop_work", icon="CANCEL")
