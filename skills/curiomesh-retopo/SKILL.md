@@ -44,7 +44,7 @@ Detail is the percent of the view that may differ from the original: lower keeps
 "$BLENDER" -b --factory-startup --python <this skill>/scripts/curiomesh_run.py -- IN --use GAME --detail 6 --out OUT.glb --report report.json
 ```
 
-- `IN`: `.obj .fbx .glb .gltf .blend .ply .stl`. Several meshes in one file are joined. `OUT`: `.glb .fbx .obj .blend`.
+- `IN`: `.obj .fbx .glb .gltf .blend .ply .stl`. Several meshes in one file are joined. `OUT`: `.obj .fbx .blend .glb`. Use `.obj` or `.blend` if you may fix bad faces afterwards: `.glb` stores triangles only, so a quad mesh re-imported from it has twice the faces.
 - Add `--addon <folder>` when running from a repo checkout.
 - Run it in the background if your tool times out. A 60,000-face model takes minutes; scans can take tens of minutes. Keep one Blender running at a time on the user's PC.
 - Read `report.json` (also printed as one `CURIOMESH_REPORT {...}` line). If `ok` is false, read `error`, fix the cause and rerun; do not retry blindly.

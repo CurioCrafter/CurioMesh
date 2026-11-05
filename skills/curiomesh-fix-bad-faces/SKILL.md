@@ -21,19 +21,21 @@ Uses `curiomesh_fix.py` and `curiomesh_run.py` from the sibling skill `curiomesh
 
 ## The loop
 
+Use `.obj` or `.blend` for the result you fix (retopo with `--out result.obj`). A `.glb` stores triangles only, so every quad comes back as two triangles and the counts no longer match the retopo report.
+
 1. Measure only (no `--fix`). The original is needed so "inward" is known:
    ```
-   "$BLENDER" -b --factory-startup --python <retopo skill>/scripts/curiomesh_fix.py -- RESULT.glb --original ORIGINAL.obj --report m0.json
+   "$BLENDER" -b --factory-startup --python <retopo skill>/scripts/curiomesh_fix.py -- RESULT.obj --original ORIGINAL.obj --report m0.json
    ```
    `before.bad` is the count of bad faces, `before` has the count per kind, `bad_face_ids` lists them (capped at 2000).
 2. If `before.bad` is 0, stop: nothing to fix.
 3. Fix. Start with `--fix ALL` (Clean Up, Flip Inward, Untangle, Relax, Patch in turn; a move that makes it worse is undone). For one kind, name the fix from the table:
    ```
-   ... curiomesh_fix.py -- RESULT.glb --original ORIGINAL.obj --fix FLIP,UNTANGLE --out fixed1.glb --report m1.json
+   ... curiomesh_fix.py -- RESULT.obj --original ORIGINAL.obj --fix FLIP,UNTANGLE --out fixed1.obj --report m1.json
    ```
    To touch only some faces: `--faces 12,40-55` (numbers from `bad_face_ids`).
 4. Read `m1.json`: `before`, `after`, `steps` (each with `kept`, `bad_before`, `bad_after`). The script keeps a step only when it lowers `bad`, so `after.bad` is never above `before.bad`.
-5. Loop: take `fixed1.glb` as the new RESULT and go to step 3 with a different fix list (for example what is left: if folds remain, `UNTANGLE,PATCH`). Stop when:
+5. Loop: take `fixed1.obj` as the new RESULT and go to step 3 with a different fix list (for example what is left: if folds remain, `UNTANGLE,PATCH`). Stop when:
    - `after.bad` is 0, or
    - a round does not lower `bad` (`improved` is false), or
    - you have done 4 rounds.

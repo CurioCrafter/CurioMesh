@@ -121,6 +121,8 @@ def main() -> int:
     }
     if args.out:
         report["out_file"] = cm.export_mesh(obj, args.out)
+    if Path(args.input).suffix.lower() in (".glb", ".gltf"):
+        report["warning"] = "glTF stores triangles only: quads were split in two, so counts are on triangles. Use .obj or .blend between steps"
     if fixes and not args.original:
         report["note"] = "no --original given: Flip Inward and Untangle need it, so they could not run"
     cm.write_json(args.report, report)
