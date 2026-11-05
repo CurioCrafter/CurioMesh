@@ -312,7 +312,11 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_method: bpy.props.EnumProperty(name="Method", description="How Reduce and Low Poly make their quads", items=segments.METHOD_ITEMS, default="AUTO")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
-    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Solve one half and mirror it, so both sides match and the seam is exact. Only used when the mesh really is symmetric; otherwise it says why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
+    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Solve one half and mirror it, so both sides match and the seam is exact. Only used when the mesh really is symmetric (or with Symmetrize); otherwise it says why", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
+    sym_force: bpy.props.BoolProperty(name="Symmetrize", description="Mirror even when the two sides differ (scans, sculpts): the result is built on one side and mirrored, so it is exactly symmetric and the other side's differences are not kept. The panel says how far apart the sides were", default=False, update=_redraw_update)
+    sym_side: bpy.props.EnumProperty(name="Keep Side", description="Which half is built and mirrored", items=(("AUTO", "Auto", "The side with more surface"), ("POS", "+", "The side with larger coordinates"), ("NEG", "-", "The side with smaller coordinates")), default="AUTO", update=_redraw_update)
+    sym_offset_use: bpy.props.BoolProperty(name="Set Plane", description="Put the mirror plane where you say, in object space, instead of finding it", default=False, update=_redraw_update)
+    sym_offset: bpy.props.FloatProperty(name="Plane Offset", description="Where the mirror plane crosses the axis, in object space", default=0.0, subtype="DISTANCE", update=_redraw_update)
     guide_use: bpy.props.BoolProperty(name="Use Guide Curves", description="Auto Segments: make the quads follow the guide curves in the list (an edge loop round an eye, a line along a panel). The curves are laid on the mesh, so they can float a little off it", default=False, update=_redraw_update)
     guide_curves: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_guide)
     guide_index: bpy.props.IntProperty(default=0)
@@ -324,9 +328,10 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     loop_gap: bpy.props.FloatProperty(name="Loop Gap", description="Distance between two loops of a drawn line or deformation line, in object units. 0 picks about one quad", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE", update=_redraw_update)
     bend_crease: bpy.props.BoolProperty(name="Crease", description="Mark the middle loop of each line with Blender's edge crease (for Subdivision Surface) when you Apply", default=False)
     bend_sharp: bpy.props.BoolProperty(name="Sharp", description="Mark the middle loop of each line as sharp edges when you Apply", default=False)
-    density_use: bpy.props.BoolProperty(name="Paint Density", description="Auto Segments: keep more faces where you painted. Paint the vertex group in Weight Paint mode (red = more detail); the rest is left to the search", default=False, update=_redraw_update)
-    density_group: bpy.props.StringProperty(name="Group", description="The vertex group of the mesh that holds the paint", default="CM_Density")
-    density_strength: bpy.props.FloatProperty(name="Strength", description="How strongly red paint pulls faces in: 1 keeps about four times as many faces in full red, 4 about six times", default=1.0, min=0.25, max=4.0)
+    density_use: bpy.props.BoolProperty(name="Detail Markers", description="Auto Segments: keep more faces where you marked More Detail and fewer where you marked Less Detail, at every Quad Size. Paint them in Weight Paint mode or place marker balls; the rest is left to the search", default=False, update=_redraw_update)
+    density_group: bpy.props.StringProperty(name="Group", description="The vertex group of the mesh that holds the More Detail paint", default="CM_Density")
+    less_group: bpy.props.StringProperty(name="Less Group", description="The vertex group of the mesh that holds the Less Detail paint", default="CM_LessDetail")
+    density_strength: bpy.props.FloatProperty(name="Strength", description="How strongly the markers move faces: 1 keeps about four times as many faces in full More Detail as in Less Detail, 4 about six times", default=1.0, min=0.25, max=4.0)
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redo the part of the result inside the shapes, live, while everything outside stays as it is. Move or resize a shape and the new quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
@@ -353,6 +358,10 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bake_size: bpy.props.EnumProperty(name="Bake Size", description="Width and height of the baked textures", items=BAKE_SIZES, default="2048")
     bake_sets: bpy.props.IntProperty(name="Texture Sets", description="Normal + Color: bake onto this many sets of maps, each its own material, so a big model keeps detail. Whole parts go together; game engines get one mesh per set if they need it", default=1, min=1, max=16)
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Relax-and-project passes that settle the new quads onto your original surface", default=2, min=0, max=30)
+    ui_tweak_open: bpy.props.BoolProperty(name="Tweak", description="Sliders that change how the quads are laid out", default=False)
+    tweak_rows: bpy.props.FloatProperty(name="Rows on Round Areas", description="Keep Detail and Balanced: how readily round, smooth areas (domes, bulges, areas with creases all round) are rebuilt as rows of quads that follow their curve. 0 leaves them as paired triangles; right finds more of them and lets them add more faces. Reruns the search with Auto-Update", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
+    tweak_flat: bpy.props.FloatProperty(name="Flat Area Size", description="Keep Detail and Balanced: how big the quads inside flat areas may get. Left adds more points inside flat areas (smaller, more even quads), right fewer; all the way right keeps the long faces reduction left. Reruns the search with Auto-Update", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
+    tweak_poles: bpy.props.BoolProperty(name="Avoid Poles", description="Keep Detail: spin edges round irregular vertices (poles) so rows of quads run on, where the view stays within the Detail. Off keeps the quads as paired: about a fifth more poles on a bust, a little less view change. Reruns the search with Auto-Update", default=True, update=_redraw_update)
     feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Edges sharper than this (degrees) count as hard edges and are kept", default=40.0, min=5.0, max=170.0)
     pure_quads: bpy.props.BoolProperty(name="Pure Quads", description="Make every face of a Whole Mesh result a quad. Turn off for a faster preview of big meshes; a few triangles stay", default=True)
     suggest_count: bpy.props.IntProperty(name="Suggestions", description="How many points Auto-suggest places", default=8, min=1, max=40)
@@ -1490,17 +1499,41 @@ def auto_target(gs, faces: int) -> int:
 def _mirror_half(gs, src, codes):
     """(half, note): the half to solve as (co, faces, mat, mirror) or None, and what to tell the user about the symmetry."""
     if gs.sym_axis == "OFF":
+        state["sym_note"] = ""
         return None, ""
-    found = symmetry.find_plane(src["co"], _bvh(src), "XYZ" if gs.sym_axis == "AUTO" else gs.sym_axis)[0]
-    if not found.ok(gs.sym_axis != "AUTO"):
-        return None, f"Not symmetric enough to mirror ({found.text()}): solved the whole mesh"
-    side = src["tri_cent"][:, found.axis] >= found.offset
-    keep = 1 if src["tri_area"][side].sum() >= src["tri_area"][~side].sum() else -1  # solve the side with more surface
-    co, faces, source, origin = symmetry.cut_half(src["co"], src["faces"], found.axis, found.offset, keep)
-    if not faces:
-        return None, "Mirror found nothing on one side of the plane: solved the whole mesh"
-    note = f"Mirrored from the {'+' if keep > 0 else '-'}{symmetry.AXES[found.axis]} half. {found.text()}"
-    return (co, faces, codes[source], (found.axis, found.offset, src["diag"], len(src["faces"]), keep), origin), note
+    key = (src["sig"], hash(np.asarray(codes).tobytes()), gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6))
+    if state.get("sym_half", (None,))[0] == key:  # the ladder asks again for every size: same mesh, same half
+        return state["sym_half"][1]
+    found = symmetry.find_plane(src["co"], _bvh(src), "XYZ" if gs.sym_axis == "AUTO" else gs.sym_axis, gs.sym_offset if gs.sym_offset_use else None)[0]
+    state["sym_note"] = f"{symmetry.AXES[found.axis]} plane: {found.differ()}"
+    if not gs.sym_force and not found.ok(gs.sym_axis != "AUTO"):
+        out = None, f"Not symmetric enough to mirror ({found.text()}): solved the whole mesh. Symmetrize mirrors it anyway"
+    else:
+        side = src["tri_cent"][:, found.axis] >= found.offset
+        keep = {"POS": 1, "NEG": -1}.get(gs.sym_side) or (1 if src["tri_area"][side].sum() >= src["tri_area"][~side].sum() else -1)  # Auto: the side with more surface
+        co, faces, source, origin = symmetry.cut_half(src["co"], src["faces"], found.axis, found.offset, keep)
+        if not faces:
+            out = None, "Mirror found nothing on one side of the plane: solved the whole mesh"
+        else:
+            note = f"{'Symmetrized' if gs.sym_force else 'Mirrored'} from the {'+' if keep > 0 else '-'}{symmetry.AXES[found.axis]} half; {found.differ()}"
+            out = (co, faces, codes[source], (found.axis, found.offset, src["diag"], len(src["faces"]), keep), origin), note
+    state["sym_half"] = (key, out)
+    return out
+
+
+def _half_paint(paint, src, half):
+    """The marker paint on the half that is solved. Paint on the other side counts too, mirrored over: whichever side
+    is marked more strongly wins, so you can mark either side."""
+    co, mirror, origin = half[0], half[3], half[4]
+    other = co.copy()
+    other[:, mirror[0]] = 2.0 * mirror[1] - other[:, mirror[0]]
+    tree = KDTree(len(src["co"]))
+    for i, p in enumerate(src["co"].tolist()):
+        tree.insert(p, i)
+    tree.balance()
+    across = paint[np.fromiter((tree.find(p)[1] for p in other.tolist()), dtype=np.int64, count=len(other))]
+    here = paint[origin]
+    return np.where(np.abs(across) > np.abs(here), across, here)
 
 
 def _guide_lines(context, gs, src, kind: str = "GUIDE") -> list[np.ndarray]:
@@ -1517,7 +1550,9 @@ def _guide_lines(context, gs, src, kind: str = "GUIDE") -> list[np.ndarray]:
 
 def _curve_sig(gs) -> tuple:
     """A cheap fingerprint of the curves in the list: moving, redrawing, adding or deleting one changes it."""
-    out = [(gs.loop_use, gs.guide_use, gs.bend_use, gs.loop_count, gs.bend_loops, round(gs.loop_gap, 6))]
+    out = [(gs.loop_use, gs.guide_use, gs.bend_use, gs.loop_count, gs.bend_loops, round(gs.loop_gap, 6)), tuple(tweaks(gs).values())]  # a Tweak slider reruns the search like a curve
+    if gs.density_use:
+        out.append(_marker_sig(bpy.context.scene))  # so does moving a marker ball
     for g in gs.guide_curves:
         o = g.obj
         if o is None:
@@ -1533,10 +1568,21 @@ def _curve_sig(gs) -> tuple:
     return tuple(out)
 
 
-def _painted(source, gs, src) -> np.ndarray | None:
-    """Paint 0..1 per vertex of the welded source from the vertex group, or None when there is none or it is empty."""
-    group = source.vertex_groups.get(gs.density_group)
-    if not gs.density_use or group is None:
+MARKER_KEY = "curiomesh_marker"  # custom property of a marker ball: +1 More Detail, -1 Less Detail
+
+
+def markers(scene) -> list:
+    return [o for o in scene.objects if o.type == "EMPTY" and MARKER_KEY in o]
+
+
+def _marker_sig(scene) -> tuple:
+    return tuple((o.name, float(o[MARKER_KEY]), o.empty_display_size, tuple(round(x, 5) for row in o.matrix_world for x in row)) for o in markers(scene))
+
+
+def _group_paint(source, name: str) -> np.ndarray | None:
+    """Weights 0..1 per vertex of the mesh from one vertex group, or None."""
+    group = source.vertex_groups.get(name)
+    if group is None:
         return None
     bm = bmesh.new()
     try:
@@ -1544,12 +1590,35 @@ def _painted(source, gs, src) -> np.ndarray | None:
         layer = bm.verts.layers.deform.active
         if layer is None:
             return None
-        paint = np.asarray([v[layer].get(group.index, 0.0) for v in bm.verts], dtype=np.float64)
+        return np.asarray([v[layer].get(group.index, 0.0) for v in bm.verts], dtype=np.float64)
     finally:
         bm.free()
-    welded = np.zeros(len(src["co"]))
-    np.maximum.at(welded, src["weld"], paint)
-    return welded if welded.max() > 0.0 else None
+
+
+def _painted(source, gs, src) -> np.ndarray | None:
+    """Detail markers -1..1 per vertex of the welded source (positive: More Detail, negative: Less Detail), from the two
+    vertex groups and the marker balls, or None when nothing is marked."""
+    if not gs.density_use:
+        return None
+    more, less = np.zeros(len(src["co"])), np.zeros(len(src["co"]))
+    for name, into in ((gs.density_group, more), (gs.less_group, less)):
+        paint = _group_paint(source, name)
+        if paint is not None:
+            np.maximum.at(into, src["weld"], paint)
+    inverse = source.matrix_world.inverted()
+    scale = max(sum(source.matrix_world.to_scale()) / 3.0, 1e-12)
+    for marker in markers(bpy.context.scene):
+        centre = np.asarray(inverse @ marker.matrix_world.translation)
+        radius = marker.empty_display_size * max(marker.matrix_world.to_scale()) / scale
+        np.maximum(more if marker[MARKER_KEY] > 0 else less, marker_weights(src["co"], centre, radius), out=more if marker[MARKER_KEY] > 0 else less)
+    marked = more - less
+    return marked if np.abs(marked).max(initial=0.0) > 0.0 else None
+
+
+def marker_weights(co: np.ndarray, centre, radius: float) -> np.ndarray:
+    """1 at a marker ball's centre, falling smoothly to 0 at its radius."""
+    d2 = ((co - np.asarray(centre)) ** 2).sum(axis=1) / max(radius, 1e-12) ** 2
+    return np.clip(1.0 - d2, 0.0, 1.0) ** 2
 
 
 def _real_materials(out: dict, charts) -> dict:
@@ -1603,7 +1672,7 @@ def _solve_inputs(gs, src, lines, paint):
     half, note = _mirror_half(gs, src, src["mat"])
     co, faces, mat, mirror = half[:4] if half is not None else (src["co"], src["faces"], src["mat"], None)
     if paint is not None:
-        paint = paint[half[4]] if half is not None else paint
+        paint = _half_paint(paint, src, half) if half is not None else paint
     if lines and mirror:
         lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
     return co, faces, mat, mirror, lines, paint, note
@@ -1632,7 +1701,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
     chords = gs.auto_chords and not baked and loose_pieces(src) <= CHORDS_MOST_PIECES
-    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
+    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6), tuple(tweaks(gs).values()), hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
     state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
         return True
@@ -1650,6 +1719,11 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     return True
 
 
+def tweaks(gs) -> dict:
+    """The Tweak sliders, as the search takes them."""
+    return {"rows": round(gs.tweak_rows, 3), "flat": round(gs.tweak_flat, 3), "poles": int(gs.tweak_poles)}
+
+
 def make_job(context, gs, src, inputs, detail: float | None = None, style: str | None = None, quiet: bool = False):
     """The search job for these inputs (what `_start_segments` gathered). The size ladder asks for others at its own
     Detail and Style, `quiet`: no helper Blenders and no saved progress, so it never competes with what you do."""
@@ -1663,8 +1737,10 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
         half, mirror, paint = None, None, None
         (co, faces, mat), outside = edgeloops.split_region(src["co"], src["faces"], codes, region)
         note = f"Only the {int(region.sum()):,} selected faces are redone"
-    if paint is not None:
-        paint = paint[half[4]] if half is not None else paint
+    if paint is not None and half is not None:
+        if state.get("half_paint", (None,))[0] != (id(paint), id(half)):  # every size of the ladder asks again
+            state["half_paint"] = ((id(paint), id(half)), _half_paint(paint, src, half), paint, half)  # kept: the ids stay theirs
+        paint = state["half_paint"][1]
     if lines and mirror:
         lines = guides.reflect_to_side(lines, mirror[0], mirror[1], mirror[4])
     if mirror:
@@ -1672,7 +1748,7 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
     bvh = _bvh(src)
     items = [(line, gs.loop_count if kind == "LOOP" else gs.bend_loops, kind) for kind, found in drawn.items() for line in found]
     strips = (items, gs.loop_gap, lambda p: bvh.find_nearest(Vector(p))[:2]) if items else None
-    cache_key = (src["sig"], mirror[:2] if mirror else None, charts is None)
+    cache_key = (src["sig"], (mirror[0], mirror[1], mirror[4]) if mirror else None, charts is None)
     if state["auto_cache"][0] != cache_key:
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
     saved = None if quiet else hardware.checkpoint_dir(co, len(faces))
@@ -1680,7 +1756,7 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
     turbo.set_gpu(gs.auto_gpu)
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
-    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough)
+    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs))
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
@@ -3429,8 +3505,16 @@ class CURIOMESH_OT_guided_edit_guide(bpy.types.Operator):
 class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
     bl_idname = "curiomesh.guided_paint_density"
     bl_label = "Paint"
-    bl_description = "Go to Weight Paint on the mesh with a vertex group for the density. Paint red where you want more quads, then leave Weight Paint (Tab) and press Start"
+    bl_description = "Go to Weight Paint on the mesh with a vertex group for the markers. Paint red where you want more (or fewer) quads, then leave Weight Paint (Tab) and press Start"
     bl_options = {"REGISTER", "UNDO"}
+
+    less: bpy.props.BoolProperty(name="Less Detail", default=False, options={"SKIP_SAVE"})
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.less:
+            return "Weight Paint the Less Detail group: red areas get bigger quads, so the faces go elsewhere. Leave Weight Paint (Tab) and press Start"
+        return "Weight Paint the More Detail group: red areas keep more, smaller quads at every Quad Size. Leave Weight Paint (Tab) and press Start"
 
     @classmethod
     def poll(cls, context):
@@ -3440,8 +3524,12 @@ class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
         gs = _gs(context)
         obj = _source_mesh(context)
         state["source"] = obj.name
-        group = obj.vertex_groups.get(gs.density_group) or obj.vertex_groups.new(name=gs.density_group or "CM_Density")
-        gs.density_group = group.name
+        if self.less:
+            group = obj.vertex_groups.get(gs.less_group) or obj.vertex_groups.new(name=gs.less_group or "CM_LessDetail")
+            gs.less_group = group.name
+        else:
+            group = obj.vertex_groups.get(gs.density_group) or obj.vertex_groups.new(name=gs.density_group or "CM_Density")
+            gs.density_group = group.name
         obj.vertex_groups.active_index = group.index
         gs.density_use = True
         context.view_layer.objects.active = obj
@@ -3459,17 +3547,52 @@ class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
 class CURIOMESH_OT_guided_clear_density(bpy.types.Operator):
     bl_idname = "curiomesh.guided_clear_density"
     bl_label = "Clear"
-    bl_description = "Delete the density paint (the vertex group)"
+    bl_description = "Delete all Detail Markers: both paint groups and the marker balls"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        obj = _source_mesh(context)
-        return obj is not None and obj.vertex_groups.get(_gs(context).density_group) is not None
+        obj, gs = _source_mesh(context), _gs(context)
+        return obj is not None and (any(obj.vertex_groups.get(n) is not None for n in (gs.density_group, gs.less_group)) or bool(markers(context.scene)))
 
     def execute(self, context):
-        obj = _source_mesh(context)
-        obj.vertex_groups.remove(obj.vertex_groups[_gs(context).density_group])
+        obj, gs = _source_mesh(context), _gs(context)
+        for name in (gs.density_group, gs.less_group):
+            if obj.vertex_groups.get(name) is not None:
+                obj.vertex_groups.remove(obj.vertex_groups[name])
+        for ball in markers(context.scene):
+            bpy.data.objects.remove(ball, do_unlink=True)
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_guided_add_marker(bpy.types.Operator):
+    bl_idname = "curiomesh.guided_add_marker"
+    bl_label = "Add Detail Marker"
+    bl_description = "A marker ball at the 3D cursor. Scale it to change its reach"
+    bl_options = {"REGISTER", "UNDO"}
+
+    less: bpy.props.BoolProperty(name="Less Detail", default=False, options={"SKIP_SAVE"})
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.less:
+            return "A Less Detail ball at the 3D cursor: bigger quads inside it, at every Quad Size. Scale it to change its reach"
+        return "A More Detail ball at the 3D cursor: more, smaller quads inside it, kept even at low face counts. Scale it to change its reach"
+
+    @classmethod
+    def poll(cls, context):
+        return _source_mesh(context) is not None
+
+    def execute(self, context):
+        gs, obj = _gs(context), _source_mesh(context)
+        ball = bpy.data.objects.new("CM_LessDetail" if self.less else "CM_MoreDetail", None)
+        ball.empty_display_type = "SPHERE"
+        ball.empty_display_size = 0.1 * max(obj.dimensions)
+        ball.location = context.scene.cursor.location
+        ball[MARKER_KEY] = -1.0 if self.less else 1.0
+        ball.color = (0.2, 0.4, 1.0, 1.0) if self.less else (1.0, 0.2, 0.1, 1.0)
+        context.scene.collection.objects.link(ball)
+        gs.density_use = True
         return {"FINISHED"}
 
 
@@ -3691,6 +3814,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
                 col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
             col.prop(gs, "sym_axis", icon="MOD_MIRROR")
+            if gs.sym_axis != "OFF":
+                self._draw_mirror(col, gs, base if done else None)
         if not solids and (gs.auto_profile in profiles.MULTIRES_USES or gs.multires_on):
             col.prop(gs, "multires_on", toggle=True, icon="MOD_MULTIRES")
             if gs.multires_on:
@@ -3708,6 +3833,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         body = None if solids else fold(layout, gs, "ui_more_open", "More Options" + (f" ({on} on)" if on else ""))  # names of what is on were cut in a narrow sidebar; none of them shape solids
         if body is not None:
             self._draw_more(body, gs, obj, searching)
+        if not solids and not done:
+            self._draw_tweak(layout, gs, searching)
 
         body = fold(layout, gs, "ui_pc_open", "This Computer")
         if body is not None:
@@ -3747,6 +3874,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if done:
             self._draw_summary(layout, gs, base["report"], len(res["faces"]))
             ladder.draw(layout, gs)
+            if gs.auto_profile not in profiles.BLOCKOUT_USES:
+                self._draw_tweak(layout, gs, searching)
             body = fold(layout, gs, "ui_teach_open", "Show It How (optional)")
             if body is not None:
                 self._draw_teach(body, obj)
@@ -3757,6 +3886,41 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             box.alert = _is_problem(message)
             for i, chunk in enumerate(message.split(" | ")[:2]):
                 overlay.wrap_label(box, chunk, icon=("ERROR" if box.alert else "INFO") if i == 0 else "BLANK1", width=32, limit=4)
+
+    @staticmethod
+    def _draw_mirror(col, gs, base) -> None:
+        """Symmetrize, the side and the plane, how far apart the sides are and, with a result, how clean its seam is."""
+        row = col.row(align=True)
+        row.prop(gs, "sym_force", toggle=True, icon="MOD_MIRROR")
+        row.prop(gs, "sym_side", text="")
+        row = col.row(align=True)
+        row.prop(gs, "sym_offset_use", toggle=True)
+        sub = row.row(align=True)
+        sub.active = gs.sym_offset_use
+        sub.prop(gs, "sym_offset", text="")
+        if state.get("sym_note"):
+            overlay.wrap_label(col, state["sym_note"], icon="INFO", width=36, limit=2)
+        seam = getattr(base and base.get("job"), "seam_report", None)
+        if seam is not None:
+            overlay.wrap_label(col, symmetry.seam_words(seam), icon="CHECKMARK" if not any(seam[k] for k in ("open", "non_manifold", "across", "duplicate")) else "ERROR", width=36, limit=2)
+
+    @staticmethod
+    def _draw_tweak(layout, gs, searching) -> None:
+        """The Tweak fold: sliders over real settings of the search. Each reruns it (Auto-Update) or applies on Start."""
+        body = fold(layout, gs, "ui_tweak_open", "Tweak")
+        if body is None:
+            return
+        col = body.column(align=True)
+        col.enabled = not searching
+        if gs.auto_style == "ROWS" or gs.auto_method != "AUTO":
+            overlay.wrap_label(col, "These change Keep Detail and Balanced with Method Auto", icon="INFO", width=36, limit=2)
+            return
+        col.prop(gs, "tweak_rows", slider=True)
+        col.prop(gs, "tweak_flat", slider=True)
+        if gs.auto_style == "DETAIL":
+            col.prop(gs, "tweak_poles", toggle=True)
+        if gs.density_use or gs.guide_use or gs.loop_use or gs.bend_use:
+            overlay.wrap_label(col, "Detail Markers and drawn curves turn off the round-area rows and the flat-area points", icon="INFO", width=36, limit=2)
 
     @staticmethod
     def _draw_summary(layout, gs, report, after):
@@ -3824,14 +3988,21 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             side.operator("curiomesh.guided_remove_guide", text="", icon="REMOVE")
             side.operator("curiomesh.guided_draw_guide", text="", icon="GREASEPENCIL").replace = True
             side.operator("curiomesh.guided_edit_guide", text="", icon="EDITMODE_HLT")
-        col.prop(gs, "density_use", text="Paint Density", toggle=True, icon="BRUSH_DATA")
+        col.prop(gs, "density_use", text="Detail Markers", toggle=True, icon="BRUSH_DATA")
         if gs.density_use:
             row = col.row(align=True)
-            row.operator("curiomesh.guided_paint_density", icon="WPAINT_HLT")
-            row.operator("curiomesh.guided_clear_density", icon="X")
+            row.operator("curiomesh.guided_paint_density", text="Paint More", icon="WPAINT_HLT").less = False
+            row.operator("curiomesh.guided_paint_density", text="Paint Less", icon="WPAINT_HLT").less = True
+            row = col.row(align=True)
+            row.operator("curiomesh.guided_add_marker", text="Ball More", icon="ADD").less = False
+            row.operator("curiomesh.guided_add_marker", text="Ball Less", icon="REMOVE").less = True
+            row.operator("curiomesh.guided_clear_density", text="", icon="X")
             col.prop(gs, "density_strength")
-            if obj.vertex_groups.get(gs.density_group) is None:
-                overlay.wrap_label(col, "Press Paint, colour the parts that need more quads red", icon="INFO", width=36, limit=3)
+            balls = markers(bpy.context.scene)
+            if obj.vertex_groups.get(gs.density_group) is None and obj.vertex_groups.get(gs.less_group) is None and not balls:
+                overlay.wrap_label(col, "Paint More or Less Detail in red, or put the 3D cursor on the mesh (Shift + right click) and add a ball; scale it to change its reach", icon="INFO", width=36, limit=4)
+            elif balls:
+                col.label(text=f"{sum(1 for b in balls if b[MARKER_KEY] > 0)} More and {sum(1 for b in balls if b[MARKER_KEY] < 0)} Less Detail balls", icon="SPHERE")
         col.separator()
         if obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
             col.prop(gs, "keep_uvs", toggle=True, icon="UV")
@@ -4201,6 +4372,7 @@ CLASSES = (
     CURIOMESH_OT_teach_forget_kept,
     CURIOMESH_OT_guided_paint_density,
     CURIOMESH_OT_guided_clear_density,
+    CURIOMESH_OT_guided_add_marker,
     CURIOMESH_UL_guided_guides,
     CURIOMESH_UL_guided_points,
     CURIOMESH_UL_guided_shapes,

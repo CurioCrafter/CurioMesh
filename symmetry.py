@@ -29,12 +29,23 @@ class Plane:
     offset: float
     match: float  # share of the sampled points whose mirror lies on the surface
     worst: float  # distance of the 99th percentile point from its mirror, as a share of the size
+    size: float = 0.0  # the mesh's diagonal, in its own units
 
     def ok(self, chosen: bool = False) -> bool:
         return self.match >= (ENOUGH_CHOSEN if chosen else ENOUGH)
 
     def text(self) -> str:
         return f"{AXES[self.axis]}: {self.match * 100:.0f}% of the surface matches its mirror (99% within {self.worst * 100:.1f}% of the size)"
+
+    def differ(self) -> str:
+        """How far apart the two sides are, in words: what Symmetrize evens out."""
+        return f"the sides differ by up to {length_words(self.worst * self.size)} (99% of the surface)"
+
+
+def length_words(metres: float) -> str:
+    if metres < 0.001:
+        return f"{metres * 1e6:.0f} um" if metres > 0 else "0 mm"
+    return f"{metres * 1000:.1f} mm" if metres < 1.0 else f"{metres:.2f} m"
 
 
 def _score(bvh, pts: np.ndarray, axis: int, offset: float, diag: float):
@@ -46,8 +57,9 @@ def _score(bvh, pts: np.ndarray, axis: int, offset: float, diag: float):
     return float((dist < MATCH_TOLERANCE).mean()), float(np.percentile(dist, 99)), dist, near, mirrored[:, axis]
 
 
-def find_plane(co: np.ndarray, bvh, axes: str = "XYZ") -> list[Plane]:
-    """The best mirror plane on each asked axis, best first. Tries the mesh centre and the origin, then nudges the plane."""
+def find_plane(co: np.ndarray, bvh, axes: str = "XYZ", offset: float | None = None) -> list[Plane]:
+    """The best mirror plane on each asked axis, best first. Tries the mesh centre and the origin, then nudges the plane.
+    With `offset` the plane stays there and is only measured."""
     lo, hi = co.min(axis=0), co.max(axis=0)
     diag = float(np.linalg.norm(hi - lo)) or 1.0
     step = max(len(co) // SAMPLES, 1)
@@ -55,6 +67,10 @@ def find_plane(co: np.ndarray, bvh, axes: str = "XYZ") -> list[Plane]:
     planes = []
     for letter in axes.upper():
         axis = AXES.index(letter)
+        if offset is not None:
+            match, worst, *_rest = _score(bvh, pts, axis, offset, diag)
+            planes.append(Plane(axis, offset, match, worst, diag))
+            continue
         best = None
         for offset in dict.fromkeys((float((lo[axis] + hi[axis]) / 2.0), 0.0)):
             match, worst, *_rest = _score(bvh, pts, axis, offset, diag)
@@ -68,7 +84,7 @@ def find_plane(co: np.ndarray, bvh, axes: str = "XYZ") -> list[Plane]:
                 break
             offset += float((near[used] - mirrored[used]).mean()) / 2.0
         match, worst, *_rest = _score(bvh, pts, axis, offset, diag)
-        planes.append(Plane(axis, offset, match, worst))
+        planes.append(Plane(axis, offset, match, worst, diag))
     return sorted(planes, key=lambda p: -p.match)
 
 
@@ -146,22 +162,109 @@ def border_vertices(faces, count: int) -> np.ndarray:
     return mask
 
 
-def mirror_result(co: np.ndarray, faces, mat, axis: int, offset: float, size: float):
-    """The solved half plus its reflection. Returns (co, faces, mat, snapped).
+def mirror_result(co: np.ndarray, faces, mat, axis: int, offset: float, size: float, keep: int = 0):
+    """The solved half plus its reflection. Returns (co, faces, mat, snapped, kept): `kept` are the faces of the half
+    that are in the result (first as they are, then mirrored).
 
     The open border of the half that lies near the plane is moved exactly onto it (`snapped` counts those
     vertices, moved by at most a few percent of `size`); the reflected copy reuses them, so nothing is left open there.
+    The seam is cleaned first: with `keep` (the side solved, +1 or -1) a vertex that strayed over the plane goes back,
+    seam vertices closer than a tenth of an edge are merged, and faces left with no area or lying wholly in the plane
+    go, so the two halves meet with no duplicate, overlapping or zero-area faces.
     """
     co = np.asarray(co, dtype=np.float64).copy()
+    faces = [tuple(f) for f in faces]
     near = border_vertices(faces, len(co)) & (np.abs(co[:, axis] - offset) <= 0.02 * size)
     co[near, axis] = offset
-    on = np.abs(co[:, axis] - offset) == 0.0
-    twin = np.where(on, np.arange(len(co)), 0)
-    fresh = np.flatnonzero(~on)
+    tiny = 1e-6 * size
+    side = co[:, axis] - offset
+    if keep:
+        strayed = ~near & (keep * side < 0.0)
+        co[strayed, axis] = offset - side[strayed]  # back over the plane: its mirror would overlap it
+    loose = ~near & (np.abs(co[:, axis] - offset) < tiny)
+    co[loose, axis] = offset + (keep or 1) * tiny  # on the plane but not on the seam: it must not weld to its mirror
+    faces, mat, kept = _clean_seam(co, faces, mat, near)
+    used = np.zeros(len(co), dtype=bool)
+    for f in faces:
+        used[list(f)] = True
+    remap = np.cumsum(used) - 1
+    co, near = co[used], near[used]
+    faces = [tuple(int(remap[v]) for v in f) for f in faces]
+    twin = np.where(near, np.arange(len(co)), 0)
+    fresh = np.flatnonzero(~near)
     twin[fresh] = len(co) + np.arange(len(fresh))
     reflected = co[fresh].copy()
     reflected[:, axis] = 2.0 * offset - reflected[:, axis]
     out_co = np.vstack((co, reflected))
-    out_faces = list(faces) + [tuple(int(twin[v]) for v in reversed(f)) for f in faces]
+    out_faces = faces + [tuple(int(twin[v]) for v in reversed(f)) for f in faces]
     out_mat = None if mat is None else np.concatenate((np.asarray(mat), np.asarray(mat)))
-    return out_co, out_faces, out_mat, int(near.sum())
+    return out_co, out_faces, out_mat, int(near.sum()), kept
+
+
+def _clean_seam(co: np.ndarray, faces: list, mat, on: np.ndarray):
+    """Merge seam vertices joined by an edge under a tenth of the usual length, and drop the faces that leaves without
+    area or that lie wholly on the seam (their mirror would be the same face). Returns (faces, mat, kept)."""
+    step = max(len(faces) // 2000, 1)
+    lengths = [float(np.linalg.norm(co[f[k]] - co[f[k - 1]])) for f in faces[::step] for k in range(len(f))]
+    short = 0.1 * float(np.median(lengths)) if lengths else 0.0
+    parent = np.arange(len(co))
+
+    def root(v: int) -> int:
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return int(v)
+
+    for f in faces:
+        for k in range(len(f)):
+            a, b = f[k - 1], f[k]
+            if on[a] and on[b] and np.linalg.norm(co[a] - co[b]) < short:
+                ra, rb = root(a), root(b)
+                if ra != rb:
+                    parent[max(ra, rb)] = min(ra, rb)
+    out, out_mat, kept = [], [], []
+    for i, f in enumerate(faces):
+        g = [root(v) for v in f]
+        g = [v for k, v in enumerate(g) if v != g[k - 1]]
+        if len(set(g)) < 3 or all(on[v] for v in g):
+            continue
+        out.append(tuple(g))
+        kept.append(i)
+        if mat is not None:
+            out_mat.append(mat[i])
+    return out, (None if mat is None else out_mat), np.asarray(kept, dtype=np.int64)
+
+
+def seam_check(co: np.ndarray, faces, axis: int, offset: float, size: float) -> dict:
+    """Issue counts along a mirror seam: open and non-manifold seam edges, faces crossing the plane, duplicate faces,
+    and the Issue Finder's slivers, pinched and concave faces among those touching the seam."""
+    try:
+        from .triadq import issues
+    except ImportError:  # imported on its own, as the tests do
+        from triadq import issues
+    co = np.asarray(co, dtype=np.float64)
+    d = co[:, axis] - offset
+    tol = 1e-7 * size
+    on = np.abs(d) <= tol
+    edges: dict[tuple[int, int], int] = {}
+    for f in faces:
+        for k in range(len(f)):
+            a, b = f[k - 1], f[k]
+            key = (a, b) if a < b else (b, a)
+            edges[key] = edges.get(key, 0) + 1
+    seam_edges = [n for (a, b), n in edges.items() if on[a] and on[b]]
+    touching = np.fromiter((bool(on[list(f)].any()) for f in faces), dtype=bool, count=len(faces))
+    across = sum(1 for f in faces if (d[list(f)] > tol).any() and (d[list(f)] < -tol).any())
+    flags = issues.topology_flags(co, faces)
+    out = {"seam_vertices": int(on.sum()), "seam_faces": int(touching.sum()), "open": sum(1 for n in seam_edges if n == 1), "non_manifold": sum(1 for n in seam_edges if n > 2), "across": across, "duplicate": len(faces) - len({tuple(sorted(f)) for f in faces})}
+    for kind in ("sliver", "pinched", "concave"):
+        out[kind] = int((flags[kind] & touching).sum())
+    return out
+
+
+def seam_words(check: dict) -> str:
+    """The seam check in one line for the panel."""
+    bad = {k: check[k] for k in ("open", "non_manifold", "across", "duplicate") if check.get(k)}
+    rough = sum(check.get(k, 0) for k in ("sliver", "pinched", "concave"))
+    head = "Seam clean" if not bad else "Seam: " + ", ".join(f"{n} {k.replace('_', '-')}" for k, n in bad.items())
+    return f"{head} ({check['seam_vertices']} vertices on the plane, {rough} thin or pinched faces along it)"
