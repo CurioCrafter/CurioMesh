@@ -212,13 +212,26 @@ def _tiny_segments(job, labels, piece, keep=()) -> list[int]:
     return tiny
 
 
-def _mismatched(labels, piece, src_areas, res_areas, share: float = MATCH_SHARE) -> list[int]:
-    """Segments whose faces on the result cover far more or far less surface than on your mesh: the result is too coarse there to hold them."""
+def _extents(labels, centres, count):
+    low = np.full((count, 3), np.inf)
+    high = np.full((count, 3), -np.inf)
+    np.minimum.at(low, labels, centres)
+    np.maximum.at(high, labels, centres)
+    return np.where(np.isfinite(high - low), high - low, 0.0)
+
+
+def _mismatched(labels, piece, src_areas, res_areas, src_centres, res_centres, share: float = MATCH_SHARE) -> list[int]:
+    """Segments whose faces on the result cover far more or far less surface than on your mesh, or reach far less or
+    further along an axis: the result is too coarse there to hold them."""
     count = int(max(labels.max(), piece.max())) + 1
     on_src = np.bincount(labels, src_areas, count)
     on_res = np.bincount(piece, res_areas, count)
     ratio = on_res / np.maximum(on_src, 1e-30)
-    return np.flatnonzero((on_src > 0) & ((ratio < share) | (ratio > 1.0 / share))).tolist()
+    bad = (ratio < share) | (ratio > 1.0 / share)
+    src_ext, res_ext = _extents(labels, src_centres, count), _extents(piece, res_centres, count)
+    real = src_ext > 0.1 * np.linalg.norm(src_ext, axis=1, keepdims=True)
+    bad |= (real & ((res_ext < share * src_ext) | (res_ext > src_ext / share))).any(axis=1)
+    return np.flatnonzero((on_src > 0) & bad).tolist()
 
 
 def _is_closed(line) -> bool:
@@ -384,7 +397,7 @@ class FindJob(view.PartJob):
         near = nearest_faces(src, bvh, co, faces)
         box["res_src"] = near
         piece = labels[near]
-        normals, areas, _centres = S.face_frames(co, faces)
+        normals, areas, centres = S.face_frames(co, faces)
         links = S.face_links(faces)
         raw = piece
         piece = S.tidy(faces, S.even_borders(faces, piece, normals, areas, rounds=1), links)
@@ -421,7 +434,7 @@ class FindJob(view.PartJob):
                 piece = np.searchsorted(values, piece)
             for _round in range(2):  # a segment finer than the result's faces gets result faces that are not it: it joins a neighbour
                 keep = set(carried(labels, box["old"], locked))
-                off = [k for k in _mismatched(labels, piece, tree.areas, areas) if k not in keep]
+                off = [k for k in _mismatched(labels, piece, tree.areas, areas, tree.centroids, centres) if k not in keep]
                 if not off:
                     break
                 labels = _drop_labels(labels, off, tree.links[0], tree.links[1], keep)
