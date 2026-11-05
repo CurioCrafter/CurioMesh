@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.5 - unreleased
+## 0.9.5 - 2026-11-05
 
 ### Game engines
 - **Export for Game Engine** (File > Export > CurioMesh Game Asset, and a button after Apply): the selected meshes and
