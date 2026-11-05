@@ -19,6 +19,21 @@
   Detail, a smaller bake, Export Job). "Don't ask again this session" is in it.
 - **A small-PC notice** in This Computer (4 cores or fewer, 8 GB or less, or no graphics card for Cycles).
 
+### Quad Size and Organization sliders
+- **Quad Size**, under the result: smaller quads to the left, bigger to the right. Each step is a whole result of the
+  search at another Detail, so it holds its own amount of change and puts the faces where the shape needs them. The
+  sizes are worked out in the background once the search is done, reusing what it measured, so most take seconds;
+  until they are ready the nearest finished one is shown, with a note.
+- **Organization**: fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the
+  right. In between, loose pieces change over one at a time, smallest first, and the whole object is looked at again.
+- Dragging either slider is a live preview: each size keeps its own preview mesh, so a step is a mesh swap (about
+  1 ms on a 17,000 face bust), at most ten times a second. The segments of the result are found once the slider
+  rests, and the sizes still being worked out wait while you drag.
+- A size that another one beats on both faces and change is skipped, so the face count only ever goes one way.
+- **Bigger Quads / Smaller Quads** for the selected parts only, the rest stays: a whole loose piece takes its faces
+  from the next size, a segment of a bigger piece is remade for Reduce at a lower or higher Detail and kept only if it
+  really has fewer (or more) faces.
+
 ## 0.9.6 - 2026-11-05
 
 ### Game engines

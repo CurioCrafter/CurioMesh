@@ -353,7 +353,17 @@ class PartJob:
         return f"{r['faces']:,} faces | Camera: {r['loss']:.1f}% of the view differs" + (f" | {self.warnings[0]}" if self.warnings else "")
 
     def _pictures_of(self, points, faces, center, half, pixels):
-        return (yield from autoretopo.pictures(points, faces, center, half, pixels))
+        """On a worker thread: one set of a big part's pictures took up to 0.4 s, which Blender felt as a stall."""
+
+        def run():
+            work = autoretopo.pictures(points, faces, center, half, pixels)
+            while True:
+                try:
+                    next(work)
+                except StopIteration as done:
+                    return done.value
+
+        return (yield from _threaded(run))
 
     def _change(self, piece: int, points, faces):
         """Generator: percent of the part's view that differs from the original part."""
