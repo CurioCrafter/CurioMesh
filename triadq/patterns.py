@@ -139,6 +139,12 @@ class Topology:
     def loops(self) -> np.ndarray:
         """Edges in the loop each edge belongs to. A loop runs straight through regular vertices."""
 
+        labels = self.loop_labels()
+        return np.bincount(labels)[labels]
+
+    def loop_labels(self) -> np.ndarray:
+        """Per edge, a number for the loop it belongs to (the same for every edge of one loop)."""
+
         key = self.a * len(self.points) + self.b
         order = np.argsort(key)
         keys = key[order]
@@ -161,8 +167,7 @@ class Topology:
         order = np.argsort(ends, kind="stable")
         ends, ids = ends[order], ids[order]
         meet = np.flatnonzero((ends[:-1] == ends[1:]) & (self.faces_at[ends[:-1]] == 2))
-        labels = _labels(len(self.edges), np.concatenate((first, ids[meet])), np.concatenate((second, ids[meet + 1])))
-        return np.bincount(labels)[labels]
+        return _labels(len(self.edges), np.concatenate((first, ids[meet])), np.concatenate((second, ids[meet + 1])))
 
     def quad_codes(self) -> np.ndarray:
         """The four corner codes per quad as one number, turned and mirrored into one spelling."""

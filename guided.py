@@ -28,7 +28,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, hardware, jobpack, ladder, multires, profiles, teach, turbo
+from . import autoretopo, blockout, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -337,6 +337,10 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_index: bpy.props.IntProperty(default=0)
     quad_size: bpy.props.FloatProperty(name="Quad Size", description="After a search: smaller quads to the left keep more detail, bigger quads to the right make fewer faces. Each step is a full result that holds its own amount of change, with the faces where the shape needs them. Sizes appear as they are worked out in the background", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
     quad_order: bpy.props.FloatProperty(name="Organization", description="After a search: fewest faces to the left (Keep Detail), even rows to the right (Clean Rows), Balanced in the middle. In between, loose pieces change over one at a time, smallest first", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
+    organize: bpy.props.FloatProperty(name="Organize", description="After a search: about the same faces, laid out tidier. Messy patches around poles become plain grids, then the quads settle into even rows on your mesh, which costs a little detail; the meter below says how much. Strengths appear as they are worked out in the background", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
+    organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Organize goes no further than this much more of the view changed than at 0", default=False, update=organize.on_cap)
+    organize_cap: bpy.props.FloatProperty(name="Most Detail Loss", description="Percent of the view that Organize may change on top of the result as it was", default=1.0, min=0.1, max=20.0, precision=1, subtype="NONE", update=organize.on_cap)
+    organize_flow: bpy.props.BoolProperty(name="Loop Flow", description="Draw the edge loops of the result in a colour each, and its poles as dots (blue: three edges, red: five or more)", default=False, update=_redraw_update)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
     blockout_sides: bpy.props.IntProperty(name="Primitive Sides", description="Blockout and Hulls: sides of each cylinder and detail of each ball (small parts get half). Hulls: about four faces per side for the biggest part, fewer for small ones", default=12, min=4, max=32, step=2)
@@ -3876,6 +3880,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if done:
             self._draw_summary(layout, gs, base["report"], len(res["faces"]))
             ladder.draw(layout, gs)
+            organize.draw(layout, gs)
             if gs.auto_profile not in profiles.BLOCKOUT_USES:
                 self._draw_tweak(layout, gs, searching)
             body = fold(layout, gs, "ui_teach_open", "Show It How (optional)")
@@ -4407,6 +4412,7 @@ def register() -> None:
     bpy.types.Object.curiomesh_point_index = bpy.props.IntProperty(default=0)
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_VIEW"))
     segments.register()
+    organize.register()
     bpy.app.handlers.load_post.append(_on_load_post)
 
 
@@ -4417,6 +4423,7 @@ def unregister() -> None:
         except Exception:
             pass
     segments.unregister()
+    organize.unregister()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_poll):
