@@ -145,7 +145,7 @@ def build_trailer():
 def build_hero():
     rows = sheet_rows()
     im, d = canvas(1400, 800)
-    center(d, "Three styles, one add-on", 14, 38, ACC, True, 1400)
+    center(d, "Clean quads for sculpts, scans and games", 14, 38, ACC, True, 1400)
     pw = 440
 
     def lion():
