@@ -13,7 +13,7 @@ Plain NumPy.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import heapq
 
 import numpy as np
@@ -136,6 +136,8 @@ class Tree:
     normals: np.ndarray
     centroids: np.ndarray
     areas: np.ndarray
+    inputs: dict | None = None  # what the merges were priced from, kept so Crease Strength can merge again without the rest
+    creases: float = 1.0  # how much more a crease costs to merge across than at the start
 
 
 def _smooth_normals(normals, areas, fa, fb, rounds: int):
@@ -166,8 +168,8 @@ def _patches(links, normals, centroids, shell, cells: int) -> np.ndarray:
     return np.unique(_labels(count, fa[same], fb[same]), return_inverse=True)[1].reshape(-1)
 
 
-def _merge_all(leaf, shell, links, co, normals, areas, centroids, log_thick, cancelled=None):
-    """Merge cheapest first until every loose piece is one patch. Returns (merges, costs, leaf area)."""
+def _merge_inputs(leaf, shell, links, co, normals, areas, centroids, log_thick) -> dict:
+    """Everything the merges are priced from: the slow part of a tree, worked out once per mesh."""
 
     fa, fb, u, v = links
     count = int(leaf.max()) + 1 if len(leaf) else 0
@@ -191,26 +193,34 @@ def _merge_all(leaf, shell, links, co, normals, areas, centroids, log_thick, can
     ends = np.concatenate((pa, pb))
     # Per patch: how bent its surroundings are. Tells a flat plate from the round rim next to it.
     turned = np.bincount(ends, np.tile(angle * pair_len, 2), count) / np.maximum(np.bincount(ends, np.tile(pair_len, 2), count), 1e-30)
+    bent = pair_len * angle
+    rows = np.column_stack((pair_len, np.where(concave, bent, 0.0), np.where(concave, 0.0, bent)))
+    # the whole model: a small loose piece splits only when much detail is asked for
+    return {"count": count, "pa": pa.astype(np.int64), "pb": pb.astype(np.int64), "rows": rows, "leaf_area": leaf_area, "curve": turned * leaf_area, "thick": log_thick * leaf_area, "whole": float(shell_area.sum())}
+
+
+def _merge_all(inputs: dict, creases: float = 1.0, cancelled=None):
+    """Merge cheapest first until every loose piece is one patch. Returns (merges, costs). `creases` scales what bending across a border costs."""
+
+    count, pa, pb, leaf_area = inputs["count"], inputs["pa"], inputs["pb"], inputs["leaf_area"]
+    rows = inputs["rows"] if creases == 1.0 else inputs["rows"] * np.array([1.0, creases, creases])
     module = _turbo.native() if _turbo is not None else None
     if module is not None and hasattr(module, "segment_merges"):  # the same merges in the same order
-        bent = pair_len * angle
-        rows = np.column_stack((pair_len, np.where(concave, bent, 0.0), np.where(concave, 0.0, bent)))
         if cancelled is not None and cancelled():
             raise ValueError("cancelled")
         try:
-            merges, costs = _turbo._stoppable(module.segment_merges, count, pa.astype(np.int64), pb.astype(np.int64), np.ascontiguousarray(rows).reshape(-1), leaf_area, turned * leaf_area, log_thick * leaf_area, float(shell_area.sum()), [CONVEX, USUAL, CURVE_STEP, THICK_STEP, NECK, BASE])
+            merges, costs = _turbo._stoppable(module.segment_merges, count, pa, pb, np.ascontiguousarray(rows).reshape(-1), leaf_area, inputs["curve"], inputs["thick"], inputs["whole"], [CONVEX, USUAL, CURVE_STEP, THICK_STEP, NECK, BASE])
         except Cancelled:
             raise ValueError("cancelled") from None
-        return merges.reshape(-1, 2), costs, leaf_area
+        return merges.reshape(-1, 2), costs
     near: list[dict] = [{} for _ in range(count)]
-    for x, y, length, ang, dent in zip(pa.tolist(), pb.tolist(), pair_len.tolist(), angle.tolist(), concave.tolist()):
-        row = [length, length * ang if dent else 0.0, 0.0 if dent else length * ang]
+    for x, y, row in zip(pa.tolist(), pb.tolist(), rows.tolist()):
         near[x][y] = row
         near[y][x] = row
     area = leaf_area.tolist()
-    curve = (turned * leaf_area).tolist()
-    thick = (log_thick * leaf_area).tolist()
-    whole = float(shell_area.sum())  # the whole model: a small loose piece splits only when much detail is asked for
+    curve = inputs["curve"].tolist()
+    thick = inputs["thick"].tolist()
+    whole = inputs["whole"]
     version = [0] * count
 
     def cost(i, j):
@@ -256,10 +266,23 @@ def _merge_all(leaf, shell, links, co, normals, areas, centroids, log_thick, can
         near[j] = {}
         for k in near[i]:
             heapq.heappush(heap, (cost(i, k), i, k, version[i], version[k]))
-    return np.asarray(merges, dtype=np.int64).reshape(-1, 2), np.asarray(costs, dtype=np.float64), leaf_area
+    return np.asarray(merges, dtype=np.int64).reshape(-1, 2), np.asarray(costs, dtype=np.float64)
 
 
-def build(co, faces, thickness=None, cells: int = CELLS, cancelled=None) -> Tree:
+def crease_factor(strength: float) -> float:
+    """Crease Strength 0..1 as how much more a crease costs to merge across: a quarter at 0, the usual at 0.5, four times at 1."""
+    return float(4.0 ** (2.0 * min(max(float(strength), 0.0), 1.0) - 1.0))
+
+
+def remerge(tree: Tree, creases: float, cancelled=None) -> Tree:
+    """The same tree with creases priced `creases` times: only the merge loop runs again."""
+    if tree.inputs is None or abs(creases - tree.creases) < 1e-9:
+        return tree
+    merges, costs = _merge_all(tree.inputs, creases, cancelled)
+    return replace(tree, merges=merges, costs=costs, creases=float(creases))
+
+
+def build(co, faces, thickness=None, cells: int = CELLS, cancelled=None, creases: float = 1.0) -> Tree:
     """The merge tree of a mesh. `thickness(points, normals)` is the local thickness (0 = unknown), or None to go without."""
 
     co = np.asarray(co, dtype=np.float64)
@@ -284,8 +307,9 @@ def build(co, faces, thickness=None, cells: int = CELLS, cancelled=None) -> Tree
         if known.any():
             log_thick[known] = np.log(measured[known])
             log_thick[~known] = float(np.median(log_thick[known]))
-    merges, costs, leaf_area = _merge_all(leaf, shell, links, co, normals, areas, centroids, log_thick, cancelled)
-    return Tree(leaf, shell, merges, costs, leaf_area, links, normals, centroids, areas)
+    inputs = _merge_inputs(leaf, shell, links, co, normals, areas, centroids, log_thick)
+    merges, costs = _merge_all(inputs, creases, cancelled)
+    return Tree(leaf, shell, merges, costs, inputs["leaf_area"], links, normals, centroids, areas, inputs, float(creases))
 
 
 def _find(parent, x: int) -> int:
@@ -303,26 +327,156 @@ def _flatten(parent: np.ndarray) -> np.ndarray:
         parent = jumped
 
 
-def cut(tree: Tree, detail: float) -> np.ndarray:
-    """Per patch: its segment at this Segment Detail (0 to 1). Instant, so the slider can be live."""
+def cut(tree: Tree, detail: float, scale=None, largest: float = 1.0, smallest: float = SMALLEST) -> np.ndarray:
+    """Per patch: its segment at this Segment Detail (0 to 1). Instant, so the slider can be live.
+
+    `scale` (per patch, from `patch_scale`) lowers or raises the detail there: under 1 makes smaller segments. A merge
+    that would make a segment over `largest` of its loose piece (times the scale there) is left out, and a segment under
+    `smallest` joins a neighbour."""
 
     t = min(max(float(detail), 0.0), 1.0)
     limit = MOST_CUT * (LEAST_CUT / MOST_CUT) ** t
-    parent = np.arange(len(tree.leaf_area))
-    done = int(np.searchsorted(tree.costs, limit, side="right"))
-    parent[tree.merges[:done, 1][::-1]] = tree.merges[:done, 0][::-1]
-    parent = _flatten(parent)
-    shell_of = np.zeros(len(parent), dtype=np.int64)
+    count = len(tree.leaf_area)
+    shell_of = np.zeros(count, dtype=np.int64)
     shell_of[tree.leaf] = tree.shell
     whole = np.bincount(shell_of, tree.leaf_area)
-    area = np.bincount(parent, tree.leaf_area, len(parent))
+    if scale is None and largest >= 1.0:
+        parent = np.arange(count)
+        done = int(np.searchsorted(tree.costs, limit, side="right"))
+        parent[tree.merges[:done, 1][::-1]] = tree.merges[:done, 0][::-1]
+        parent = _flatten(parent)
+        area = np.bincount(parent, tree.leaf_area, count)
+        rest = tree.merges[done:].tolist()
+    else:  # merge by merge: each one asks the size it may reach where it is
+        scale = np.ones(count) if scale is None else np.asarray(scale, dtype=np.float64)
+        parents = list(range(count))
+        area = tree.leaf_area.tolist()
+        weight = (tree.leaf_area * scale).tolist()
+        cap = (min(largest, 1.0) * whole[shell_of]).tolist()  # red paint also caps the size: at full red 1/SIZE_RANGE of the loose piece
+        done = int(np.searchsorted(tree.costs, limit * float(scale.max()), side="right"))
+        for (a, b), price in zip(tree.merges[:done].tolist(), tree.costs[:done].tolist()):
+            ra, rb = _find(parents, a), _find(parents, b)
+            if ra == rb:
+                continue
+            joined = area[ra] + area[rb]
+            here = (weight[ra] + weight[rb]) / max(joined, 1e-30)
+            if price > limit * here or joined > cap[ra] * min(here, 1.0):
+                continue
+            parents[rb] = ra
+            area[ra] = joined
+            weight[ra] += weight[rb]
+        parent = _flatten(np.asarray(parents, dtype=np.int64))
+        area = np.bincount(parent, tree.leaf_area, count)
+        rest = tree.merges.tolist()
     # A segment under the smallest size joins whichever neighbour the tree merges it with first.
-    for a, b in tree.merges[done:].tolist():
+    for a, b in rest:
         ra, rb = _find(parent, a), _find(parent, b)
-        if ra != rb and min(area[ra], area[rb]) < SMALLEST * whole[shell_of[ra]]:
+        if ra != rb and min(area[ra], area[rb]) < smallest * whole[shell_of[ra]]:
             parent[rb] = ra
             area[ra] += area[rb]
     return _flatten(parent)
+
+
+def view_kept(before: float, after: float, times: float, more: float) -> bool:
+    """A remade segment's camera check against what it had: it may differ `times` as much, or `more` points more."""
+    return after <= max(times * before, before + more)
+
+
+def shape_kept(points, faces, made_points, made_faces, area_share: float = 0.7, extent_share: float = 0.8) -> bool:
+    """False when a remake has lost the segment's shape: its surface area or its size along an axis fell far below
+    the original's (a round tank crushed into a few flat triangles has much less of both)."""
+    area = face_frames(points, faces)[1].sum()
+    made = face_frames(made_points, made_faces)[1].sum()
+    if not (area_share * area <= made <= area / area_share):
+        return False
+    points, made_points = np.asarray(points, dtype=np.float64), np.asarray(made_points, dtype=np.float64)
+    extent, made_extent = np.ptp(points, axis=0), np.ptp(made_points, axis=0)
+    real = extent > 0.01 * float(np.linalg.norm(extent))
+    return bool(np.all(made_extent[real] >= extent_share * extent[real]))
+
+
+SIZE_RANGE = 8.0  # Paint Size at full red or full blue changes the detail there this many times
+
+
+def face_paint(faces, vertex_weight) -> np.ndarray:
+    """Per face: the mean paint of its corners."""
+    face_of, a, _b = _half_edges(faces)
+    weight = np.asarray(vertex_weight, dtype=np.float64)
+    return np.bincount(face_of, weight[a], len(faces)) / np.maximum(np.bincount(face_of, minlength=len(faces)), 1)
+
+
+def patch_scale(tree: Tree, face_weight) -> np.ndarray:
+    """Per patch, for `cut`: paint 0.5 is the slider's own size, 1 (red) smaller segments, 0 (blue) larger ones."""
+    weight = np.bincount(tree.leaf, np.asarray(face_weight, dtype=np.float64) * tree.areas, len(tree.leaf_area)) / np.maximum(tree.leaf_area, 1e-30)
+    return SIZE_RANGE ** (1.0 - 2.0 * np.clip(weight, 0.0, 1.0))
+
+
+def keep_locked(labels, old, locked, fa, fb, tidy_up: bool = True) -> np.ndarray:
+    """New segments with the locked ones of `old` kept face for face. A new segment a locked one cuts in two becomes two."""
+    labels = np.asarray(labels, dtype=np.int64)
+    if old is None or not locked or len(old) != len(labels):
+        return labels
+    held = np.isin(old, list(locked))
+    if not held.any():
+        return labels
+    out = labels.copy()
+    out[held] = int(labels.max()) + 1 + np.asarray(old)[held]
+    if not tidy_up:  # the live preview: the locked faces are right, the rest settles when it is kept
+        return out
+    same = out[fa] == out[fb]
+    parts = np.unique(_labels(len(out), fa[same], fb[same]), return_inverse=True)[1].reshape(-1)
+    tidied = one_piece_each(parts, fa, fb)
+    locked_parts = np.unique(parts[held])
+    back = ~held & np.isin(tidied, locked_parts)  # a sliver never joins a locked segment
+    tidied[back] = parts[back]
+    tidied[held] = parts[held]
+    return np.unique(tidied, return_inverse=True)[1].reshape(-1)
+
+
+def split_in_two(tree: Tree, labels, segment: int) -> np.ndarray | None:
+    """Faces of `segment` that go to its second half when the merge tree is walked back one step inside it. None when it is one patch."""
+    labels = np.asarray(labels)
+    mine = labels == segment
+    count = len(tree.leaf_area)
+    share = np.bincount(tree.leaf[mine], tree.areas[mine], count) / np.maximum(tree.leaf_area, 1e-30)
+    inside = share > 0.5
+    groups = int(inside.sum())
+    if groups < 2:
+        return None
+    parents = list(range(count))
+    has = inside.tolist()
+    for a, b in tree.merges.tolist():
+        ra, rb = _find(parents, a), _find(parents, b)
+        if ra == rb:
+            continue
+        if has[ra] and has[rb]:
+            if groups == 2:
+                break
+            groups -= 1
+        parents[rb] = ra
+        has[ra] = has[ra] or has[rb]
+    root = _flatten(np.asarray(parents, dtype=np.int64))
+    roots, sizes = np.unique(root[inside], return_counts=True)
+    if len(roots) < 2:
+        return None
+    first = roots[np.argmax(np.bincount(np.searchsorted(roots, root[inside]), share[inside] * tree.leaf_area[inside]))]
+    return mine & np.isin(root[tree.leaf], roots[roots != first]) & inside[tree.leaf]
+
+
+def shrink_into(labels, mask, segment: int, fa, fb) -> np.ndarray:
+    """Faces of `segment` under `mask` go to the neighbours they flood in from. Faces no neighbour reaches stay."""
+    labels = np.asarray(labels, dtype=np.int64).copy()
+    take = np.asarray(mask, dtype=bool) & (labels == segment)
+    labels[take] = -1
+    while True:
+        open_a = (labels[fa] < 0) & (labels[fb] >= 0) & (labels[fb] != segment)
+        open_b = (labels[fb] < 0) & (labels[fa] >= 0) & (labels[fa] != segment)
+        if not (open_a.any() or open_b.any()):
+            break
+        labels[fa[open_a]] = labels[fb[open_a]]
+        labels[fb[open_b]] = labels[fa[open_b]]
+    labels[labels < 0] = segment
+    return labels
 
 
 def snap(tree: Tree, face_labels: np.ndarray, rounds: int = 6, cancelled=None) -> np.ndarray:
@@ -443,12 +597,14 @@ def dense(labels) -> np.ndarray:
     return rank[inverse.reshape(-1)]
 
 
-def find(tree: Tree, faces, detail: float, cancelled=None) -> np.ndarray:
-    """Per face: its segment at this detail, borders settled on the creases."""
+def find(tree: Tree, faces, detail: float, cancelled=None, scale=None, largest: float = 1.0, smallest: float = SMALLEST, smooth: float = 0.5) -> np.ndarray:
+    """Per face: its segment at this detail, borders settled on the creases. `smooth` 0..1 rounds the borders off less or more."""
 
-    parent = cut(tree, detail)
+    parent = cut(tree, detail, scale, largest, smallest)
     labels = snap(tree, parent[tree.leaf], cancelled=cancelled)
-    labels = even_borders(faces, labels, _smooth_normals(tree.normals, tree.areas, tree.links[0], tree.links[1], 1), tree.areas, rounds=EVEN_ROUNDS)
+    rounds = int(round(2 * EVEN_ROUNDS * min(max(smooth, 0.0), 1.0)))
+    if rounds:
+        labels = even_borders(faces, labels, _smooth_normals(tree.normals, tree.areas, tree.links[0], tree.links[1], 1), tree.areas, rounds=rounds)
     return dense(tidy(faces, labels, tree.links))
 
 

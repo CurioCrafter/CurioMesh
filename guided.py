@@ -305,7 +305,6 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_bad: bpy.props.BoolProperty(name="Show Bad Faces", description="Paint in red the faces that point inward, sink into your mesh, cross or fold over others", default=True, update=segments.on_view)
     seg_wire: bpy.props.BoolProperty(name="Wireframe", description="Show the edges of the result", default=True, update=segments.on_view)
     seg_compare: bpy.props.EnumProperty(name="Original", description="Where your original mesh is shown", items=[("BESIDE", "Beside", "The result sits next to your mesh"), ("OVER", "Over", "The result sits on your mesh, which is drawn over it as a white wireframe")], default="BESIDE", update=segments.on_view)
-    seg_detail: bpy.props.FloatProperty(name="Segment Detail", description="How many segments a connected mesh splits into. Left finds only the big parts, right also the smaller ones. Changing it starts the segments over, with their tries and hand changes", default=0.65, min=0.0, max=1.0, subtype="FACTOR", update=segments.segment_goals.on_detail)
     seg_goal: bpy.props.EnumProperty(name="Use", description="What the selected segments are for", items=segments.segment_goals.GOAL_ITEMS, default="ANIMATION")
     seg_goal_detail: bpy.props.FloatProperty(name="Detail", description="Faces in the selected segments. The middle keeps the size of the quads they have now", default=0.5, min=0.0, max=1.0, subtype="FACTOR")
     seg_method: bpy.props.EnumProperty(name="Method", description="How Reduce and Low Poly make their quads", items=segments.METHOD_ITEMS, default="AUTO")
@@ -1745,7 +1744,8 @@ def _auto_slice():
     if work is None or not isinstance(work["runner"], (autoretopo.AutoJob, segments.PartJob)) or not work["runner"].busy:
         return None
     work["runner"].step()
-    return work["runner"].cfg.gap_s
+    cfg = getattr(work["runner"], "cfg", None)  # a part redo has no effort settings of its own: it ran once and the timer died
+    return cfg.gap_s if cfg is not None else 0.0
 
 
 def _collect_work(context) -> None:

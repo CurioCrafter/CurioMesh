@@ -2,6 +2,33 @@
 
 ## 0.9.3 - 2026-11-04
 
+### Segments you shape yourself
+- **Live segment size.** Segment Detail and the new **Largest Segment**, **Smallest Segment** and **Crease Strength**
+  sliders recolour the segments while you drag, with the segment count beside them. The colours come from the merge
+  tree the last find kept, so a change shows in milliseconds even on a big mesh; a moment after you stop, the
+  segments are found for real (borders settled on the creases) and kept. **Border Smoothness** sets how round the
+  borders are where no crease holds them; it shows when the segments are kept.
+- **Each mesh keeps its own segment settings.** They are stored on the object and saved with the .blend.
+- **Paint Size.** Paint the CM_SegmentSize vertex group in Weight Paint: red makes smaller segments there, blue
+  larger ones, green leaves it to the sliders. The colours follow each stroke.
+- **Edit segments by hand.** **Split in Two** cuts the selected segment along its own natural border, no line needed.
+  **Grow** and **Shrink** move a segment's border with a brush (Ctrl paints the other way). **Lock** keeps a segment
+  face for face when the size settings change; segments you merge, split, grow, shrink or paint are locked for you.
+  In Review Segments, M merges, K splits in two, L locks, G and S grow and shrink. **Undo Edit** (Ctrl+Z in
+  Review Segments) goes back through the last 20 hand edits, and the next Auto run uses the edited segments.
+- **A remade segment never loses its shape.** A Redo or Use remake whose camera check is much worse than the
+  segment had (or whose surface or size shrinks far below your mesh there) is refused: the segment keeps what it
+  had and the panel says so. Before, the check only asked for more faces, and a segment that had never been
+  measured (one you split, merged or painted) had no check at all, so a round tank could come back as a few flat
+  triangles.
+- **No segment finer than the result can hold.** Where the result's quads are bigger than a found segment (painted
+  very small, for example), the segment joins a neighbour instead of being marked on faces that are not it. Grow,
+  Shrink and Paint New mark the result through the faces of your mesh, so a segment covers the same surface on both.
+- **Locked segments stay locked when the size changes.** A small segment that is dropped no longer joins a locked
+  neighbour, which made the locked one bigger and lose its lock.
+- **Redo and Use remakes run to the end again.** A part redo stopped after its first step and sat at "Remaking..."
+  for good.
+
 ### Finding what is still wrong
 - **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is
   found and ranked, worst first. It counts faces turned inward, sunk into your mesh, crossing, folded over, bent,

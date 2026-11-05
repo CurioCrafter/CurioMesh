@@ -59,6 +59,9 @@ seg = {
     "tree": None,  # the merge tree, kept so Segment Detail is instant
     "tree_job": None,
     "painted": None,
+    "live": None,  # per result face: the live preview's segment while you change the size, until the find keeps it
+    "live_count": None,
+    "res_src": None,  # (result faces, per result face the nearest face of your mesh)
 }
 
 
@@ -69,7 +72,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None)
+    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
 
 
 def ready() -> bool:
@@ -243,6 +246,8 @@ def info_lines(piece: int) -> list[str]:
         f"Looks {alike(r['change'])}" if r["change"] is not None else "Look not measured",
         f"Method: {method_name(r['method'])}",
     ]
+    if r.get("locked"):
+        lines.append("Locked: size changes keep it")
     if r.get("topology") is not None:
         lines.insert(3, f"Tidiness {r['topology']:.0f}/100" + (" (ranks this Animation part)" if by_topology(r) else ""))
     return lines
@@ -405,6 +410,11 @@ class PartJob:
             if made is None:
                 continue
             change = yield from self._change(p, made[0], made[1])
+            had = current["change"] if current["change"] is not None else (yield from self._change(p, current["build"][0], current["build"][1]))
+            src_points, src_polys, _kinds = job._piece_arrays(record.get("source", job.pieces[p]))
+            if not S.view_kept(had, change, segment_goals.WORSE_TIMES, segment_goals.WORSE_BY) or not S.shape_kept(src_points, src_polys, made[0], made[1]):
+                self.warnings = [f"{name_of(p)}: {method_name(self.method)} would lose its shape ({change:.0f}% of its view changes, it had {had:.0f}%), so it stays as it was"]
+                continue
             builds[p] = made
             self.new_tries[p] = {"method": self.method, "after": len(made[1]), "change": change, "build": (made[0], made[1], kinds_back(made[2], self.base.get("charts")))}
         self.progress = (len(self.pieces), len(self.pieces))
@@ -584,8 +594,11 @@ def _palette(count: int) -> np.ndarray:
     return 0.45 + 0.45 * np.cos(2.0 * np.pi * (hue[:, None] + np.array([0.0, 0.33, 0.67])))
 
 
-def part_colours(gs, count: int):
-    """RGBA per part for the current overlay switches, or None when nothing should be tinted. The part under the mouse has its own small batch: redoing this one on every hover would stall a big mesh."""
+def part_colours(gs, count: int, showing: bool = False):
+    """RGBA per part for the current overlay switches, or None when nothing should be tinted. The part under the mouse has its own small batch: redoing this one on every hover would stall a big mesh.
+    A live preview (`showing`) is always tinted, in plain colours: its segments have no numbers or selection yet."""
+    if showing:
+        return np.concatenate((_palette(count), np.full((count, 1), 0.6)), axis=1).astype(np.float32)
     selected = seg["sel"]
     if not (gs.seg_colors or gs.seg_heat or selected):
         return None
@@ -638,19 +651,23 @@ def _draw_view() -> None:
         piece = seg["piece"]
         if piece is None or len(piece) != len(res["faces"]):
             return
+        live = seg.get("live")
+        showing = live is not None and len(live) == len(res["faces"])
+        if showing:
+            piece = live
         import gpu
         from gpu_extras.batch import batch_for_shader
 
         matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
         seg["held"] = (res, piece)  # kept alive so the ids below can't come back on a new result
-        colour_key = (id(res), id(piece), matrix, gs.seg_colors, gs.seg_heat, frozenset(seg["sel"]), round(gs.auto_detail, 2))
+        colour_key = (id(res), id(piece), matrix, gs.seg_colors, gs.seg_heat, frozenset(seg["sel"]), round(gs.auto_detail, 2), showing)
         flat = gpu.shader.from_builtin("FLAT_COLOR")
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_mask_set(False)
         gpu.state.depth_test_set("LESS_EQUAL")
         if seg["batch_key"] != colour_key:
             seg["batch"] = None
-            colours = part_colours(gs, len(seg["parts"]))
+            colours = part_colours(gs, seg["live_count"] if showing else len(seg["parts"]), showing)
             if colours is not None:
                 _id, corners, owners = _triangles(guided, res, piece)
                 world = guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32)
@@ -669,7 +686,8 @@ def _draw_view() -> None:
                 flat.bind()
                 seg["bad"].draw(flat)
             issue_panel.draw_overlay(guided, preview, res, flat, batch_for_shader)
-        segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
+        if not showing:  # outlines and hover belong to the kept segments
+            segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
         if gs.seg_compare == "OVER":
             lines_key = (source.name, len(source.data.edges), tuple(round(x, 5) for row in source.matrix_world for x in row))
             if seg["lines_key"] != lines_key:
@@ -933,7 +951,7 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
             return
         r = seg["parts"][item.piece]
         row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
-        row.label(text=name_of(item.piece), icon="CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
+        row.label(text=name_of(item.piece), icon="LOCKED" if r.get("locked") else "CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
         row = row.split(factor=0.42, align=True)  # "92%" is short; the face count needs the room ("1,65...")
         # the number the list is sorted by: the look, or Tidiness for an Animation part (a 98% look ranked low read as a mistake)
         row.label(text=f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
@@ -977,9 +995,9 @@ def draw_parts(layout, context, gs) -> None:
 
 # --------------------------------------------------------------------------- registration
 
-from . import issue_panel, segment_goals  # noqa: E402  (segment_goals builds on PartJob above)
+from . import issue_panel, seglive, segment_goals  # noqa: E402  (segment_goals builds on PartJob above)
 
-PRE_CLASSES = (CURIOMESH_PG_segpart,)
+PRE_CLASSES = (CURIOMESH_PG_segpart, *seglive.PRE_CLASSES)
 CLASSES = (
     CURIOMESH_UL_segparts,
     CURIOMESH_OT_seg_select,
@@ -989,6 +1007,7 @@ CLASSES = (
     CURIOMESH_OT_keep_original_bad,
     *segment_goals.CLASSES,
     *issue_panel.CLASSES,
+    *seglive.CLASSES,
 )
 _handles: list = []
 
@@ -996,6 +1015,7 @@ _handles: list = []
 def register() -> None:
     _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_view, (), "WINDOW", "POST_VIEW"))
     _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_text, (), "WINDOW", "POST_PIXEL"))
+    seglive.register()
 
 
 def unregister() -> None:
@@ -1004,5 +1024,6 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_handles.pop(), "WINDOW")
         except Exception:
             pass
+    seglive.unregister()
     reset()
     issue_panel.ui.update(res=None, cur=-1, diff=None, batch=None, batch_key=None)  # its GPU batches go with the draw handler
