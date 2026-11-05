@@ -3013,6 +3013,9 @@ class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
+        if _gs(context).auto_profile in profiles.BLOCKOUT_USES:  # the job script runs the reducing search only
+            cls.poll_message_set("Blockout and Hulls are quick: press Start here")
+            return False
         return _source_mesh(context) is not None
 
     def invoke(self, context, event):
