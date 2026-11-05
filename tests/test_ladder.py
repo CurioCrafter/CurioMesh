@@ -42,6 +42,11 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(L.step(ready, 6.0, False), 1.5)
         self.assertIsNone(L.step(ready, 24.0, True))
 
+    def test_useful_drops_beaten_rungs(self):
+        rungs = [(6.0, 14286, 6.2), (9.54, 14488, 8.5), (15.1, 9000, 14.0), (3.8, 20000, 4.0)]
+        self.assertEqual(L.useful(rungs), [6.0, 15.1, 3.8])
+        self.assertEqual(L.useful([(1, 10, 1.0), (2, 10, 1.0)]), [1, 2])  # ties both stay
+
     def test_bar_between_styles(self):
         self.assertEqual(L.between(0.0), ("DETAIL", "BALANCED", 0.0))
         self.assertEqual(L.between(0.25), ("DETAIL", "BALANCED", 0.5))

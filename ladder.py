@@ -26,7 +26,12 @@ from .triadq import parts as P
 
 MOST_FACES = 400_000  # faces of your mesh: past this each rung is a long search, so there is no ladder
 ROWS_MOST = 100_000  # Clean Rows rungs only up to here: one took over three minutes on a 17,000 face bust
+SLOW = 120.0  # seconds: a search slower than this gets only the sizes next to its own, and no Clean Rows (a 79,000 triangle machine took about 6 minutes a rung)
 SLICE, GAP, WAIT = 0.03, 0.02, 0.25  # seconds of work per tick, between ticks, and between looks while a job of yours runs
+THROTTLE = 0.1  # while you drag a slider the preview changes at most this often
+SETTLE = 0.4  # seconds after the last move: then the segments of the result are found (and a blend is looked at)
+QUIET = 1.0  # the ladder's own work waits this long after a slider moved, so dragging never competes with it
+MOST_MESHES = 40  # preview meshes kept, one per size or blend shown
 GOAL_STEP = 0.15  # Bigger or Smaller Quads on a segment: this much of its Detail slider
 STYLE_WORDS = {"DETAIL": "Keep Detail", "BALANCED": "Balanced", "ROWS": "Clean Rows"}
 
@@ -39,7 +44,9 @@ lad = {
     "doing": None,
     "shown": None,  # what is on screen: (left rung, right rung, pieces from the right one)
     "failed": [],
+    "meshes": {},  # what the sliders picked -> its preview mesh, so moving back and forth only swaps meshes
 }
+drag = {"pending": False, "shown_at": 0.0, "moved": -1e9, "settled": True}
 
 
 def _g():
@@ -52,7 +59,15 @@ def cancel() -> None:
     """Stop working out rungs and forget them (a new search, another mesh, or the add-on going away)."""
     if lad["job"] is not None:
         lad["job"].stop()
-    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[])
+    for mesh in lad["meshes"].values():
+        try:
+            mesh.use_fake_user = False
+            if mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+        except ReferenceError:  # gone with a file load
+            pass
+    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={})
+    drag.update(pending=False, settled=True)
 
 
 def start(context) -> bool:
@@ -66,7 +81,12 @@ def start(context) -> bool:
     if inputs[0] or job.outside is not None or len(job.faces) > MOST_FACES:  # Reduce To aims at a face count, not a Detail
         return False
     here = (job.style, round(job.detail, 3))
-    lad.update(key=base["key"], base=here, rungs={here: job}, plan=L.plan(here[1], here[0], rows=len(job.faces) <= ROWS_MOST), shown=(here, here, ()))
+    slow = (job.report or {}).get("seconds", 0.0) > SLOW
+    plan = L.plan(here[1], here[0], rows=len(job.faces) <= ROWS_MOST and not slow)
+    if slow:  # ponytail: a fixed cut; helpers for the ladder would make all sizes affordable, at the cost of more Blenders running
+        plan = [(s, d) for s, d in plan if here[1] / 2.6 <= d <= here[1] * 2.6]
+    lad.update(key=base["key"], base=here, rungs={here: job}, plan=plan, shown=(here, here, ()))
+    _mesh_for((here, here, ()), compose(here, here, ()))
     gs = context.scene.curiomesh_guided
     gs["quad_size"], gs["quad_order"] = 0.5, L.order_of(job.style)  # no update: the result on screen is this already
     if not bpy.app.timers.is_registered(_tick):
@@ -104,6 +124,7 @@ def work(seconds: float) -> None:
                 cancel()
                 return
             lad["job"] = guided.make_job(bpy.context, bpy.context.scene.curiomesh_guided, guided._source_data(source), guided.state["auto_inputs"], detail, style, quiet=True)
+            lad["job"].threaded = True
             continue
         job.step(min(SLICE, max(ends - time.perf_counter(), 0.005)))
         if job.busy:
@@ -111,6 +132,8 @@ def work(seconds: float) -> None:
         if job.report is not None and job.output is not None:
             _drop_heavy(job)
             lad["rungs"][lad["doing"]] = job
+            rung = lad["doing"]
+            _mesh_for((rung, rung, ()), compose(rung, rung, ()))  # made now, while nobody drags, so showing it is a swap
             overlay.tag_redraw()
         else:
             lad["failed"].append(lad["doing"])
@@ -122,8 +145,8 @@ def _tick():
         cancel()
         return None
     work_ = _g().state["work"]
-    if work_ is not None and work_["runner"].busy:
-        return WAIT  # yours first
+    if (work_ is not None and work_["runner"].busy) or time.perf_counter() - drag["moved"] < QUIET:
+        return WAIT  # yours first, and nothing while a slider moves
     work(SLICE)
     return GAP if lad["job"] is not None or lad["plan"] else None
 
@@ -142,7 +165,9 @@ def finish(timeout: float | None = None, styles=None) -> bool:
 
 
 def ready(style: str) -> list[float]:
-    return sorted(d for s, d in lad["rungs"] if s == style)
+    """Details of the finished rungs of this style worth showing (none another one beats on faces and change)."""
+    mine = [(d, j.report["faces"], j.report["loss"]) for (s, d), j in lad["rungs"].items() if s == style]
+    return sorted(L.useful(mine))
 
 
 def _pick(style: str, wanted: float):
@@ -211,9 +236,32 @@ class ShowJob(segments.segment_goals.FindJob):
             yield from super()._run()
 
 
-def show(context) -> bool:
-    """Put what the sliders ask for on screen. Instant: the rungs are finished results; only the numbers of a blend and
-    the segments of the new result are worked out afterwards, in the background."""
+def _mesh_for(picked, out):
+    """The preview mesh of what the sliders picked, made once."""
+    mesh = lad["meshes"].get(picked)
+    try:
+        if mesh is not None and mesh.name:
+            return mesh
+    except ReferenceError:
+        pass
+    guided = _g()
+    source = guided.state_source()
+    if source is None:
+        return None
+    mesh = guided._make_mesh(guided.PREVIEW_NAME + "_Size", source, out, uvs=False)
+    mesh.use_fake_user = True  # kept while another size is on screen
+    lad["meshes"][picked] = mesh
+    while len(lad["meshes"]) > MOST_MESHES:
+        old = lad["meshes"].pop(next(iter(lad["meshes"])))
+        old.use_fake_user = False
+        if old.users == 0:
+            bpy.data.meshes.remove(old)
+    return mesh
+
+
+def preview(context) -> bool:
+    """Put what the sliders ask for on screen: a mesh swap for a finished size, a splice of whole pieces for a blend.
+    Nothing else runs here; `settle` finds the segments once the slider rests."""
     guided = _g()
     if not active():
         return False
@@ -226,27 +274,68 @@ def show(context) -> bool:
     old = guided.state["auto_base"]
     report = dict(job.report, faces=len(out["faces"]), quads=sum(1 for f in out["faces"] if len(f) == 4), tris=sum(1 for f in out["faces"] if len(f) == 3))
     guided.stop_work()
-    base = {"id": time.perf_counter_ns(), "sig": old["sig"], "key": lad["key"], "out": out, "charts": old.get("charts"), "report": report, "job": job, "summary": job.status()}
-    guided.state["auto_base"] = base
+    kept = {k: segments.seg.get(k) for k in ("tree", "tree_job", "src")}  # what finding the segments again reuses
+    segments.reset()  # the parts table is made once the slider rests, not on every step of a drag
+    guided.state["auto_base"] = {"id": time.perf_counter_ns(), "sig": old["sig"], "key": lad["key"], "out": out, "charts": old.get("charts"), "report": report, "job": job, "summary": job.status()}
+    segments.seg.update(kept, base=guided.state["auto_base"]["id"])
+    segments.refresh_list()
     guided.state["res"] = out
-    guided._build_preview(context, guided.state_source(), out, uvs=False)
+    guided._build_preview(context, guided.state_source(), out, uvs=False, mesh=_mesh_for(picked, out))
     guided.state["draw_key"] = None
-    if segments.seg.get("tree") is not None:
-        segments.seg["tree_job"] = job  # every rung is of the same mesh: the segment tree holds
-    segments.ensure()
     lad["shown"] = picked
     guided.state["message"] = f"{len(out['faces']):,} faces, {STYLE_WORDS.get(a[0], a[0])}" + ("" if not moved else f" with {len(moved)} piece{'s' if len(moved) != 1 else ''} {STYLE_WORDS.get(b[0], b[0])}")
+    overlay.tag_redraw()
+    return True
+
+
+def settle(context) -> None:
+    """The slider rests: find the segments of the result on screen, and look at a blend, whose numbers are not known yet."""
+    guided = _g()
+    if not active():
+        return
+    a, _b, moved = lad["shown"]
+    if segments.seg.get("tree") is not None:
+        segments.seg["tree_job"] = lad["rungs"][a]  # every rung is of the same mesh: the segment tree holds
+    segments.seg["base"] = None  # held back while dragging: make the parts table now
+    segments.ensure()
     if moved or not segments.mirrored():
         runner = ShowJob(context, bool(moved))
         guided.state["work"] = {"key": lad["key"], "runner": runner, "cent": None, "seen": 0, "areas": []}
         if not bpy.app.timers.is_registered(guided._auto_slice):
             bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
-    overlay.tag_redraw()
+
+
+def show(context) -> bool:
+    """`preview` and `settle` at once, for scripts."""
+    if not preview(context):
+        return False
+    settle(context)
     return True
 
 
+def pump(context):
+    """While a slider moves: the preview at most every THROTTLE seconds, the segments once it rests. Returns when to look
+    again, or None when there is nothing left to do (the timer's return value)."""
+    now = time.perf_counter()
+    if drag["pending"] and now - drag["shown_at"] >= THROTTLE:
+        drag.update(pending=False, shown_at=now)
+        if preview(context):
+            drag["settled"] = False
+    if not drag["settled"] and not drag["pending"] and now - drag["moved"] >= SETTLE:
+        drag["settled"] = True
+        settle(context)
+    return None if drag["settled"] and not drag["pending"] else THROTTLE / 2
+
+
+def _drag_tick():
+    return pump(bpy.context)
+
+
 def on_slider(self, context) -> None:
-    show(context)
+    drag.update(pending=True, moved=time.perf_counter())
+    pump(context)
+    if (not drag["settled"] or drag["pending"]) and not bpy.app.timers.is_registered(_drag_tick):
+        bpy.app.timers.register(_drag_tick, first_interval=THROTTLE / 2)
 
 
 def status() -> str:

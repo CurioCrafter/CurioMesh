@@ -1407,9 +1407,10 @@ def _shade_by_angle(mesh) -> None:
     mesh.update()
 
 
-def _build_preview(context, source, res, uvs=True) -> None:
+def _build_preview(context, source, res, uvs=True, mesh=None) -> None:
+    """Show `res` as the preview object. `mesh`: one already made for it (the size ladder keeps one per size)."""
     obj = bpy.data.objects.get(PREVIEW_NAME)
-    mesh = _make_mesh(PREVIEW_NAME + "_Mesh", source, res, uvs)
+    mesh = _make_mesh(PREVIEW_NAME + "_Mesh", source, res, uvs) if mesh is None else mesh
     if obj is None:
         obj = bpy.data.objects.new(PREVIEW_NAME, mesh)
         (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(obj)

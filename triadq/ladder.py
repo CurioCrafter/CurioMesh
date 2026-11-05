@@ -40,6 +40,14 @@ def plan(base: float, style: str, rows: bool = True) -> list[tuple[str, float]]:
     return order
 
 
+def useful(rungs) -> list:
+    """Keys of the rungs worth showing, from (key, faces, change) each: none that another rung beats on both faces and
+    change. A higher Detail can land on more faces (seen on a many-part machine); skipping it keeps the slider's face
+    count going one way."""
+    rungs = list(rungs)
+    return [k for k, f, c in rungs if not any((f2 <= f and c2 <= c) and (f2 < f or c2 < c) for _k2, f2, c2 in rungs)]
+
+
 def size_detail(base: float, size: float) -> float:
     """Quad Size 0..1 as a Detail: 0 the smallest quads, 0.5 the size you searched with, 1 the biggest."""
     size = min(max(size, 0.0), 1.0)

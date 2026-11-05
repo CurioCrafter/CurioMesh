@@ -664,6 +664,7 @@ class AutoJob:
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
         self.redo_counts = {"regions": 0, "no better": 0, "kept": 0}  # what happened to the regions tried, for the bench
         self.parallel = bool(parallel)  # measure parts in helper processes when the job and the computer suit it (parallel.py)
+        self.threaded = False  # every slow Python step on a worker thread, however small the job (the size ladder runs while you work)
         self._pool = None
         self._copy_plan: dict | None = None  # with helpers: part -> (the part it copies, how to move onto it) or None, found ahead of time
         self._plan_reps: list = []
@@ -1630,7 +1631,7 @@ class AutoJob:
 
     def _off(self, work):
         """Generator: `work()`, on a worker thread when this job is big enough for it to hold up Blender. Returns its result."""
-        if len(self.faces) < OFF_MAIN_FROM:
+        if len(self.faces) < OFF_MAIN_FROM and not self.threaded:
             return work()
         return (yield from self._background(work))
 
@@ -1642,7 +1643,7 @@ class AutoJob:
         """Generator: `pictures`, on a worker thread in a big job."""
         baked_from = self._bake_tree if self.baked else None
         drawn = turbo.gpu_drawn()
-        if len(self.faces) < OFF_MAIN_FROM:
+        if len(self.faces) < OFF_MAIN_FROM and not self.threaded:
             view = yield from pictures(points, polys, center, half, pixels, baked_from=baked_from)
         else:
             def run():
