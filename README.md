@@ -122,7 +122,7 @@ object on top and a close-up below.
 
 *View changed* is the share of the picture that differs from your original, seen from six sides. CurioMesh measures it
 itself. It is not a quality score, and it says nothing about how tidy the quads are. *Size* is the result as a share of the
-original's faces. Folded quads (a quad that is folded or flipped) are rare but not zero: the drill press has 1 of 16,809; the treasure chest has 1 of 10,423; the ship pinnace has 40 of 59,904. Numbers are from
+original's faces. Bad faces are not rare on hard-surface models. The Issue Finder (0.9.3 and later) counts faces turned inward, folded over or crossing: on the drill press 203 inward, 180 folded and 14 crossing among 16,809 faces. Models of many small parts have about 6 to 22 such faces per 1,000, smooth sculpts 0.1 to 0.8. They are shown in red and can be fixed with Fix Selection or Keep Original Where Bad. The other numbers are from
 commit `7f94ff8`, run on Blender 5.2.3 LTS.
 
 Rough rock and fine detail need the most faces to keep their look. Hard-surface models with big smooth areas gain the most.
