@@ -2050,6 +2050,7 @@ def _stop() -> None:
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
     stop_work()
+    ladder.cancel()  # its preview meshes have fake users: left, they would be saved in the file
     remove_preview()
     state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}), lod=None)
     segments.reset()
@@ -2066,6 +2067,7 @@ def _poll():
         if active is not None and active.type == "MESH" and active.name not in (PREVIEW_NAME, state["source"]) and active.mode == "OBJECT":
             state.update(source=active.name, lock=None, sig=None, auto_base=None)
             stop_work()
+            ladder.cancel()
             remove_preview()
         source = state_source()
         preview = bpy.data.objects.get(PREVIEW_NAME)
