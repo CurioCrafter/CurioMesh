@@ -28,7 +28,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, hardware, jobpack, multires, profiles, teach, turbo
+from . import autoretopo, blockout, hardware, jobpack, multires, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -331,6 +331,8 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_index: bpy.props.IntProperty(default=0)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
+    blockout_sides: bpy.props.IntProperty(name="Primitive Sides", description="Blockout and Hulls: sides of each cylinder and detail of each ball (small parts get half). Hulls: about four faces per side for the biggest part, fewer for small ones", default=12, min=4, max=32, step=2)
+    blockout_separate: bpy.props.BoolProperty(name="Each Part Its Own Object", description="Blockout and Hulls: Apply writes one object per loose part of your mesh, not one merged mesh", default=False)
     auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Repeated parts become linked copies that cost no extra geometry (copies share UVs). Off: one merged mesh", default=False)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where the finished quads are written", items=APPLY_ITEMS, default="NEW")
     auto_rough: bpy.props.BoolProperty(name="Rough As Texture", description="For rough scans (rock, sea floor): judge bumps on average and merge leftover triangles. Far fewer faces; bumps smaller than a few pixels are lost", default=False)
@@ -1604,6 +1606,8 @@ def loose_pieces(src) -> int:
 
 def _start_segments(context, gs, src, target: int | None = None) -> bool:
     """Start the search, to land on `target` faces if given. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
+    if gs.auto_profile in profiles.BLOCKOUT_USES:
+        return _start_blockout(gs, src)
     target = auto_target(gs, len(src["faces"])) if target is None else target
     state["applied"] = ""
     lines = _guide_lines(context, gs, src)
@@ -1654,6 +1658,24 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": charts}
     state.update(ms=0.0, spot=None)
     state["message"] = job.status()
+    if not bpy.app.timers.is_registered(_auto_slice):
+        bpy.app.timers.register(_auto_slice, first_interval=0.0)
+    return True
+
+
+def _start_blockout(gs, src) -> bool:
+    """Blockout or Hulls: each loose part becomes low-poly solids. In a LOD set each level halves the sides."""
+    level = len(state["lod"]["made"]) if state["lod"] is not None else 0
+    sides = max(4, gs.blockout_sides >> level)
+    key = (src["sig"], "AUTO", gs.auto_profile, sides)
+    state["applied"] = ""
+    if state["work"] is not None and state["work"]["key"] == key:
+        return True
+    stop_work()
+    state["auto_base"] = None
+    job = blockout.BlockoutJob(src["co"], src["faces"], src["mat"], hull=gs.auto_profile == "HULL", sides=sides, settings=effort_settings(gs))
+    state["work"] = {"key": key, "runner": job, "cent": None, "seen": 0, "areas": [], "charts": None}
+    state.update(ms=0.0, spot=None, message=job.status())
     if not bpy.app.timers.is_registered(_auto_slice):
         bpy.app.timers.register(_auto_slice, first_interval=0.0)
     return True
@@ -1742,7 +1764,7 @@ def _start_boolean(context, gs, source, src, coarser: float = 1.0) -> bool:
 def _auto_slice():
     """Run the search in short slices with gaps between them, so Blender stays usable. Ends when the job does."""
     work = state["work"]
-    if work is None or not isinstance(work["runner"], (autoretopo.AutoJob, segments.PartJob)) or not work["runner"].busy:
+    if work is None or not isinstance(work["runner"], (autoretopo.AutoJob, blockout.BlockoutJob, segments.PartJob)) or not work["runner"].busy:
         return None
     work["runner"].step()
     return work["runner"].cfg.gap_s
@@ -1776,13 +1798,16 @@ def _collect_work(context) -> None:
             segments.commit(runner)
         overlay.tag_redraw()
         return
-    if isinstance(runner, autoretopo.AutoJob):
+    if isinstance(runner, (autoretopo.AutoJob, blockout.BlockoutJob)):
         state["message"] = runner.warnings[0] if runner.warnings else runner.status()
         base = state["auto_base"]
         if not runner.busy and runner.report is not None and runner.output is not None and (base is None or base["job"] is not runner):
             state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": _real_materials(runner.output, work.get("charts")), "charts": work.get("charts"), "report": runner.report, "job": runner, "summary": state["message"]}
             if state["lod"] is not None:
                 _lod_finished(context, source, runner.report)
+                overlay.tag_redraw()
+                return
+            if isinstance(runner, blockout.BlockoutJob):  # solids: no hand fixes to put back, no segments to find on them
                 overlay.tag_redraw()
                 return
             segments.ensure()
@@ -2738,11 +2763,18 @@ def _write_instances(out, source, instances) -> int:
     return made
 
 
+def _blockout_result() -> bool:
+    """The result on show is solids from Blockout or Hulls: they shade as themselves, not like your mesh."""
+    base = state["auto_base"]
+    return base is not None and isinstance(base["job"], blockout.BlockoutJob)
+
+
 def _write_result(context, source, res, gs, name: str):
     """A new object from a result, with UVs, normals, shading and materials as your mesh has them. Returns (object, bake text)."""
     mesh = _make_mesh(name, source, res)
     _shade_by_angle(mesh)
-    _transfer_normals(mesh, _source_data(source), res)
+    if not _blockout_result():
+        _transfer_normals(mesh, _source_data(source), res)
     if gs.bend_crease or gs.bend_sharp:
         _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
     out = bpy.data.objects.new(name, mesh)
@@ -2844,6 +2876,16 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         if res is None:
             self.report({"WARNING"}, "Nothing to apply")
             return {"CANCELLED"}
+        if gs.scope == "AUTO" and gs.blockout_separate and _blockout_result():
+            made = [_write_result(context, source, part, gs, f"{source.name}_Part")[0] for part in blockout.split_result(res)]
+            gs.enabled = False  # removes the preview, stops the timer
+            bpy.ops.object.select_all(action="DESELECT")
+            for obj in made:
+                obj.select_set(True)
+            context.view_layer.objects.active = made[0]
+            state["applied"] = f"{len(res['faces']):,} faces written to {len(made):,} objects named {source.name}_Part"
+            self.report({"INFO"}, state["applied"])
+            return {"FINISHED"}
         # Keep Copies as Instances: one mesh per repeated part. Not with a bake or kept UV seams, which work on one mesh.
         instances = res.get("instances") if gs.scope == "AUTO" and gs.auto_instances and gs.bake_detail == "OFF" and res.get("chart") is None and not gs.multires_on else None
         if gs.auto_instances and gs.scope == "AUTO" and instances is None:
@@ -2851,7 +2893,8 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
         written = instances["rest"] if instances else res
         mesh = _make_mesh(source.name + "_Retopo", source, written)
         _shade_by_angle(mesh)
-        _transfer_normals(mesh, _source_data(source), written)
+        if not _blockout_result():
+            _transfer_normals(mesh, _source_data(source), written)
         if gs.bend_crease or gs.bend_sharp:
             _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
         out = bpy.data.objects.new(source.name + "_Retopo", mesh)
@@ -3374,7 +3417,7 @@ def progress_info(kind: str | None = None):
             return None
         left = runner.seconds_left()
         return runner.fraction, runner.stage + (f", about {_clock(left)} left" if left is not None else "")
-    if isinstance(runner, autoretopo.AutoJob):
+    if isinstance(runner, (autoretopo.AutoJob, blockout.BlockoutJob)):
         if kind == "BOOL":
             return None
         left = runner.seconds_left()
@@ -3537,16 +3580,21 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col = layout.column(align=True)
         col.enabled = not searching
         col.prop(gs, "auto_profile")
-        col.row(align=True).prop(gs, "auto_aim", expand=True)
-        if gs.auto_aim == "KEEP":
-            col.prop(gs, "auto_detail")
-            overlay.wrap_label(col, profiles.detail_words(gs.auto_detail), icon="INFO", width=36, limit=2)
+        solids = gs.auto_profile in profiles.BLOCKOUT_USES
+        if solids:  # no Detail or face count: each part's solid is the camera's pick, and the sides set the rest
+            col.prop(gs, "blockout_sides")
+            col.prop(gs, "blockout_separate", toggle=True, icon="OUTLINER_OB_GROUP_INSTANCE")
         else:
-            col.row(align=True).prop(gs, "auto_reduce_by", expand=True)
-            col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
-            col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
-        col.prop(gs, "sym_axis", icon="MOD_MIRROR")
-        if gs.auto_profile in profiles.MULTIRES_USES or gs.multires_on:
+            col.row(align=True).prop(gs, "auto_aim", expand=True)
+            if gs.auto_aim == "KEEP":
+                col.prop(gs, "auto_detail")
+                overlay.wrap_label(col, profiles.detail_words(gs.auto_detail), icon="INFO", width=36, limit=2)
+            else:
+                col.row(align=True).prop(gs, "auto_reduce_by", expand=True)
+                col.prop(gs, "auto_reduce_percent" if gs.auto_reduce_by == "PERCENT" else "auto_reduce_count")
+                col.label(text=f"Aiming for about {auto_target(gs, faces):,} faces")
+            col.prop(gs, "sym_axis", icon="MOD_MIRROR")
+        if not solids and (gs.auto_profile in profiles.MULTIRES_USES or gs.multires_on):
             col.prop(gs, "multires_on", toggle=True, icon="MOD_MULTIRES")
             if gs.multires_on:
                 col.prop(gs, "multires_levels")
@@ -3558,7 +3606,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                     row.prop(gs, "bake_size", text="")
 
         on = sum((gs.region_use, gs.loop_use, gs.guide_use, gs.bend_use, gs.density_use))
-        body = fold(layout, gs, "ui_more_open", "More Options" + (f" ({on} on)" if on else ""))  # names of what is on were cut in a narrow sidebar
+        body = None if solids else fold(layout, gs, "ui_more_open", "More Options" + (f" ({on} on)" if on else ""))  # names of what is on were cut in a narrow sidebar; none of them shape solids
         if body is not None:
             self._draw_more(body, gs, obj, searching)
 

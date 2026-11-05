@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.4 - unreleased
+
+### Blockout and Hulls
+- **Blockout** (a new Use): every loose part of your mesh becomes the low-poly solid that fits it best: an oriented
+  box, a cylinder (axis found from the part, capped with quads) or a ball (a quad sphere, stretched to an ellipsoid),
+  or a small convex hull when that matches clearly better. The camera picks, from the part's own six views. A big
+  part no single solid fits is cut at its creases by the segment finder and each segment gets its own solid. A part
+  that still looks wrong keeps a reduced copy of itself, so nothing comes out crushed; the result says which parts
+  did. All quads except the hulls. Each solid takes the material most of its part had.
+- **Hulls** (a new Use): every part becomes its own reduced convex hull, for a quick faceted low-poly look. Concave
+  parts are cut at their creases first.
+- **Primitive Sides** sets the sides of each cylinder and the detail of each ball (small parts get half), and the
+  size of the hulls. **Each Part Its Own Object** makes Apply write one object per loose part.
+- Apply, Undo, Bake Detail and Make LOD Set work as with the other Uses; in a LOD set each level halves the sides.
+
 ## 0.9.3 - 2026-11-04
 
 ### Finding what is still wrong
