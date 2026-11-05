@@ -51,7 +51,7 @@ loops for faces and joints on its own, and big scans take minutes, sometimes ten
 
 ## Contents
 
-[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install-the-blender-retopology-add-on) · [AI agents](#use-it-with-claude-and-other-ai-agents) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
+[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Quad Size](#quad-size-and-organization-drag-and-watch) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Install](#download-and-install-the-blender-retopology-add-on) · [AI agents](#use-it-with-claude-and-other-ai-agents) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
 
 ## What it does
 
@@ -60,11 +60,16 @@ loops for faces and joints on its own, and big scans take minutes, sometimes ten
 | **Auto Segments and the Auto button** | Reduces the whole object to all quads, one loose part at a time, and checks every size from six sides. **Auto** picks the Use and settings for you. |
 | **Presets by use** | Low Poly, Game Asset, Animation, Subdivision, Scan Cleanup, Sculpt Base. |
 | **Three layout styles** | Keep Detail (fewest faces), Balanced, Clean Rows (even quads in rows). |
+| **Quad Size and Organization sliders** | After a run, drag from more quads to fewer, or from fewest faces to even rows, and the preview follows live. |
+| **Symmetrize and Detail Markers** | Mirror a scan or sculpt even when its sides differ a little. Mark where you want more or less detail. |
+| **Tweak** | Rows on Round Areas, Flat Area Size and Avoid Poles, to shape the layout the way you like it. |
 | **Reduce To** | Aim at a percentage of your faces or a face count, within about 10%. |
 | **Review Segments** | Every part in its own colour, numbers on hover, redo one part with another method, go back to any try. |
 | **Multires Detail** | A clean low cage at level 0, with the shape of your mesh back in the Multires levels above it. |
 | **Make LOD Set** | Three objects named `_LOD0`, `_LOD1` and `_LOD2`, at percents you choose. |
-| **Bake Detail** | Normal map, or normal map and colour, onto the new mesh. Your mesh is only read. |
+| **Bake Detail** | Normal map, or normal map and colour, onto the new mesh, in one or more Texture Sets. Your mesh is only read. |
+| **Export for Game Engine** | Unreal, Unity, Godot, Roblox, glTF or your own settings, with the right normal map format. Tested in Unreal, Unity and Godot. |
+| **Know the cost first** | The time on your PC before you press Start, Slow/Heavy tags on heavy options, and a question before long jobs. |
 
 More below: [all features](#all-features).
 
@@ -183,6 +188,28 @@ Quads can follow the shape, or they can run in rows. Pick what comes first when 
 *Tidiness* is a number from 0 to 100 for how close the quads' layout is to hand-made meshes. Higher is tidier. Credits and limits are in
 [`docs/PATTERN_SOURCES.md`](docs/PATTERN_SOURCES.md). Read it next to View changed, because a tidy grid can still miss the surface.
 
+## Quad Size and Organization: drag and watch
+
+After a run, two sliders sit under the result. Dragging either one is a live preview: the mesh on screen changes at once and Blender stays
+usable (1 to 4 ms per step on the bust and the compressor).
+
+- **Quad Size**: smaller quads to the left, bigger to the right. Each step is a full result of the search at another Detail, so it keeps
+  the shape and puts its faces where the shape needs them. The other sizes are worked out in the background while you look; until one is
+  ready, the nearest finished size is shown.
+- **Organization**: fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the right. On models of many
+  loose pieces, the pieces change over one at a time, so the change is gradual.
+- **Bigger Quads / Smaller Quads** change only the parts you select in Review Segments.
+
+| Quad Size on the marble bust | Finest | | Auto | | Coarsest |
+|---|---:|---:|---:|---:|---:|
+| Faces | 6,077 | 3,733 | 2,515 | 983 | 492 |
+| View changed | 1.6% | 4.1% | 6.5% | 14.8% | 23.6% |
+
+![Quad Size and Organization sliders on a marble bust: 6,077, 2,515 and 492 quads, then Balanced at 5,995 and Clean Rows at 14,147](docs/images/quad_size_strip.jpg)
+
+The sizes take a while to work out on big models (minutes per size on an 80,000-face model). Moving a slider after a per-part edit puts
+back a whole size, so that edit is lost.
+
 ## Reduce To a number of faces
 
 Set **Aim** to Reduce To and give a percentage of your faces or a face count. The result lands within about 10% of it unless the parts
@@ -216,15 +243,17 @@ you can merge, split with a drawn line or in two along the segment's own border,
 rename and lock them. Edited segments are locked, so later size changes keep them, and the next run uses them. Part kinds (tube, flat plate, rough scan) are a rough guess from the shape, and the guess can be wrong.
 The [CHANGELOG](CHANGELOG.md) has the full list.
 
-## Draw edge loops, mirror, guide curves, paint density
+## Draw edge loops, mirror, guide curves, detail markers
 
 - **Draw Edge Loops.** Draw a closed loop around an eye or the mouth, or an open line. Each becomes a strip of regular quads with the
   poles pushed outside it. **Deformation Lines** across an elbow, knee or mouth corner become three or more evenly spaced loops. Move or redraw
   a curve and the result updates. In our test, a ring across a bent neck cut collapsed quads there from 6.2% to 4.0%. A broad bend saw no
   difference, so it helps tight joints and little else.
 - **Mirror** (Auto, X, Y or Z). Solves one half and mirrors it, so both sides match and the seam is exact. Auto uses the plane only when 90% of the surface matches.
+- **Symmetrize** (next to Mirror). Mirrors even when the sides differ, as on scans and sculpts: the result is built on one side (**Keep Side**) and mirrored, and **Set Plane** puts the plane where you type. The panel says how far apart the sides were ("the sides differ by up to 38.8 mm") and checks the seam: on a horse statue, 4 faces crossing the plane before, none after, and no open or doubled seam edges at any Quad Size.
 - **Guide Curves.** Draw strokes on the mesh, or add curves, Grease Pencil drawings or edge-only meshes. The quads follow them.
-- **Paint Density.** Paint a vertex group red where you want more quads. It works best with Reduce To.
+- **Detail Markers.** **Paint More** or **Paint Less** in Weight Paint, or add **marker balls** at the 3D cursor and scale them. The faces go where you said at every Quad Size: on the bust, a More ball on the mouth and a Less ball on the hair doubled the faces per area in the mouth against the hair. With Mirror, a marker on either side counts.
+- **Tweak** (a fold under the result). **Rows on Round Areas** (how readily round, smooth areas become rows of quads), **Flat Area Size** (how big the quads inside flat areas may get) and **Avoid Poles** (Keep Detail). Each reruns the search with Auto-Update and takes seconds on a bust.
 - **Show it how.** Fix a spot by hand, press **Remember This Fix**, and CurioMesh can find the same quad pattern in later results. It is stored on your PC.
 
 ## Redo inside shapes (Live Boolean)
@@ -267,7 +296,10 @@ A redo is refused when it would make more faces than it replaces, and the panel 
 
 ## Big scans, small PCs, and a cloud job
 
-The **This computer** box reads your cores, free memory and graphics card and says in words how big the job is for this PC.
+The **This computer** box reads your cores, free memory and graphics card and says in words how big the job is for this PC, and says so
+plainly when the PC is on the small side. Before Start, the panel gives the time on this PC, including any bake ("about 3 to 12 minutes,
+plus about 70 seconds of baking that blocks Blender"). Heavy options carry a **Slow** or **Heavy** tag with the time they add. Before a
+long job, Start, Make LOD Set and Apply ask first and list cheaper ways (Effort Light, Keep Detail, a smaller bake, Export Job).
 **Effort** (Auto, Light, Normal, Full) trades speed for a usable Blender. Pieces too big for the effort are cut into regions with their borders kept
 exactly. Each region appears when it is done, and finished regions are saved so a stopped job resumes.
 
@@ -291,7 +323,10 @@ surfaces by their average direction instead of every pixel, so far fewer faces a
 | **Redraw Messy Quads** | Parts with many irregular vertices are redrawn as pole-free grids. On for Animation and Subdivision, and left off on models of many loose parts. |
 | **Segments inside one mesh** | Splits a connected model along necks and creases (head, torso, plinth). Merge, split, paint, rename. |
 | **Draw Edge Loops and Deformation Lines** | Loops round eyes and mouths, lines across joints. The quads follow. |
-| **Mirror, Guide Curves, Paint Density** | Symmetric results, strokes the quads follow, and more faces where you paint. |
+| **Mirror, Symmetrize, Guide Curves, Detail Markers** | Symmetric results with a checked seam, strokes the quads follow, and more or fewer faces where you mark. |
+| **Quad Size, Organization, Bigger/Smaller Quads** | Live sliders for quad size and for fewest faces to even rows, and per-part size changes. |
+| **Tweak** | Rows on Round Areas, Flat Area Size, Avoid Poles. |
+| **Texture Sets, Export for Game Engine** | Bake big models onto several sets of maps; write FBX, .glb or OBJ for your engine with meshes split under its triangle limit. |
 | **Show it how** | Fix a spot by hand once, and CurioMesh finds the same pattern in later results. |
 | **Redo inside shapes (Live Boolean)** | Union, Subtract or Intersect boxes and spheres, and only what is inside is redone, live. |
 | **UV and shading care** | Keep UV Seams, hard edges past 60 degrees, shading read from your source. |
@@ -421,7 +456,8 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-in
 - **Folded slivers on some small thin parts.** A quad can come out bent about 90 degrees round an edge of a thin part. They are named in the summary and selected on Apply, so you can fix them by hand.
 - **Judge After Baking is experimental.** On big flat areas of a scan it can leave long thin slivers, which bake badly, and its score misses them. It is off by default.
 - **Redraw Messy Quads costs time.** On some models it roughly doubles the tidiness score for 7 to 50% more faces and 2 to 5 times the time, and it is left off on models of more than 40 loose pieces.
-- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
+- **Sliders and markers.** Bigger Quads on one area of a one-piece mesh can be refused when it would lose the shape. Less Detail markers are weaker than More Detail at high face counts. Changing Symmetrize or Tweak after a run stops the background sizes until the next Start.
+- Mirror, Guide Curves and Detail Markers work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
 
 ## Community
 
