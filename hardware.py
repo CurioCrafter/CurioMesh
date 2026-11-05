@@ -333,6 +333,92 @@ def rate(machine: dict, est: dict, settings: Settings, slow: bool = False) -> tu
     return level, f"This mesh is too big for this PC to do comfortably: {when}. Export it and run it on a stronger machine"
 
 
+# --------------------------------------------------------------------------- what the heavy options cost
+
+
+# Bakes run in Cycles on the main thread and block Blender. Fitted on two timed CPU bakes (Normal + Color, 4 render
+# threads, new UVs, 16 samples) of an 86,000-face free model onto a 3,000-face copy: 512 px took 0.66 s and 1024 px 2.51 s,
+# i.e. 1.18 s per megapixel per map and next to no fixed part. The source's face count is not modelled (a denser source
+# makes each ray dearer); the unwrap of 3,000 faces is inside the fixed part.
+BAKE_FIXED_S = 0.04
+BAKE_S_PER_MPIX_MAP = 1.18
+BAKE_FIT_THREADS = 4  # more cores bake faster, up to BAKE_MOST_THREADS (ponytail: linear in threads, GPU bakes are not modelled)
+BAKE_MOST_THREADS = 16
+BAKE_MAPS = {"OFF": 0, "NORMAL": 1, "NORMAL_COLOR": 2}
+# Not fitted: how much longer than Keep Detail each style runs. Clean Rows (QuadriFlow, capped at 10 minutes a try) and the
+# field methods are the ones the 20x spread above is for.
+STYLE_FACTOR = {"DETAIL": 1.0, "BALANCED": 1.0, "ROWS": 2.0}
+METHOD_FACTOR = {"FIELD": 2.0, "QUADRIFLOW": 2.0}
+CONFIRM_FROM_S = 600.0  # ask before a job expected to run longer than this
+CONFIRM_BAKE_S = 120.0  # ...or an Apply whose bake alone runs longer
+
+
+def bake_seconds(size: int, bake: str, sets: int = 1, machine: dict | None = None) -> float:
+    """Seconds one Apply spends baking (0 when Off). Blender is frozen for all of it."""
+    maps = BAKE_MAPS.get(bake, 0)
+    if not maps:
+        return 0.0
+    threads = min(max((machine or {}).get("cores") or BAKE_FIT_THREADS, 1), BAKE_MOST_THREADS)
+    megapixels = (int(size) / 1024.0) ** 2 * 1.048576 * maps * max(int(sets) if bake == "NORMAL_COLOR" else 1, 1)
+    return (BAKE_FIXED_S + BAKE_S_PER_MPIX_MAP * megapixels) * BAKE_FIT_THREADS / threads
+
+
+def style_factor(style: str, method: str = "") -> float:
+    return max(STYLE_FACTOR.get(style, 1.0), METHOD_FACTOR.get(method, 1.0))
+
+
+def cost_tag(seconds: float, runs: int = 1) -> tuple[str, bool]:
+    """(short line, heavy?) for a label next to an option. Under 15 seconds there is nothing to say."""
+    if seconds < 15:
+        return "", False
+    heavy = seconds * runs >= 180
+    each = f" each, {runs} runs" if runs > 1 else ""
+    return f"{'Heavy' if heavy else 'Slow'}: {clock(seconds)}{each}", heavy
+
+
+def with_bake(text: str, bake_s: float) -> str:
+    """The panel's time sentence, with the bake added when there is one."""
+    return text if bake_s < 15 else f"{text}, plus {clock(bake_s)} of baking that blocks Blender"
+
+
+def needs_confirm(level: str, seconds: float, bake_s: float = 0.0, applying: bool = False) -> bool:
+    """Ask first? Starts: a LARGE or TOO_BIG rating or a long estimate. Apply: only a long bake."""
+    if applying:
+        return bake_s > CONFIRM_BAKE_S
+    return level != "OK" or seconds + bake_s > CONFIRM_FROM_S
+
+
+def cheaper_ways(style: str, bake: str, size: int, effort: str, lods: bool = False) -> list[str]:
+    """What the user could change first, only the ones that still help."""
+    ways = []
+    if effort != "LIGHT":
+        ways.append("Effort: Light (gentler on this PC, slower)")
+    if style == "ROWS":
+        ways.append("Style: Keep Detail instead of Clean Rows")
+    if bake != "OFF" and int(size) > 1024:
+        ways.append(f"A smaller bake: {int(size) // 2} px takes a quarter of the time")
+    ways.append("Export Job (This Computer) to run it on a stronger machine")
+    return ways
+
+
+def weak_pc(machine: dict | None) -> str:
+    """One plain sentence when this computer is weak (4 cores or fewer, 8 GB or less, or no card for Cycles), else an empty string."""
+    if not machine:
+        return ""
+    small = []
+    if (machine.get("cores") or 99) <= 4:
+        small.append(f"{machine['cores']} cores")
+    if (machine.get("ram_gb") or 99) <= 8:
+        small.append(f"{machine['ram_gb']:.0f} GB of memory")
+    card = bool(machine.get("gpu") or machine.get("cycles"))
+    if not small and card:
+        return ""
+    why = ", ".join(small) if small else "no graphics card Cycles can use, so bakes run on the processor"
+    if small and not card:
+        why += ", no graphics card for baking"
+    return f"This PC is on the small side ({why}). Big meshes and bakes will be slow. Effort Light, a smaller bake, Keep Detail and Export Job (to another computer) all help."
+
+
 # --------------------------------------------------------------------------- chunks
 
 
