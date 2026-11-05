@@ -15,7 +15,9 @@ The work runs from its own timer in small slices, and waits while any job of you
 
 from __future__ import annotations
 
+import threading
 import time
+from itertools import chain
 
 import bpy
 import numpy as np
@@ -45,6 +47,8 @@ lad = {
     "shown": None,  # what is on screen: (left rung, right rung, pieces from the right one)
     "failed": [],
     "meshes": {},  # what the sliders picked -> its preview mesh, so moving back and forth only swaps meshes
+    "want": None,  # what the sliders ask for; while dragging a blend, the nearer Style stands in for it
+    "blend": None,  # (wanted, thread, box) while a blend is spliced off the main thread
 }
 drag = {"pending": False, "shown_at": 0.0, "moved": -1e9, "settled": True}
 
@@ -66,7 +70,7 @@ def cancel() -> None:
                 bpy.data.meshes.remove(mesh)
         except ReferenceError:  # gone with a file load
             pass
-    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={})
+    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None)
     drag.update(pending=False, settled=True)
 
 
@@ -234,6 +238,28 @@ class ShowJob(segments.segment_goals.FindJob):
             self.base["report"] = self.report = dict(self.base["report"], loss=loss, shading=None, shading_soft=None, topology=None)
         if not segments.mirrored():
             yield from super()._run()
+        if not segments.seg["parts"]:  # no segments found: the loose pieces are the parts
+            segments.seg["base"] = None
+
+
+def _make_mesh(name, out, source):
+    """A preview mesh straight from arrays (no UVs): several times quicker than `from_pydata` on 30,000 faces."""
+    faces = out["faces"]
+    sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
+    flat = np.fromiter(chain.from_iterable(faces), dtype=np.int32, count=int(sizes.sum()))
+    mesh = bpy.data.meshes.new(name)
+    mesh.vertices.add(len(out["co"]))
+    mesh.vertices.foreach_set("co", np.asarray(out["co"], dtype=np.float32).ravel())
+    mesh.loops.add(len(flat))
+    mesh.loops.foreach_set("vertex_index", flat)
+    mesh.polygons.add(len(faces))
+    mesh.polygons.foreach_set("loop_start", (np.cumsum(sizes) - sizes).astype(np.int32))
+    mesh.update(calc_edges=True)
+    for m in source.data.materials:
+        mesh.materials.append(m)
+    if out.get("mat") is not None and len(out["mat"]) == len(faces):
+        mesh.polygons.foreach_set("material_index", np.asarray(out["mat"], dtype=np.int32))
+    return mesh
 
 
 def _mesh_for(picked, out):
@@ -248,7 +274,7 @@ def _mesh_for(picked, out):
     source = guided.state_source()
     if source is None:
         return None
-    mesh = guided._make_mesh(guided.PREVIEW_NAME + "_Size", source, out, uvs=False)
+    mesh = _make_mesh(guided.PREVIEW_NAME + "_Size", out, source)
     mesh.use_fake_user = True  # kept while another size is on screen
     lad["meshes"][picked] = mesh
     while len(lad["meshes"]) > MOST_MESHES:
@@ -259,18 +285,11 @@ def _mesh_for(picked, out):
     return mesh
 
 
-def preview(context) -> bool:
-    """Put what the sliders ask for on screen: a mesh swap for a finished size, a splice of whole pieces for a blend.
-    Nothing else runs here; `settle` finds the segments once the slider rests."""
+def _put(context, picked, out) -> None:
+    """`out` on screen as the result, for what the sliders picked. The parts table waits for `settle`."""
     guided = _g()
-    if not active():
-        return False
-    picked = choice(context.scene.curiomesh_guided)
-    if picked is None or picked == lad["shown"]:
-        return False
     a, b, moved = picked
     job = lad["rungs"][a]
-    out = compose(a, b, moved)
     old = guided.state["auto_base"]
     report = dict(job.report, faces=len(out["faces"]), quads=sum(1 for f in out["faces"] if len(f) == 4), tris=sum(1 for f in out["faces"] if len(f) == 3))
     guided.stop_work()
@@ -285,46 +304,102 @@ def preview(context) -> bool:
     lad["shown"] = picked
     guided.state["message"] = f"{len(out['faces']):,} faces, {STYLE_WORDS.get(a[0], a[0])}" + ("" if not moved else f" with {len(moved)} piece{'s' if len(moved) != 1 else ''} {STYLE_WORDS.get(b[0], b[0])}")
     overlay.tag_redraw()
+
+
+def preview(context) -> bool:
+    """Put what the sliders ask for on screen at once: a finished size is a mesh swap. A blend of two Styles shows the
+    nearer of the two meanwhile; `settle` splices the real blend on a worker thread once the slider rests."""
+    if not active():
+        return False
+    picked = choice(context.scene.curiomesh_guided)
+    if picked is None:
+        return False
+    lad["want"] = picked
+    a, b, moved = picked
+    if moved:
+        side = a if 2 * len(moved) < len(lad["rungs"][a].pieces) else b
+        picked = (side, side, ())
+    if picked == lad["shown"]:
+        return False
+    _put(context, picked, compose(*picked))
     return True
 
 
 def settle(context) -> None:
-    """The slider rests: find the segments of the result on screen, and look at a blend, whose numbers are not known yet."""
-    guided = _g()
+    """The slider rests: splice a blend if one was asked for (on a thread), then find the segments of the result on
+    screen and look at a blend, whose numbers are not known yet."""
+    want = lad.get("want")
     if not active():
         return
+    if want is not None and want != lad["shown"] and want[2]:
+        box = {}
+
+        def work():
+            try:
+                box["out"] = compose(*want)
+            except Exception as exc:  # a thread has nobody above it to report to
+                box["error"] = exc
+
+        thread = threading.Thread(target=work, daemon=True, name="CurioMeshBlend")
+        thread.start()
+        lad["blend"] = (want, thread, box)
+        return
+    _finish(context)
+
+
+def _finish(context) -> None:
+    guided = _g()
     a, _b, moved = lad["shown"]
     if segments.seg.get("tree") is not None:
         segments.seg["tree_job"] = lad["rungs"][a]  # every rung is of the same mesh: the segment tree holds
-    segments.seg["base"] = None  # held back while dragging: make the parts table now
-    segments.ensure()
-    if moved or not segments.mirrored():
+    if moved or not segments.mirrored():  # finding the segments makes the parts table
         runner = ShowJob(context, bool(moved))
         guided.state["work"] = {"key": lad["key"], "runner": runner, "cent": None, "seen": 0, "areas": []}
         if not bpy.app.timers.is_registered(guided._auto_slice):
             bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
+    else:
+        segments.seg["base"] = None
+        segments.ensure()
+
+
+def _blend_done(context) -> bool:
+    """Put a blend spliced on its thread on screen. False while it is still being made."""
+    want, thread, box = lad["blend"]
+    if thread.is_alive():
+        return False
+    lad["blend"] = None
+    if "out" in box and active() and lad.get("want") == want:
+        _put(context, want, box["out"])
+        _finish(context)
+    return True
 
 
 def show(context) -> bool:
-    """`preview` and `settle` at once, for scripts."""
-    if not preview(context):
-        return False
+    """`preview` and `settle` at once, for scripts: waits for a blend."""
+    preview(context)
     settle(context)
+    while lad.get("blend"):
+        lad["blend"][1].join()
+        _blend_done(context)
     return True
 
 
 def pump(context):
-    """While a slider moves: the preview at most every THROTTLE seconds, the segments once it rests. Returns when to look
+    """While a slider moves: the preview at most every THROTTLE seconds, the rest once it rests. Returns when to look
     again, or None when there is nothing left to do (the timer's return value)."""
     now = time.perf_counter()
+    if lad.get("blend") and (drag["pending"] or not _blend_done(context)):
+        if drag["pending"]:
+            lad["blend"] = None  # moved again: that blend is not wanted any more (its thread ends by itself)
+        else:
+            return THROTTLE / 2
     if drag["pending"] and now - drag["shown_at"] >= THROTTLE:
-        drag.update(pending=False, shown_at=now)
-        if preview(context):
-            drag["settled"] = False
+        drag.update(pending=False, shown_at=now, settled=False)
+        preview(context)
     if not drag["settled"] and not drag["pending"] and now - drag["moved"] >= SETTLE:
         drag["settled"] = True
         settle(context)
-    return None if drag["settled"] and not drag["pending"] else THROTTLE / 2
+    return None if drag["settled"] and not drag["pending"] and not lad.get("blend") else THROTTLE / 2
 
 
 def _drag_tick():
@@ -334,7 +409,7 @@ def _drag_tick():
 def on_slider(self, context) -> None:
     drag.update(pending=True, moved=time.perf_counter())
     pump(context)
-    if (not drag["settled"] or drag["pending"]) and not bpy.app.timers.is_registered(_drag_tick):
+    if not bpy.app.timers.is_registered(_drag_tick):
         bpy.app.timers.register(_drag_tick, first_interval=THROTTLE / 2)
 
 
