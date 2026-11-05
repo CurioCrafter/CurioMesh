@@ -13,7 +13,18 @@
   or unzip the new `curiomesh-<version>-agent-skills.zip` from a release into a skills folder. It is not in the
   extensions.blender.org zip.
 
-## 0.9.3 - 2026-11-04
+### Blockout and Hulls
+- **Blockout** (a new Use): every loose part of your mesh becomes the low-poly solid that fits it best: an oriented
+  box, a cylinder (axis found from the part, capped with quads) or a ball (a quad sphere, stretched to an ellipsoid),
+  or a small convex hull when that matches clearly better. The camera picks, from the part's own six views. A big
+  part no single solid fits is cut at its creases by the segment finder and each segment gets its own solid. A part
+  that still looks wrong keeps a reduced copy of itself, so nothing comes out crushed; the result says which parts
+  did. All quads except the hulls. Each solid takes the material most of its part had.
+- **Hulls** (a new Use): every part becomes its own reduced convex hull, for a quick faceted low-poly look. Concave
+  parts are cut at their creases first.
+- **Primitive Sides** sets the sides of each cylinder and the detail of each ball (small parts get half), and the
+  size of the hulls. **Each Part Its Own Object** makes Apply write one object per loose part.
+- Apply, Undo, Bake Detail and Make LOD Set work as with the other Uses; in a LOD set each level halves the sides.
 
 ### Segments you shape yourself
 - **Live segment size.** Segment Detail and the new **Largest Segment**, **Smallest Segment** and **Crease Strength**
@@ -41,6 +52,13 @@
   neighbour, which made the locked one bigger and lose its lock.
 - **Redo and Use remakes run to the end again.** A part redo stopped after its first step and sat at "Remaking..."
   for good.
+
+### Fixes
+- Without the native core (blocked by the system, or the Python-only build) fitting to your mesh stopped with an
+  error. It now skips only its crossing test.
+- Report a Problem filled in "CurioMesh ?" in the Blender 4.2+ zips; it now reads the version.
+
+## 0.9.3 - 2026-11-04
 
 ### Finding what is still wrong
 - **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is
