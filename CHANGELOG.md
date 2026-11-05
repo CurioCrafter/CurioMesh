@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.7 - unreleased
+
+### Auto Segments
+- **Fewer long thin quads on flat areas** (Keep Detail and Balanced): before pairing, flat areas that reduction left as
+  long thin triangles get a few points inside, graded from small at their edges to large in the middle, so flat
+  plates get far fewer fans of thin spokes from bolts and corners. Their outline stays exactly where it was. On four
+  test models the face count stayed within 2%, thin quads on flat areas dropped by a third or more on two of them (the
+  other two barely changed), and the Issue Finder total went down or stayed level.
+
 ## 0.9.6 - 2026-11-05
 
 ### Game engines

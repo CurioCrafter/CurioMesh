@@ -35,7 +35,7 @@ from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patt
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
-from .triadq.flatquad import _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
+from .triadq.flatquad import FlatQuadOptions, _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
 from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces, unfold
 from .triadq.quadreduce import quad_reducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
@@ -77,6 +77,8 @@ ROWS_START = 0.04  # Clean Rows: first try, as a share of the source's triangles
 ROWS_MOST = 0.8  # Clean Rows: most faces, as a share of the source's triangles
 ROWS_SECONDS = 30.0  # Clean Rows: QuadriFlow's time limit per piece, plus...
 ROWS_SECONDS_PER_QUAD = 0.01  # ...this much for each quad asked for
+EVEN_FLAT_UP_TO = 150_000  # faces before pairing: past this, flat areas keep the long triangles reduction left (Python, about 1 s per 10k)
+EVEN_FLAT = FlatQuadOptions(tolerance=0.0002, angle_deg=8.0, refine=True, min_faces=4, min_saving=-3.0)  # points added inside flat areas, so no long thin quads cross them
 FLAT_SNAP_SHARE = 0.015  # Balanced: a face whose new vertices would move less than this share of its size stays whole
 ROWS_TIME = 600.0  # Clean Rows: a denser layout is only asked for if it should finish within this many seconds
 ROWS_SECONDS_ESTIMATE = 0.003  # Clean Rows: rough QuadriFlow time per quad, measured on a 74,000 quad rock
@@ -1567,6 +1569,8 @@ class AutoJob:
                     domes = smooth_areas(self.co, self.faces)
                     self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
                 coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
+                if len(coarse.faces) <= EVEN_FLAT_UP_TO:
+                    coarse = flatten_regions(coarse, EVEN_FLAT)[0]
             if self.style == "BALANCED" and method == "AUTO" and self.output_kind == "QUADS":  # quads split only where that gains shape
                 self._paired = self._balanced(coarse)
                 self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started

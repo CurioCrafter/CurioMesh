@@ -43,6 +43,8 @@ class FlatQuadOptions:
     grading: float = 0.6  # how fast density falls with distance from a dense chain
     max_outline: int = 20_000  # outlines above this stay detail (ear clipping is quadratic)
     seed_count: int = 2
+    refine: bool = False  # on an already reduced mesh: keep every outline vertex and only add inner points, in triangle regions
+    thin: float = 4.0  # refine: only regions holding a triangle whose longest side is this many times its height
 
 
 @dataclass(slots=True)
@@ -80,6 +82,20 @@ def _fit_plane(points: np.ndarray, normal_hint: np.ndarray) -> tuple[np.ndarray,
     centred = points - origin
     normal = np.linalg.eigh(centred.T @ centred)[1][:, 0]
     return origin, -normal if float(normal @ normal_hint) < 0.0 else normal
+
+
+def _thin_triangles(vertices: np.ndarray, faces, ratio: float) -> np.ndarray:
+    """Per face: a triangle whose longest side is over `ratio` times its height (always False for other faces)."""
+
+    out = np.zeros(len(faces), dtype=bool)
+    ids = np.asarray([k for k, face in enumerate(faces) if len(face) == 3], dtype=np.int64)
+    if not len(ids):
+        return out
+    p = vertices[np.asarray([faces[k] for k in ids.tolist()], dtype=np.int64)]
+    longest = np.linalg.norm(p - np.roll(p, -1, axis=1), axis=2).max(axis=1)
+    double_area = np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1)
+    out[ids] = longest * longest > ratio * double_area  # longest / height, height = double area / longest
+    return out
 
 
 def _grow_regions(vertices, faces, normals, areas, materials, tol, cos_limit) -> np.ndarray:
@@ -497,6 +513,9 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
     for face, label in enumerate(labels.tolist()):
         members[label].append(face)
     usable = np.asarray([len(group) >= options.min_faces for group in members] + [False], dtype=bool)
+    if options.refine:  # only triangle regions with long thin triangles: grids already made, and good triangles, stay as they are
+        thin = _thin_triangles(vertices, faces, options.thin)
+        usable[:-1] &= np.asarray([all(len(faces[face]) == 3 for face in group) and bool(thin[group].any()) for group in members], dtype=bool)
     spare_label = region_count  # faces released from a region join this detail label
     members.append([])
 
@@ -511,6 +530,9 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
     cache: dict[int, tuple] = {}  # most outlines survive a round unchanged
     for _round in range(32):  # a failed region becomes detail, which re-locks its neighbours' chains
         kept, dense = _kept_vertices(vertices, faces, edge_faces, labels, usable, tol)
+        if options.refine:
+            outline = {v for (a, b), users in edge_faces.items() if len(users) != 2 or labels[users[0]] != labels[users[1]] for v in (a, b)}
+            kept, dense = kept | outline, dense | outline
         failed = False
         built.clear()
         for region in np.flatnonzero(usable).tolist():
