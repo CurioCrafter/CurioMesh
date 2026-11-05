@@ -82,9 +82,10 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
 def _crossings(points: np.ndarray, quads: np.ndarray) -> np.ndarray:
     """Each pair of quads that pass through each other, as one number (lower * count + higher). Empty without the native core."""
 
-    if _turbo is None or not len(quads):
+    tree = _turbo.face_tree(points, quads) if _turbo is not None and len(quads) else None
+    if tree is None:  # the wrapper gives None when the native core didn't load
         return np.zeros(0, dtype=np.int64)
-    pairs = np.asarray(_turbo.face_tree(points, quads).crossing_pairs(), dtype=np.int64).reshape(-1, 2)
+    pairs = np.asarray(tree.crossing_pairs(), dtype=np.int64).reshape(-1, 2)
     return pairs.min(axis=1) * len(quads) + pairs.max(axis=1)
 
 
