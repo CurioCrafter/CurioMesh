@@ -1,24 +1,16 @@
-## 0.2.0: the desktop app does more
-
-- **Start screen, settings first.** Choose what the model is for before you open it: Game asset, Scan cleanup, Low poly, Sculpt base or your own limit, each with a one-line explanation. Measuring detail and the other options are there too. Your choices and a list of recent files are remembered.
-- **Batch.** Add files or a folder (or drop them), pick an output folder and run them one after another in the background. Every model has its own progress bar, there is an overall bar and a Cancel button. A table shows faces before and after, view change, bad faces and time. Open a result to compare it, show it in its folder, or export the table as CSV.
-- **Guide.** A built-in guide explains every preset and setting, how to read view change and bad faces, the compare view, batch, and tips for scans, game assets and sculpts. Every control has a hover tip, and a short first-run tour can be skipped.
-- **Easier navigation.** A bar at the top switches between Home, the open model and Batch.
-
-## 0.1.1
-
-The first preview of CurioMesh without Blender: a desktop app and a command line that turn heavy scans, CAD exports and sculpts into clean all-quad meshes.
+CurioMesh Standalone 0.2.0: more than opening one model. Batch whole folders, pick settings up front, mirror symmetric models, try several quad sizes, and write files ready for game engines.
 
 **Download** the zip for your system below, unpack it and start `curiomesh-gui`. Both programs are inside, with a short guide.
 
-- **Keep the look, drop the faces.** You choose how much of the view may change (6% for a game asset, 2% for a scan) and CurioMesh keeps the fewest quads that hold it. Hard edges and silhouettes stay; flat areas become large quads.
-- **See the difference.** Drag a line across the model to compare the original and the new quads side by side.
-- **Know where to look.** Bad faces are counted and the spots worth a look are listed worst first. Click one to fly to it.
-- **Check any retopology.** `curiomesh measure` scores a result from any tool against its source and can stop a build when it is over a limit.
-- **Opens** OBJ, glTF, GLB and PLY. **Saves** OBJ.
+- **Batch.** `curiomesh batch models/ -o done/` retopologizes every model in a folder with the same settings, carries on past a model that fails, and writes a report per model as JSON and CSV.
+- **Presets and settings files.** Game Asset, Scan Cleanup, Low Poly, Sculpt Base and Animation are built in, after the Blender add-on's uses. Save your own with `curiomesh preset save`, or keep settings in a small JSON file.
+- **Mirror.** `--mirror auto` solves one half of a symmetric model and mirrors it, with a closed seam and two identical sides.
+- **Quad sizes.** `curiomesh sizes model.glb` works out the model from small quads to big ones and lists faces and view change for each.
+- **For game engines.** Writes `.glb` as well as OBJ. `--engine unreal|unity|godot|roblox|gltf` sets triangles, the file type and Roblox's 20,000-triangle limit per mesh.
+- **Fix:** glTF models whose texture files are missing now open.
 
-On three free test models at about the same face count, CurioMesh kept far more of the shape than AutoRemesher 1.2.0 (drill press: 8.2% of the view changed against 32.8%, 0 bad faces against 1,219). AutoRemesher's quads are more even on smooth, organic shapes. The full table is in the guide.
+- **The desktop app, rebuilt around that.** A start screen asks what the model is for (the presets above, Detail, Mirror, the game engine) before you open anything, and remembers your choices and recent files. A Batch screen runs a folder one model at a time with a bar per file, Cancel, a results table (faces before and after, view change, bad faces, time), Open result, Show in folder and CSV export. A built-in guide explains every setting, with hover tips and a short first-run tour.
 
-This is a preview: the Blender add-on still does more (UVs, baking, guided loops, repair), and the programs aren't code-signed yet, so Windows and macOS ask once before the first run. GPL-3.0-or-later.
+Still a preview: no UVs, textures or FBX yet, and the programs aren't code-signed, so Windows and macOS ask once before the first run. GPL-3.0-or-later.
 
 Check a download against `SHA256SUMS.txt`.

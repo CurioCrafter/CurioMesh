@@ -45,22 +45,110 @@ result has none.
 
 ## Use the command line
 
-`curiomesh` does the same work in scripts and asset pipelines.
+`curiomesh` does the same work in scripts and asset pipelines. `curiomesh --help` lists everything.
+
+### One model
 
 ```
 curiomesh model.glb -o model_low.obj --use game-asset --report issues.json
 curiomesh scan.ply -o scan_low.obj --reduce-to 5000
-curiomesh measure model.glb any_retopo.obj --max-loss 6 --max-bad 0
+curiomesh statue.obj -o statue_low.obj --mirror auto
+curiomesh crate.glb -o crate_game.glb --engine godot
 ```
+
+The name after `-o` decides the file type: `.obj` or `.glb`.
+
+### Many models: `batch`
+
+```
+curiomesh batch models/ -o done/ --use game-asset
+curiomesh batch a.glb b.obj c.ply -o done/ --engine roblox --jobs 2
+```
+
+Give files, folders (every .obj, .gltf, .glb and .ply directly inside), or both. Each result is written as
+`NAME_curiomesh.obj` (or `.glb`) in the `-o` folder, with the same settings for every model. A model that can't be
+read or fails is noted and the rest carry on. When all are done, `curiomesh_report.json` and `curiomesh_report.csv` in
+the same folder list per model: faces, quads and triangles, how much of the view changed, bad faces, issue spots, time,
+and ok or failed. `--jobs N` works on N models at once (default 1, at most half your processor cores). The program
+exits with code 1 when any model failed.
+
+### Quad sizes: `sizes`
+
+```
+curiomesh sizes model.glb --detail 6 -o sizes/
+```
+
+Works out the model at 7 detail values around `--detail` (a quarter of it up to four times it), from small quads to
+big ones, and prints each one's faces and view change. Sizes that another size beats on both counts are left out.
+With `-o` each size worth keeping is saved, so you can pick by eye.
+
+### Settings and presets
 
 | Option | What it does |
 |---|---|
+| `--use NAME` | A preset (see below) or one you saved. |
+| `--settings FILE.json` | Settings from a file. Keys left out keep their defaults. |
 | `--detail P` | Keep the fewest faces whose view changes by at most P percent. Default 6. |
-| `--use game-asset` or `--use scan` | The app's presets: 6% or 2%. |
 | `--reduce-to N` | Aim for about N faces instead. |
-| `--report FILE.json` | Write the numbers and the issue spots as JSON. |
+| `--mirror auto`, `x`, `y` or `z` | Solve one half, mirror it and close the seam, so both sides are the same. `auto` mirrors only when the model is symmetric (90% of it matches its mirror); naming an axis needs 70%. |
 | `--no-rows` | Keep every part as reduced; don't try even rows of quads on smooth parts. |
+| `--pixels N` | Camera picture size per side. Default 192. |
 | `--cpu` | Draw the camera pictures on the processor instead of the graphics card. |
+| `--report FILE.json` | Write the numbers and the issue spots as JSON. |
+
+Later options win: `--use scan --detail 3` is Scan Cleanup at 3%.
+
+Built-in presets, after the Blender add-on's uses:
+
+| Preset | Detail | Also |
+|---|---|---|
+| `game-asset` | 6% | The default. All quads, few faces. |
+| `scan` | 2% | Scan Cleanup: keeps more of a scan's detail. |
+| `low-poly` | 10% | Written as triangles, no rows. Small parts may vanish. |
+| `sculpt-base` | 6% | Mirrored when the model is symmetric. |
+| `animation` | 1.5% | More, evener quads; mirrored when symmetric. Check eyes, mouth and joints by hand. |
+
+```
+curiomesh preset list                       # built-in and saved presets
+curiomesh preset show scan > my.json        # a preset as a settings file to edit
+curiomesh preset save props --use low-poly --detail 8 --engine unity
+curiomesh batch props/ -o done/ --use props
+```
+
+Saved presets live in `%APPDATA%\CurioMesh\presets` on Windows, `~/Library/Application Support/CurioMesh/presets` on macOS and `~/.config/CurioMesh/presets` on Linux. A
+settings file looks like this:
+
+```json
+{
+  "curiomesh_settings": 1,
+  "detail": 6.0,
+  "reduce_to": null,
+  "pixels": 192,
+  "gpu": true,
+  "rows": true,
+  "mirror": "off",
+  "export": { "format": "obj", "triangulate": false, "max_tris": 0, "scale": 1.0, "up": "y" }
+}
+```
+
+### For game engines
+
+| Option | What it does |
+|---|---|
+| `--engine unreal` | One .glb in triangles. Unreal 5 reads glTF and turns it to its own axes and centimetres. |
+| `--engine unity` | OBJ in triangles, Y up, in metres. |
+| `--engine godot` | One .glb in triangles. |
+| `--engine roblox` | OBJ in triangles, cut into pieces of at most 20,000 triangles (Roblox's limit per mesh). |
+| `--engine gltf` | One .glb in triangles for three.js, Babylon.js, Bevy, Sketchfab and other glTF readers. |
+| `--triangulate` | Write triangles. Quads are cut along their shorter diagonal. |
+| `--max-tris N` | Cut the mesh into pieces of at most N triangles, along materials and then across its longest side. |
+| `--scale S` | Multiply every coordinate by S. |
+| `--up z` | OBJ only: Z up instead of Y up. A .glb is always Y up, as glTF requires. |
+| `--format obj` or `glb` | The file type for `batch` and `sizes`. |
+
+Pieces are separate objects in one file. No textures or UVs are written: the standalone doesn't bake.
+
+### Check any retopology: `measure`
 
 `curiomesh measure SOURCE RESULT` scores any retopology against its source: one made by CurioMesh, by another tool
 or by hand. It prints the view change, the bad faces and the worst spots. With `--max-loss` or `--max-bad` it exits
@@ -85,7 +173,7 @@ results here have 5-9% more faces.
 ## Known limits of the preview
 
 - The Blender add-on still does more: part-by-part sizing, guided edge loops, UVs, baking, repair and Redo Rough
-  Spots. The standalone writes OBJ only, without UVs.
+  Spots. The standalone writes OBJ and .glb without UVs or textures, and no FBX.
 - Quad flow on organic models is less even than a field-aligned remesher's.
 - Large models draw thinned out in the viewport; the saved result is complete.
 
