@@ -85,6 +85,15 @@ class EditTests(unittest.TestCase):
         self.assertEqual(int((out == corner[0]).sum()), 4)
         self.assertEqual(count(out), 3)
 
+    def test_locked_segment_in_two_pieces_stays_one(self):
+        co, faces = grid(10, 10)
+        fa, fb, _u, _v = segment.face_links(faces)
+        old = np.zeros(len(faces), dtype=np.int64)
+        old[[0, 99]] = 3  # merged from two places that don't touch
+        out = segment.keep_locked(np.zeros(len(faces), dtype=np.int64), old, {3}, fa, fb)
+        self.assertEqual(out[0], out[99])
+        self.assertEqual(int((out == out[0]).sum()), 2)
+
     def test_lock_cutting_a_segment_makes_two(self):
         co, faces = grid(10, 1)
         fa, fb, _u, _v = segment.face_links(faces)

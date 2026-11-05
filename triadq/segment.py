@@ -429,7 +429,8 @@ def keep_locked(labels, old, locked, fa, fb, tidy_up: bool = True) -> np.ndarray
     locked_parts = np.unique(parts[held])
     back = ~held & np.isin(tidied, locked_parts)  # a sliver never joins a locked segment
     tidied[back] = parts[back]
-    tidied[held] = parts[held]
+    ids, first = np.unique(out[held], return_index=True)  # a locked segment in several pieces (a merge of loose parts) stays one
+    tidied[held] = parts[held][first[np.searchsorted(ids, out[held])]]
     return np.unique(tidied, return_inverse=True)[1].reshape(-1)
 
 
