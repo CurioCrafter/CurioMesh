@@ -272,7 +272,7 @@ class BlockoutJob:
             name = hardware.region_name(points.mean(axis=0), low, high)
             self.stage = f"Part {index + 1} of {len(parts)}: {name}"
             share = float(np.ptp(points, axis=0).max()) / extent
-            sides = self.sides if share >= SMALL_PART else max(6, self.sides // 2)
+            sides = self.sides if share >= SMALL_PART else max(min(6, self.sides), self.sides // 2)  # never more than a big part gets
             budget = max(8, int(round(self.sides * 4 * math.sqrt(share)))) if self.hull else 2 * sides
             box = P.fit_box(points)
             frame = self._frame(points, box)
