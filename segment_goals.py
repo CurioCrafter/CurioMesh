@@ -893,6 +893,9 @@ def undo_edit() -> str:
     if not history:
         return "No hand edit to undo"
     out, piece, parts, src, sel = history.pop()
+    if out["co"] is not base["out"]["co"]:  # a find since then laid the seams again: show the points Apply will write
+        guided._build_preview(bpy.context, guided.state_source(), out, uvs=False)
+        guided.state["draw_key"] = None
     base.update(out=out, id=time.perf_counter_ns())
     base["job"]._face_piece = src
     for k, record in enumerate(parts):
