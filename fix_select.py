@@ -235,6 +235,15 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
     how: bpy.props.EnumProperty(items=[(k, v[1], v[2]) for k, v in FIXES.items()] + [("ALL", "Fix All", "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad")])
 
     @classmethod
+    def poll(cls, context):
+        from . import guided
+
+        if context.edit_object is not None and context.edit_object.name == guided.PREVIEW_NAME:  # the preview is rebuilt from the result: a fix there is lost on Apply
+            cls.poll_message_set("Apply first, then fix the result. Find Bad Faces works on the preview")
+            return False
+        return super().poll(context)
+
+    @classmethod
     def description(cls, context, props):
         return FIXES[props.how][2] if props.how in FIXES else "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad"
 
