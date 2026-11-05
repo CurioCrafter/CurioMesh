@@ -474,6 +474,8 @@ def part_sizes(context, pieces, bigger: bool) -> tuple[int, list[str]]:
     """Bigger or smaller quads on these parts only. Returns (parts changed or started, why others could not)."""
     seg, wanted, todo, why = segments.seg, {}, [], []
     base = _g().state["auto_base"]
+    if base is not None and getattr(base["job"], "mirror", None) is not None:  # no piece per face, and one side alone would break the mirror
+        return 0, ["Bigger and Smaller Quads don't work on a mirrored result"]
     for p in pieces:
         record = seg["parts"][p]
         loose = record.get("loose", p)
