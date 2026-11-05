@@ -9,6 +9,10 @@
 [![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
+![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 15,881 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
+
+*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model), Keep Detail, fewest faces: 79,042 faces to 15,881 quads, 5.6% of the view changed. Wire shown on both sides.*
+
 <p align="center"><img src="docs/trailer/trailer.webp" alt="CurioMesh trailer: Clean Rows retopology of a bust and a scan, the three layout styles, a game asset with a baked normal map lit in Godot, and export to Unreal, Unity, Godot and Roblox" width="800"></p>
 
 ![Three CurioMesh styles with wireframe: Clean Rows on a marble bust and on a concrete road barrier, and a low-poly game asset with a baked normal map](docs/images/hero_styles.jpg)
@@ -70,10 +74,6 @@ Every example below ran the real add-on on a free [Poly Haven](https://polyhaven
 Asset settings: Keep Detail, **Detail 6%**. Detail is how much of the view may look different from your mesh. You can
 download the same models and check the numbers. Each picture shows the original (left) and the result (right), the whole
 object on top and a close-up below.
-
-![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 15,881 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
-
-*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model), Keep Detail, fewest faces: 79,042 faces to 15,881 quads, 5.6% of the view changed. Wire shown on both sides.*
 
 ![Auto retopology of a chess set in Blender: 76,832 faces become 10,110 quads, wireframe before and after, whole object and close-up](docs/images/chess_set.jpg)
 
