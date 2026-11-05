@@ -9,9 +9,9 @@
 [![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
-![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 15,881 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
+<p align="center"><img src="docs/images/choice.webp" alt="A marble bust retopologised by CurioMesh: a slider moves from Keep Detail (2,508 quads, fewest faces) through Balanced (3,920) to Clean Rows (14,147 quads in even rows), all keeping the same shape" width="800"></p>
 
-*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model), Keep Detail, fewest faces: 79,042 faces to 15,881 quads, 5.6% of the view changed. Wire shown on both sides.*
+*The same 17,456-face sculpt at every setting, about 6% of the view changed: Keep Detail makes the fewest faces (2,508 quads), Clean Rows makes even rows (14,147 quads). You choose what matters more for the job.*
 
 <p align="center"><img src="docs/trailer/trailer.webp" alt="CurioMesh trailer: Clean Rows retopology of a bust and a scan, the three layout styles, a game asset with a baked normal map lit in Godot, and export to Unreal, Unity, Godot and Roblox" width="800"></p>
 
@@ -74,6 +74,10 @@ Every example below ran the real add-on on a free [Poly Haven](https://polyhaven
 Asset settings: Keep Detail, **Detail 6%**. Detail is how much of the view may look different from your mesh. You can
 download the same models and check the numbers. Each picture shows the original (left) and the result (right), the whole
 object on top and a close-up below.
+
+![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 15,881 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
+
+*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model), Keep Detail, fewest faces: 79,042 faces to 15,881 quads, 5.6% of the view changed. Wire shown on both sides.*
 
 ![Auto retopology of a chess set in Blender: 76,832 faces become 10,110 quads, wireframe before and after, whole object and close-up](docs/images/chess_set.jpg)
 

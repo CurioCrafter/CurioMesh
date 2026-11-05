@@ -52,6 +52,64 @@ def sheet_rows():
     return [s.crop((0, a, 1024, b)) for a, b in ((15, 240), (275, 485), (535, 745))]
 
 
+# ---------- the choice: fewest faces <-> even rows, same shape ----------
+STOPS = [("Keep Detail", "2,508 quads", "marble_bust_01.jpg"),
+         ("Balanced", "3,920 quads", "bust_balanced.jpg"),
+         ("Clean Rows", "14,147 quads", "bust_rows.jpg")]
+LEFT, RIGHT = "Fewest faces: game assets, LODs, far objects", "Even rows: editing, subdividing, animating"
+
+
+def slider(d, x0, x1, y, t, w):
+    """A scroll bar from fewest faces (t=0) to even rows (t=1), with a knob at t."""
+    d.rounded_rectangle([x0, y - 5, x1, y + 5], 5, fill=(70, 74, 82))
+    d.rounded_rectangle([x0, y - 5, x0 + (x1 - x0) * t, y + 5], 5, fill=ACC)
+    for k, (name, _faces, _f) in enumerate(STOPS):
+        x = x0 + (x1 - x0) * k / (len(STOPS) - 1)
+        d.ellipse([x - 6, y - 6, x + 6, y + 6], fill=ACC if k / (len(STOPS) - 1) <= t + 1e-6 else (70, 74, 82))
+        f = font(20, True)
+        d.text((x - d.textlength(name, font=f) / 2, y + 16), name, font=f, fill=TXT)
+    kx = x0 + (x1 - x0) * t
+    d.ellipse([kx - 14, y - 14, kx + 14, y + 14], fill=TXT, outline=ACC, width=4)
+
+
+def stop_image(k, w, close):
+    box = (705, 548, 1400, 1040) if close else (705, 54, 1400, 540)
+    return crop(IMG / STOPS[k][2], box, w)
+
+
+def choice_frame(t):
+    """One trailer frame with the knob at t: the result blends between the stops either side."""
+    im, d = canvas()
+    center(d, "You choose: fewest faces or even rows", 22, 40, ACC, True)
+    center(d, "Same bust, same shape: about 6% of the view changed at every setting", 76, 22, DIM)
+    pos = t * (len(STOPS) - 1)
+    a = min(int(pos), len(STOPS) - 2)
+    u = pos - a
+    for j, close in enumerate((False, True)):
+        pic = Image.blend(stop_image(a, 560, close), stop_image(a + 1, 560, close), u)
+        im.paste(pic, (60 + j * 600, 120))
+    k = round(pos)
+    center(d, f"{STOPS[k][0]}: {STOPS[k][1]}", 530, 30, TXT, True)
+    slider(d, 160, 1120, 600, t, W)
+    d.text((60, 660), "← " + LEFT, font=font(19), fill=DIM)
+    f = font(19)
+    d.text((W - 60 - d.textlength(RIGHT + " →", font=f), 660), RIGHT + " →", font=f, fill=DIM)
+    return im
+
+
+def choice_frames():
+    """The knob rests on each stop, slides between them, then slides back to fewest faces."""
+    out = []
+    path = [0.0, 0.5, 1.0, 0.0]
+    for i in range(len(path) - 1):
+        a, b = path[i], path[i + 1]
+        out.append((choice_frame(a), 1400))
+        steps = 10 if abs(b - a) <= 0.5 else 14
+        out += [(choice_frame(a + (b - a) * s / steps), 60) for s in range(1, steps)]
+    out.append((choice_frame(0.0), 1200))
+    return out
+
+
 # ---------- trailer scenes ----------
 def title():
     im, d = canvas()
@@ -120,7 +178,8 @@ def endcard():
 
 def build_trailer():
     scenes = [(title(), 2.5),
-              (before_after(IMG / "bust_rows.jpg", "Clean Rows: a scan or sculpt", "17,456 faces to 14,147 even quads"), 3.0),
+              (before_after(IMG / "marble_bust_01.jpg", "A 17,456-face sculpt in 2,508 quads", "Keep Detail: the fewest faces that keep the shape"), 3.0),
+              (choice_frames(), None),
               (before_after(IMG / "barrier_rows.jpg", "Clean Rows: a photo scan", "60,928 faces to 2,486 quads"), 3.0),
               (choose(), 3.5),
               (game_asset(), 4.5),
@@ -128,17 +187,62 @@ def build_trailer():
               (endcard(), 3.5)]
     frames, durs = [], []
     fade_n, fade_ms = 5, 70
-    for i, (im, hold) in enumerate(scenes):
-        if i:
+    last = None
+    for im, hold in scenes:
+        seq = im if hold is None else [(im, int(hold * 1000))]  # a scene is one still or a run of frames
+        if last is not None:
             for k in range(1, fade_n + 1):
-                frames.append(Image.blend(scenes[i - 1][0], im, k / (fade_n + 1)))
+                frames.append(Image.blend(last, seq[0][0], k / (fade_n + 1)))
                 durs.append(fade_ms)
-        frames.append(im)
-        durs.append(int(hold * 1000))
+        for f, ms in seq:
+            frames.append(f)
+            durs.append(ms)
+        last = seq[-1][0]
     OUT.mkdir(exist_ok=True)
     out = OUT / "trailer.webp"
     frames[0].save(out, save_all=True, append_images=frames[1:], duration=durs, loop=0, quality=72, method=6, kmax=1)
     print(out, round(out.stat().st_size / 1e6, 2), "MB,", round(sum(durs) / 1000, 1), "s")
+
+
+# ---------- the face picture: original, fewest faces, even rows, and the bar between ----------
+def build_choice():
+    im, d = canvas(1400, 860)
+    center(d, "Same sculpt, your choice: fewest faces or even rows", 14, 36, ACC, True, 1400)
+    pw, gap, x0 = 430, 20, 25
+    cols = [("Original", "17,456 triangles", None), ("Keep Detail", "2,508 quads", 0), ("Clean Rows", "14,147 quads", 2)]
+    mids = []
+    for i, (name, faces, k) in enumerate(cols):
+        x = x0 + i * (pw + gap)
+        src = IMG / ("marble_bust_01.jpg" if k is None else STOPS[k][2])
+        left = (0, 54, 695, 540) if k is None else (705, 54, 1400, 540)
+        lower = (0, 548, 695, 1040) if k is None else (705, 548, 1400, 1040)
+        a, b = crop(src, left, pw), crop(src, lower, pw)
+        im.paste(a, (x, 70))
+        im.paste(b, (x, 70 + a.height + 6))
+        ty = 70 + a.height + b.height + 16
+        d.text((x, ty), name, font=font(28, True), fill=TXT)
+        d.text((x + d.textlength(name, font=font(28, True)) + 14, ty + 8), faces, font=font(20), fill=DIM)
+        mids.append(x + pw / 2)
+    y = 818
+    xa, xb = mids[1], mids[2]  # a two-way bar from fewest faces to even rows
+    d.rounded_rectangle([xa, y - 4, xb, y + 4], 4, fill=ACC)
+    for xx in (xa, xb):
+        d.ellipse([xx - 10, y - 10, xx + 10, y + 10], fill=TXT, outline=ACC, width=3)
+    f = font(19, True)
+    d.text((xa + 18, y - 34), "fewest faces", font=f, fill=ACC)
+    d.text((xb - 18 - d.textlength("even rows", font=f), y - 34), "even rows", font=f, fill=ACC)
+    d.text((x0, y - 12), "Both keep about 6% view change", font=font(19), fill=DIM)
+    out = IMG / "hero_choice.jpg"
+    im.save(out, quality=88)
+    print(out, round(out.stat().st_size / 1e3), "KB")
+
+
+def build_choice_anim():
+    """The README's first picture: the knob scrolls from fewest faces to even rows and back, the result follows."""
+    seq = choice_frames()
+    out = IMG / "choice.webp"
+    seq[0][0].save(out, save_all=True, append_images=[f for f, _ in seq[1:]], duration=[ms for _, ms in seq], loop=0, quality=75, method=6)
+    print(out, round(out.stat().st_size / 1e6, 2), "MB")
 
 
 # ---------- hero ----------
@@ -180,5 +284,7 @@ def build_hero():
 
 
 if __name__ == "__main__":
+    build_choice()
+    build_choice_anim()
     build_hero()
     build_trailer()
