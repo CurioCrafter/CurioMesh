@@ -9,9 +9,10 @@ mod gui_batch;
 mod gui_guide;
 mod gui_prefs;
 
-use curiomesh::{io, issues};
+use curiomesh::settings::Mirror;
+use curiomesh::{export, io, issues};
 use gui_batch::Batch;
-use gui_prefs::{Prefs, Purpose};
+use gui_prefs::{Prefs, CUSTOM};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextStyle, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -305,13 +306,16 @@ impl App {
     fn save(&mut self) {
         let (Some(model), Some((finished, _))) = (&self.model, &self.result) else { return };
         let stem = model.path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-        let mut dialog = rfd::FileDialog::new().add_filter("OBJ", &["obj"]).set_file_name(format!("{stem}_curiomesh.obj"));
+        let target = self.prefs.choices.settings(true).export;
+        let ext = target.format.ext();
+        let mut dialog = rfd::FileDialog::new().add_filter(ext, &[ext]).set_file_name(format!("{stem}_curiomesh.{ext}"));
         if let Some(folder) = model.path.parent() {
             dialog = dialog.set_directory(folder);
         }
         if let Some(path) = dialog.save_file() {
-            self.note = Some(match io::write_obj(&finished.mesh, &path) {
-                Ok(()) => (format!("Saved {}", path.display()), false),
+            self.note = Some(match export::write(&finished.mesh, &path, &target) {
+                Ok(1) | Ok(0) => (format!("Saved {}", path.display()), false),
+                Ok(n) => (format!("Saved {n} pieces next to {}", path.display()), false),
                 Err(e) => (format!("Couldn't save: {e}"), true),
             });
         }
@@ -465,7 +469,7 @@ impl App {
     }
 
     fn pick(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new().add_filter("3D models", &gui_batch::MODEL_EXTENSIONS).pick_file() {
+        if let Some(path) = rfd::FileDialog::new().add_filter("3D models", &curiomesh::batch::READABLE).pick_file() {
             self.open(path, ctx);
         }
     }
@@ -552,17 +556,18 @@ impl App {
         ui.add_enabled_ui(enabled, |ui| {
             if compact {
                 // Beside a model the presets fold into a list, to leave room for the result.
-                egui::ComboBox::from_id_salt("preset").width(ui.available_width() - 8.0).selected_text(c.purpose.title()).show_ui(ui, |ui| {
-                    for purpose in Purpose::ALL {
-                        if ui.selectable_label(c.purpose == purpose, purpose.title()).on_hover_text(purpose.blurb()).clicked() {
-                            c.pick(purpose);
+                egui::ComboBox::from_id_salt("preset").width(ui.available_width() - 8.0).selected_text(c.label()).show_ui(ui, |ui| {
+                    for (key, label, words) in gui_prefs::uses() {
+                        if ui.selectable_label(c.preset == key, label).on_hover_text(words).clicked() {
+                            c.pick(key);
                         }
                     }
                 }).response.on_hover_text("What the model is for. This sets how much of the view may change.");
-                ui.add(egui::Label::new(RichText::new(c.purpose.blurb()).small().color(MUTED)).wrap());
+                let words = gui_prefs::uses().into_iter().find(|u| u.0 == c.preset).map_or("", |u| u.2);
+                ui.add(egui::Label::new(RichText::new(words).small().color(MUTED)).wrap());
             }
-            for purpose in Purpose::ALL.into_iter().filter(|_| !compact) {
-                let chosen = c.purpose == purpose;
+            for (key, label, words) in gui_prefs::uses().into_iter().filter(|_| !compact) {
+                let chosen = c.preset == key;
                 let frame = egui::Frame::new()
                     .fill(if chosen { Color32::from_rgb(52, 45, 36) } else { Color32::from_rgb(44, 46, 53) })
                     .stroke(Stroke::new(if chosen { 1.5 } else { 1.0 }, if chosen { AMBER } else { LINE }))
@@ -571,16 +576,16 @@ impl App {
                 let shown = frame.show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(RichText::new(purpose.title()).strong().color(if chosen { AMBER } else { TEXT }));
-                    ui.add(egui::Label::new(RichText::new(purpose.blurb()).small().color(MUTED)).wrap());
+                    ui.label(RichText::new(label).strong().color(if chosen { AMBER } else { TEXT }));
+                    ui.add(egui::Label::new(RichText::new(words).small().color(MUTED)).wrap());
                 });
-                let response = ui.interact(shown.response.rect, ui.id().with(purpose.title()), Sense::click());
-                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{} Click to use it.", purpose.blurb())).clicked() {
-                    c.pick(purpose);
+                let response = ui.interact(shown.response.rect, ui.id().with(key), Sense::click());
+                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{words}. Click to use it.")).clicked() {
+                    c.pick(key);
                 }
                 ui.add_space(-2.0);
             }
-            if c.purpose == Purpose::Custom {
+            if c.preset == CUSTOM {
                 ui.add(egui::Slider::new(&mut c.custom_detail, 0.5..=15.0).suffix("% may change").step_by(0.5)).on_hover_text("The most the view may change. Lower keeps more faces and detail.");
             }
             section(ui, "Options");
@@ -600,6 +605,26 @@ impl App {
                         ui.selectable_value(&mut c.pixels, pixels, name);
                     }
                 }).response.on_hover_text("How big the camera pictures are when the view change is measured. Fine sees smaller differences and takes longer.");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Mirror");
+                let name = |m: Mirror| match m { Mirror::Off => "Off", Mirror::Auto => "Auto", Mirror::Axis(0) => "X", Mirror::Axis(1) => "Y", _ => "Z" };
+                egui::ComboBox::from_id_salt("mirror").selected_text(name(c.mirror)).show_ui(ui, |ui| {
+                    for m in [Mirror::Off, Mirror::Auto, Mirror::Axis(0), Mirror::Axis(1), Mirror::Axis(2)] {
+                        ui.selectable_value(&mut c.mirror, m, name(m));
+                    }
+                }).response.on_hover_text("For a symmetric model: solve one half and mirror it, so both sides match. Auto looks for the plane and skips models that are not symmetric.");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Send to");
+                let engines = export::engines();
+                let label = engines.iter().find(|e| e.0 == c.engine).map_or("Plain OBJ", |e| e.1);
+                egui::ComboBox::from_id_salt("engine").selected_text(label).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut c.engine, String::new(), "Plain OBJ").on_hover_text("An OBJ file with the quads as they are.");
+                    for (key, label, words, _) in engines {
+                        ui.selectable_value(&mut c.engine, key.to_string(), label).on_hover_text(words);
+                    }
+                }).response.on_hover_text("The game engine the file is for. This sets the file type, triangles and size limits.");
             });
             ui.checkbox(&mut c.gpu, "Use the graphics card").on_hover_text("Draw the camera pictures on the graphics card. Faster. Turn it off if it fails on your computer.");
         });
@@ -716,7 +741,7 @@ impl App {
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(RichText::new("Save OBJ").strong()).stroke(Stroke::new(1.0, AMBER))).on_hover_text("Save the new mesh as an OBJ file.").clicked() {
+            if ui.add(egui::Button::new(RichText::new("Save model").strong()).stroke(Stroke::new(1.0, AMBER))).on_hover_text("Save the new mesh as a file for the engine you chose (OBJ, or GLB for Unreal, Godot and glTF).").clicked() {
                 self.save();
             }
             if ui.button("Save issue report").on_hover_text("Save the numbers and the list of spots as a JSON file.").clicked() {

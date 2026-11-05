@@ -6,99 +6,73 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Purpose {
-    Game,
-    Scan,
-    LowPoly,
-    Sculpt,
-    Custom,
-}
 
-impl Purpose {
-    pub const ALL: [Purpose; 5] = [Purpose::Game, Purpose::Scan, Purpose::LowPoly, Purpose::Sculpt, Purpose::Custom];
+use curiomesh::{export, settings};
+use settings::Mirror;
 
-    pub fn title(self) -> &'static str {
-        match self {
-            Purpose::Game => "Game asset",
-            Purpose::Scan => "Scan cleanup",
-            Purpose::LowPoly => "Low poly",
-            Purpose::Sculpt => "Sculpt base",
-            Purpose::Custom => "Your own limit",
-        }
-    }
+pub const CUSTOM: &str = "custom";
 
-    pub fn blurb(self) -> &'static str {
-        match self {
-            Purpose::Game => "Few faces for real-time use. Up to 6% of the view may change.",
-            Purpose::Scan => "Keeps small detail from a scan. Up to 2% may change.",
-            Purpose::LowPoly => "As few big quads as possible. Up to 12% may change.",
-            Purpose::Sculpt => "A tidy base to sculpt on. Up to 3% may change, even rows.",
-            Purpose::Custom => "You choose how much of the view may change.",
-        }
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            Purpose::Game => "game",
-            Purpose::Scan => "scan",
-            Purpose::LowPoly => "low_poly",
-            Purpose::Sculpt => "sculpt",
-            Purpose::Custom => "custom",
-        }
-    }
-
-    /// Whether choosing this preset turns even rows of quads on.
-    pub fn rows(self) -> bool {
-        self != Purpose::LowPoly
-    }
+/// What the settings panel offers as a use: the engine's presets, then the user's own limit. (key, label, words).
+pub fn uses() -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut all: Vec<_> = settings::presets().into_iter().map(|p| (p.key, p.label, p.words)).collect();
+    all.push((CUSTOM, "Your own limit", "You choose how much of the view may change."));
+    all
 }
 
 /// Everything in the settings panel.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Choices {
-    pub purpose: Purpose,
+    pub preset: String, // a preset's key, or CUSTOM
     pub custom_detail: f64,
     pub aim_for_count: bool,
     pub count: usize,
     pub rows: bool,
+    pub triangulate: bool, // from the preset (Low Poly writes triangles)
+    pub mirror: Mirror,
+    pub engine: String, // an engine's key, or "" for a plain OBJ
     pub gpu: bool,
     pub pixels: usize,
 }
 
 impl Default for Choices {
     fn default() -> Self {
-        Choices { purpose: Purpose::Game, custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, gpu: true, pixels: 192 }
+        Choices { preset: "game-asset".into(), custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, triangulate: false, mirror: Mirror::Off, engine: String::new(), gpu: true, pixels: 192 }
     }
 }
 
 impl Choices {
     /// Percent of the view that may change.
     pub fn detail(&self) -> f64 {
-        match self.purpose {
-            Purpose::Game => 6.0,
-            Purpose::Scan => 2.0,
-            Purpose::LowPoly => 12.0,
-            Purpose::Sculpt => 3.0,
-            Purpose::Custom => self.custom_detail,
+        self.base().map_or(self.custom_detail, |s| s.detail)
+    }
+
+    fn base(&self) -> Option<settings::Settings> {
+        settings::presets().into_iter().find(|p| p.key == self.preset).map(|p| p.settings)
+    }
+
+    pub fn pick(&mut self, key: &str) {
+        self.preset = key.to_string();
+        if let Some(s) = self.base() {
+            (self.rows, self.mirror, self.triangulate) = (s.rows, s.mirror, s.export.triangulate);
         }
     }
 
-    pub fn pick(&mut self, purpose: Purpose) {
-        self.purpose = purpose;
-        if purpose != Purpose::Custom {
-            self.rows = purpose.rows();
-        }
+    pub fn label(&self) -> &'static str {
+        uses().into_iter().find(|u| u.0 == self.preset).map_or("Your own limit", |u| u.1)
     }
 
     /// `count_allowed` is false in a batch: one face count can't suit many models.
-    pub fn settings(&self, count_allowed: bool) -> curiomesh::retopo::Settings {
-        curiomesh::retopo::Settings {
+    pub fn settings(&self, count_allowed: bool) -> settings::Settings {
+        let mut export = export::engine(&self.engine).unwrap_or_default();
+        export.triangulate |= self.triangulate;
+        settings::Settings {
             detail: self.detail(),
             reduce_to: (self.aim_for_count && count_allowed).then_some(self.count),
             pixels: self.pixels,
             gpu: self.gpu,
             rows: self.rows,
+            mirror: self.mirror,
+            export,
         }
     }
 }
@@ -136,9 +110,12 @@ impl Prefs {
     pub fn from_json(v: &Value) -> Prefs {
         let mut p = Prefs::default();
         let c = &mut p.choices;
-        if let Some(purpose) = Purpose::ALL.into_iter().find(|x| v["purpose"] == x.key()) {
-            c.purpose = purpose;
+        if let Some(key) = uses().into_iter().find(|u| v["preset"] == u.0) {
+            c.preset = key.0.to_string();
         }
+        c.triangulate = v["triangulate"].as_bool().unwrap_or(false);
+        c.mirror = v["mirror"].as_str().and_then(|m| Mirror::parse(m).ok()).unwrap_or(Mirror::Off);
+        c.engine = v["engine"].as_str().filter(|e| export::engine(e).is_ok()).unwrap_or("").to_string();
         c.custom_detail = v["custom_detail"].as_f64().unwrap_or(c.custom_detail).clamp(0.5, 15.0);
         c.aim_for_count = v["aim_for_count"].as_bool().unwrap_or(false);
         c.count = v["count"].as_u64().map_or(c.count, |n| (n as usize).clamp(24, 5_000_000));
@@ -153,7 +130,7 @@ impl Prefs {
     pub fn to_json(&self) -> Value {
         let c = &self.choices;
         json!({
-            "purpose": c.purpose.key(), "custom_detail": c.custom_detail, "aim_for_count": c.aim_for_count, "count": c.count,
+            "preset": c.preset, "triangulate": c.triangulate, "mirror": c.mirror.word(), "engine": c.engine, "custom_detail": c.custom_detail, "aim_for_count": c.aim_for_count, "count": c.count,
             "rows": c.rows, "gpu": c.gpu, "pixels": c.pixels, "tour_done": self.tour_done,
             "recent": self.recent.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
         })
@@ -182,14 +159,15 @@ mod tests {
     #[test]
     fn prefs_round_trip() {
         let mut p = Prefs::default();
-        p.choices.pick(Purpose::LowPoly);
+        p.choices.pick("low-poly");
+        p.choices.engine = "godot".into();
         p.choices.pixels = 256;
         p.remember(std::path::Path::new("a.obj"));
         p.tour_done = true;
         let back = Prefs::from_json(&p.to_json());
         assert_eq!(back.choices, p.choices);
         assert_eq!(back.recent, p.recent);
-        assert!(back.tour_done && !back.choices.rows && back.choices.detail() == 12.0);
+        assert!(back.tour_done && !back.choices.rows && back.choices.detail() == 10.0 && back.choices.settings(true).export.triangulate);
         assert_eq!(Prefs::from_json(&Value::Null).choices, Choices::default()); // a missing or broken file gives the defaults
     }
 }

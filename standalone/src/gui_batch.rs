@@ -3,51 +3,29 @@
 //! The batch screen: a list of models, run one after another on a worker thread, with a results table.
 
 use super::{thousands, GREEN, MUTED, RED, TEXT};
-use curiomesh::{io, issues, retopo};
+use curiomesh::batch::{self, FileReport, Progress};
+use curiomesh::{issues, retopo, settings};
 use eframe::egui::{self, RichText};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
-pub const MODEL_EXTENSIONS: [&str; 4] = ["obj", "gltf", "glb", "ply"];
-
 pub fn is_model(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| MODEL_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| batch::READABLE.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 // ------------------------------------------------------------------------------------------------------ ADAPTER
-// The only place the batch (and the single-model run) call the engine. To switch to the engine's own batch API,
-// replace `retopo_checked` and the loop in `work` below.
+// Where the app calls the engine: `retopo_checked` for one model, `batch::run` in `Batch::start` for many.
 
-/// Retopologize one loaded model and check the result.
-pub fn retopo_checked(source: &io::Mesh, settings: &retopo::Settings, log: impl FnMut(&str)) -> Result<(retopo::Outcome, issues::Check), String> {
-    let out = retopo::retopo(source, settings, log)?;
+/// Retopologize one loaded model (mirroring when asked) and check the result.
+pub fn retopo_checked(source: &curiomesh::io::Mesh, settings: &settings::Settings, log: impl FnMut(&str)) -> Result<(retopo::Outcome, issues::Check), String> {
+    let out = settings::run(source, settings, log)?;
     let check = issues::check(&out.mesh);
     Ok((out, check))
 }
 
-/// Read, retopologize and save one file; returns its row for the table.
-fn process_one(path: &Path, out_dir: &Path, name: &str, settings: &retopo::Settings, log: impl FnMut(&str)) -> Result<Row, String> {
-    let source = io::weld(&io::read(path)?);
-    let (out, check) = retopo_checked(&source, settings, log)?;
-    let output = out_dir.join(name);
-    io::write_obj(&out.mesh, &output)?;
-    Ok(Row { before: source.faces(), after: check.faces, loss: out.loss, bad: check.bad, seconds: out.seconds, output })
-}
-
 // ------------------------------------------------------------------------------------------------------ state
-
-#[derive(Clone)]
-pub struct Row {
-    pub before: usize,
-    pub after: usize,
-    pub loss: f64,
-    pub bad: usize,
-    pub seconds: f64,
-    pub output: PathBuf,
-}
 
 #[derive(Clone, PartialEq)]
 pub enum Status {
@@ -63,7 +41,7 @@ pub struct Item {
     pub status: Status,
     pub steps: usize, // log lines seen: the search gives no percentage, so the bar fills as it reports
     pub line: String,
-    pub row: Option<Row>,
+    pub row: Option<FileReport>,
 }
 
 impl Item {
@@ -75,8 +53,8 @@ impl Item {
 enum Message {
     Started(usize),
     Line(usize, String),
-    Done(usize, Result<Row, String>),
-    Finished,
+    Finished(usize, FileReport),
+    End,
 }
 
 #[derive(Default)]
@@ -109,15 +87,13 @@ impl Batch {
         let mut found = Vec::new();
         for p in paths {
             if p.is_dir() {
-                let mut inside: Vec<PathBuf> = std::fs::read_dir(&p).into_iter().flatten().flatten().map(|e| e.path()).filter(|f| f.is_file() && is_model(f)).collect();
-                inside.sort();
-                found.extend(inside);
-            } else if is_model(&p) {
+                found.extend(batch::inputs(&[p]).unwrap_or_default());
+            } else {
                 found.push(p);
             }
         }
         let mut added = 0;
-        for p in found {
+        for p in found.into_iter().filter(|p| is_model(p)) {
             if !self.items.iter().any(|i| i.path == p) {
                 self.items.push(Item::new(p));
                 added += 1;
@@ -130,34 +106,34 @@ impl Batch {
         added
     }
 
-    pub fn start(&mut self, settings: retopo::Settings, ctx: &egui::Context) {
+    pub fn start(&mut self, settings: settings::Settings, ctx: &egui::Context) {
         let Some(out_dir) = self.out_dir.clone() else { return };
-        if let Err(e) = std::fs::create_dir_all(&out_dir) {
-            self.note = Some((format!("Couldn't make the output folder: {e}"), true));
+        if self.items.is_empty() {
             return;
         }
         for item in &mut self.items {
             *item = Item::new(std::mem::take(&mut item.path)); // every run starts the whole list again
         }
-        // Names are fixed up front so two models called alike never write the same file.
-        let mut used = HashSet::new();
-        let jobs: Vec<(usize, PathBuf, String)> = self.items.iter().enumerate().map(|(n, i)| {
-            let stem = i.path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-            let mut name = format!("{stem}_curiomesh.obj");
-            let mut k = 2;
-            while !used.insert(name.clone()) {
-                name = format!("{stem}_curiomesh_{k}.obj");
-                k += 1;
-            }
-            (n, i.path.clone(), name)
-        }).collect();
-        if jobs.is_empty() {
-            return;
-        }
+        let paths: Vec<PathBuf> = self.items.iter().map(|i| i.path.clone()).collect();
         self.cancel = Arc::new(AtomicBool::new(false));
         let (cancel, ctx) = (self.cancel.clone(), ctx.clone());
         let (send, receive) = mpsc::channel();
-        std::thread::spawn(move || work(jobs, out_dir, settings, cancel, send, ctx));
+        std::thread::spawn(move || {
+            let on_progress = |p: Progress| {
+                let _ = send.send(match p {
+                    Progress::Started { index, .. } => Message::Started(index),
+                    Progress::Line { index, line } => Message::Line(index, line.trim().to_string()),
+                    Progress::Finished { index, report, .. } => Message::Finished(index, report.clone()),
+                });
+                ctx.request_repaint();
+            };
+            // One file at a time, so the PC stays usable. The engine skips the rest once `cancel` is set.
+            if let Err(e) = batch::run(&paths, &settings, &out_dir, 1, &on_progress, &cancel) {
+                let _ = send.send(Message::Line(0, e));
+            }
+            let _ = send.send(Message::End);
+            ctx.request_repaint();
+        });
         self.run = Some(receive);
         self.started = Some(Instant::now());
         self.elapsed = 0.0;
@@ -182,19 +158,20 @@ impl Batch {
                     self.items[i].steps += 1;
                     self.items[i].line = line;
                 }
-                Message::Done(i, Ok(row)) => (self.items[i].status, self.items[i].row) = (Status::Done, Some(row)),
-                Message::Done(i, Err(e)) => self.items[i].status = Status::Failed(e),
-                Message::Finished => finished = true,
+                Message::Finished(i, report) => {
+                    self.items[i].status = match &report.status {
+                        batch::Status::Ok => Status::Done,
+                        batch::Status::Failed(e) => Status::Failed(e.clone()),
+                        batch::Status::Cancelled => Status::Cancelled,
+                    };
+                    self.items[i].row = (report.status == batch::Status::Ok).then_some(report);
+                }
+                Message::End => finished = true,
             }
         }
         if finished {
             self.run = None;
             let stopped = self.cancel.load(Ordering::Relaxed);
-            for item in &mut self.items {
-                if item.status == Status::Queued && stopped {
-                    item.status = Status::Cancelled;
-                }
-            }
             let ok = self.items.iter().filter(|i| i.status == Status::Done).count();
             let bad = self.items.iter().filter(|i| matches!(i.status, Status::Failed(_))).count();
             let first = self.items.iter().find_map(|i| if let Status::Failed(e) = &i.status { Some(format!(" First problem: {e}")) } else { None }).unwrap_or_default();
@@ -207,44 +184,10 @@ impl Batch {
         self.items.iter().filter(|i| !matches!(i.status, Status::Queued | Status::Running)).count()
     }
 
-    pub fn csv(&self) -> String {
-        let mut out = String::from("file,status,faces_before,faces_after,view_change_percent,bad_faces,seconds,output\n");
-        let quote = |s: &str| if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() };
-        for i in &self.items {
-            let name = quote(&i.path.to_string_lossy());
-            let status = quote(&match &i.status {
-                Status::Done => "ok".to_string(),
-                Status::Failed(e) => format!("failed: {e}"),
-                Status::Cancelled => "cancelled".into(),
-                _ => "not run".into(),
-            });
-            match &i.row {
-                Some(r) => out += &format!("{name},{status},{},{},{:.2},{},{:.1},{}\n", r.before, r.after, r.loss, r.bad, r.seconds, quote(&r.output.to_string_lossy())),
-                None => out += &format!("{name},{status},,,,,,\n"),
-            }
-        }
-        out
+    /// The reports of the finished models, in list order, for the CSV.
+    pub fn reports(&self) -> Vec<FileReport> {
+        self.items.iter().filter_map(|i| i.row.clone()).collect()
     }
-}
-
-fn work(jobs: Vec<(usize, PathBuf, String)>, out_dir: PathBuf, settings: retopo::Settings, cancel: Arc<AtomicBool>, send: mpsc::Sender<Message>, ctx: egui::Context) {
-    for (i, path, name) in jobs {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        let _ = send.send(Message::Started(i));
-        ctx.request_repaint();
-        let log = |line: &str| {
-            let _ = send.send(Message::Line(i, line.trim().to_string()));
-            ctx.request_repaint();
-        };
-        // A model that panics deep in the engine fails its own row, not the whole batch.
-        let row = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process_one(&path, &out_dir, &name, &settings, log))).unwrap_or_else(|_| Err("the engine stopped on this model".into()));
-        let _ = send.send(Message::Done(i, row));
-        ctx.request_repaint();
-    }
-    let _ = send.send(Message::Finished);
-    ctx.request_repaint();
 }
 
 // ------------------------------------------------------------------------------------------------------ the screen
@@ -259,7 +202,7 @@ impl Batch {
             ui.add_space(12.0);
             ui.add_enabled_ui(idle, |ui| {
                 if ui.button("Add files...").on_hover_text("Choose OBJ, glTF, GLB or PLY files to add to the list.").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("3D models", &MODEL_EXTENSIONS).pick_files() {
+                    if let Some(files) = rfd::FileDialog::new().add_filter("3D models", &batch::READABLE).pick_files() {
                         self.add(files);
                     }
                 }
@@ -278,13 +221,13 @@ impl Batch {
             ui.label(RichText::new("Save results in").color(MUTED));
             let text = self.out_dir.as_ref().map_or("not chosen yet".to_string(), |d| d.display().to_string());
             ui.add_enabled_ui(idle, |ui| {
-                if ui.button("Choose...").on_hover_text("Pick the folder the new OBJ files go into.").clicked() {
+                if ui.button("Choose...").on_hover_text("Pick the folder the new files go into.").clicked() {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         self.out_dir = Some(dir);
                     }
                 }
             });
-            ui.add(egui::Label::new(RichText::new(text).color(TEXT)).truncate()).on_hover_text("Every result is saved here as NAME_curiomesh.obj.");
+            ui.add(egui::Label::new(RichText::new(text).color(TEXT)).truncate()).on_hover_text("Every result is saved here as NAME_curiomesh.obj (or .glb for a glTF engine).");
         });
         let total = self.items.len();
         if total > 0 {
@@ -295,7 +238,7 @@ impl Batch {
                 let export = ui.add_enabled(done > 0 && idle, egui::Button::new("Export table (CSV)")).on_hover_text("Save the results table as a CSV file for a spreadsheet.");
                 if export.clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name("curiomesh_batch.csv").save_file() {
-                        self.note = Some(match std::fs::write(&path, self.csv()) {
+                        self.note = Some(match batch::write_csv(&self.reports(), &path) {
                             Ok(()) => (format!("Saved {}", path.display()), false),
                             Err(e) => (format!("Couldn't save: {e}"), true),
                         });
@@ -353,8 +296,8 @@ impl Batch {
                     }
                     match &item.row {
                         Some(r) => {
-                            ui.label(thousands(r.before));
-                            ui.label(thousands(r.after));
+                            ui.label(thousands(r.source_faces));
+                            ui.label(thousands(r.faces));
                             ui.label(format!("{:.1}%", r.loss));
                             ui.label(RichText::new(r.bad.to_string()).color(if r.bad == 0 { GREEN } else { RED }));
                             ui.label(format!("{:.1} s", r.seconds));
@@ -362,7 +305,7 @@ impl Batch {
                                 if ui.button("Open result").on_hover_text("Compare the original and the result in the viewer.").clicked() {
                                     action = Some(Action::OpenResult(n));
                                 }
-                                if ui.button("Show in folder").on_hover_text("Show the saved OBJ in your file browser.").clicked() {
+                                if ui.button("Show in folder").on_hover_text("Show the saved file in your file browser.").clicked() {
                                     action = Some(Action::ShowInFolder(r.output.clone()));
                                 }
                             });
@@ -371,9 +314,7 @@ impl Batch {
                             for _ in 0..5 {
                                 ui.label("");
                             }
-                            if matches!(item.status, Status::Failed(_)) {
-                                ui.label(""); // the reason is in the bar's tooltip and the note above
-                            } else if idle && ui.small_button("Remove").on_hover_text("Take this model off the list.").clicked() {
+                            if !matches!(item.status, Status::Failed(_)) && idle && ui.small_button("Remove").on_hover_text("Take this model off the list.").clicked() {
                                 remove = Some(n);
                             }
                         }
@@ -407,19 +348,6 @@ pub fn show_in_folder(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn csv_quotes_and_lists_every_row() {
-        let mut b = Batch::default();
-        let row = Row { before: 10, after: 4, loss: 1.234, bad: 0, seconds: 2.0, output: "o.obj".into() };
-        b.items.push(Item { status: Status::Done, row: Some(row), ..Item::new("a,b.obj".into()) });
-        b.items.push(Item { status: Status::Failed("no \"faces\"".into()), ..Item::new("c.ply".into()) });
-        let csv = b.csv();
-        let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[1], "\"a,b.obj\",ok,10,4,1.23,0,2.0,o.obj");
-        assert!(lines[2].starts_with("c.ply,\"failed: no \"\"faces\"\"\""));
-    }
 
     #[test]
     fn only_model_files_count() {
