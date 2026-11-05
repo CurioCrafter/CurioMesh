@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.6 - unreleased
+
+### Game engines
+- **Texture Sets** on the bake (1 to 16): Normal + Color onto several sets of maps, each its own material, with whole
+  parts kept together in sets of about equal area. Lit in Godot, three 1024 sets shade like one.
+- **More engines in Export for Game Engine:** Roblox (FBX unit scale, tangents, 20,000 triangles per mesh, 1024
+  textures), Web and glTF (.glb for three.js, Babylon.js, Bevy, Sketchfab), CryEngine and O3DE (DirectX normal maps),
+  and **Custom**: FBX, .glb or OBJ, OpenGL or DirectX normal maps, a triangle limit and a largest texture size.
+- **Auto-split:** a mesh over the engine's triangle limit is written as pieces under it, cut along texture sets and
+  parts. FBX and OBJ files now point at their PNG maps, so engines link the textures on import.
+
+### README
+- The star chart is drawn from GitHub's own star dates, as a quad mesh (`scripts/star_chart.py`).
+
 ## 0.9.5 - 2026-11-05
 
 ### Game engines

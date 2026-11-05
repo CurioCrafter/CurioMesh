@@ -347,6 +347,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     lod2_percent: bpy.props.FloatProperty(name="LOD2", description="Faces of the third LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[2], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
     bake_detail: bpy.props.EnumProperty(name="Bake Detail", description="On Apply, bake your mesh's detail into textures on the result, on the CPU or GPU set for Cycles. Can take minutes", items=BAKE_ITEMS, default="OFF")
     bake_size: bpy.props.EnumProperty(name="Bake Size", description="Width and height of the baked textures", items=BAKE_SIZES, default="2048")
+    bake_sets: bpy.props.IntProperty(name="Texture Sets", description="Normal + Color: bake onto this many sets of maps, each its own material, so a big model keeps detail. Whole parts go together; game engines get one mesh per set if they need it", default=1, min=1, max=16)
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Relax-and-project passes that settle the new quads onto your original surface", default=2, min=0, max=30)
     feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Edges sharper than this (degrees) count as hard edges and are kept", default=40.0, min=5.0, max=170.0)
     pure_quads: bpy.props.BoolProperty(name="Pure Quads", description="Make every face of a Whole Mesh result a quad. Turn off for a faster preview of big meshes; a few triangles stay", default=True)
@@ -2735,11 +2736,18 @@ def _bake_result(source, out, gs, new_uvs: bool) -> str:
             material = slot.material
             slot.link = "DATA"
             slot.material = material
+    color = gs.bake_detail == "NORMAL_COLOR"
     try:
-        images = textures.bake_detail(source, out, with_color=gs.bake_detail == "NORMAL_COLOR", resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
+        if color and gs.bake_sets > 1:
+            piece = segments.seg["piece"]
+            labels = piece if piece is not None and len(piece) == len(out.data.polygons) else None
+            images = textures.bake_texture_sets(source, out, count=gs.bake_sets, labels=labels, resolution=int(gs.bake_size), cage=cage)
+        else:
+            images = textures.bake_detail(source, out, with_color=color, resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
     except Exception as exc:  # the bake has its own rollback, and the quads are worth keeping
         return f". Bake failed: {exc}"
-    return f", {len(images)} textures baked at {gs.bake_size} (a Triangulate modifier keeps the bake's triangles on export)"
+    sets = f" in {len(images) // 2} texture sets" if color and len(images) > 2 else ""
+    return f", {len(images)} textures baked at {gs.bake_size}{sets} (a Triangulate modifier keeps the bake's triangles on export)"
 
 
 def _write_instances(out, source, instances) -> int:
@@ -3880,6 +3888,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         layout.prop(gs, "bake_detail", text="Bake")
         if gs.bake_detail != "OFF":
             layout.prop(gs, "bake_size", text="")
+        if gs.bake_detail == "NORMAL_COLOR":
+            layout.prop(gs, "bake_sets")
         if not previewing and not compact:
             overlay.wrap_label(layout, "Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
 
@@ -3978,6 +3988,8 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
         layout.prop(gs, "bake_detail", text="Bake")
         if gs.bake_detail != "OFF":
             layout.prop(gs, "bake_size", text="")
+        if gs.bake_detail == "NORMAL_COLOR":
+            layout.prop(gs, "bake_sets")
         elif obj is not None and obj.data.uv_layers:
             overlay.wrap_label(layout, "For textured game assets, Normal + Color is recommended", icon="INFO", width=36, limit=2)
 

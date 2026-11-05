@@ -221,7 +221,20 @@ A redo is refused when it would make more faces than it replaces, and the panel 
 - **Make LOD Set** makes three new objects named `_LOD0`, `_LOD1` and `_LOD2` for game engines, each a Reduce To of your mesh at percents you choose (50, 25 and 12.5% by default). Only the first runs the full search.
 - **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces.
 - Apply marks edges sharper than 60 degrees as hard, and the result takes its shading from the nearest source points, so flat sides stay flat.
-- **Export for Game Engine** (File > Export > CurioMesh Game Asset, or the button after Apply) writes the selected meshes for **Unreal**, **Unity** or **Godot**. It writes FBX plus PNG maps for Unreal and Unity, and one .glb with the textures inside for Godot. It keeps the bake's triangles, and gives Unreal its normal map with the green channel flipped (Unreal reads DirectX normal maps; Blender, Unity and Godot read OpenGL ones). Your images in Blender are not changed.
+- **Texture Sets** (next to Bake Size, with Normal + Color): bake onto 1 to 16 sets of maps, each its own material, so a big model keeps its detail. Whole parts go together, in sets of about equal area. Faces on a set's border are split, as on any UV seam.
+- **Export for Game Engine** (File > Export > CurioMesh Game Asset, or the button after Apply) writes the selected meshes and their maps for the engine you pick. It keeps the bake's triangles, and your objects and images in Blender are not changed.
+
+  | Pick | Writes | Normal map | Limits | Tested here |
+  |---|---|---|---|---|
+  | Unreal | FBX + PNG | green flipped (DirectX) | | Unreal 5.7 |
+  | Unity | FBX turned and scaled for Unity + PNG | as baked (OpenGL) | | Unity 6 |
+  | Godot | .glb, textures inside | as baked | | Godot 4.7 |
+  | Roblox | FBX at FBX unit scale, with tangents + PNG | as baked | 20,000 triangles per mesh, 1024 textures | no, from Roblox's docs |
+  | Web and glTF (three.js, Babylon.js, Bevy, Sketchfab) | .glb | as baked (glTF is green up) | | no |
+  | CryEngine, O3DE | FBX + PNG | green flipped | | no |
+  | Custom | FBX, .glb or OBJ | your pick | your triangle limit and texture size | |
+
+  A mesh over the triangle limit is written as several pieces under it, cut along texture sets first and then along parts, so each piece uses one set of maps.
 - **Tested in Unreal 5.7, Unity 6 and Godot 4.7** under a light circling the model from 8 sides. The test used a 47,214-face sculpt reduced to 1,068 faces with a 1024 bake, compared with the original by how far the shading differs (lower is closer):
 
   | Engine, front view | No normal map | Exported normal map | Normal map in the wrong format |
