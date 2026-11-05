@@ -432,7 +432,7 @@ class FindJob(view.PartJob):
                 values, labels = np.unique(labels, return_inverse=True)
                 labels = labels.reshape(-1)
                 piece = np.searchsorted(values, piece)
-            for _round in range(2):  # a segment finer than the result's faces gets result faces that are not it: it joins a neighbour
+            for _round in range(4):  # a segment finer than the result's faces gets result faces that are not it: it joins a neighbour
                 keep = set(carried(labels, box["old"], locked))
                 off = [k for k in _mismatched(labels, piece, tree.areas, areas, tree.centroids, centres) if k not in keep]
                 if not off:
