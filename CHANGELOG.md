@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.6 - unreleased
+## 0.9.6 - 2026-11-05
 
 ### Game engines
 - **Texture Sets** on the bake (1 to 16): Normal + Color onto several sets of maps, each its own material, with whole
