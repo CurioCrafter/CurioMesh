@@ -222,14 +222,15 @@ A redo is refused when it would make more faces than it replaces, and the panel 
 - **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces.
 - Apply marks edges sharper than 60 degrees as hard, and the result takes its shading from the nearest source points, so flat sides stay flat.
 - **Export for Game Engine** (File > Export > CurioMesh Game Asset, or the button after Apply) writes the selected meshes for **Unreal**, **Unity** or **Godot**. It writes FBX plus PNG maps for Unreal and Unity, and one .glb with the textures inside for Godot. It keeps the bake's triangles, and gives Unreal its normal map with the green channel flipped (Unreal reads DirectX normal maps; Blender, Unity and Godot read OpenGL ones). Your images in Blender are not changed.
-- **Tested in Unreal 5.7 and Godot 4.7** under a light circling the model from 8 sides. The test used a 47,214-face sculpt reduced to 1,068 faces with a 1024 bake, compared with the original by how far the shading differs (lower is closer):
+- **Tested in Unreal 5.7, Unity 6 and Godot 4.7** under a light circling the model from 8 sides. The test used a 47,214-face sculpt reduced to 1,068 faces with a 1024 bake, compared with the original by how far the shading differs (lower is closer):
 
   | Engine, front view | No normal map | Exported normal map | Normal map in the wrong format |
   |---|---|---|---|
   | Godot 4.7 (.glb) | 0.83 | **0.37** | 1.01 |
   | Unreal 5.7 (FBX + PNG) | 0.180 | **0.157** | 0.177 |
+  | Unity 6 (FBX + PNG) | 0.232 | **0.095** | 0.267 |
 
-  Imported with default settings, the exported files gave the closest result in both engines. Unity reads normal maps the same way as Godot, but has not been tested in Unity itself yet.
+  Imported with default settings, the exported files gave the closest result in all three engines.
 - A plain FBX export sends no textures, because a bake lives only inside the .blend until saved, and a plain glTF export lets the engine choose its own triangles. Use Export for Game Engine, or save the images and tick Apply Modifiers.
 - Baking blocks Blender until it finishes and reads the surface nearest to each texel, so parts that touch can bleed into each other. Only the normal map and base colour are baked, not roughness or metal.
 

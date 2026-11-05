@@ -1,6 +1,6 @@
 """Export for Game Engine: the selected meshes and their baked textures, set up the way each engine reads them.
 
-Tested in Unreal 5.7 and Godot 4.7 by lighting a baked result from eight sides next to its source. Blender, Godot and
+Tested in Unreal 5.7, Unity 6 and Godot 4.7 by lighting a baked result from eight sides next to its source. Blender, Godot and
 Unity read normal maps green-up (OpenGL); Unreal reads them green-down (DirectX), so its copy gets the green channel
 flipped. Your images in Blender are never changed. A baked image lives only inside the .blend until saved, so FBX
 exports would reach the engine without textures: the maps are written as PNG files next to the mesh.
