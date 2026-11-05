@@ -114,6 +114,7 @@ PRESETS = {
 }
 
 state = {
+    "no_ask": False,  # the user ticked "Don't ask again this session" in a long-job dialog
     "source": "",
     "sig": None,
     "changed_at": 0.0,
@@ -1575,14 +1576,22 @@ def effort_settings(gs) -> hardware.Settings:
     return hardware.settings_for(gs.auto_effort, machine_info())
 
 
-def job_rating(gs, faces: int, sig=None) -> tuple[str, str, hardware.Settings]:
-    """(level, sentence, settings) for a mesh of this many faces on this computer."""
+def job_cost(gs, faces: int, sig=None, bakes: int = 1) -> tuple[str, str, hardware.Settings, float, float]:
+    """(level, sentence, settings, search seconds, bake seconds) for a mesh of this many faces on this computer. The sentence includes the bake."""
     machine = state["machine"]
     settings = hardware.settings_for(gs.auto_effort, machine)
     parts = state["parts"][1] if state["parts"] is not None and state["parts"][0] == sig else None
-    slow = gs.auto_style == "ROWS" or gs.auto_method in {"FIELD", "QUADRIFLOW"} or gs.multires_on
-    level, text = hardware.rate(machine, hardware.estimate(faces, parts, settings, state["rays"]), settings, slow)
-    return level, text, settings
+    factor = hardware.style_factor(gs.auto_style, gs.auto_method)
+    est = hardware.estimate(faces, parts, settings, state["rays"])
+    est["seconds"] *= factor
+    level, text = hardware.rate(machine, est, settings, factor > 1 or gs.multires_on)
+    bake_s = bakes * hardware.bake_seconds(int(gs.bake_size), gs.bake_detail, gs.bake_sets, machine)
+    return level, text if level == "TOO_BIG" else hardware.with_bake(text, bake_s), settings, est["seconds"], bake_s
+
+
+def job_rating(gs, faces: int, sig=None) -> tuple[str, str, hardware.Settings]:
+    """(level, sentence, settings) for a mesh of this many faces on this computer."""
+    return job_cost(gs, faces, sig)[:3]
 
 
 def _solve_inputs(gs, src, lines, paint):
@@ -2833,7 +2842,45 @@ def _lod_finished(context, source, report) -> None:
     context.view_layer.objects.active = first
 
 
-class CURIOMESH_OT_guided_make_lods(bpy.types.Operator):
+class _AskFirst:
+    """Mixin: a long job asks first, in a small dialog with the cheaper ways, unless this session was told not to ask."""
+
+    dont_ask: bpy.props.BoolProperty(name="Don't ask again this session", default=False, options={"SKIP_SAVE"})
+
+    def _question(self, context) -> list[str]:
+        """Lines for the dialog, or an empty list when the job is short enough to just run."""
+        return []
+
+    def invoke(self, context, event):
+        machine_info()
+        lines = [] if state["no_ask"] or bpy.app.background else self._question(context)
+        if not lines:
+            return self.execute(context)
+        self._lines = lines
+        return context.window_manager.invoke_props_dialog(self, width=440)
+
+    def draw(self, context):
+        for i, line in enumerate(self._lines):
+            overlay.wrap_label(self.layout, line, icon="TIME" if i == 0 else "BLANK1", width=60, limit=3)
+        self.layout.prop(self, "dont_ask")
+
+    def _remember(self) -> None:
+        state["no_ask"] = state["no_ask"] or self.dont_ask
+
+
+def _ask_lines(context, bakes: int = 1, applying: bool = False) -> list[str]:
+    """What the long-job dialog says, or [] when the job is short: the time here, then what would make it cheaper."""
+    gs = _gs(context)
+    obj = _source_mesh(context)
+    faces = len(obj.data.polygons) if obj is not None else 0
+    level, text, _settings, seconds, bake_s = job_cost(gs, faces, state["src"]["sig"] if state["src"] is not None else None, bakes)
+    if not hardware.needs_confirm(level, seconds, bake_s, applying):
+        return []
+    head = f"The bake takes {hardware.clock(bake_s)} on this PC and Blender is frozen until it ends." if applying else text
+    return [head, "To make it cheaper first:"] + ["- " + way for way in hardware.cheaper_ways(gs.auto_style, gs.bake_detail, int(gs.bake_size), gs.auto_effort)]
+
+
+class CURIOMESH_OT_guided_make_lods(_AskFirst, bpy.types.Operator):
     bl_idname = "curiomesh.guided_make_lods"
     bl_label = "Make LOD Set"
     bl_description = "Make three new objects named for game engines (_LOD0, _LOD1, _LOD2), each a Reduce To of your mesh at the percents here. Blender stays usable, and only the first needs the full search. Uses your UV and bake settings"
@@ -2843,7 +2890,11 @@ class CURIOMESH_OT_guided_make_lods(bpy.types.Operator):
     def poll(cls, context):
         return _source_mesh(context) is not None
 
+    def _question(self, context):
+        return _ask_lines(context, bakes=profiles.LOD_LEVELS)
+
     def execute(self, context):
+        self._remember()
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         gs = _gs(context)
@@ -2863,7 +2914,7 @@ class CURIOMESH_OT_guided_make_lods(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CURIOMESH_OT_guided_apply(bpy.types.Operator):
+class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
     bl_idname = "curiomesh.guided_apply"
     bl_label = "Apply"
     bl_description = "Write the preview as <name>_Retopo (or into your object, see Result). Undo restores"
@@ -2873,7 +2924,11 @@ class CURIOMESH_OT_guided_apply(bpy.types.Operator):
     def poll(cls, context):
         return state["res"] is not None and state_source() is not None
 
+    def _question(self, context):
+        return _ask_lines(context, applying=True)
+
     def execute(self, context):
+        self._remember()
         gs = _gs(context)
         source = state_source()
         res = state["res"]
@@ -2963,7 +3018,7 @@ class CURIOMESH_OT_guided_stop(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CURIOMESH_OT_guided_auto_start(bpy.types.Operator):
+class CURIOMESH_OT_guided_auto_start(_AskFirst, bpy.types.Operator):
     bl_idname = "curiomesh.guided_auto_start"
     bl_label = "Start"
     bl_description = "Start Auto Segments on the selected mesh. A bar shows the progress and Blender stays usable. Starting again throws away the areas you fixed"
@@ -2973,7 +3028,11 @@ class CURIOMESH_OT_guided_auto_start(bpy.types.Operator):
     def poll(cls, context):
         return _source_mesh(context) is not None
 
+    def _question(self, context):
+        return _ask_lines(context)
+
     def execute(self, context):
+        self._remember()
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         gs = _gs(context)
@@ -3536,7 +3595,17 @@ class CURIOMESH_OT_guided_auto_all(bpy.types.Operator):
             gs.multires_on = True
         gs.bake_detail, gs.bake_size = choice["bake"], choice["bake_size"]
         gs.auto_why = choice["why"]
-        return bpy.ops.curiomesh.guided_auto_start()
+        return {"CANCELLED"} if bpy.ops.curiomesh.guided_auto_start("INVOKE_DEFAULT") == {"CANCELLED"} else {"FINISHED"}  # may ask first when the job is long
+
+
+def _tag(layout, line: tuple[str, bool], suffix: str = "") -> None:
+    """A one-line cost tag under an option: nothing when the option is cheap."""
+    if line[0]:
+        layout.label(text=line[0] + suffix, icon="ERROR" if line[1] else "TIME")
+
+
+def _bake_tag(layout, gs) -> None:
+    _tag(layout, hardware.cost_tag(hardware.bake_seconds(int(gs.bake_size), gs.bake_detail, gs.bake_sets, state["machine"])), ", blocks Blender")
 
 
 class CURIOMESH_PT_guided(bpy.types.Panel):
@@ -3615,6 +3684,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 row.prop(gs, "bake_detail", text="Bake")
                 if gs.bake_detail != "OFF":
                     row.prop(gs, "bake_size", text="")
+                col.label(text="Slow: also builds the levels on Apply", icon="TIME")
+                _bake_tag(col, gs)
 
         on = sum((gs.region_use, gs.loop_use, gs.guide_use, gs.bend_use, gs.density_use))
         body = None if solids else fold(layout, gs, "ui_more_open", "More Options" + (f" ({on} on)" if on else ""))  # names of what is on were cut in a narrow sidebar; none of them shape solids
@@ -3633,6 +3704,10 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
                 col.prop(gs, "lod1_percent")
                 col.prop(gs, "lod2_percent")
                 col.operator("curiomesh.guided_make_lods", icon="MOD_DECIM")
+                if state["machine"] is not None:
+                    _, _, _, seconds, bake_s = job_cost(gs, faces, state["src"]["sig"] if state["src"] is not None else None, profiles.LOD_LEVELS)
+                    _tag(col, hardware.cost_tag(seconds + bake_s))
+                col.label(text="Searches once, then makes 3 sizes", icon="INFO")
                 for line in state["lod_report"].split(" | ") if state["lod_report"] else ():
                     overlay.wrap_label(col, line, icon="CHECKMARK", width=36, limit=2)
 
@@ -3752,6 +3827,9 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         col.prop(gs, "auto_instances", toggle=True, icon="LINKED")
         col.prop(gs, "auto_style")
         col.prop(gs, "auto_method")
+        factor = hardware.style_factor(gs.auto_style, gs.auto_method)
+        if factor > 1:
+            col.label(text=f"Slow: about {factor:g}x Keep Detail, or more", icon="TIME")
         col.row(align=True).prop(gs, "auto_output", expand=True)
 
     @staticmethod
@@ -3763,6 +3841,8 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         else:
             for line in hardware.describe(machine, turbo_words(turbo.status())):
                 overlay.wrap_label(col, line, icon="BLANK1", width=36, limit=2)
+            if hardware.weak_pc(machine):
+                overlay.wrap_label(col, hardware.weak_pc(machine), icon="ERROR", width=36, limit=5)
         sub = col.column()
         sub.enabled = not searching
         sub.prop(gs, "auto_effort")
@@ -3890,6 +3970,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             layout.prop(gs, "bake_size", text="")
         if gs.bake_detail == "NORMAL_COLOR":
             layout.prop(gs, "bake_sets")
+        _bake_tag(layout, gs)
         if not previewing and not compact:
             overlay.wrap_label(layout, "Nothing changes until you press Apply.", icon="LOCKED", width=36, limit=2)
 
@@ -3992,6 +4073,7 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
             layout.prop(gs, "bake_sets")
         elif obj is not None and obj.data.uv_layers:
             overlay.wrap_label(layout, "For textured game assets, Normal + Color is recommended", icon="INFO", width=36, limit=2)
+        _bake_tag(layout, gs)
 
 
 class CURIOMESH_PT_guided_shapes(_AutoSub, bpy.types.Panel):

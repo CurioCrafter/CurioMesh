@@ -3,11 +3,21 @@
 ## 0.9.7 - unreleased
 
 ### Auto Segments
-- **Fewer long thin quads on flat areas** (Keep Detail and Balanced): before pairing, flat areas that reduction left as
+- **Fewer long thin quads on flat areas** (Keep Detail; Balanced uses the same step): before pairing, flat areas that reduction left as
   long thin triangles get a few points inside, graded from small at their edges to large in the middle, so flat
   plates get far fewer fans of thin spokes from bolts and corners. Their outline stays exactly where it was. On four
   test models the face count stayed within 2%, thin quads on flat areas dropped by a third or more on two of them (the
   other two barely changed), and the Issue Finder total went down or stayed level.
+
+### Know the cost before you press Start
+- **Cost tags** in the panel: Bake Detail, LOD Set, Clean Rows / Field Rows / QuadriFlow and Multires say "Slow" or
+  "Heavy" with the time they add on this computer, and whether they block Blender.
+- **A fuller time estimate** before Start: it now counts the style's slowdown and the bake ("plus about 1 minute of
+  baking that blocks Blender").
+- **Start, Make LOD Set and Auto ask first** when the job is rated large or expected to take over 10 minutes, and Apply
+  asks when its bake alone takes over 2 minutes. The dialog says the time here and the cheaper ways (Effort Light, Keep
+  Detail, a smaller bake, Export Job). "Don't ask again this session" is in it.
+- **A small-PC notice** in This Computer (4 cores or fewer, 8 GB or less, or no graphics card for Cycles).
 
 ## 0.9.6 - 2026-11-05
 
