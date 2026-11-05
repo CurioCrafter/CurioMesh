@@ -5,7 +5,13 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")] // no console window behind the app
 
-use curiomesh::{io, issues, retopo};
+mod gui_batch;
+mod gui_guide;
+mod gui_prefs;
+
+use curiomesh::{io, issues};
+use gui_batch::Batch;
+use gui_prefs::{Prefs, Purpose};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextStyle, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -22,23 +28,6 @@ const RED: Color32 = Color32::from_rgb(229, 72, 77);
 const GREEN: Color32 = Color32::from_rgb(124, 201, 138);
 
 const MOST_DRAWN: usize = 600_000; // triangles drawn per view: a bigger model is thinned out on screen, not in the work
-
-#[derive(Clone, Copy, PartialEq)]
-enum Purpose {
-    Game,
-    Scan,
-    Custom,
-}
-
-impl Purpose {
-    fn detail(self, custom: f64) -> f64 {
-        match self {
-            Purpose::Game => 6.0,
-            Purpose::Scan => 2.0,
-            Purpose::Custom => custom,
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Show {
@@ -132,14 +121,19 @@ struct Loaded {
     drawable: Drawable,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Screen {
+    Home,
+    Model,
+    Batch,
+}
+
 struct App {
+    screen: Screen,
+    prefs: Prefs,
+    saved: String, // the prefs as last written, to save only on a change
     model: Option<Loaded>,
     result: Option<(Finished, Drawable)>,
-    purpose: Purpose,
-    custom_detail: f64,
-    aim_for_count: bool,
-    count: usize,
-    rows: bool,
     running: Option<mpsc::Receiver<Message>>,
     last_line: String,
     note: Option<(String, bool)>, // (message, is an error)
@@ -147,21 +141,31 @@ struct App {
     show: Show,
     split: f32,
     picked_spot: Option<usize>,
-    shot: Option<PathBuf>, // CURIOMESH_SHOT: save a screenshot here once the result is in, then close (for the README)
+    batch: Batch,
+    guide_open: bool,
+    guide_topic: usize,
+    tour: Option<usize>, // the step of the first-run tour being shown
+    tour_forget: bool,
+    // For screenshots (CURIOMESH_SHOT=file.png): save the picture once the screen is ready, then close.
+    shot: Option<PathBuf>,
     shot_asked: bool,
+    frames: u32,
+    batch_demo: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext) -> App {
         style(&cc.egui_ctx);
+        let prefs = Prefs::load();
+        let env = |k: &str| std::env::var(k).unwrap_or_default();
         let mut app = App {
+            screen: Screen::Home,
+            saved: prefs.to_json().to_string(),
+            tour: (!prefs.tour_done).then_some(0),
+            tour_forget: true,
+            prefs,
             model: None,
             result: None,
-            purpose: Purpose::Game,
-            custom_detail: 4.0,
-            aim_for_count: false,
-            count: 5000,
-            rows: true,
             running: None,
             last_line: String::new(),
             note: None,
@@ -169,13 +173,40 @@ impl App {
             show: Show::Split,
             split: 0.5,
             picked_spot: None,
+            batch: Batch::default(),
+            guide_open: false,
+            guide_topic: 0,
             shot: std::env::var_os("CURIOMESH_SHOT").map(PathBuf::from),
             shot_asked: false,
+            frames: 0,
+            batch_demo: false,
         };
-        if let Some(path) = std::env::args_os().nth(1) {
-            app.open(PathBuf::from(path), &cc.egui_ctx); // a model dropped onto the program's icon
+        let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+        if files.len() == 1 && !files[0].is_dir() {
+            app.open(files[0].clone(), &cc.egui_ctx); // a model dropped onto the program's icon
             if app.shot.is_some() {
                 app.start(&cc.egui_ctx);
+            }
+        } else if !files.is_empty() {
+            app.drop_files(files, &cc.egui_ctx);
+        }
+        // Switches for screenshots and tests.
+        match env("CURIOMESH_SCREEN").as_str() {
+            "batch" => app.screen = Screen::Batch,
+            "guide" => app.guide_open = true,
+            s if s.starts_with("guide:") => (app.guide_open, app.guide_topic) = (true, s[6..].parse().unwrap_or(0)),
+            _ => {}
+        }
+        let demo: Vec<PathBuf> = env("CURIOMESH_BATCH").split(';').filter(|s| !s.is_empty()).map(PathBuf::from).collect();
+        if !demo.is_empty() {
+            app.screen = Screen::Batch;
+            app.batch.add(demo);
+            if let Some(out) = std::env::var_os("CURIOMESH_OUT") {
+                app.batch.out_dir = Some(out.into());
+            }
+            if app.shot.is_some() {
+                app.batch_demo = true;
+                app.batch.start(app.prefs.choices.settings(false), &cc.egui_ctx);
             }
         }
         app
@@ -189,28 +220,50 @@ impl App {
             Ok(mesh) => {
                 let mesh = io::weld(&mesh);
                 self.camera = Some(Camera::framing(&mesh.points));
-                self.count = (mesh.faces() / 8).max(100);
+                self.prefs.choices.count = (mesh.faces() / 8).max(100);
+                self.prefs.remember(&path);
                 self.model = Some(Loaded { drawable: Drawable::of(&mesh), path, mesh });
                 self.result = None;
                 self.picked_spot = None;
                 self.note = None;
                 self.show = Show::Split;
+                self.screen = Screen::Model;
             }
             Err(e) => self.note = Some((format!("Couldn't open that file. {e}"), true)),
         }
         ctx.request_repaint();
     }
 
+    /// Files dropped on the window or given on the command line: one model opens, anything more goes to the batch.
+    fn drop_files(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        if self.screen != Screen::Batch && paths.len() == 1 && !paths[0].is_dir() {
+            self.open(paths[0].clone(), ctx);
+        } else if !self.batch.running() {
+            self.batch.add(paths);
+            self.screen = Screen::Batch;
+        }
+    }
+
+    /// The batch table's "Open result": the original and the saved result, side by side in the viewer.
+    fn open_result(&mut self, n: usize, ctx: &egui::Context) {
+        let Some((path, Some(row))) = self.batch.items.get(n).map(|i| (i.path.clone(), i.row.clone())) else { return };
+        self.open(path, ctx);
+        if self.screen != Screen::Model {
+            return;
+        }
+        match io::read(&row.output) {
+            Ok(mesh) => {
+                let drawable = Drawable::of(&mesh);
+                self.result = Some((Finished { check: issues::check(&mesh), mesh, loss: row.loss, seconds: row.seconds }, drawable));
+            }
+            Err(e) => self.note = Some((format!("Couldn't read the result. {e}"), true)),
+        }
+    }
+
     fn start(&mut self, ctx: &egui::Context) {
         let Some(model) = &self.model else { return };
         let source = model.mesh.clone();
-        let settings = retopo::Settings {
-            detail: self.purpose.detail(self.custom_detail),
-            reduce_to: self.aim_for_count.then_some(self.count),
-            pixels: 192,
-            gpu: true,
-            rows: self.rows,
-        };
+        let settings = self.prefs.choices.settings(true);
         let (send, receive) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -218,7 +271,7 @@ impl App {
                 let _ = send.send(Message::Log(line.trim().to_string()));
                 ctx.request_repaint();
             };
-            let done = retopo::retopo(&source, &settings, log).map(|out| Finished { check: issues::check(&out.mesh), mesh: out.mesh, loss: out.loss, seconds: out.seconds });
+            let done = gui_batch::retopo_checked(&source, &settings, log).map(|(out, check)| Finished { check, mesh: out.mesh, loss: out.loss, seconds: out.seconds });
             let _ = send.send(Message::Done(done));
             ctx.request_repaint();
         });
@@ -327,118 +380,319 @@ fn thousands(n: usize) -> String {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.batch.poll();
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
-        if let Some(path) = dropped.into_iter().next() {
-            self.open(path, ctx);
+        if !dropped.is_empty() {
+            self.drop_files(dropped, ctx);
         }
-        self.side_panel(ctx);
-        self.viewport(ctx);
+        if self.screen == Screen::Model && self.model.is_none() {
+            self.screen = Screen::Home;
+        }
+        self.top_bar(ctx);
+        match self.screen {
+            Screen::Home => self.home(ctx),
+            Screen::Model => {
+                self.side_panel(ctx);
+                self.viewport(ctx);
+            }
+            Screen::Batch => {
+                self.batch_panel(ctx);
+                self.batch_view(ctx);
+            }
+        }
+        let mut replay = false;
+        gui_guide::guide_window(ctx, &mut self.guide_open, &mut self.guide_topic, &mut replay);
+        if replay {
+            (self.tour, self.screen, self.guide_open) = (Some(0), Screen::Home, false);
+        }
+        if let (Some(step), Screen::Home) = (self.tour, self.screen) {
+            let mut step = step;
+            let over = gui_guide::tour(ctx, &mut step, &mut self.tour_forget);
+            self.tour = match over {
+                Some(forget) => {
+                    self.prefs.tour_done |= forget;
+                    None
+                }
+                None => Some(step),
+            };
+        }
+        let now = self.prefs.to_json().to_string();
+        if now != self.saved {
+            self.prefs.save();
+            self.saved = now;
+        }
         self.screenshot(ctx);
     }
 }
 
+const SIDE: f32 = 336.0;
+
+fn side_frame() -> egui::Frame {
+    egui::Frame::new().fill(PANEL).inner_margin(egui::Margin { left: 24, right: 18, top: 8, bottom: 16 })
+}
+
+fn big_button(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
+    let button = if primary {
+        egui::Button::new(RichText::new(text).size(17.0).strong().color(SLATE)).fill(AMBER)
+    } else {
+        egui::Button::new(RichText::new(text).size(17.0).strong()).stroke(Stroke::new(1.5, AMBER))
+    };
+    ui.add_sized([ui.available_width(), 46.0], button.corner_radius(8.0))
+}
+
 impl App {
-    fn side_panel(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("controls")
-            .exact_width(336.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin { left: 28, right: 20, top: 22, bottom: 16 }))
-            .show(ctx, |ui| {
-                // The brand's red edge, as on the project's cover image.
-                let full = ui.max_rect().expand2(Vec2::new(0.0, 22.0));
-                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(full.left() - 28.0, full.top() - 22.0), Vec2::new(5.0, ctx.content_rect().height() + 44.0)), 0.0, RED);
-                ui.label(RichText::new("CurioMesh").heading().strong());
-                ui.label(RichText::new("Clean quads from heavy meshes").color(MUTED));
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    self.model_section(ui, ctx);
-                    if self.model.is_some() {
-                        self.settings_section(ui, ctx);
-                        self.result_section(ui);
-                    }
-                    if let Some((text, error)) = &self.note {
-                        ui.add_space(10.0);
-                        ui.label(RichText::new(text).color(if *error { RED } else { GREEN }));
+    fn top_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("bar").exact_height(46.0).frame(egui::Frame::new().fill(SLATE).inner_margin(egui::Margin { left: 18, right: 14, top: 0, bottom: 0 })).show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                let (bar, _) = ui.allocate_exact_size(Vec2::new(5.0, 24.0), Sense::hover());
+                ui.painter().rect_filled(bar, 0.0, RED); // the brand's red edge, as on the project's cover image
+                ui.label(RichText::new("CurioMesh").size(19.0).strong());
+                ui.add_space(18.0);
+                let mut go = self.screen;
+                ui.selectable_value(&mut go, Screen::Home, "Home").on_hover_text("Choose what the model is for, and open models.");
+                if self.model.is_some() {
+                    ui.selectable_value(&mut go, Screen::Model, "Model").on_hover_text("The model you opened: compare it with its result.");
+                }
+                ui.selectable_value(&mut go, Screen::Batch, "Batch").on_hover_text("Run many models, one after another.");
+                self.screen = go;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Button::new(RichText::new("Guide").strong()).stroke(Stroke::new(1.0, AMBER))).on_hover_text("A guide to every part of the app.").clicked() {
+                        self.guide_open = !self.guide_open;
                     }
                 });
             });
-    }
-
-    fn model_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        section(ui, "Model");
-        match &self.model {
-            None => {
-                let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 120.0), Sense::click());
-                let hovered = response.hovered();
-                ui.painter().rect(rect, 8.0, if hovered { Color32::from_rgb(44, 46, 53) } else { SLATE }, Stroke::new(1.0, if hovered { BLUE } else { LINE }), StrokeKind::Inside);
-                ui.painter().text(rect.center() - Vec2::new(0.0, 12.0), Align2::CENTER_CENTER, "Open a model", FontId::proportional(16.0), TEXT);
-                ui.painter().text(rect.center() + Vec2::new(0.0, 14.0), Align2::CENTER_CENTER, "or drop an OBJ, glTF, GLB or PLY file here", FontId::proportional(12.5), MUTED);
-                if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    self.pick(ctx);
-                }
-            }
-            Some(model) => {
-                let name = model.path.file_name().and_then(|n| n.to_str()).unwrap_or("model").to_string();
-                ui.label(RichText::new(name).strong());
-                ui.label(RichText::new(format!("{} faces, {} points", thousands(model.mesh.faces()), thousands(model.mesh.points.len() / 3))).color(MUTED).small());
-                if ui.add_enabled(self.running.is_none(), egui::Button::new("Open another model")).clicked() {
-                    self.pick(ctx);
-                }
-            }
-        }
+        });
     }
 
     fn pick(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new().add_filter("3D models", &["obj", "gltf", "glb", "ply"]).pick_file() {
+        if let Some(path) = rfd::FileDialog::new().add_filter("3D models", &gui_batch::MODEL_EXTENSIONS).pick_file() {
             self.open(path, ctx);
         }
     }
 
-    fn settings_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let idle = self.running.is_none();
-        section(ui, "What it's for");
-        ui.add_enabled_ui(idle, |ui| {
-            for (purpose, title, what) in [
-                (Purpose::Game, "Game asset", "All quads, few faces. Up to 6% of the view may change."),
-                (Purpose::Scan, "Scan cleanup", "Keeps more of the detail. Up to 2% may change."),
-                (Purpose::Custom, "Your own limit", "Choose how much of the view may change."),
-            ] {
-                let chosen = self.purpose == purpose;
-                let response = ui.radio(chosen, RichText::new(title).strong());
-                ui.indent(title, |ui| ui.label(RichText::new(what).small().color(MUTED)));
-                if response.clicked() {
-                    self.purpose = purpose;
-                }
-            }
-            if self.purpose == Purpose::Custom {
-                ui.add(egui::Slider::new(&mut self.custom_detail, 0.5..=15.0).suffix("% may change").step_by(0.5));
-            }
-            ui.add_space(4.0);
-            ui.checkbox(&mut self.aim_for_count, "Aim for a face count instead");
-            if self.aim_for_count {
-                ui.add(egui::DragValue::new(&mut self.count).range(24..=5_000_000).speed(50.0).suffix(" faces"));
-            }
-            ui.checkbox(&mut self.rows, "Even rows on smooth parts").on_hover_text(
-                "Smooth parts are also tried as even rows of quads, and keep them when the view still holds and no bad faces come in.",
-            );
-        });
-        ui.add_space(12.0);
-        if idle {
-            let button = egui::Button::new(RichText::new("Retopologize").size(16.0).strong().color(SLATE)).fill(AMBER).corner_radius(8.0);
-            if ui.add_sized([ui.available_width(), 40.0], button).clicked() {
-                self.start(ctx);
-            }
-        } else {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new(&self.last_line).color(MUTED).small());
+    // ------------------------------------------------------------------------------------------ the start screen
+
+    fn home(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(SLATE).inner_margin(egui::Margin::symmetric(24, 12))).show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let width = ui.available_width().min(1040.0);
+                ui.horizontal_top(|ui| {
+                    ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                    ui.vertical(|ui| {
+                        ui.set_width(width);
+                        ui.label(RichText::new("Clean quads from heavy models").size(30.0).strong());
+                        ui.label(RichText::new("Choose what your model is for, then add it. CurioMesh keeps how it looks and drops the faces it doesn't need.").color(MUTED));
+                        ui.add_space(14.0);
+                        ui.columns(2, |cols| {
+                            cols[0].label(RichText::new("1   What is it for?").size(17.0).strong().color(AMBER));
+                            cols[0].add_space(4.0);
+                            let top_down = egui::Layout::top_down(egui::Align::Min);
+                            cols[0].with_layout(top_down, |ui| self.settings_ui(ui, true, true, false));
+                            cols[1].with_layout(top_down, |ui| self.add_models(ui, ctx));
+                        });
+                    });
+                });
             });
+        });
+    }
+
+    fn add_models(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(RichText::new("2   Add your models").size(17.0).strong().color(AMBER));
+        ui.add_space(4.0);
+        if big_button(ui, "Open Model...", true).on_hover_text("Choose one OBJ, glTF, GLB or PLY file and retopologize it.").clicked() {
+            self.pick(ctx);
+        }
+        if big_button(ui, "Batch a Folder...", false).on_hover_text("Choose a folder. Every model inside it is retopologized with these settings.").clicked() {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                self.batch.add([dir]);
+                self.screen = Screen::Batch;
+            }
+        }
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 74.0), Sense::hover());
+        ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0, LINE), StrokeKind::Inside);
+        ui.painter().text(rect.center() - Vec2::new(0.0, 9.0), Align2::CENTER_CENTER, "or drop files or a folder here", FontId::proportional(15.0), TEXT);
+        ui.painter().text(rect.center() + Vec2::new(0.0, 12.0), Align2::CENTER_CENTER, "OBJ, glTF, GLB, PLY.  One file opens. Several go to a batch.", FontId::proportional(12.5), MUTED);
+        response.on_hover_text("Drop files anywhere in this window.");
+        if let Some((text, error)) = &self.note {
+            ui.label(RichText::new(text).color(if *error { RED } else { GREEN }));
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("Recent").size(13.5).color(MUTED));
+        if self.prefs.recent.is_empty() {
+            ui.label(RichText::new("Models you open will show up here.").small().color(MUTED));
+        }
+        let mut open = None;
+        for path in self.prefs.recent.clone() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("model").to_string();
+            let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            let exists = path.exists();
+            ui.horizontal(|ui| {
+                let r = ui.add_enabled(exists, egui::Button::new(RichText::new(&name).color(if exists { TEXT } else { MUTED })).frame(false));
+                if r.on_hover_text(if exists { path.display().to_string() } else { "This file has moved or been deleted.".into() }).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    open = Some(path.clone());
+                }
+                ui.add(egui::Label::new(RichText::new(folder).small().color(MUTED)).truncate());
+            });
+        }
+        if let Some(path) = open {
+            self.open(path, ctx);
+        }
+        ui.add_space(10.0);
+        if ui.button("New here? Read the guide").on_hover_text("Open the guide to every part of the app.").clicked() {
+            self.guide_open = true;
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ settings, shared
+
+    /// The settings every run uses, on the start screen, beside a model and beside a batch. `count_ok` is false in a
+    /// batch, where one face count can't suit every model.
+    fn settings_ui(&mut self, ui: &mut egui::Ui, enabled: bool, count_ok: bool, compact: bool) {
+        let c = &mut self.prefs.choices;
+        ui.add_enabled_ui(enabled, |ui| {
+            if compact {
+                // Beside a model the presets fold into a list, to leave room for the result.
+                egui::ComboBox::from_id_salt("preset").width(ui.available_width() - 8.0).selected_text(c.purpose.title()).show_ui(ui, |ui| {
+                    for purpose in Purpose::ALL {
+                        if ui.selectable_label(c.purpose == purpose, purpose.title()).on_hover_text(purpose.blurb()).clicked() {
+                            c.pick(purpose);
+                        }
+                    }
+                }).response.on_hover_text("What the model is for. This sets how much of the view may change.");
+                ui.add(egui::Label::new(RichText::new(c.purpose.blurb()).small().color(MUTED)).wrap());
+            }
+            for purpose in Purpose::ALL.into_iter().filter(|_| !compact) {
+                let chosen = c.purpose == purpose;
+                let frame = egui::Frame::new()
+                    .fill(if chosen { Color32::from_rgb(52, 45, 36) } else { Color32::from_rgb(44, 46, 53) })
+                    .stroke(Stroke::new(if chosen { 1.5 } else { 1.0 }, if chosen { AMBER } else { LINE }))
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::symmetric(10, 6));
+                let shown = frame.show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(purpose.title()).strong().color(if chosen { AMBER } else { TEXT }));
+                    ui.add(egui::Label::new(RichText::new(purpose.blurb()).small().color(MUTED)).wrap());
+                });
+                let response = ui.interact(shown.response.rect, ui.id().with(purpose.title()), Sense::click());
+                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{} Click to use it.", purpose.blurb())).clicked() {
+                    c.pick(purpose);
+                }
+                ui.add_space(-2.0);
+            }
+            if c.purpose == Purpose::Custom {
+                ui.add(egui::Slider::new(&mut c.custom_detail, 0.5..=15.0).suffix("% may change").step_by(0.5)).on_hover_text("The most the view may change. Lower keeps more faces and detail.");
+            }
+            section(ui, "Options");
+            if count_ok {
+                ui.checkbox(&mut c.aim_for_count, "Aim for a face count instead").on_hover_text("Ask for about this many faces and ignore the view-change limit. Good for a fixed budget.");
+                if c.aim_for_count {
+                    ui.add(egui::DragValue::new(&mut c.count).range(24..=5_000_000).speed(50.0).suffix(" faces")).on_hover_text("About how many faces the result should have.");
+                }
+            } else {
+                ui.label(RichText::new("A fixed face count suits one model, so a batch uses the limit above.").small().color(MUTED));
+            }
+            ui.checkbox(&mut c.rows, "Even rows on smooth parts").on_hover_text("Smooth parts are also tried as even rows of quads, and keep them when the view still holds and no bad faces come in.");
+            ui.horizontal(|ui| {
+                ui.label("Measuring detail");
+                egui::ComboBox::from_id_salt("pixels").selected_text(match c.pixels { 0..=160 => "Quick", 161..=224 => "Normal", _ => "Fine" }).show_ui(ui, |ui| {
+                    for (name, pixels) in [("Quick", 128), ("Normal", 192), ("Fine", 256)] {
+                        ui.selectable_value(&mut c.pixels, pixels, name);
+                    }
+                }).response.on_hover_text("How big the camera pictures are when the view change is measured. Fine sees smaller differences and takes longer.");
+            });
+            ui.checkbox(&mut c.gpu, "Use the graphics card").on_hover_text("Draw the camera pictures on the graphics card. Faster. Turn it off if it fails on your computer.");
+        });
+    }
+
+    // ------------------------------------------------------------------------------------------ one model
+
+    fn side_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("controls").exact_width(SIDE).resizable(false).frame(side_frame()).show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                self.model_section(ui, ctx);
+                if self.model.is_some() {
+                    section(ui, "What it's for");
+                    let idle = self.running.is_none();
+                    self.settings_ui(ui, idle, true, true);
+                    ui.add_space(12.0);
+                    if idle {
+                        let button = egui::Button::new(RichText::new("Retopologize").size(16.0).strong().color(SLATE)).fill(AMBER).corner_radius(8.0);
+                        if ui.add_sized([ui.available_width(), 40.0], button).on_hover_text("Make the new quad mesh with these settings.").clicked() {
+                            self.start(ctx);
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add(egui::Label::new(RichText::new(&self.last_line).color(MUTED).small()).truncate());
+                        });
+                    }
+                    self.result_section(ui);
+                }
+                if let Some((text, error)) = &self.note {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(text).color(if *error { RED } else { GREEN }));
+                }
+            });
+        });
+    }
+
+    fn model_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        section(ui, "Model");
+        let Some(model) = &self.model else { return };
+        let name = model.path.file_name().and_then(|n| n.to_str()).unwrap_or("model").to_string();
+        ui.add(egui::Label::new(RichText::new(name).strong()).truncate()).on_hover_text(model.path.display().to_string());
+        ui.label(RichText::new(format!("{} faces, {} points", thousands(model.mesh.faces()), thousands(model.mesh.points.len() / 3))).color(MUTED).small());
+        if ui.add_enabled(self.running.is_none(), egui::Button::new("Open another model")).on_hover_text("Choose a different file. You can also drop one on the window.").clicked() {
+            self.pick(ctx);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ a batch
+
+    fn batch_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("batch_controls").exact_width(SIDE).resizable(false).frame(side_frame()).show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                section(ui, "Settings for every model");
+                let idle = !self.batch.running();
+                self.settings_ui(ui, idle, false, true);
+                ui.add_space(12.0);
+                if idle {
+                    let n = self.batch.items.len();
+                    let ready = n > 0 && self.batch.out_dir.is_some();
+                    let button = egui::Button::new(RichText::new(format!("Run batch ({n})")).size(16.0).strong().color(SLATE)).fill(AMBER).corner_radius(8.0);
+                    let tip = if ready { "Retopologize every model in the list, one after another." } else { "Add models and choose an output folder first." };
+                    let response = ui.add_enabled_ui(ready, |ui| ui.add_sized([ui.available_width(), 40.0], button)).inner.on_hover_text(tip).on_disabled_hover_text(tip);
+                    if response.clicked() {
+                        let settings = self.prefs.choices.settings(false);
+                        self.batch.start(settings, ctx);
+                    }
+                } else {
+                    let button = egui::Button::new(RichText::new("Cancel").size(16.0).strong()).stroke(Stroke::new(1.5, RED)).corner_radius(8.0);
+                    if ui.add_sized([ui.available_width(), 40.0], button).on_hover_text("Stop after the model in progress. Finished results stay saved.").clicked() {
+                        self.batch.cancel();
+                    }
+                }
+            });
+        });
+    }
+
+    fn batch_view(&mut self, ctx: &egui::Context) {
+        let mut action = None;
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(SLATE).inner_margin(egui::Margin::symmetric(20, 14))).show(ctx, |ui| {
+            action = self.batch.ui(ui);
+        });
+        match action {
+            Some(gui_batch::Action::OpenResult(n)) => self.open_result(n, ctx),
+            Some(gui_batch::Action::ShowInFolder(path)) => gui_batch::show_in_folder(&path),
+            None => {}
         }
     }
 
     fn result_section(&mut self, ui: &mut egui::Ui) {
         let Some((finished, _)) = &self.result else { return };
         let source_faces = self.model.as_ref().map_or(0, |m| m.mesh.faces());
-        let limit = self.purpose.detail(self.custom_detail);
+        let limit = self.prefs.choices.detail();
         let (quads, faces, loss, bad, seconds, spots) = (finished.check.quads, finished.check.faces, finished.loss, finished.check.bad, finished.seconds, finished.check.spots.len());
         let rows: Vec<(String, f64)> = finished.check.spots.iter().take(100).map(|s| {
             let kinds: Vec<String> = issues::KINDS.iter().zip(s.kinds).filter(|(_, n)| *n > 0).map(|(k, n)| format!("{n} {}", plural(k, n))).collect();
@@ -450,7 +704,7 @@ impl App {
         ui.add_space(6.0);
         egui::Grid::new("numbers").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
             ui.label(RichText::new("View change").color(MUTED));
-            let fits = self.aim_for_count || loss <= limit * 1.1;
+            let fits = self.prefs.choices.aim_for_count || loss <= limit * 1.1;
             ui.label(RichText::new(format!("{loss:.1}%")).color(if fits { GREEN } else { AMBER })).on_hover_text("Share of the model's outline, depth and surface direction that differs, seen from six sides.");
             ui.end_row();
             ui.label(RichText::new("Bad faces").color(MUTED));
@@ -462,10 +716,10 @@ impl App {
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(RichText::new("Save OBJ").strong()).stroke(Stroke::new(1.0, AMBER))).clicked() {
+            if ui.add(egui::Button::new(RichText::new("Save OBJ").strong()).stroke(Stroke::new(1.0, AMBER))).on_hover_text("Save the new mesh as an OBJ file.").clicked() {
                 self.save();
             }
-            if ui.button("Save issue report").clicked() {
+            if ui.button("Save issue report").on_hover_text("Save the numbers and the list of spots as a JSON file.").clicked() {
                 self.save_report();
             }
         });
@@ -498,7 +752,7 @@ impl App {
             let rect = ui.max_rect();
             let response = ui.allocate_rect(rect, Sense::click_and_drag());
             let Some(model) = &self.model else {
-                ui.painter().text(rect.center() - Vec2::new(0.0, 14.0), Align2::CENTER_CENTER, "Drop a model anywhere", FontId::proportional(24.0), TEXT);
+                ui.painter().text(rect.center() - Vec2::new(0.0, 14.0), Align2::CENTER_CENTER, "Open a model from Home", FontId::proportional(24.0), TEXT);
                 ui.painter().text(rect.center() + Vec2::new(0.0, 18.0), Align2::CENTER_CENTER, "CurioMesh keeps how it looks and gives you clean quads", FontId::proportional(15.0), MUTED);
                 return;
             };
@@ -553,13 +807,13 @@ impl App {
             let mut show = self.show;
             let mut turn = false;
             let has_result = self.result.is_some();
-            egui::Area::new(egui::Id::new("show")).anchor(Align2::RIGHT_TOP, Vec2::new(-14.0, 14.0)).show(ctx, |ui| {
+            egui::Area::new(egui::Id::new("show")).anchor(Align2::RIGHT_TOP, Vec2::new(-14.0, 60.0)).show(ctx, |ui| {
                 egui::Frame::new().fill(PANEL).corner_radius(8.0).inner_margin(4.0).stroke(Stroke::new(1.0, LINE)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if has_result {
-                            ui.selectable_value(&mut show, Show::Split, "Side by side");
-                            ui.selectable_value(&mut show, Show::Original, "Original");
-                            ui.selectable_value(&mut show, Show::Result, "Result");
+                            ui.selectable_value(&mut show, Show::Split, "Side by side").on_hover_text("Original on the left, new quads on the right. Drag the line to compare.");
+                            ui.selectable_value(&mut show, Show::Original, "Original").on_hover_text("Only the original model.");
+                            ui.selectable_value(&mut show, Show::Result, "Result").on_hover_text("Only the new quads.");
                             ui.separator();
                         }
                         turn = ui.button("Upright").on_hover_text("Stand the model on its other axis, if it lies on its side").clicked();
@@ -577,7 +831,11 @@ impl App {
 
     fn screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.shot.clone() else { return };
-        if self.result.is_none() {
+        self.frames += 1;
+        let batch_done = !self.batch_demo || (!self.batch.running() && self.batch.done_count() == self.batch.items.len());
+        let ready = self.frames > 12 && batch_done && (self.screen != Screen::Model || self.result.is_some());
+        if !ready {
+            ctx.request_repaint();
             return;
         }
         if !self.shot_asked {
@@ -688,7 +946,9 @@ fn draw(d: &Drawable, camera: &Camera, rect: Rect, wire: Option<Color32>, highli
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/curiomesh.png")).ok();
-    let mut viewport = egui::ViewportBuilder::default().with_title("CurioMesh").with_inner_size([1360.0, 840.0]).with_min_inner_size([900.0, 560.0]);
+    // CURIOMESH_SIZE=1280x720 opens at that size, to check the layout.
+    let size = std::env::var("CURIOMESH_SIZE").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([1360.0, 840.0]);
+    let mut viewport = egui::ViewportBuilder::default().with_title("CurioMesh").with_inner_size(size).with_min_inner_size([900.0, 560.0]);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
