@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from triadq import MeshData, flat_quad_remesh, topology_summary  # noqa: E402
+from triadq import flatquad  # noqa: E402
 from triadq.flatquad import FlatQuadOptions, flatten_regions, make_closable  # noqa: E402
 from triadq.topology import _unpair_quads  # noqa: E402
 
@@ -220,6 +221,23 @@ class FlatRegionTests(unittest.TestCase):
         coarse, report = flatten_regions(mesh)
         self.assertGreaterEqual(report.regions, 1)
         self.assertLess(len(coarse.faces), len(mesh.faces) * 0.5)
+
+    def test_refine_adds_inner_points_to_a_fan_and_keeps_the_outline(self):
+        # A reduced plate: twelve points along one side, all joined to one far corner by long thin triangles.
+        bottom = [(x, 0.0, 0.0) for x in np.linspace(0.0, 1.0, 13)]
+        vertices = np.array(bottom + [(1.0, 1.0, 0.0), (0.0, 1.0, 0.0)])
+        top_left, top_right = 14, 13
+        faces = [(k, k + 1, top_left) for k in range(12)] + [(12, top_right, top_left)]
+        mesh = MeshData(vertices=vertices, faces=faces)
+        thin = flatquad._thin_triangles(vertices, faces, 4.0)
+        self.assertTrue(thin.any())
+        refined, report = flatten_regions(mesh, FlatQuadOptions(refine=True, min_faces=4, min_saving=-3.0))
+        self.assertEqual(report.regions, 1)
+        self.assertGreater(len(refined.vertices), len(vertices))
+        for p in vertices:  # every outline point stays where it was
+            self.assertLess(float(np.linalg.norm(refined.vertices - p, axis=1).min()), 1e-12)
+        self.assertLess(int(flatquad._thin_triangles(refined.vertices, refined.faces, 4.0).sum()), int(thin.sum()))
+        self.assertEqual(topology_summary(refined).non_manifold_edges, 0)
 
 
 if __name__ == "__main__":
