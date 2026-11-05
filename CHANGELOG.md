@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.5 - unreleased
+
+### Game engines
+- **Export for Game Engine** (File > Export > CurioMesh Game Asset, and a button after Apply): the selected meshes and
+  their baked maps for Unreal (FBX, PNG maps, normal map green flipped for DirectX), Unity (FBX turned and scaled for
+  Unity, PNG maps) or Godot (.glb with the textures inside). The bake's triangles are kept, and your images are not changed.
+- Baking is now tested in Unreal 5.7 and Godot 4.7, lit from 8 sides next to the source, not only by re-importing in
+  Blender. Imported with default settings, the exported files came closest to the source in both. A hand-made export
+  lost out: Unreal needed Flip Green set by hand, a plain glTF export let Godot choose other triangles, and a plain FBX
+  export carried no textures.
+
 ## 0.9.4 - 2026-11-04
 
 ### Skills for AI agents

@@ -3966,6 +3966,7 @@ class CURIOMESH_PT_guided_apply(_AutoSub, bpy.types.Panel):
         row.operator("curiomesh.guided_apply", text="Apply Result", icon="CHECKMARK")
         if not done and state["applied"]:
             overlay.wrap_label(layout, f"Applied: {state['applied']}. Select a mesh and Start for another.", icon="CHECKMARK", width=30, limit=4)
+            layout.operator("curiomesh.export_game", icon="EXPORT")
             _draw_thanks(layout)
         elif not done:
             overlay.wrap_label(layout, "Available once the search has finished. Nothing changes until you press Apply.", icon="LOCKED", width=30, limit=3)

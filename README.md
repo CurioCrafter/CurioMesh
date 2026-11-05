@@ -221,7 +221,16 @@ A redo is refused when it would make more faces than it replaces, and the panel 
 - **Make LOD Set** makes three new objects named `_LOD0`, `_LOD1` and `_LOD2` for game engines, each a Reduce To of your mesh at percents you choose (50, 25 and 12.5% by default). Only the first runs the full search.
 - **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces.
 - Apply marks edges sharper than 60 degrees as hard, and the result takes its shading from the nearest source points, so flat sides stay flat.
-- Baking was tested through FBX and glTF export and re-import in Blender. It has not been tested in a game engine yet.
+- **Export for Game Engine** (File > Export > CurioMesh Game Asset, or the button after Apply) writes the selected meshes for **Unreal**, **Unity** or **Godot**. It writes FBX plus PNG maps for Unreal and Unity, and one .glb with the textures inside for Godot. It keeps the bake's triangles, and gives Unreal its normal map with the green channel flipped (Unreal reads DirectX normal maps; Blender, Unity and Godot read OpenGL ones). Your images in Blender are not changed.
+- **Tested in Unreal 5.7 and Godot 4.7** under a light circling the model from 8 sides. The test used a 47,214-face sculpt reduced to 1,068 faces with a 1024 bake, compared with the original by how far the shading differs (lower is closer):
+
+  | Engine, front view | No normal map | Exported normal map | Normal map in the wrong format |
+  |---|---|---|---|
+  | Godot 4.7 (.glb) | 0.83 | **0.37** | 1.01 |
+  | Unreal 5.7 (FBX + PNG) | 0.180 | **0.157** | 0.177 |
+
+  Imported with default settings, the exported files gave the closest result in both engines. Unity reads normal maps the same way as Godot, but has not been tested in Unity itself yet.
+- A plain FBX export sends no textures, because a bake lives only inside the .blend until saved, and a plain glTF export lets the engine choose its own triangles. Use Export for Game Engine, or save the images and tick Apply Modifiers.
 - Baking blocks Blender until it finishes and reads the surface nearest to each texel, so parts that touch can bleed into each other. Only the normal map and base colour are baked, not roughness or metal.
 
 ## Big scans, small PCs, and a cloud job
@@ -338,7 +347,7 @@ Yes. CurioMesh is free and open source (GPL-3.0-or-later), works in Blender 3.6 
 Install CurioMesh, select the scan, open the CurioMesh tab, choose Auto Segments, pick the Scan Cleanup Use, and press Start. Check the result in Review Segments, redo any part that looks wrong, then press Apply. For scans over a million faces, set Effort to Light or use Export Job.
 
 **How do I make a low poly game asset from a high poly mesh?**
-Pick the Game Asset or Low Poly Use and press Start. Turn on Bake Detail with Normal + Color to carry the surface detail over as a normal map. Triangulate before you export to your engine.
+Pick the Game Asset or Low Poly Use and press Start. Turn on Bake Detail with Normal + Color to carry the surface detail over as a normal map. After Apply, press Export for Game Engine and pick Unreal, Unity or Godot: it writes the mesh and its maps in the form that engine reads.
 
 **Can I get all quads from an automatic quad remesh?**
 Yes. Output defaults to Quads, and the summary reports leftover triangles, which are normally zero. Quads can still be slanted on smooth surfaces with Keep Detail. Balanced and Clean Rows give tidier layouts for more faces.
