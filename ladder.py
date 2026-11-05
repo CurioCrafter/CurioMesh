@@ -49,6 +49,7 @@ lad = {
     "meshes": {},  # what the sliders picked -> its preview mesh, so moving back and forth only swaps meshes
     "want": None,  # what the sliders ask for; while dragging a blend, the nearer Style stands in for it
     "blend": None,  # (wanted, thread, box) while a blend is spliced off the main thread
+    "settings": None,  # the panel settings the search ran with (`_settings`): each rung reads them again
 }
 drag = {"pending": False, "shown_at": 0.0, "moved": -1e9, "settled": True}
 
@@ -70,7 +71,7 @@ def cancel() -> None:
                 bpy.data.meshes.remove(mesh)
         except ReferenceError:  # gone with a file load
             pass
-    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None)
+    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None)
     drag.update(pending=False, settled=True)
 
 
@@ -89,13 +90,19 @@ def start(context) -> bool:
     plan = L.plan(here[1], here[0], rows=len(job.faces) <= ROWS_MOST and not slow)
     if slow:  # ponytail: a fixed cut; helpers for the ladder would make all sizes affordable, at the cost of more Blenders running
         plan = [(s, d) for s, d in plan if here[1] / 2.6 <= d <= here[1] * 2.6]
-    lad.update(key=base["key"], base=here, rungs={here: job}, plan=plan, shown=(here, here, ()))
-    _mesh_for((here, here, ()), compose(here, here, ()))
     gs = context.scene.curiomesh_guided
+    lad.update(key=base["key"], base=here, rungs={here: job}, plan=plan, shown=(here, here, ()), settings=_settings(gs))
+    _mesh_for((here, here, ()), compose(here, here, ()))
     gs["quad_size"], gs["quad_order"] = 0.5, L.order_of(job.style)  # no update: the result on screen is this already
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=WAIT)
     return True
+
+
+def _settings(gs) -> tuple:
+    """What `make_job` reads from the panel besides the search's inputs. Changed after the search (Symmetrize, a Tweak
+    with Auto-Update off), the rungs still to come would not match the result on screen."""
+    return (gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6), tuple(_g().tweaks(gs).values()), gs.density_strength, gs.auto_tidy, gs.auto_method, gs.auto_output, gs.auto_rough, gs.auto_drop_hidden, gs.auto_redo_rough, gs.loop_count, gs.bend_loops, round(gs.loop_gap, 6))
 
 
 def active() -> bool:
@@ -124,10 +131,12 @@ def work(seconds: float) -> None:
             style, detail = lad["doing"] = lad["plan"].pop(0)
             guided = _g()
             source = guided.state_source()
-            if source is None:
+            gs = bpy.context.scene.curiomesh_guided
+            src = None if source is None else guided._source_data(source)
+            if src is None or src["sig"] != lad["key"][0] or _settings(gs) != lad["settings"]:  # another mesh or other settings: no rung would match
                 cancel()
                 return
-            lad["job"] = guided.make_job(bpy.context, bpy.context.scene.curiomesh_guided, guided._source_data(source), guided.state["auto_inputs"], detail, style, quiet=True)
+            lad["job"] = guided.make_job(bpy.context, gs, src, guided.state["auto_inputs"], detail, style, quiet=True)
             lad["job"].threaded = True
             continue
         job.step(min(SLICE, max(ends - time.perf_counter(), 0.005)))
