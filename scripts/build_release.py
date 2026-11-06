@@ -165,8 +165,8 @@ def _series_overrides(root: Path, series: str, layout: str) -> dict[str, bytes]:
 
 # extensions.blender.org build: Python only, CC0 data only, no outside programs.
 # Rules read 2026-11-02: https://extensions.blender.org/terms-of-service/ (1.2, 3.6, 5.2).
-# Only these files of docs/ go in the listing zip: the sources of the bundled data.
-LISTING_DOCS = ("docs/PATTERN_SOURCES.md",)
+# Only these files of docs/ go in the listing zip: the sources of the bundled data and the originality notes.
+LISTING_DOCS = ("docs/PATTERN_SOURCES.md", "docs/ORIGINALITY.md")
 LISTING_DROP = ("CHANGELOG.md",)  # release notes of every build, native ones included: the site has its own
 
 # Banned in the listing zip's code (extensions.blender.org review): (pattern, why).
@@ -219,6 +219,8 @@ def listing_overrides(root: Path) -> dict[str, bytes]:
         "README.md": readme.encode("utf-8"),
         "THIRD_PARTY_NOTICES.md": LISTING_NOTICES.encode("utf-8"),
         "docs/PATTERN_SOURCES.md": sources.encode("utf-8"),
+        # the main ORIGINALITY.md also covers the GitHub-only compiled modules; this copy lists only the Python modules
+        "docs/ORIGINALITY.md": (root / "docs" / "LISTING_ORIGINALITY.md").read_bytes(),
     }
 
 

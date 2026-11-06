@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! The field mesher's sweeps (`triadq/fieldmesh.py`: `_orient_sweep`, `_position_sweep`). Each vertex sums what its
 //! edges say in the order NumPy's `bincount` would, so the result is the same to the last bit, on all cores.
 

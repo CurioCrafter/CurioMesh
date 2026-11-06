@@ -5,6 +5,6 @@
   "homepage": "https://github.com/CurioCrafter/CurioMesh",
   "repository": "https://github.com/CurioCrafter/CurioMesh",
   "license": "GPL-3.0-or-later",
-  "keywords": ["blender", "retopology", "quad-remesh", "3d", "game-assets"],
+  "keywords": ["blender", "retopology", "all-quad", "3d", "game-assets"],
   "skills": "./skills"
 }

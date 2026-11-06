@@ -967,7 +967,7 @@ def quad_only_closure(
     frozen_midpoints: dict[tuple[int, int], int] | None = None,
     checked: bool = True,
 ) -> MeshData:
-    """Conformingly split every polygon corner into a quad.
+    """Conformingly split every polygon corner into a quad (the midpoint split of Catmull-Clark subdivision).
 
     Edge midpoints are shared globally, so adjacent faces receive matching
     topology. UV midpoints remain face-local, which preserves UV seams.

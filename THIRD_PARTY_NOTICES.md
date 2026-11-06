@@ -137,7 +137,7 @@ GPL-2.0-or-later). It is distributed here under GPL-3.0-or-later.
 ## Not included
 
 CurioMesh does not include QuadWild, QuadWild-BiMDF, QuadriFlow or Instant Meshes.
-QuadriFlow is used through Blender's own Quad Remesh operator. The developer script
+QuadriFlow is used through Blender's own QuadriFlow Remesh operator. The developer script
 `scripts/flowtool.py` (not in the add-on zips) can call a separately installed
 QuadWild-BiMDF (GPL-3.0, https://github.com/cgg-bern/quadwild-bimdf) as an outside
 program.

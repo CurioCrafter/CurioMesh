@@ -1,4 +1,4 @@
-# CurioMesh: free auto retopology and quad remesh add-on for Blender
+# CurioMesh: free automatic retopology add-on for Blender
 
 **A free, open source Blender retopology add-on. It turns a dense sculpt, scan or high-poly game asset into a clean all-quad, low-poly mesh.**
 
@@ -69,7 +69,7 @@ was done on 5.2. The viewport overlays draw with Blender's GPU module. If a buil
 
 </details>
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Quick start
 
@@ -95,7 +95,7 @@ setting and the older tools are in the [CurioMesh Pro tab](#pro-tab-and-classic-
 | **Three layout styles** | Keep Detail (fewest faces), Balanced, Clean Rows (even quads in rows). |
 | **Know the cost first** | The time on your PC before you press Start, Slow/Heavy tags on heavy options, and a question before long jobs. |
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Choose a use and a style
 
@@ -149,7 +149,7 @@ Pick what comes first when the two disagree:
 
 ![Blender quad retopology with the Keep Detail style on a marble bust, wireframe before and after](docs/images/marble_bust_01.jpg)
 ![Quad retopology with the Balanced style on a marble bust, wireframe before and after](docs/images/bust_balanced.jpg)
-![Quad remesh with the Clean Rows style on a marble bust, even quads in rows, wireframe before and after](docs/images/bust_rows.jpg)
+![Retopology with the Clean Rows style on a marble bust, even quads in rows, wireframe before and after](docs/images/bust_rows.jpg)
 
 | Style | Model | CurioMesh quads | View changed | Tidiness | Wire pictures |
 |---|---|---:|---:|---:|---|
@@ -163,7 +163,7 @@ Pick what comes first when the two disagree:
 *Tidiness* is a number from 0 to 100 for how close the quads' layout is to hand-made meshes. Higher is tidier. Credits and limits are in
 [`docs/PATTERN_SOURCES.md`](docs/PATTERN_SOURCES.md). Read it next to View changed, because a tidy grid can still miss the surface.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Adjust
 
@@ -212,7 +212,7 @@ with 11.2% of the view changed.
 
 ![Reduce polygon count in Blender: marble bust reduced to about 1,500 quad faces, wireframe before and after](docs/images/bust_reduce.jpg)
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Fix
 
@@ -239,7 +239,7 @@ A redo is refused when it would make more faces than it replaces, and the panel 
 
 Fix a spot by hand, press **Remember This Fix**, and CurioMesh can find the same quad pattern in later results. It is stored on your PC.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Finish
 
@@ -297,7 +297,7 @@ Reshape. Animate or export level 0, and sculpt or bake from the levels above it.
 Level 0 keeps its own rough outline, so a normal map changes its shading only. For any cage you made yourself, select it and your source mesh and press
 **Add Multires Detail**.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Hard Surface
 
@@ -323,7 +323,7 @@ The camera keeps a layout only where the view holds. The two rebuilds are also s
 
 </details>
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Shape the flow
 
@@ -348,7 +348,7 @@ Turn on **Flow Editor (Experimental)** in the add-on preferences and **Draw on t
 - **Flow**, **Ring** and **Edge** force a kind; **Place Circle** (drag to size, Shift for an ellipse); **Eye**, **Mouth** and **Nose-Mouth** place those shapes where you click; **Erase** and **Erase All**. Strokes are curves in the guide list, saved with the .blend and used by Start too; with a mirrored result they work on both sides.
 - Not yet measured inside Blender. On the bust outside Blender, a ring round the forehead redid 268 faces into 417 in 1.6 s with five closed loops round it, and a flow line redid 79 faces in 0.5 s, both with clean seams.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Parts
 
@@ -368,7 +368,7 @@ you can merge, split with a drawn line or in two along the segment's own border,
 rename and lock them. Edited segments are locked, so later size changes keep them, and the next run uses them. Part kinds (tube, flat plate, rough scan) are a rough guess from the shape, and the guess can be wrong.
 The [CHANGELOG](CHANGELOG.md) has the full list.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Blockout and Hulls
 
@@ -383,7 +383,7 @@ Two Uses for fast, faceted stand-ins: Blockout for solids that fit each part, Hu
 
 ![Blockout on a fire hydrant](docs/images/releases/v094_blockout_hydrant.jpg)
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Pro tab and classic tools
 
@@ -431,7 +431,7 @@ are in [docs/ATLAS_Q_REFERENCE.md](docs/ATLAS_Q_REFERENCE.md). Release notes are
 
 </details>
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## How it checks results
 
@@ -443,7 +443,7 @@ Every result is compared with your original by a camera check, so you do not hav
 - The camera also picks between layouts per part, keeps a layout only where the view holds, and undoes a repair it dislikes.
 - Detail is how much of the view may look different from your mesh. The default Game Asset setting is Keep Detail at Detail 6%.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Results
 
@@ -459,7 +459,7 @@ object on top and a close-up below.
 
 *Chess set (33 pieces), [Poly Haven](https://polyhaven.com/a/chess_set), CC0.*
 
-![Quad remesh of an overhead crane in Blender: 89,964 faces become 22,541 quads, wireframe before and after, whole object and close-up](docs/images/overhead_crane.jpg)
+![Retopology of an overhead crane in Blender: 89,964 faces become 22,541 quads, wireframe before and after, whole object and close-up](docs/images/overhead_crane.jpg)
 
 *Overhead crane, [Poly Haven](https://polyhaven.com/a/overhead_crane), CC0.*
 
@@ -500,7 +500,7 @@ The numbers are from commit `7f94ff8`, run on Blender 5.2.3 LTS. The Issue Finde
 
 </details>
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Big scans and small PCs
 
@@ -517,7 +517,7 @@ exactly. Each region appears when it is done, and finished regions are saved so 
 
 At the default settings, the coast rocks scan went from 1,260,423 faces to 434,995 quads (5.9% of the view changed) in 5 min and the coastal cliff scan went from 1,537,926 faces to 362,292 quads (6.0% of the view changed) in 7 min, on a PC that was also doing other work. Both stayed all quads.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Agent skills
 
@@ -547,7 +547,7 @@ Then ask, for example: *"Retopologise `crate.fbx` for a game with CurioMesh, abo
 
 The scripts also work by hand: `blender -b --factory-startup --python skills/curiomesh-retopo/scripts/curiomesh_run.py -- model.obj --use GAME --detail 6 --out model_low.glb --report report.json`.
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## FAQ
 
@@ -573,7 +573,7 @@ Pick the Game Asset or Low Poly Use and press Start. Turn on Bake Detail with No
 </details>
 
 <details>
-<summary><b>Can I get all quads from an automatic quad remesh?</b></summary>
+<summary><b>Can I get all quads from automatic retopology?</b></summary>
 
 Yes. Output defaults to Quads, and the summary reports leftover triangles, which are normally zero. Quads can still be slanted on smooth surfaces with Keep Detail. Balanced and Clean Rows give tidier layouts for more faces.
 
@@ -587,9 +587,9 @@ Yes. Review Segments redoes one part with its own method and detail while the se
 </details>
 
 <details>
-<summary><b>How is it different from Blender's Quad Remesh?</b></summary>
+<summary><b>How is it different from Blender's QuadriFlow Remesh?</b></summary>
 
-Blender's Quad Remesh works on the whole object in one pass. CurioMesh works part by part, measures each result against your original, and lets you redo single parts. QuadriFlow is also one of its Methods, for smooth organic parts.
+Blender's QuadriFlow Remesh works on the whole object in one pass. CurioMesh works part by part, measures each result against your original, and lets you redo single parts. QuadriFlow is also one of its Methods, for smooth organic parts.
 
 </details>
 
@@ -628,7 +628,7 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Install](#install) for which versions 
 
 </details>
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Known limits
 
@@ -655,7 +655,7 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Install](#install) for which versions 
 
 </details>
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Contributing
 
@@ -678,7 +678,7 @@ If CurioMesh saved you time, a [star on GitHub](https://github.com/CurioCrafter/
 
 [![Stars over time](docs/stars.svg)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 
-[Back to top](#curiomesh-free-auto-retopology-and-quad-remesh-add-on-for-blender)
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Credits
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
-//! Maximum-cardinality matching (Edmonds' blossoms), a line-by-line mirror of
+//! Maximum-cardinality matching (Edmonds' blossoms, Edmonds 1965), a line-by-line mirror of
 //! `engine._augment_matching` / `engine._blossom_search` so the pairs are identical.
 //! Dict membership is modelled with -1 sentinels (stored values are never -1).
 

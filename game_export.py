@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 """Export for Game Engine: the selected meshes and their baked textures, set up the way each engine reads them.
 
 Unreal, Unity and Godot were tested here (Unreal 5.7, Unity 6, Godot 4.7) by lighting a baked result from eight sides

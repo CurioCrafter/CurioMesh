@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 """Draw docs/stars.svg from GitHub's star dates: stars over time, drawn as a quad mesh whose top edge loop is the
 star count. Needs the gh CLI. Run before a release:
 python scripts/star_chart.py
