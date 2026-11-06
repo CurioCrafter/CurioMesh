@@ -291,7 +291,7 @@ def areas(co, faces, strokes, centres=None, adjacency=None) -> list[tuple[np.nda
     for s in strokes:
         line = np.asarray(s["points"], dtype=np.float64)
         width = edge_near(co, faces, line, centres)
-        mask = guides._to_line(centres, line) < REACH[s["kind"]] * width
+        mask = guides._to_line(centres, line) < s.get("reach", REACH[s["kind"]]) * width
         if s["kind"] == "RING":
             mask |= _inside_ring(centres, line)
         masks.append(mask)

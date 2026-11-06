@@ -16,7 +16,7 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from . import icons, overlay, region, segments
+from . import autoretopo, icons, overlay, region, segments
 from . import organize as ORG
 from .triadq import loopscore
 from .triadq import organize as O
@@ -26,6 +26,9 @@ from .triadq.patterns import Topology
 WIGGLY = 4.0  # degrees per quad: Fix This straightens a strip that turns more
 UNEVEN = 0.15  # Fix This evens out a strip whose width varies more than this
 SHORT = 3  # quads: Fix This takes away an open strip this short (a dead end between two poles)
+VIEW_COST = 1.0  # points of view change Fix Every Strip may spend
+SHARP_DEG = 60.0  # an edge folding more than this holds its vertices: Tidy Up's 35 held 40% of a coarse bust's face
+RING_REACH = 2.5  # quad widths round a ring that are redone: the Flow Editor's 6 took the nose with an eye on a coarse result
 POLE_PIXELS = 14  # how near the mouse has to be to a pole dot to drag it
 DRAG_PIXELS = 250.0  # mouse travel that slides a strip a whole quad over
 SEL_COLOUR = (1.0, 0.55, 0.1, 0.4)
@@ -44,6 +47,8 @@ fl = {
     "base": None,  # the result (guided.state["auto_base"]) the history belongs to
     "hist": {},  # strip_step -> (result, selected element)
     "batch": None,
+    "note": "",
+    "look": None,  # (source signature, its pictures, centre, reach) for the camera check  # the last Fix Every Strip's Loop Quality change
 }
 
 
@@ -54,7 +59,7 @@ def _g():
 
 
 def cancel() -> None:
-    fl.update(res=None, strips=None, tree=None, stay=None, go=None, walks={}, hover=None, sel=None, live=None, base=None, hist={}, batch=None)
+    fl.update(res=None, strips=None, tree=None, stay=None, go=None, walks={}, hover=None, sel=None, live=None, base=None, hist={}, batch=None, note="")
 
 
 def _cache(res) -> None:
@@ -150,7 +155,7 @@ def _plan(res, strip, reach: int = S.REACH):
     _cache(res)
     co = np.asarray(res["co"], dtype=np.float64)
     if fl["stay"] is None:
-        fl["stay"] = O.pinned(co, res["faces"])
+        fl["stay"] = O.pinned(co, res["faces"], sharp_deg=SHARP_DEG)
         fl["go"] = loopscore._continuations(Topology(co, res["faces"]))
     return S.rung_lines(strip, fl["go"], len(co), fl["stay"], reach), fl["stay"]
 
@@ -181,8 +186,73 @@ def moved_points(res, strip, kind: str, amount: float, project=None) -> np.ndarr
     return S.finish(co, S.move(co, lines, goals, stay), res["faces"], project, mirror, side)
 
 
+def _view(points, faces):
+    """Share (percent) of what a viewer sees that differs from your mesh: the camera check Organize uses."""
+    guided = _g()
+    source = guided.state_source()
+    if source is None:
+        return 0.0
+    src = guided._source_data(source)
+    if fl.get("look") is None or fl["look"][0] != src["sig"]:
+        low, high = src["co"].min(axis=0), src["co"].max(axis=0)
+        centre, reach = (low + high) / 2.0, (float(np.ptp(src["co"], axis=0).max()) or 1.0) * 0.55
+        fl["look"] = (src["sig"], ORG._drain(autoretopo.pictures(src["co"], src["faces"], centre, reach, autoretopo.MAX_PIXELS)), centre, reach)
+    _sig, reference, centre, reach = fl["look"]
+    pixels = autoretopo.MAX_PIXELS
+    wrong, shown = autoretopo.picture_counts(reference, ORG._drain(autoretopo.pictures(np.asarray(points, dtype=np.float64), faces, centre, reach, pixels)), 2.0 * reach / pixels)
+    return 100.0 * wrong / max(shown, 1)
+
+
+def fix_all(context, rounds: int = 3, bend: float = 40.0, most: float = 0.75) -> str:
+    """Straighten every wiggly strip of the result, worst first, a few times over, then even out the uneven ones half
+    way, as one step. Vertices where the surface bends stay, no vertex moves more than 3/4 of an edge, and it is kept only
+    when Loop Quality goes up."""
+    sync(context)
+    guided = _g()
+    res = guided.state["res"]
+    if res is None:
+        return "No result yet"
+    st = strips(res)
+    co = np.asarray(res["co"], dtype=np.float64)
+    _plan(res, {"a": [], "b": []})
+    stay, go = fl["stay"] | S.bent(co, res["faces"], bend), fl["go"]
+    plans = []
+    for label in np.unique(st.labels).tolist():
+        if st.sizes[label] >= 2:
+            strip = st.walk(int(np.flatnonzero(st.labels == label)[0]))
+            plans.append((strip, S.rung_lines(strip, go, len(co), stay)))
+    for _ in range(rounds):
+        for strip, lines in sorted(plans, key=lambda p: -S.stats(co, p[0])["turn"]):
+            if lines and S.stats(co, strip)["turn"] > WIGGLY:
+                co = S.move(co, lines, S.targets(co, lines, "straighten", 1.0, strip["closed"]), stay)
+    for strip, lines in plans:
+        if lines and S.stats(co, strip)["width"] > UNEVEN:
+            co = S.move(co, lines, S.targets(co, lines, "even", 0.5, strip["closed"]), stay)
+    co = S.capped(res["co"], co, res["faces"], most)
+    mirror, side = _mirror(res, {"a": [0], "b": [0]})
+    co = S.finish(res["co"], co, res["faces"], _project(), mirror, side)
+    before = loopscore.loop_quality(res["co"], res["faces"])["quality"]
+    seen = _view(res["co"], res["faces"])
+    full = co
+    for part in (1.0, 0.5, 0.25):  # as much of the fix as keeps the look within VIEW_COST points
+        co = res["co"] + part * (full - res["co"])
+        after = loopscore.loop_quality(co, res["faces"])["quality"]
+        if _view(co, res["faces"]) <= seen + VIEW_COST:
+            break
+    else:
+        return "Straightening the strips here would change the look too much (the rows run over detail)"
+    if after <= before:
+        return f"Straightening every strip would not make the rows better here (Loop Quality {before:.0f} -> {after:.0f})"
+    keep = fl["sel"][1] if fl["sel"] is not None and fl["sel"][0] is res else None
+    commit(context, dict(res, co=co), keep)
+    fl["note"] = f"Fix Every Strip: Loop Quality {before:.0f} -> {after:.0f}"
+    return ""
+
+
 def edit(context, kind: str, amount: float = 1.0):
     """Do one edit on the selected strip. Returns an error in words, or ""."""
+    if kind == "fix_all":
+        return fix_all(context)
     sync(context)
     found = selected()
     if found is None:
@@ -200,18 +270,19 @@ def edit(context, kind: str, amount: float = 1.0):
         out = res
         if numbers["turn"] > WIGGLY:
             out = dict(out, co=moved_points(out, strip, "straighten", 1.0, project))
-        if numbers["width"] > UNEVEN:
+        elif numbers["width"] > UNEVEN:
             out = dict(out, co=moved_points(out, strip, "even", 1.0, project))
         if out is res:
             return "This strip already looks clean"
         commit(context, out, element)
         return ""
+    strip = strips(res).walk(element, past_poles=True)  # a strip is split or joined whole, or a face at its end breaks
     mirror, _side = _mirror(res, strip)
     group = [strip]
     if mirror is not None:
         other = S.mirror_element(strips(res), strip, mirror[2])
         if other >= 0:
-            group.append(walk(res, other))
+            group.append(strips(res).walk(other, past_poles=True))
     _plan(res, strip)  # the pins
     try:
         if kind == "add":
@@ -452,7 +523,8 @@ def ring(context, centre, normal, right, rx: float, ry: float) -> bool:
     r = np.asarray(right, dtype=np.float64)
     r = r - (r @ n) * n
     line = F.ellipse(np.asarray(centre, dtype=np.float64), n, r / max(float(np.linalg.norm(r)), 1e-30), rx, ry, 48)
-    flowedit.add_stroke(context, source, "RING", flowedit._nearest_surface(source)(line))
+    obj = flowedit.add_stroke(context, source, "RING", flowedit._nearest_surface(source)(line))
+    obj[flowedit.REACH_KEY] = RING_REACH
     return flowedit.request(context)
 
 
@@ -612,8 +684,19 @@ class CURIOMESH_OT_strip_even(_Edit, bpy.types.Operator):
 class CURIOMESH_OT_strip_fix(_Edit, bpy.types.Operator):
     bl_idname = "curiomesh.strip_fix"
     bl_label = "Fix This"
-    bl_description = "Picks the fix the selected strip needs and does it: straightens a wiggly strip, evens out an uneven one, takes away a short dead end. One step, one Undo"
+    bl_description = "Picks the fix the selected strip needs and does it: straightens a wiggly strip, else evens out an uneven one, or takes away a short dead end. One step, one Undo"
     KIND = "fix"
+
+
+class CURIOMESH_OT_strip_fix_all(_Edit, bpy.types.Operator):
+    bl_idname = "curiomesh.strip_fix_all"
+    bl_label = "Fix Every Strip"
+    bl_description = "Straightens every wiggly strip of the result and evens out the uneven ones, all at once. Kept only when the rows come out better; one step, one Undo"
+    KIND = "fix_all"
+
+    @classmethod
+    def poll(cls, context):
+        return _has_result(context)
 
 
 class CURIOMESH_OT_strip_add(_Edit, bpy.types.Operator):
@@ -630,7 +713,7 @@ class CURIOMESH_OT_strip_remove(_Edit, bpy.types.Operator):
     KIND = "remove"
 
 
-CLASSES = (CURIOMESH_OT_strip_pick, CURIOMESH_OT_strip_ring, CURIOMESH_OT_strip_fix, CURIOMESH_OT_strip_slide, CURIOMESH_OT_strip_straighten, CURIOMESH_OT_strip_even, CURIOMESH_OT_strip_add, CURIOMESH_OT_strip_remove)
+CLASSES = (CURIOMESH_OT_strip_pick, CURIOMESH_OT_strip_ring, CURIOMESH_OT_strip_fix, CURIOMESH_OT_strip_fix_all, CURIOMESH_OT_strip_slide, CURIOMESH_OT_strip_straighten, CURIOMESH_OT_strip_even, CURIOMESH_OT_strip_add, CURIOMESH_OT_strip_remove)
 
 
 def draw(layout, gs) -> None:
@@ -640,6 +723,9 @@ def draw(layout, gs) -> None:
     row = col.row(align=True)
     row.operator("curiomesh.strip_pick", icon="RESTRICT_SELECT_OFF")
     row.operator("curiomesh.strip_ring", **icons.kw("tool_ring", "MESH_CIRCLE"))
+    col.operator("curiomesh.strip_fix_all", icon="SHADERFX")
+    if fl["note"]:
+        overlay.wrap_label(col, fl["note"], width=36, limit=1)
     found = selected()
     if found is None:
         return

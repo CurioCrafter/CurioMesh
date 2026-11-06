@@ -5,7 +5,8 @@
 
 A strip is what you get walking from a quad across one edge to the quad on the other side, then across that quad's
 opposite edge, and so on (Blender's face loop select does the same walk) until the walk comes back to its first quad
-(closed) or reaches a border, a triangle or an n-gon (open). Every quad lies on two strips, one per pair of opposite
+(closed) or reaches a border, a triangle, an n-gon, or an edge with a pole at either end (open). Stopping at poles keeps
+a strip to one run of rows: on a messy result a walk that went on past them winds over the whole mesh. Every quad lies on two strips, one per pair of opposite
 edges; an "element" is one of those: `row * 2 + d`, the quad in row `row` of `Strips.quads` crossed through its edges
 d and d + 2.
 
@@ -55,6 +56,7 @@ class Strips:
         fb = np.fromiter((f[(k + 1) % len(f)] for f in faces for k in range(len(f))), dtype=np.int64)
         used, counts = np.unique(np.minimum(fa, fb) * n + np.maximum(fa, fb), return_counts=True)
         self.twin = np.full(len(a), -1, dtype=np.int64)
+        self.full_twin = self.twin
         if len(a):
             key = a * n + b
             order = np.argsort(key)
@@ -62,6 +64,11 @@ class Strips:
             twin = np.where(key[order][at] == b * n + a, order[at], -1)
             two = counts[np.searchsorted(used, np.minimum(a, b) * n + np.maximum(a, b))] == 2
             self.twin = np.where(two, twin, -1)  # half-edge row * 4 + k -> the half-edge across it on the next quad
+            from .patterns import Topology
+
+            poles = Topology(self.co, faces).poles
+            self.full_twin = self.twin.copy()  # the walk past poles, for adding and taking away whole strips
+            self.twin[poles[a] | poles[b]] = -1  # the rows turn at a pole: the strip stops at an edge touching one
         h = np.flatnonzero(self.twin >= 0)
         here = (h // 4) * 2 + (h % 4) % 2
         there = (self.twin[h] // 4) * 2 + (self.twin[h] % 4) % 2
@@ -73,23 +80,29 @@ class Strips:
         row = self.row_of.get(int(face))
         return -1 if row is None else row * 2 + edge % 2
 
-    def walk(self, element: int) -> dict:
+    def walk(self, element: int, past_poles: bool = False) -> dict:
         """The strip through `element`, in order: {"rows", "entry" (crossed edge per quad), "faces", "a", "b" (its two
-        sides, one rung each, the last rung dropped when closed), "closed", "crossing" (it runs over itself)}."""
+        sides, one rung each, the last rung dropped when closed), "closed", "crossing" (it would run over itself)}. `past_poles`:
+        the whole strip, on past poles to a border or back to its start (a strip can only be split or joined whole)."""
         row0, d = divmod(int(element), 2)
-        q, twin = self.quads, self.twin
+        q, twin = self.quads, (self.full_twin if past_poles else self.twin)
+
+        seen, crossing = {row0}, []
 
         def go(row, entry):
             seq = []
-            while len(seq) <= 2 * len(q):
+            while True:
                 t = twin[row * 4 + (entry + 2) % 4]
                 if t < 0:
                     return seq, False
                 row, entry = divmod(int(t), 4)
-                if row == row0:
+                if row == row0 and entry % 2 == d:
                     return seq, True
+                if row in seen:  # it would run over itself: stop short of that
+                    crossing.append(True)
+                    return seq, False
+                seen.add(row)
                 seq.append((row, entry))
-            return seq, False
 
         ahead, closed = go(row0, d)
         behind = []
@@ -106,7 +119,7 @@ class Strips:
         if not closed:
             a.append(int(c[-1, (k[-1] + 3) % 4]))
             b.append(int(c[-1, (k[-1] + 2) % 4]))
-        return {"rows": rows, "entry": entry, "faces": self.face_of[rows].tolist(), "a": a, "b": b, "closed": closed, "crossing": len(set(rows)) < len(rows)}
+        return {"rows": rows, "entry": entry, "faces": self.face_of[rows].tolist(), "a": a, "b": b, "closed": closed, "crossing": bool(crossing)}
 
     def segments(self, least: int = LONG):
         """(segment ends 2 per element, strip label per segment): each quad crossed by a line from the middle of one
@@ -201,14 +214,30 @@ def targets(co, lines, kind: str, amount: float, closed: bool = False) -> list[t
     if kind == "straighten":
         a = np.asarray([co[ids[ia]] for ids, ia in lines]).reshape(-1, 3)
         b = np.asarray([co[ids[ia + 1]] for ids, ia in lines]).reshape(-1, 3)
-        mid = 0.5 * (a + b)
-        smooth = mid.copy()
-        for _ in range(int(round(30 * amount))):
-            if closed:
-                smooth = 0.5 * smooth + 0.25 * (np.roll(smooth, 1, axis=0) + np.roll(smooth, -1, axis=0))
-            elif len(smooth) > 2:
-                smooth[1:-1] = 0.5 * smooth[1:-1] + 0.25 * (smooth[:-2] + smooth[2:])
-        shift = ((smooth - mid) * _unit(b - a)).sum(axis=1)
+        mid, across = 0.5 * (a + b), _unit(b - a)
+        # How far each rung can shift along its line (the same room `move` leaves); a rung with a pinned end can't.
+        room = np.zeros((len(lines), 2))
+        way = across.copy()  # how the middle of a rung moves per unit of shift: a and b each along their own line
+        for k, ((ids, ia), s) in enumerate(zip(lines, arcs)):
+            m = len(ids)
+            if ia > 0 and ia + 2 < m and s[-1] > 1e-30:
+                step = NARROWEST * s[-1] / (m - 1)
+                room[k] = (s[0] + step * ia - s[ia], s[-1] - step * (m - 2 - ia) - s[ia + 1])
+                p = co[ids]
+                way[k] = 0.25 * (2.0 * across[k] + _unit(p[ia + 2] - p[ia + 1]) + _unit(p[ia] - p[ia - 1]))
+        if not closed and len(room):
+            room[0] = room[-1] = 0.0
+        # Pulling the middle of the strip straight with each rung kept inside its room (each point toward the line
+        # through its two neighbours, as in Organize's loop pull):
+        # wiggles go as far as the quads beside them allow, and a rung that can't move holds the curve.
+        shift = np.zeros(len(lines))
+        for _ in range(int(round(40 * amount))):
+            p = mid + shift[:, None] * way
+            before, after = np.roll(p, 1, axis=0), np.roll(p, -1, axis=0)
+            u = _unit(after - before)
+            line = before + ((p - before) * u).sum(axis=1, keepdims=True) * u  # onto the line through its neighbours: straight, spacing left alone
+            even = 0.5 * p + 0.5 * line
+            shift = np.clip(((even - mid) * way).sum(axis=1) / np.maximum((way * way).sum(axis=1), 1e-30), room[:, 0], room[:, 1])
         return list(zip((sa + shift).tolist(), (sb + shift).tolist()))
     raise ValueError(kind)
 
@@ -312,6 +341,33 @@ def move_vertex(co, faces, vertex: int, goal, stay: np.ndarray, rings: int = 2, 
     return out
 
 
+def bent(co, faces, degrees: float = 25.0) -> np.ndarray:
+    """Vertices where the surface bends: a quad round it turns more than `degrees` from its normal. Moving these
+    along the surface loses the shape they hold (a brow, a lip), so the whole-result fix leaves them."""
+    co = np.asarray(co, dtype=np.float64)
+    quads = np.asarray([f for f in faces if len(f) == 4], dtype=np.int64).reshape(-1, 4)
+    n = _quad_normals(co, quads)
+    vn = np.zeros_like(co)
+    np.add.at(vn, quads.reshape(-1), np.repeat(n, 4, axis=0))
+    vn = _unit(vn)
+    turn = np.zeros(len(co))
+    cos = (n[:, None, :] * vn[quads]).sum(axis=2)
+    np.maximum.at(turn, quads.reshape(-1), np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))).reshape(-1))
+    return turn > degrees
+
+
+def capped(old, new, faces, share: float = 1.0) -> np.ndarray:
+    """`new` with no vertex further than `share` of its mean edge length from where it was in `old`."""
+    old, new = np.asarray(old, dtype=np.float64), np.asarray(new, dtype=np.float64)
+    a = np.fromiter((v for f in faces for v in f), dtype=np.int64)
+    b = np.fromiter((f[(k + 1) % len(f)] for f in faces for k in range(len(f))), dtype=np.int64)
+    length = np.linalg.norm(old[a] - old[b], axis=1)
+    mean = (np.bincount(a, length, len(old)) + np.bincount(b, length, len(old))) / np.maximum(np.bincount(a, minlength=len(old)) + np.bincount(b, minlength=len(old)), 1)
+    drift = new - old
+    far = np.linalg.norm(drift, axis=1)
+    return old + drift * np.minimum(1.0, share * mean / np.maximum(far, 1e-30))[:, None]
+
+
 def _quad_normals(co, quads):
     p = co[quads]
     return _unit(np.cross(p[:, 2] - p[:, 0], p[:, 3] - p[:, 1]))
@@ -328,7 +384,7 @@ def cut(co, faces, strips, project=None):
     split, rungs = {}, set()
     for strip in strips:
         if strip["crossing"]:
-            raise ValueError("this strip runs over itself")
+            raise ValueError("this strip winds back over itself (common on a messy result: Tidy Up first)")
         for f, k in zip(strip["faces"], strip["entry"]):
             if f in split:
                 raise ValueError("this strip runs over itself")
@@ -431,4 +487,4 @@ def mirror_element(strips: Strips, strip: dict, partner: np.ndarray) -> int:
     return -1
 
 
-__all__ = ["Strips", "collapse", "cut", "describe", "finish", "mirror_element", "move", "move_vertex", "partners", "rung_lines", "stats", "targets"]
+__all__ = ["Strips", "bent", "capped", "collapse", "cut", "describe", "finish", "mirror_element", "move", "move_vertex", "partners", "rung_lines", "stats", "targets"]

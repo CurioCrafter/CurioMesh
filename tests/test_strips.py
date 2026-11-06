@@ -32,9 +32,10 @@ class StripsTest(unittest.TestCase):
         self.assertIn(14, strip["faces"])
         co, faces = ball(4)
         st = S.Strips(co, faces)
-        strip = st.walk(0)
-        self.assertTrue(strip["closed"])
-        self.assertEqual(len(strip["faces"]), 16)  # round the cube: 4 sides of 4 quads
+        self.assertFalse(st.walk(0)["closed"])  # a corner quad: its strips stop at the cube's corner poles
+        rings = [w for w in (st.walk(e) for e in range(2 * len(st.quads))) if w["closed"]]
+        self.assertTrue(rings)
+        self.assertEqual({len(w["faces"]) for w in rings}, {16})  # round the cube away from its corners: 4 sides of 4
         ends, labels = st.segments()
         self.assertEqual(len(ends), 2 * len(labels))
 

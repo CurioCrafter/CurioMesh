@@ -4,19 +4,24 @@
 
 ### Face loops
 - **Loop Flow shows face loops**: each strip of quads (walk across a quad to the one on its opposite side, and on) is
-  drawn as a line in its own colour through the quads it crosses, instead of the edge loops. Poles are still dots.
+  drawn as a line in its own colour through the quads it crosses, instead of the edge loops. A strip stops where it
+  meets a pole, so it shows one run of rows; poles are still dots.
 - **Face Loops** in Adjust, under Tidy Up. **Pick a Strip**: point at the result and the strip under the mouse lights
   up; click to select it. The line under the buttons gives its faces, whether it closes, how much it turns and how
   even its width is. While picking, drag the selected strip to move it sideways, or drag a pole dot to move the pole
-  along the surface; the quads round it follow.
+  along the surface; the quads round it follow. The header says what each drag does.
 - Tools for the selected strip, each one Ctrl+Z step: **Fix This** (picks the fix itself: straightens a wiggly strip,
-  evens out an uneven one, takes away a short dead end), **Slide** (move the mouse, click), **Straighten**, **Even
-  Width**, **Add Strip** (splits it down the middle; every face stays a quad) and **Remove Strip** (joins its two sides;
-  refused where a face next to it would stop being a quad). Only the strip and up to three quads each side move, along
-  the lines the quads already run on; hard edges, borders and the mirror seam stay put, the result stays on your mesh,
-  and a mirrored result gets the same change on the other side.
+  else evens out an uneven one, or takes away a short dead end), **Slide** (move the mouse, click), **Straighten**,
+  **Even Width**, **Add Strip** (splits the whole strip down the middle; every face stays a quad) and **Remove Strip**
+  (joins its two sides; refused where a face next to it would stop being a quad, or where the strip winds back over
+  itself). Only the strip and up to three quads each side move, along the lines the quads already run on; folds over
+  60 degrees, borders and the mirror seam stay put, the result stays on your mesh, and a mirrored result gets the same
+  change on the other side.
+- **Fix Every Strip**: straightens every wiggly strip of the result and evens out the uneven ones in one step. Places
+  where the surface bends stay, and it keeps only as much of the change as costs at most 1 point of the camera check;
+  on the marble bust after Tidy Up, Loop Quality 29 -> 33 for 0.8 points.
 - **Ring Round This**: press on the middle of an eye, mouth or hole and drag out to its edge; the quads there are
-  redone as closed rings round it (the Flow Editor's Ring).
+  redone as closed rings round it (the Flow Editor's Ring, over a narrower area than a drawn Ring).
 
 ## 0.9.8 - 2026-11-06
 
