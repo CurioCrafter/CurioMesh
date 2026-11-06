@@ -184,13 +184,14 @@ BANNED_CODE = (
     (r"\b(Turbo|turbo|TURBO)\b|\bLite\b", "names of the GitHub-only native core or an old edition"),
     (r"urllib\.request|http\.client|\bsocket\.|\brequests\.(get|post)\b", "network use"),
     (r"Star on GitHub|star helps", "promotional prompts"),
+    (r"(?i)soft ?wrap|quad ?remesher|retopo ?flow|hard ?ops|box ?cutter|zremesher", "names of other add-ons"),
     (r"(?<![\w.])(eval|exec)\(", "eval / exec"),
     (r"[\"'](bl_ext|user_default|blender_org|user_repository)\b", "hard-coded repository names"),
     (r"addons\[__name__\]", "preferences keyed by __name__ (use __package__)"),
     (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
     (r"__pycache__|\.pyc\b", "bytecode"),
 )
-BANNED_TEXT = ("CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core")
+BANNED_TEXT = ("CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
 LISTING_NOTICES = """# Third-party notices (extensions.blender.org build)
 
 CurioMesh is GPL-3.0-or-later. This build is Python only and contains no compiled code.
