@@ -17,6 +17,7 @@ const CLOSE_ENOUGH: f64 = 0.10; // Reduce To: this near the face count asked for
 const ROUNDS: usize = 4;
 const MOST_LOOKS: usize = 12;
 const TURN_LOSS: f64 = 1.0; // points of view change evening the quads out may add
+const TIDY_LOSS: f64 = 1.0; // points of view change Tidy Up may add
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -26,6 +27,7 @@ pub struct Settings {
     pub gpu: bool,
     pub rows: bool,                // offer even rows of quads to smooth parts
     pub baked: bool,               // judge the result as it will look with a normal map baked from the source
+    pub tidy: f64,                 // Tidy Up: 0 off, 0.5 one round of redrawing patches round poles, 1 two rounds + spinning
 }
 
 pub struct Outcome {
@@ -33,6 +35,7 @@ pub struct Outcome {
     pub loss: f64,
     pub looks: usize,
     pub seconds: f64,
+    pub tidy: Option<String>, // what Tidy Up did, for the line under the result
 }
 
 // ------------------------------------------------------------------------------------------------------ the camera
@@ -438,9 +441,47 @@ impl<'a> Prepared<'a> {
                 (mesh, change) = (tried, after);
             }
         }
+        // Tidy Up: patches round poles redrawn as plain grids, then edges spun again (the add-on's Organize, `clean_poles`).
+        let mut tidied = None;
+        if settings.tidy > 0.0 {
+            let rounds = if settings.tidy >= 1.0 { 2 } else { 1 };
+            let mut tried = mesh.clone();
+            if crate::tidy::redraw_poles(&mut tried, &self.source_tree, rounds) == 0 {
+                tidied = Some("Tidy Up: no patch round a pole could be redrawn tidier".to_string());
+            } else {
+                if rounds > 1 {
+                    crate::layout::spin_edges(&mut tried);
+                }
+                let after = self.look(&tried);
+                looks += 1;
+                let line = if after <= change + TIDY_LOSS {
+                    format!("Tidy Up: poles {} -> {}, view changed {:.1}% -> {:.1}%", thousands(crate::tidy::poles(&mesh)), thousands(crate::tidy::poles(&tried)), change, after)
+                } else {
+                    format!("Tidy Up: not kept, the view would change {:.1}% -> {:.1}%", change, after)
+                };
+                log(&format!("  {line}"));
+                if after <= change + TIDY_LOSS {
+                    (mesh, change) = (tried, after);
+                }
+                tidied = Some(line);
+            }
+        }
         mesh.material = mesh.material.iter().map(|&t| unpack(t).0).collect();
-        Ok(Outcome { mesh: crate::io::compact(&mesh), loss: change, looks, seconds: started.elapsed().as_secs_f64() })
+        Ok(Outcome { mesh: crate::io::compact(&mesh), loss: change, looks, seconds: started.elapsed().as_secs_f64(), tidy: tidied })
     }
+}
+
+/// 1077 -> "1,077".
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Part number per triangle: triangles sharing a corner are one part.
@@ -750,7 +791,7 @@ mod tests {
     #[test]
     fn a_box_comes_out_all_quads_and_unchanged_in_view() {
         let source = cube();
-        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true, baked: false };
+        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true, baked: false, tidy: 1.0 };
         let out = retopo(&source, &settings, |_| {}).unwrap();
         assert!(out.mesh.faces() > 0);
         assert!((0..out.mesh.faces()).all(|f| out.mesh.face(f).len() == 4), "all quads");

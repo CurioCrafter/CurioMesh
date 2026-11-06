@@ -44,6 +44,7 @@ pub struct Settings {
     pub gpu: bool,
     pub rows: bool,
     pub baked: bool, // judge as it will look with a normal map baked from the source (scans)
+    pub tidy: f64,   // Tidy Up, 0 to 1: fewer poles, about the same faces
     pub mirror: Mirror,
     pub export: Target,
     pub keep_uvs: bool, // give the result the source's UVs (a bake does too)
@@ -54,7 +55,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, baked: false, mirror: Mirror::Off, export: Target::default(), keep_uvs: false, bake_normal: false, bake_color: false, bake_size: 2048 }
+        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, baked: false, tidy: 0.0, mirror: Mirror::Off, export: Target::default(), keep_uvs: false, bake_normal: false, bake_color: false, bake_size: 2048 }
     }
 }
 
@@ -133,7 +134,7 @@ pub fn save_preset(name: &str, settings: &Settings) -> Result<PathBuf, String> {
 
 impl Settings {
     pub fn retopo(&self) -> retopo::Settings {
-        retopo::Settings { detail: self.detail, reduce_to: self.reduce_to, pixels: self.pixels, gpu: self.gpu, rows: self.rows, baked: self.baked }
+        retopo::Settings { detail: self.detail, reduce_to: self.reduce_to, pixels: self.pixels, gpu: self.gpu, rows: self.rows, baked: self.baked, tidy: self.tidy }
     }
 
     pub fn to_json(&self) -> Value {
@@ -145,6 +146,7 @@ impl Settings {
             "gpu": self.gpu,
             "rows": self.rows,
             "baked": self.baked,
+            "tidy": self.tidy,
             "mirror": self.mirror.word(),
             "export": self.export.to_json(),
             "keep_uvs": self.keep_uvs,
@@ -198,6 +200,7 @@ impl Settings {
                 "gpu" => self.gpu = flag(k, v)?,
                 "rows" => self.rows = flag(k, v)?,
                 "baked" => self.baked = flag(k, v)?,
+                "tidy" => self.tidy = number(k, v)?.clamp(0.0, 1.0),
                 "mirror" => self.mirror = Mirror::parse(v.as_str().ok_or("settings: mirror must be off, auto, x, y or z")?)?,
                 "export" => self.export.apply(v.as_object().unwrap_or(&empty))?,
                 "keep_uvs" => self.keep_uvs = flag(k, v)?,

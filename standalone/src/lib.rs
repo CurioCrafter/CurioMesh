@@ -37,6 +37,7 @@ pub mod io;
 pub mod issues;
 pub mod ladder;
 pub mod layout;
+pub mod tidy;
 pub mod mirror;
 pub mod retopo;
 pub mod rows;

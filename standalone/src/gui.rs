@@ -114,6 +114,7 @@ struct Finished {
     loss: f64,
     seconds: f64,
     check: issues::Check,
+    tidy: Option<String>, // what Tidy Up did
 }
 
 struct Loaded {
@@ -255,7 +256,7 @@ impl App {
         match io::read(&row.output) {
             Ok(mesh) => {
                 let drawable = Drawable::of(&mesh);
-                self.result = Some((Finished { check: issues::check(&mesh), mesh, loss: row.loss, seconds: row.seconds }, drawable));
+                self.result = Some((Finished { check: issues::check(&mesh), mesh, loss: row.loss, seconds: row.seconds, tidy: None }, drawable));
             }
             Err(e) => self.note = Some((format!("Couldn't read the result. {e}"), true)),
         }
@@ -272,7 +273,7 @@ impl App {
                 let _ = send.send(Message::Log(line.trim().to_string()));
                 ctx.request_repaint();
             };
-            let done = gui_batch::retopo_checked(&source, &settings, log).map(|(out, check)| Finished { check, mesh: out.mesh, loss: out.loss, seconds: out.seconds });
+            let done = gui_batch::retopo_checked(&source, &settings, log).map(|(out, check)| Finished { check, mesh: out.mesh, loss: out.loss, seconds: out.seconds, tidy: out.tidy });
             let _ = send.send(Message::Done(done));
             ctx.request_repaint();
         });
@@ -650,6 +651,12 @@ impl App {
             } else {
                 ui.label(RichText::new("A fixed face count suits one model, so a batch uses the limit above.").small().color(MUTED));
             }
+            ui.horizontal(|ui| {
+                ui.label("Tidy Up");
+                ui.label(RichText::new("More detail").small().color(MUTED));
+                ui.add(egui::Slider::new(&mut c.tidy, 0.0..=1.0).step_by(0.5).show_value(false)).on_hover_text("Tidy Up: fewer poles at about the same faces. Messy patches round poles are redrawn as plain grids, and kept only if the view changes at most 1 point more. Off at the left, one round in the middle, two rounds and spun edges at the right.");
+                ui.label(RichText::new("Tidier").small().color(MUTED));
+            });
             ui.checkbox(&mut c.rows, "Even rows on smooth parts").on_hover_text("Smooth parts are also tried as even rows of quads, and keep them when the view still holds and no bad faces come in.");
             let more = |ui: &mut egui::Ui, c: &mut gui_prefs::Choices| {
             ui.horizontal(|ui| {
@@ -849,6 +856,9 @@ impl App {
             ui.label(format!("{seconds:.1} s"));
             ui.end_row();
         });
+        if let Some(line) = &finished.tidy {
+            ui.label(RichText::new(line).small().color(MUTED));
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.add(egui::Button::new(RichText::new("Save model").strong()).stroke(Stroke::new(1.0, AMBER))).on_hover_text("Save the new mesh as a file for the engine you chose (OBJ, or GLB for Unreal, Godot and glTF).").clicked() {

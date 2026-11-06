@@ -44,6 +44,17 @@ silhouettes and hard edges while flat and gently curved areas become large quads
 Bad faces are faces on broken edges, flipped or duplicated faces, and quads bent past 60 degrees or folded. A good
 result has none.
 
+### Tidy Up
+
+Tidy Up (the slider under Options, `--tidy` on the command line) takes away poles, the corners where other than four
+edges meet. Round each pole, worst first, it looks at the patch of quads up to three rings out and asks whether a plain
+grid fits the patch's outline with fewer poles; if it does, the patch is redrawn as that grid with its new corners on
+the original surface. Hard edges, borders and material changes stay where they are, and no redraw may bring in a bad
+face. The result is kept only if the view changes at most 1 point more; the line under the result says what it did,
+such as "Tidy Up: poles 2,521 -> 909, view changed 4.8% -> 5.4%". It works best on organic models (a marble bust lost
+two thirds of its poles), less on machines with many hard edges. The grids are usually a little coarser than the
+patches they replace, so the result also has 5 to 20% fewer faces.
+
 ## Use the command line
 
 `curiomesh` does the same work in scripts and asset pipelines. `curiomesh --help` lists everything.
@@ -93,6 +104,7 @@ With `-o` each size worth keeping is saved, so you can pick by eye.
 | `--reduce-to N` | Aim for about N faces instead. |
 | `--mirror auto`, `x`, `y` or `z` | Solve one half, mirror it and close the seam, so both sides are the same. `auto` mirrors only when the model is symmetric (90% of it matches its mirror); naming an axis needs 70%. |
 | `--no-rows` | Keep every part as reduced; don't try even rows of quads on smooth parts. |
+| `--tidy T` | Tidy Up, 0 to 1 (default 0): fewer poles. 0.5 is one round, 1 is two rounds and spun edges. See below. |
 | `--pixels N` | Camera picture size per side. Default 192. |
 | `--cpu` | Draw the camera pictures on the processor instead of the graphics card. |
 | `--report FILE.json` | Write the numbers and the issue spots as JSON. |
@@ -127,6 +139,7 @@ settings file looks like this:
   "pixels": 192,
   "gpu": true,
   "rows": true,
+  "tidy": 0.0,
   "mirror": "off",
   "export": { "format": "obj", "triangulate": false, "max_tris": 0, "scale": 1.0, "up": "y" },
   "keep_uvs": false,
