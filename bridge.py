@@ -386,6 +386,10 @@ def _quadriflow_kwargs(config: RemeshConfig) -> dict[str, Any]:
 def _run_quadriflow(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     _set_active_only(obj)
     kwargs = _quadriflow_kwargs(config)
+    mesh = obj.data
+    if not (obj.vertex_groups or getattr(mesh, "color_attributes", None)):
+        # Blender 5.2 can crash reprojecting attributes (mesh_remesh_reproject_attributes); skip it when there's nothing to keep.
+        kwargs["preserve_attributes"] = False
     try:
         try:
             result = bpy.ops.object.quadriflow_remesh(**kwargs)
