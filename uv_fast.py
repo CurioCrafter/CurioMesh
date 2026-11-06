@@ -49,7 +49,7 @@ def _install_chart() -> None:
 
 # main-only: uv begin pack
 def _install_pack() -> None:
-    uvpack.set_fast(probe=turbo.uvpack_probe)
+    uvpack.set_fast(probe=turbo.uvpack_probe, fill_page=turbo.uvpack_fill_page, pack_boxes=turbo.uvpack_pack_boxes, pack_into=turbo.uvpack_pack_into)
 # main-only: uv end pack
 
 

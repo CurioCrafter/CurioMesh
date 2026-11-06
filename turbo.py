@@ -964,4 +964,43 @@ def uvpack_probe() -> "int | None":
     """1 when the compiled `uvpack` kernel is there and its compile probe passes; None for "use NumPy"."""
 
     return _uv_probe("uvpack_probe")
+
+
+def _pk_f64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
+
+
+def _pk_i64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.int64).ravel())
+
+
+def _pk_flag(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=bool).ravel())
+
+
+def uvpack_fill_page(w, h, turn_ok, weight, page_w: int, page_h: int, k: int, order=None, policy: int = 0, scale: float = 0.0,
+                     passes: int = 0, budget: float = 0.0) -> "UvJob | None":
+    """Fill one page as a job (never blocks): `result()` = (info, x, y, turned, order).
+
+    info = [scale, space used, policy, passes done, budget hit, stopped, ok]. k < 0 means no gap. `order`, `policy` and
+    `scale` from an earlier result resume it (Keep going); passes = swap passes after the variants (0 none, negative until a pass gains nothing). None: use the NumPy twin.
+    """
+
+    start = np.zeros(0, np.int64) if order is None else _pk_i64(order)
+    return uv_job("uvpack_fill_page", _pk_f64(w), _pk_f64(h), _pk_flag(turn_ok), _pk_f64(weight),
+                  int(page_w), int(page_h), int(k), start, int(policy), float(scale), int(passes), float(budget), name="CurioMeshUVPack")
+
+
+def uvpack_pack_boxes(w, h, turn_ok, order, policy: int, scale: float, page_w: int, page_h: int, k: int) -> "UvJob | None":
+    """Pack boxes at one scale as a job: `result()` = (ok, x, y, turned)."""
+
+    return uv_job("uvpack_pack_boxes", _pk_f64(w), _pk_f64(h), _pk_flag(turn_ok), _pk_i64(order),
+                  int(policy), float(scale), int(page_w), int(page_h), int(k), name="CurioMeshUVPackBoxes")
+
+
+def uvpack_pack_into(seed, tris, tri_chart, charts: int, as_box, turn_ok, page_w: int, page_h: int, k: int) -> "UvJob | None":
+    """Pack charts into a page that may hold others, as a job: `result()` = (ok, dx, dy, quarter turns) per chart."""
+
+    return uv_job("uvpack_pack_into", _pk_f64(seed), _pk_f64(tris), _pk_i64(tri_chart), int(charts), _pk_flag(as_box), _pk_flag(turn_ok),
+                  int(page_w), int(page_h), int(k), name="CurioMeshUVPackInto")
 # main-only: uv end pack
