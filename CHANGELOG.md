@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.8.1 - unreleased
+
+### Hard surface follow-up
+- **Even Cylinders no longer pads flat discs.** The compressor's regression with the Hard Surface rebuilds on came from
+  Even Cylinders alone (run one at a time on the compressor, Clean Panels alone was level with both off): its "at
+  least 16 sides" floor fired on four thin round covers (0.007 thick, 0.22 across), taking them from 19 to 104 faces
+  for no visible change and 38 slivers each round their thin rims. A round part thinner than a fifth of its radius is
+  now sized by the camera alone.
+- **Clean Panels cuts L- and U-shaped panels into rectangles.** A notched flat panel is split by straight cuts from its
+  inner corners along its own edges until every piece is convex, and each piece becomes one clean grid, as by hand.
+  An L-shaped plate is now 14 quads at the fewest (3 per side) instead of 28, a U-shaped one 22 instead of 40.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

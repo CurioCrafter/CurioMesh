@@ -113,6 +113,23 @@ class CleanPanels(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertEqual(quality(out[0], out[1]), (0, 0, 0))
 
+    def test_l_shape_is_two_rectangles(self):
+        # an L plate with clean triangulated caps: each cap is cut into two rectangles (3 quads), as by hand
+        outline = [(0, 0), (3, 0), (3, 1), (1, 1), (1, 3), (0, 3)]
+        n = len(outline)
+        co = np.asarray([(x, y, z) for z in (0.0, 0.5) for x, y in outline], dtype=float)
+        tris = [(0, 1, 2), (0, 2, 3), (0, 3, 5), (3, 4, 5)]
+        faces = [t[::-1] for t in tris] + [tuple(n + v for v in t) for t in tris]
+        faces += [f for i in range(n) for f in ((i, (i + 1) % n, (i + 1) % n + n), (i, (i + 1) % n + n, i + n))]
+        out = hardsurf.panel_rebuild(co, faces, 0.0)
+        self.assertIsNotNone(out)
+        self.assertEqual(quality(out[0], out[1]), (0, 0, 0))
+        self.assertEqual(len(out[1]), 14)  # 3 + 3 on the caps, 8 round the sides
+        for step in hardsurf.PANEL_STEPS[1:]:
+            out = hardsurf.panel_rebuild(co, faces, step)
+            self.assertIsNotNone(out, step)
+            self.assertEqual(quality(out[0], out[1]), (0, 0, 0))
+
     def test_plate_with_hole(self):
         co, faces = plate_with_hole()
         for step in hardsurf.PANEL_STEPS:
@@ -148,6 +165,13 @@ class EvenCylinders(unittest.TestCase):
         self.assertTrue(all(len(f) == 4 for f in built[1]))
         radius = np.hypot(*(built[0] @ fit["frame"] - fit["center"])[:, :2].T)
         self.assertLess(float(np.abs(radius - radius.mean()).max()), 0.1)
+
+    def test_round_floor_skips_flat_discs(self):
+        outline = [(math.cos(2 * math.pi * k / 32), math.sin(2 * math.pi * k / 32)) for k in range(32)]
+        can = prism(outline, 0.6, rows=4)
+        disc = prism(outline, 0.06, rows=4)
+        self.assertGreater(hardsurf.round_floor(*can, 4.0), 0)
+        self.assertEqual(hardsurf.round_floor(*disc, 4.0), 0)  # its thin rim would be all slivers
 
     def test_tree_path_follows_a_chain(self):
         edges = [(1.0, 0, 1), (1.0, 1, 2), (1.0, 2, 3), (5.0, 0, 3), (0.5, 1, 4)]
