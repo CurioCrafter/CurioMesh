@@ -11,6 +11,8 @@ whole area: a cross field that is constant on the map, which is the smoothest fi
 - the surface's bends: per point, the bending of the edges around it summed as a curvature tensor (Cohen-Steiner and
   Morvan 2003, "Restricted Delaunay triangulations and normal cycle"), which also holds any hard edge inside;
 - the drawn lines inside the area, which count far more;
+- the way across the screen the area was marked from (`across`), as much as all the bends together: rows run the way
+  the user sees them, so turning the view first sets how the rows run;
 - the area's long side, a little, so a plain area gets rows along its length.
 
 The fit is a least-squares average of the four-fold directions in the power form u = exp(4i theta) (Knoppel, Crane,
@@ -40,9 +42,10 @@ from .patch import (
 
 MARGIN = 0.55  # cells: grid corners stay this far inside the border, leaving room for the row that ties it on
 LINE_WEIGHT = 4.0  # drawn lines against all the surface's bends
+ACROSS_WEIGHT = 1.0  # the view's sideways direction against all the surface's bends
 LONG_WEIGHT = 0.15  # the area's long side against all the surface's bends
 TENSOR_SMOOTH = 3  # rounds averaging each point's bending tensor with its neighbours'
-DETAIL_RANGE = 3.0  # quads at most this much finer or coarser than the area's usual where the old ones were
+DETAIL_RANGE = 1.0  # quads at most this much finer or coarser than where the old ones were: 1, even rows (3 bunched rows at a fine border and stretched the rest 2.5 to 1 on the marble bust)
 CONVEX_ROUNDS = 400  # rounds pulling in the corners of the flat map's border that turn back
 BAND_REACH = 30  # seam vertices a tie may run ahead of or behind the even spread
 POLE_COST = 1.0  # a grid corner off four edges, against one bad quad
@@ -54,6 +57,7 @@ FOLD = -0.866  # neighbours more than 150 degrees apart lie folded over each oth
 SEAM_ROUNDS = 3  # rounds easing the area's border along itself
 SEAM_MOST = 0.35  # of the shorter border edge beside it: the most a border point moves
 POOR, BAD_COST = 0.1, 40.0  # a tie quad this poor (folded, or a corner near flat) costs as much as many poles
+UNTANGLE_ROUNDS = 12  # rounds opening out folded quads, each corner once a round
 
 
 def _detail(points: np.ndarray, tris: np.ndarray) -> np.ndarray:
@@ -130,7 +134,7 @@ def _power(vectors: np.ndarray) -> complex:
     return complex(np.sum(np.linalg.norm(vectors, axis=1) * np.exp(4j * angle)))
 
 
-def direction(points, tris, uv, along=None, on_line=None) -> float:
+def direction(points, tris, uv, along=None, on_line=None, across=None) -> float:
     """The angle on the flat map the rows run at (mod 90 degrees): bends, drawn lines and the long side, see above."""
     a, b, edge_of, uses = fieldmesh._edges(tris, len(points))
     normals = fieldmesh._normals_areas(points, tris)[0]
@@ -151,6 +155,9 @@ def direction(points, tris, uv, along=None, on_line=None) -> float:
         mapped = np.einsum("pij,pj->pi", _jacobians(points, tris, uv)[ids], along[ids])
         line = _power(mapped)
         total += LINE_WEIGHT * scale * line / max(float(np.linalg.norm(mapped, axis=1).sum()), 1e-30)
+    if across is not None:
+        mapped = np.einsum("pij,j->pi", _jacobians(points, tris, uv), np.asarray(across, dtype=np.float64))
+        total += ACROSS_WEIGHT * scale * _power(mapped) / max(float(np.linalg.norm(mapped, axis=1).sum()), 1e-30)
     centred = uv - uv.mean(axis=0)
     w, v = np.linalg.eigh(centred.T @ centred)
     long_side = v[:, 1] * (1.0 - w[0] / max(w[1], 1e-30))
@@ -214,8 +221,9 @@ def _loop_count(cell: np.ndarray) -> int:
     return len(boundary_loops(quads, range(len(quads)))[0])
 
 
-def grid_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None):
-    """A grid of about `target` quads over a piece (a disk, or a disk with holes in it), along `direction`, its corners
+def grid_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None, across=None):
+    """A grid of about `target` quads over a piece (a disk, or a disk with holes in it), along `direction` (`across`: the
+    view's sideways direction, see there), its corners
     on the piece: (points, quads). Same call as `fieldmesh.field_quads`, which does the work where the piece touches
     itself. Each hole is closed by a fan for the flat map only, and the grid keeps out of it."""
     points = np.asarray(vertices, dtype=np.float64)
@@ -233,7 +241,7 @@ def grid_quads(vertices, faces, target: float, turn: float | None = None, seed: 
         points = np.vstack([points] + [points[h].mean(axis=0, keepdims=True) for h in holes])
         tris = np.vstack([tris] + [np.stack((np.roll(h, -1), h, np.full(len(h), count + k)), axis=1) for k, h in enumerate(holes)])
     uv = _flat(points, tris, border)
-    theta = direction(points, tris, uv, along, on_line)
+    theta = direction(points, tris, uv, along, on_line, across)
     turn_by = np.array([[np.cos(theta), np.sin(theta)], [-np.sin(theta), np.cos(theta)]])
     flat = uv @ turn_by.T  # the rows run along the map's axes
     q = flat[tris[:real]]
@@ -291,6 +299,73 @@ def folded(points, faces) -> np.ndarray:
     out[fa[over]] = True
     out[fb[over]] = True
     return out
+
+
+def untangle(co, faces, free, project=None, rounds: int = UNTANGLE_ROUNDS) -> np.ndarray:
+    """The points with folded or near-flat quads opened out: each free corner of such a quad (and of its neighbours) is
+    tried a quarter, half and all the way to the middle of the corners it shares an edge with (umbrella smoothing, Taubin
+    1995) and to where its quads would be parallelograms (each quad's other three corners: a + c - b; all, or each alone), put
+    back on the surface by `project`, and kept where it leaves fewer folded or bent faces round it, else a better worst quad.
+    `free`: per point, may it move. Every point stays on the surface; faces with no bad neighbour don't move."""
+    co = np.asarray(co, dtype=np.float64).copy()
+    free = np.asarray(free, dtype=bool)
+    faces = [tuple(f) for f in faces]
+    users: dict = {}
+    nbrs: dict = {}
+    for i, f in enumerate(faces):
+        for k, v in enumerate(f):
+            users.setdefault(v, []).append(i)
+            nbrs.setdefault(v, set()).update((f[k - 1], f[(k + 1) % len(f)]))
+    fa, fb = face_adjacency(faces)
+    side: dict = {}
+    for a, b in zip(fa.tolist(), fb.tolist()):
+        side.setdefault(a, []).append(b)
+        side.setdefault(b, []).append(a)
+
+    def quality(points, ids):
+        quads = [i for i in ids if len(faces[i]) == 4]
+        return quad_quality(points[np.asarray([faces[i] for i in quads], dtype=np.int64)]) if quads else np.ones(1)
+
+    def normals(points, ids):
+        n = np.asarray([np.cross(points[faces[i][2]] - points[faces[i][0]], points[faces[i][-1]] - points[faces[i][1]]) for i in ids])
+        return n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-30)
+
+    def score(points, v):
+        ids = users[v]
+        near = sorted({j for i in ids for j in side.get(i, [])} | set(ids))
+        at = {i: k for k, i in enumerate(near)}
+        n = normals(points, near)
+        bad = {k for i in ids for j in side.get(i, []) if float(n[at[i]] @ n[at[j]]) < FOLD for k in (i, j)}
+        bad |= {i for i, q in zip([i for i in near if len(faces[i]) == 4], quality(points, [i for i in near if len(faces[i]) == 4])) if q <= 0.0}
+        return (-len(bad), float(quality(points, ids).min()))
+
+    for _ in range(rounds):
+        q = np.ones(len(faces))
+        quads = np.flatnonzero([len(f) == 4 for f in faces])
+        q[quads] = quad_quality(co[np.asarray([faces[i] for i in quads.tolist()], dtype=np.int64)])
+        bad = np.flatnonzero((q < POOR) | folded(co, faces))
+        if not len(bad):
+            break
+        near = {j for i in bad.tolist() for j in side.get(i, [])} | set(bad.tolist())
+        moved = False
+        for v in sorted({v for i in near for v in faces[i] if free[v]}):
+            square = [co[f[k - 1]] + co[f[(k + 1) % 4]] - co[f[(k + 2) % 4]] for i in users[v] for f in (faces[i],) if len(f) == 4 for k in (f.index(v),)]
+            goals = [co[list(nbrs[v])].mean(axis=0)] + ([np.mean(square, axis=0)] + square if square else [])
+            best, keep = score(co, v), None
+            for goal, t in [(g, t) for g in goals for t in (0.25, 0.5, 1.0)]:
+                trial = co.copy()
+                trial[v] = co[v] + t * (goal - co[v])
+                if project is not None:
+                    trial[v] = np.asarray(project(trial[v][None]), dtype=np.float64)[0]
+                got = score(trial, v)
+                if got > best:
+                    best, keep = got, trial[v]
+            if keep is not None:
+                co[v] = keep
+                moved = True
+        if not moved:
+            break
+    return co
 
 
 def ease_seam(co, faces, ids, project=None, rounds: int = SEAM_ROUNDS) -> np.ndarray:
@@ -452,4 +527,4 @@ def band(points, loop, seam, next_id: int = 0, faces=()):
     return made[::-1], []
 
 
-__all__ = ["band", "direction", "ease_seam", "folded", "grid_quads", "tidy_area"]
+__all__ = ["band", "direction", "ease_seam", "folded", "grid_quads", "tidy_area", "untangle"]

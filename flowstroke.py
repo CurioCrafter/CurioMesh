@@ -18,6 +18,8 @@ a constraint. Plain NumPy.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 
 try:  # inside the add-on, or on its own for the tests
@@ -374,10 +376,22 @@ def splice(co, faces, mat, builds: list[tuple[np.ndarray, tuple]]):
     return co2, faces2, mat2, piece2 > 0
 
 
-def rows(co, faces, mat, ids, strokes=(), project=None):
+def _mesh_border(faces, count: int) -> np.ndarray:
+    """Per point: on an open edge of the mesh."""
+    uses: dict = {}
+    for f in faces:
+        for k in range(len(f)):
+            e = (min(f[k - 1], f[k]), max(f[k - 1], f[k]))
+            uses[e] = uses.get(e, 0) + 1
+    out = np.zeros(count, dtype=bool)
+    out[[v for e, n in uses.items() if n == 1 for v in e]] = True
+    return out
+
+
+def rows(co, faces, mat, ids, strokes=(), project=None, across=None):
     """Redraw in Rows: the faces `ids` of a result (tidied, see `rowfill.tidy_area`) remade as rows of quads at their
     own size (`rowfill.grid_quads`), tied to the faces round them (`rowfill.band`) after their border is eased along
-    itself (`rowfill.ease_seam`), steered by `strokes`. Returns (co, faces, mat, new face mask, the old faces redone,
+    itself (`rowfill.ease_seam`), steered by `strokes` and `across` (the view's sideways direction). Returns (co, faces, mat, new face mask, the old faces redone,
     folded new faces).
     Raises ValueError where it can't."""
     marked = np.zeros(len(faces), dtype=bool)
@@ -386,9 +400,16 @@ def rows(co, faces, mat, ids, strokes=(), project=None):
     if len(area) < 8:
         raise ValueError("the area is too small: rows need at least a few quads each way")
     eased = rowfill.ease_seam(co, faces, area, project)
-    made = redo(eased, faces, area, list(strokes), project, mesher=rowfill.grid_quads, bridge=rowfill.band)
-    out = splice(eased, faces, mat, [(area, made)])
-    return (*out, area, int((rowfill.folded(out[0], out[1]) & out[3]).sum()))
+    made = redo(eased, faces, area, list(strokes), project, mesher=functools.partial(rowfill.grid_quads, across=across), bridge=rowfill.band)
+    co2, faces2, mat2, new = splice(eased, faces, mat, [(area, made)])
+    free = np.zeros(len(co2), dtype=bool)
+    free[np.unique([v for f, n in zip(faces2, new) if n for v in f])] = True
+    free[np.unique([v for f, n in zip(faces2, new) if not n for v in f])] = False  # the seam stays: the faces round keep their shape
+    co2 = rowfill.untangle(co2, faces2, free, project)
+    seam = np.zeros(len(co2), dtype=bool)  # still folded: the seam's points may move too, never so a face round turns bad
+    seam[np.unique([v for f, n in zip(faces2, new) if n for v in f])] = True
+    co2 = rowfill.untangle(co2, faces2, seam & ~_mesh_border(faces2, len(co2)), project)
+    return co2, faces2, mat2, new, area, int((rowfill.folded(co2, faces2) & new).sum())
 
 
 __all__ = ["KINDS", "areas", "ellipse", "fit_ring", "recognise", "record", "redo", "rows", "splice", "template", "tidy"]

@@ -25,6 +25,7 @@ import math
 import numpy as np
 
 from .patch import boundary_loops, coons_grid, face_adjacency, mask_components
+from .rowfill import untangle
 
 BAND = 2.5  # quad widths round the rim whose faces are redone, by default (the user drags this)
 FANS = 6  # most corner quads (poles) in the band: past this the rings get more quads instead
@@ -326,6 +327,8 @@ def find_rim(src_co, src_tris, centre, normal, right, size: float):
     m = np.stack((np.cos(angles) ** 2, np.sin(angles) ** 2), axis=1)
     fit, *_ = np.linalg.lstsq(m, 1.0 / radii**2, rcond=None)
     wide, tall = sorted((float(np.clip(size / math.sqrt(f), 0.8 * size, 3.0 * size)) for f in np.maximum(fit, 1.0 / 9.0)), reverse=True)
+    if wide <= 1.0 * size:  # under a quad across: a bump in the middle, not the opening's rim
+        return None
     return wide, max(tall, 0.4 * wide)  # a click is read as an opening at least as wide as tall: draw it out for others
 
 
@@ -479,9 +482,10 @@ def build(co, faces, centre, normal, right, rx: float, ry: float, band: float = 
             break
         points[back] = lifted[back]
 
-    every = np.vstack((co, points))
     kept = np.flatnonzero(~mask)
     out_faces = [faces[f] for f in kept.tolist()] + new_faces
+    fresh = np.arange(len(co) + len(points)) >= base
+    every = untangle(np.vstack((co, points)), out_faces, fresh, project)
     used = np.zeros(len(every), dtype=bool)
     for f in out_faces:
         used[list(f)] = True

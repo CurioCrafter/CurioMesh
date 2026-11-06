@@ -18,7 +18,7 @@ from mathutils.bvhtree import BVHTree
 
 from . import autoretopo, icons, overlay, region, segments
 from . import organize as ORG
-from .triadq import loopscore, patch, segment
+from .triadq import loopscore, patch, rowfill, segment
 from .triadq import organize as O
 from .triadq import rings as RG
 from .triadq import strips as S
@@ -235,6 +235,7 @@ def fix_all(context, rounds: int = 3, bend: float = 40.0, most: float = 0.75) ->
     co = S.capped(res["co"], co, res["faces"], most)
     mirror, side = _mirror(res, {"a": [0], "b": [0]})
     co = S.finish(res["co"], co, res["faces"], _project(), mirror, side)
+    co = _no_new_folds(res["co"], co, res["faces"])
     before = loopscore.loop_quality(res["co"], res["faces"])["quality"]
     seen = _view(res["co"], res["faces"])
     full = co
@@ -251,6 +252,19 @@ def fix_all(context, rounds: int = 3, bend: float = 40.0, most: float = 0.75) ->
     commit(context, dict(res, co=co), keep)
     fl["note"] = f"Fix Every Strip: Loop Quality {before:.0f} -> {after:.0f}"
     return ""
+
+
+def _no_new_folds(old, new, faces) -> np.ndarray:
+    """`new` with the corners of every face it folds or bends flat that `old` didn't put back, until none is left."""
+    old, new = np.asarray(old, dtype=np.float64), np.asarray(new, dtype=np.float64).copy()
+    was = rowfill.folded(old, faces)
+    for _ in range(6):
+        worse = np.flatnonzero(rowfill.folded(new, faces) & ~was)
+        if not len(worse):
+            break
+        back = np.unique([v for i in worse.tolist() for v in faces[i]])
+        new[back] = old[back]
+    return new
 
 
 def lasso_faces(res, poly, to_screen, toward) -> np.ndarray:
@@ -288,9 +302,10 @@ def _strokes_in(context, res, ids):
     return out
 
 
-def redraw_rows(context, ids) -> str:
+def redraw_rows(context, ids, across=None) -> str:
     """Remake the faces `ids` of the result on screen as rows of quads at their own size, tied to the faces round them
-    (`triadq.rowfill`), as one Undo step. Returns an error in words, or ""."""
+    (`triadq.rowfill`), as one Undo step. `across`: the view's sideways direction in the result's space, which the rows
+    follow. Returns an error in words, or ""."""
     from . import flowstroke as F
 
     sync(context)
@@ -301,7 +316,7 @@ def redraw_rows(context, ids) -> str:
     if len(ids) < 8:
         return "Mark a bigger area: rows need at least a few quads each way"
     try:
-        co, faces, mat, new, area, bad = F.rows(res["co"], res["faces"], res["mat"], ids, _strokes_in(context, res, ids), _project())
+        co, faces, mat, new, area, bad = F.rows(res["co"], res["faces"], res["mat"], ids, _strokes_in(context, res, ids), _project(), across)
     except ValueError as exc:
         return f"Can't redraw this area in rows: {exc}"
     if segment.open_edges(faces) > segment.open_edges(res["faces"]):
@@ -751,6 +766,16 @@ def _view_mappers(context, preview):
     return to_screen, lambda points: np.tile(look, (len(points), 1))
 
 
+def _across(context):
+    """The view's sideways direction in the result's space (None off a 3D view): Redraw in Rows lays rows along it."""
+    preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+    rv3d = getattr(context.space_data, "region_3d", None)
+    if preview is None or rv3d is None:
+        return None
+    right = np.asarray(preview.matrix_world.inverted().to_3x3() @ (rv3d.view_rotation @ Vector((1.0, 0.0, 0.0))))
+    return right / max(float(np.linalg.norm(right)), 1e-30)
+
+
 def _edit_selection(context):
     """Faces of the result selected in Edit Mode on the preview, or None (back in Object Mode either way)."""
     preview = bpy.data.objects.get(_g().PREVIEW_NAME)
@@ -774,7 +799,7 @@ def _part_at(res, face: int) -> np.ndarray:
 class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
     bl_idname = "curiomesh.redraw_rows"
     bl_label = "Redraw in Rows"
-    bl_description = "Draw round an area of the result (or click a part, or select faces in Edit Mode first) and its quads are laid out again as long straight rows at the same size. The rows follow the surface's bends and any lines you drew, and the faces round it stay as they are"
+    bl_description = "Draw round an area of the result (or click a part, or select faces in Edit Mode first) and its quads are laid out again as long straight rows at the same size. The rows run across the screen the way you look at it, bent by the surface and any lines you drew, and the faces round it stay as they are"
     bl_options = {"REGISTER", "UNDO"}
     HINT = "Drag round the area to redraw in rows, or click a part for all of it. Right-click or Esc: cancel"
 
@@ -786,7 +811,7 @@ class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
         fl["lasso"] = None
         context.workspace.status_text_set(None)
         overlay.tag_redraw()
-        error = redraw_rows(context, ids)
+        error = redraw_rows(context, ids, _across(context))
         if error:
             self.report({"WARNING"}, error)
             return {"CANCELLED"}
