@@ -15,6 +15,9 @@
   Changing a switch works the strengths out again from the result as it was.
 - Measured at Tidy Up 1, 0.9.8 -> 0.9.8.1 (Keep Detail 6%): bust poles 722 -> 525, Tidiness 56 -> 65, Loop Quality
   32 -> 33, Issue Finder 170 -> 154, view changed 7.8% -> 8.4% (6.2% before Tidy Up), faces 2,410 -> 2,266.
+  Lion head poles 2,194 -> 1,871, Tidiness 55 -> 59, view 7.2% -> 7.6%, faces 7,246 -> 6,953; road barrier poles
+  255 -> 194, Tidiness 44 -> 54, Loop Quality 15 -> 17, view 8.0% -> 8.2%. Inward, folded and crossing faces not up.
+  Working out the strengths takes about twice as long (bust 7 -> 18 s).
 - Tried and left out: moving poles off flat spots toward curved ones with energy-neutral spins (on the bust it moved 4
   of about 38 flat-spot poles and changed nothing else), and longer walks that may raise the energy part way (a few
   more poles for far fewer faces and 2-3x the time). Under about 500 poles on the bust the rest mark where the quad size
