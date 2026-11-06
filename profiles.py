@@ -28,6 +28,7 @@ OUTPUT_ITEMS = [
 PROFILES = {
     "LOW_POLY": ("Low Poly", "Fewest faces for a game prop or background: flat areas collapse into big polygons, then triangles. Small parts may vanish", 10.0, "FLAT", "TRIS"),
     "GAME": ("Game Asset", "All quads, few faces, good for a game model. The default", 6.0, "AUTO", "QUADS"),
+    "HARD": ("Hard Surface", "Machines, props and architecture: all quads, few faces, flat panels laid out as clean grids and round parts as even cylinders where the camera agrees, and every hard edge marked Sharp and Creased when you Apply. Keeps a little more detail than Game Asset, for crisp silhouettes", 5.0, "AUTO", "QUADS"),
     "ANIMATION": ("Animation", "All quads, even sizes and more faces, so the mesh bends cleanly. Check eyes, mouth and joints by hand", 1.5, "QUADRIFLOW", "QUADS"),
     "SUBDIV": ("Subdivision", "All quads with flat panels kept as single large quads, so smoothing keeps the shape", 1.5, "FLAT", "QUADS"),
     "SCAN": ("Scan Cleanup", "Keeps more of the detail of a dirty scan (scans have few true flats, so no flat merging)", 2.0, "AUTO", "QUADS"),
@@ -93,7 +94,7 @@ def choose(facts: dict, free_gb: float) -> dict:
     if many_parts:
         return {"use": "GAME", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "assembly", "why": f"{size}: an assembly. Game Asset, part by part. No Multires: its levels would round hard edges and many small parts gain little."}
     if facts["flat"] >= 0.2:
-        return {"use": "GAME", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "hard", "why": f"{size}, {100.0 * facts['flat']:.0f}% of its edges flat: a hard-surface model. Game Asset. No Multires: its levels would round the hard edges."}
+        return {"use": "HARD", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "hard", "why": f"{size}, {100.0 * facts['flat']:.0f}% of its edges flat: a hard-surface model. Hard Surface: Game Asset with its hard edges marked. No Multires: its levels would round the hard edges."}
     levels = levels_for(cage_faces(faces), free_gb, faces)
     room = f"{levels} Multires level{'s' if levels != 1 else ''}: past that your mesh has no more to give, or the {free_gb:.0f} GB free runs out"
     if facts["flat"] < 0.06:

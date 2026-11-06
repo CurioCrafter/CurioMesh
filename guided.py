@@ -28,7 +28,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
+from . import autoretopo, blockout, hard_surface, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -215,6 +215,7 @@ def _profile_update(self, context):
             self.auto_detail, self.auto_method, self.auto_output = values
             self.bend_use = self.auto_profile == "ANIMATION"  # Deformation Lines are for joints: on with Animation, off again with any other use
             self.auto_chords = self.auto_profile in CHORDS_PROFILES  # tidiness first: Animation and Subdivision
+            self.hs_edges = "MARK" if self.auto_profile == "HARD" else "NONE"  # Hard Surface marks its hard edges on Apply
         finally:
             _applying = False
     if self.multires_on != (self.auto_profile == "ANIMATION"):  # Animation's route: a QuadriFlow cage, with the detail in Multires levels
@@ -340,6 +341,14 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     organize: bpy.props.FloatProperty(name="Organize", description="After a search: about the same faces, laid out tidier. Messy patches around poles become plain grids, then the quads settle into even rows on your mesh, which costs a little detail; the meter below says how much. Strengths appear as they are worked out in the background", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
     organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Organize goes no further than this much more of the view changed than at 0", default=False, update=organize.on_cap)
     organize_cap: bpy.props.FloatProperty(name="Most Detail Loss", description="Percent of the view that Organize may change on top of the result as it was", default=1.0, min=0.1, max=20.0, precision=1, subtype="NONE", update=organize.on_cap)
+    # Hard surface (hard_surface.py): two search switches and the hard-edge finish on Apply
+    hs_panels: hard_surface.prop("hs_panels")
+    hs_cylinders: hard_surface.prop("hs_cylinders")
+    hs_edges: hard_surface.prop("hs_edges")
+    hs_angle: hard_surface.prop("hs_angle")
+    hs_hold_unit: hard_surface.prop("hs_hold_unit")
+    hs_hold_percent: hard_surface.prop("hs_hold_percent")
+    hs_hold_mm: hard_surface.prop("hs_hold_mm")
     organize_flow: bpy.props.BoolProperty(name="Loop Flow", description="Draw the edge loops of the result in a colour each, and its poles as dots (blue: three edges, red: five or more)", default=False, update=_redraw_update)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads, the middle keeps the quad size and only reorganizes the flow, right makes more, smaller quads that keep more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Draw each point's reach and the combined region outline", default=True, update=_redraw_update)
@@ -1705,7 +1714,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
     chords = gs.auto_chords and not baked and loose_pieces(src) <= CHORDS_MOST_PIECES
-    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6), tuple(tweaks(gs).values()), hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
+    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6), tuple(tweaks(gs).values()), hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap, tuple(hard_surface.job_flags(gs).values()))
     state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
         return True
@@ -1760,7 +1769,7 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
     turbo.set_gpu(gs.auto_gpu)
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
-    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs))
+    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs), hard=hard_surface.job_flags(gs))
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
@@ -2893,6 +2902,7 @@ def _write_result(context, source, res, gs, name: str):
         _transfer_normals(mesh, _source_data(source), res)
     if gs.bend_crease or gs.bend_sharp:
         _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
+    hard_surface.finish(mesh, gs, context.scene.unit_settings.scale_length)
     out = bpy.data.objects.new(name, mesh)
     (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(out)
     out.matrix_world = source.matrix_world.copy()
@@ -3059,6 +3069,8 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             _transfer_normals(mesh, _source_data(source), written)
         if gs.bend_crease or gs.bend_sharp:
             _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
+        if not (gs.multires_on and gs.scope == "AUTO"):  # Multires creases its own cage
+            hard_surface.finish(mesh, gs, context.scene.unit_settings.scale_length)
         out = bpy.data.objects.new(source.name + "_Retopo", mesh)
         (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(out)
         out.matrix_world = source.matrix_world.copy()
@@ -4021,6 +4033,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         if gs.auto_profile == "LOW_POLY":
             col.prop(gs, "auto_baked", text="Judge After Baking (Experimental)", toggle=True, icon="EXPERIMENTAL")
         col.prop(gs, "auto_instances", toggle=True, icon="LINKED")
+        hard_surface.draw(col.box(), gs)
         col.prop(gs, "auto_style")
         col.prop(gs, "auto_method")
         factor = hardware.style_factor(gs.auto_style, gs.auto_method)

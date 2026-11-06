@@ -32,7 +32,7 @@ from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patterns, redo, repair, special, views
+from .triadq import bakescore, cases, checks, detail, hardsurf, issues, parts, patch, patterns, redo, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
@@ -107,6 +107,7 @@ CHORDS_SECONDS = 240.0  # time for redrawing and judging per run; plain collapse
 CHORDS_MESSY = 0.3  # a part is redrawn when more than this share of its corners are poles
 TURN_UP_TO = 150_000  # quads: edges are spun at poles up to here (plain Python, about 3 s per 15,000 quads)
 TURN_LOSS = 1.0  # points of view change spinning edges may add, staying within what Keep Detail counts as a fit
+HARD = {"panels": False, "cylinders": False}  # hard-surface rebuilds when the caller says nothing (hard_surface.job_flags)
 TWEAK = {"rows": 0.5, "flat": 0.5, "poles": 1}  # the Tweak settings as they are by default: what the constants above give (poles: 1 on, 0 off)
 
 
@@ -682,7 +683,8 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False, tweak: dict | None = None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
+        self.hard = dict(HARD if hard is None else hard)  # Clean Panels and Even Cylinders: more rebuilt sizes per part
         self.redo_rough = bool(redo_rough)  # Redo Rough Spots: regions round the spots still bad after the repairs are made again, finer
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
         self.redo_counts = {"regions": 0, "no better": 0, "kept": 0}  # what happened to the regions tried, for the bench
@@ -1056,7 +1058,8 @@ class AutoJob:
         seen = 0.0
         enough = GOOD_ENOUGH * self.detail / 100.0
         if not cut and self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
-            tries = parts.rebuilds(points, polys, max(set(kinds), key=kinds.count))
+            kind = max(set(kinds), key=kinds.count)
+            tries = chain(parts.rebuilds(points, polys, kind), hardsurf.rebuilds(points, polys, kind, **self.hard))
             while True:
                 out = yield from self._off(lambda: next(tries, False))
                 if out is False:
@@ -2117,7 +2120,7 @@ class AutoJob:
         self.timings["check and repair"] = self.timings.get("check and repair", 0.0) + time.perf_counter() - began
         if left and time.perf_counter() > self._repair_until:
             self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
-        check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
+        check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left), int(found.overlap.sum())), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
         return points, faces, mats, view, check
 
     def _redo_rough(self, points, faces, mats, piece, view, after):
