@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! Redraw Messy Quads (`triadq/chords.py`): the cheapest closed walk on squared paper, and how many pixels of the six
 //! source pictures a quad gets wrong. Both mirror the Python step for step, in the same double precision, so they give
 //! the same walks and the same pixel counts.

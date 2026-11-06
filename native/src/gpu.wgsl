@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 // Six orthographic depth pictures of a triangle mesh, the compute twin of `geom::pictures_along`.
 // One thread per triangle, looping over the three axes. Pass `depth` keeps the nearest depth per pixel as an
 // atomic min of its f32 bits (positive floats order like their bits). Pass `ids` then keeps, among the triangles

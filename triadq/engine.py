@@ -837,6 +837,10 @@ def _augment_matching(
 ) -> int:
     """Grow `mate` in place to a maximum-cardinality matching (Edmonds' blossoms).
 
+    Pairing triangles into quads by a matching on the dual graph is the idea of Blossom-Quad (Remacle et al. 2012);
+    the search is Edmonds' algorithm (Edmonds 1965, "Paths, Trees, and Flowers") in its usual textbook form
+    (common base, mark the two paths, contract), written here for this code with a union-find of bases and frozen trees.
+
     The greedy start keeps high-score pairs; each free root, in seed order,
     then runs one alternating-tree search that contracts odd cycles
     (blossoms) so paths through them are not missed. A root without an

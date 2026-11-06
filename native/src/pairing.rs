@@ -6,7 +6,8 @@
 use crate::matching;
 use rayon::prelude::*;
 
-/// Python's `random.Random(seed)`: MT19937 seeded by `init_by_array([seed])`, for a seed below 2^32.
+/// Python's `random.Random(seed)`: MT19937 (Matsumoto and Nishimura 1998, whose published constants these are) seeded
+/// by `init_by_array([seed])`, for a seed below 2^32, so the numbers match Python's exactly.
 struct Mersenne {
     state: Box<[u32; 624]>,
     at: usize,

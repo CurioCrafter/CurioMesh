@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | [Blender Studio Human Base Meshes v1.4.1](https://www.blender.org/download/demo/) | character | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) | Blender Studio, Human Base Meshes | 82 |
 | MakeHuman base mesh (`base.obj`, body only) | character | CC0 1.0 (assets) | MakeHuman Community, base mesh | 1 |
-| Keenan Crane: Spot, Bob, Blub, Jerry the Ogre (control meshes only) | character | Public domain / CC0 1.0 | Keenan Crane | 4 |
+| [Keenan Crane's 3D Model Repository](https://www.cs.cmu.edu/~kmcrane/Projects/ModelRepository/): Spot, Bob, Blub, Jerry the Ogre (control meshes only) | character | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) | Keenan Crane's 3D Model Repository (Spot: Crane, Pinkall and Schroeder 2013) | 4 |
 | [Blender Studio Sprite (Sprite Fright)](https://studio.blender.org/characters/sprite/v1/) | character | [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Sprite Rig (CC-BY) Blender Foundation, studio.blender.org | 14 |
 | [Blender Studio Rain](https://studio.blender.org/characters/rain/v3/) | character | [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Rain Rig (CC) Blender Foundation \| studio.blender.org | 17 |
 | [Blender Studio Pack Bot (Charge)](https://studio.blender.org/characters/pack-bot/v1/) | hard surface | [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Pack Bot Rig (CC-BY) Blender Foundation, studio.blender.org | 40 |

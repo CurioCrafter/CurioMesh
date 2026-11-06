@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! `segment._merge_all`'s loop: merge the cheapest neighbouring patches first, until each loose piece is one. The same
 //! prices, in the same arithmetic (`x ** 0.5` as `powf`), popped in the same order as a heap of Python tuples.
 

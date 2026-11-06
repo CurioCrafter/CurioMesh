@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 """Build docs/trailer/trailer.webp and docs/images/hero_styles.jpg from existing pictures.
 
 Run from the repo root:  python scripts/make_trailer.py [path/to/godot_export/sheet_user.png]

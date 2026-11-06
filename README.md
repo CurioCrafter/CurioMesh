@@ -587,9 +587,9 @@ Yes. Review Segments redoes one part with its own method and detail while the se
 </details>
 
 <details>
-<summary><b>How is it different from Blender's Quad Remesh?</b></summary>
+<summary><b>How is it different from Blender's QuadriFlow Remesh?</b></summary>
 
-Blender's Quad Remesh works on the whole object in one pass. CurioMesh works part by part, measures each result against your original, and lets you redo single parts. QuadriFlow is also one of its Methods, for smooth organic parts.
+Blender's QuadriFlow Remesh works on the whole object in one pass. CurioMesh works part by part, measures each result against your original, and lets you redo single parts. QuadriFlow is also one of its Methods, for smooth organic parts.
 
 </details>
 
