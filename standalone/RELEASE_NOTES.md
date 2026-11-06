@@ -9,6 +9,7 @@ CurioMesh Standalone 0.2.0: more than opening one model. Batch whole folders, pi
 - **For game engines.** Writes `.glb` as well as OBJ. `--engine unreal|unity|godot|roblox|gltf` sets triangles, the file type and Roblox's 20,000-triangle limit per mesh.
 - **Fix:** glTF models whose texture files are missing now open.
 
+- **A verdict on every result**, the same as the Blender add-on's 0.9.8 panel: a green, amber or red icon with "Good for game asset", "Check 2 spots" or "5 spots with bad faces left", and what to do next. The uses carry the add-on's own icons.
 - **The desktop app, rebuilt around that.** A start screen asks what the model is for (the presets above, Detail, Mirror, the game engine) before you open anything, and remembers your choices and recent files. A Batch screen runs a folder one model at a time with a bar per file, Cancel, a results table (faces before and after, view change, bad faces, time), Open result, Show in folder and CSV export. A built-in guide explains every setting, with hover tips and a short first-run tour.
 
 Still a preview: no UVs, textures or FBX yet, and the programs aren't code-signed, so Windows and macOS ask once before the first run. GPL-3.0-or-later.
