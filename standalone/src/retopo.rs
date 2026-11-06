@@ -18,6 +18,7 @@ const ROUNDS: usize = 4;
 const MOST_LOOKS: usize = 12;
 const TURN_LOSS: f64 = 1.0; // points of view change evening the quads out may add
 
+#[derive(Clone, Debug)]
 pub struct Settings {
     pub detail: f64,               // percent of the view that may change
     pub reduce_to: Option<usize>,  // a face count instead
@@ -297,105 +298,139 @@ pub fn close_polygons(points: &[f64], indptr: &[i64], flat: &[i64], material: &[
 
 pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> Result<Outcome, String> {
     let started = Instant::now();
-    let (tris, owner) = triangles(source);
-    let tri_material: Vec<i64> = owner.iter().map(|&f| source.material[f as usize]).collect();
-    let tri_piece = pieces(&tris, source.points.len() / 3);
-    // Faces carry (material, part) packed in one tag through pairing and closing; parts never touch, so pairing,
-    // which won't join faces with different tags, is unchanged.
-    let tags: Vec<i64> = tri_material.iter().zip(&tri_piece).map(|(&m, &p)| pack(m, p)).collect();
-    let view = view_of(&source.points, settings.pixels, settings.gpu);
-    let reference = pictures(&source.points, &tris, &view);
-    log(&format!("Reducing {} triangles", tris.len() / 3));
-    let tris_u32: Vec<u32> = tris.iter().map(|&v| v as u32).collect();
-    let run = qem::run(&source.points, &tris_u32, &[], 4);
-    let total = tris.len() / 3;
-    let smallest = (run.smallest() as usize).max(12);
-    let mut looks = 0;
-    let mut make = |wanted: usize| -> Result<(Mesh, f64), String> {
-        let (points, level_tris, from) = run.level(wanted as u32);
-        let material: Vec<i64> = from.iter().map(|&t| tags[t as usize]).collect();
-        let out = pair_and_close(&points, &level_tris, &material, &source.materials)?;
-        let seen = pictures(&out.points, &triangles(&out).0, &view);
-        looks += 1;
-        Ok((out, loss(&reference, &seen, &view)))
-    };
-    let (mesh, change) = if let Some(goal) = settings.reduce_to {
-        let mut wanted = ((goal as f64 / PAIRED_SHARE) as usize).clamp(smallest, total);
-        let mut best: Option<(f64, Mesh, f64)> = None;
-        for _ in 0..ROUNDS {
-            let (out, change) = make(wanted)?;
-            let miss = (out.faces() as f64 - goal as f64).abs() / goal.max(1) as f64;
-            log(&format!("  {} triangles kept -> {} faces, {:.2}% of the view changed", wanted, out.faces(), change));
-            let share = out.faces() as f64 / wanted.max(1) as f64;
-            if best.as_ref().is_none_or(|b| miss < b.0) {
-                best = Some((miss, out, change));
-            }
-            if miss <= CLOSE_ENOUGH || share <= 0.0 {
-                break;
-            }
-            wanted = ((goal as f64 / share) as usize).clamp(smallest, total);
-        }
-        let (_, mesh, change) = best.unwrap();
-        (mesh, change)
-    } else {
-        // The fewest triangles kept whose closed quads change no more than `detail` of the view, halving in log space.
-        let (mut low, mut high) = (smallest as f64, total as f64);
-        let mut best: Option<(Mesh, f64)> = None;
-        for _ in 0..MOST_LOOKS {
-            if high / low < 1.05 {
-                break;
-            }
-            let middle = (low * high).sqrt() as usize;
-            let (out, change) = make(middle)?;
-            log(&format!("  {} triangles kept -> {} faces, {:.2}% of the view changed", middle, out.faces(), change));
-            if change <= settings.detail {
-                high = middle as f64;
-                let near = change >= 0.9 * settings.detail;
-                best = Some((out, change));
-                if near {
+    let prepared = Prepared::new(source, settings.pixels, settings.gpu, &mut log);
+    let mut out = prepared.solve(settings, log)?;
+    out.seconds = started.elapsed().as_secs_f64();
+    Ok(out)
+}
+
+/// What every search on one source shares: its camera pictures and its one reduction order. Made once, it answers
+/// any number of Detail or face-count searches (the Quad Size ladder, `ladder.rs`).
+pub struct Prepared<'a> {
+    source: &'a Mesh,
+    tris: Vec<i64>,
+    tri_piece: Vec<i64>,
+    tags: Vec<i64>,
+    view: View,
+    reference: Pictures,
+    run: qem::Run,
+    source_tree: near::FaceTree,
+}
+
+impl<'a> Prepared<'a> {
+    pub fn new(source: &'a Mesh, pixels: usize, gpu: bool, log: &mut dyn FnMut(&str)) -> Prepared<'a> {
+        let (tris, owner) = triangles(source);
+        let tri_material: Vec<i64> = owner.iter().map(|&f| source.material[f as usize]).collect();
+        let tri_piece = pieces(&tris, source.points.len() / 3);
+        // Faces carry (material, part) packed in one tag through pairing and closing; parts never touch, so pairing,
+        // which won't join faces with different tags, is unchanged.
+        let tags: Vec<i64> = tri_material.iter().zip(&tri_piece).map(|(&m, &p)| pack(m, p)).collect();
+        let view = view_of(&source.points, pixels, gpu);
+        let reference = pictures(&source.points, &tris, &view);
+        log(&format!("Reducing {} triangles", tris.len() / 3));
+        let tris_u32: Vec<u32> = tris.iter().map(|&v| v as u32).collect();
+        let run = qem::run(&source.points, &tris_u32, &[], 4);
+        let source_tree = near::FaceTree::new(&source.points, &source.indptr, &source.flat);
+        Prepared { source, tris, tri_piece, tags, view, reference, run, source_tree }
+    }
+
+    /// The view change of `mesh` against the source, in percent.
+    pub fn look(&self, mesh: &Mesh) -> f64 {
+        loss(&self.reference, &pictures(&mesh.points, &triangles(mesh).0, &self.view), &self.view)
+    }
+
+    /// One search. `settings.pixels` and `settings.gpu` were fixed by `new`; the rest is used.
+    pub fn solve(&self, settings: &Settings, mut log: impl FnMut(&str)) -> Result<Outcome, String> {
+        let started = Instant::now();
+        let (source, tris, tri_piece, tags, view, reference, run) = (self.source, &self.tris, &self.tri_piece, &self.tags, &self.view, &self.reference, &self.run);
+        let total = tris.len() / 3;
+        let smallest = (run.smallest() as usize).max(12);
+        let mut looks = 0;
+        let mut make = |wanted: usize| -> Result<(Mesh, f64), String> {
+            let (points, level_tris, from) = run.level(wanted as u32);
+            let material: Vec<i64> = from.iter().map(|&t| tags[t as usize]).collect();
+            let out = pair_and_close(&points, &level_tris, &material, &source.materials)?;
+            let seen = pictures(&out.points, &triangles(&out).0, view);
+            looks += 1;
+            Ok((out, loss(reference, &seen, view)))
+        };
+        let (mesh, change) = if let Some(goal) = settings.reduce_to {
+            let mut wanted = ((goal as f64 / PAIRED_SHARE) as usize).clamp(smallest, total);
+            let mut best: Option<(f64, Mesh, f64)> = None;
+            for _ in 0..ROUNDS {
+                let (out, change) = make(wanted)?;
+                let miss = (out.faces() as f64 - goal as f64).abs() / goal.max(1) as f64;
+                log(&format!("  {} triangles kept -> {} faces, {:.2}% of the view changed", wanted, out.faces(), change));
+                let share = out.faces() as f64 / wanted.max(1) as f64;
+                if best.as_ref().is_none_or(|b| miss < b.0) {
+                    best = Some((miss, out, change));
+                }
+                if miss <= CLOSE_ENOUGH || share <= 0.0 {
                     break;
                 }
-            } else {
-                low = middle as f64;
+                wanted = ((goal as f64 / share) as usize).clamp(smallest, total);
+            }
+            let (_, mesh, change) = best.unwrap();
+            (mesh, change)
+        } else {
+            // The fewest triangles kept whose closed quads change no more than `detail` of the view, halving in log space.
+            let (mut low, mut high) = (smallest as f64, total as f64);
+            let mut best: Option<(Mesh, f64)> = None;
+            for _ in 0..MOST_LOOKS {
+                if high / low < 1.05 {
+                    break;
+                }
+                let middle = (low * high).sqrt() as usize;
+                let (out, change) = make(middle)?;
+                log(&format!("  {} triangles kept -> {} faces, {:.2}% of the view changed", middle, out.faces(), change));
+                if change <= settings.detail {
+                    high = middle as f64;
+                    let near = change >= 0.9 * settings.detail;
+                    best = Some((out, change));
+                    if near {
+                        break;
+                    }
+                } else {
+                    low = middle as f64;
+                }
+            }
+            match best {
+                Some(found) => found,
+                None => make(high as usize)?,
+            }
+        };
+        let (mut mesh, mut change) = (mesh, change);
+        // Rows and evening out together may add at most TURN_LOSS points, and stay within 110% of the detail asked for
+        // unless the search result was already over (the add-on's rule for spinning edges at poles).
+        let limit = if settings.reduce_to.is_some() { change + TURN_LOSS } else { (change + TURN_LOSS).min(change.max(1.1 * settings.detail)) };
+        if settings.rows {
+            let mut look = |m: &Mesh| {
+                looks += 1;
+                loss(reference, &pictures(&m.points, &triangles(m).0, view), view)
+            };
+            let swapped = rows_where_they_hold(&mut mesh, &mut change, limit, source, tris, tri_piece, tags, &mut look, &mut log);
+            if swapped > 0 {
+                log(&format!("  Rows of quads on {swapped} smooth part(s): {change:.2}% of the view changed"));
             }
         }
-        match best {
-            Some(found) => found,
-            None => make(high as usize)?,
-        }
-    };
-    let (mut mesh, mut change) = (mesh, change);
-    let source_tree = near::FaceTree::new(&source.points, &source.indptr, &source.flat);
-    // Rows and evening out together may add at most TURN_LOSS points, and stay within 110% of the detail asked for
-    // unless the search result was already over (the add-on's rule for spinning edges at poles).
-    let limit = if settings.reduce_to.is_some() { change + TURN_LOSS } else { (change + TURN_LOSS).min(change.max(1.1 * settings.detail)) };
-    if settings.rows {
-        let mut look = |m: &Mesh| {
+        // Even the quads out.
+        let steps: [(&str, &dyn Fn(&mut Mesh) -> usize); 2] = [("Spinning edges at poles", &|m| crate::layout::spin_edges(m)), ("Relaxing the quads on the source", &|m| crate::layout::relax(m, &self.source_tree))];
+        for (name, step) in steps {
+            let mut tried = mesh.clone();
+            if step(&mut tried) == 0 {
+                continue;
+            }
+            let after = loss(reference, &pictures(&tried.points, &triangles(&tried).0, view), view);
             looks += 1;
-            loss(&reference, &pictures(&m.points, &triangles(m).0, &view), &view)
-        };
-        let swapped = rows_where_they_hold(&mut mesh, &mut change, limit, source, &tris, &tri_piece, &tags, &mut look, &mut log);
-        if swapped > 0 {
-            log(&format!("  Rows of quads on {swapped} smooth part(s): {change:.2}% of the view changed"));
+            let keep = after <= limit;
+            log(&format!("  {name}: {:.2}% of the view changed, {}", after, if keep { "kept" } else { "not kept" }));
+            if keep {
+                (mesh, change) = (tried, after);
+            }
         }
+        mesh.material = mesh.material.iter().map(|&t| unpack(t).0).collect();
+        Ok(Outcome { mesh: crate::io::compact(&mesh), loss: change, looks, seconds: started.elapsed().as_secs_f64() })
     }
-    // Even the quads out.
-    let steps: [(&str, &dyn Fn(&mut Mesh) -> usize); 2] = [("Spinning edges at poles", &|m| crate::layout::spin_edges(m)), ("Relaxing the quads on the source", &|m| crate::layout::relax(m, &source_tree))];
-    for (name, step) in steps {
-        let mut tried = mesh.clone();
-        if step(&mut tried) == 0 {
-            continue;
-        }
-        let after = loss(&reference, &pictures(&tried.points, &triangles(&tried).0, &view), &view);
-        looks += 1;
-        let keep = after <= limit;
-        log(&format!("  {name}: {:.2}% of the view changed, {}", after, if keep { "kept" } else { "not kept" }));
-        if keep {
-            (mesh, change) = (tried, after);
-        }
-    }
-    mesh.material = mesh.material.iter().map(|&t| unpack(t).0).collect();
-    Ok(Outcome { mesh: crate::io::compact(&mesh), loss: change, looks, seconds: started.elapsed().as_secs_f64() })
 }
 
 /// Part number per triangle: triangles sharing a corner are one part.

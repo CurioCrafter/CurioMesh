@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
-//! Reading OBJ (tobj), glTF/GLB (gltf) and PLY (own reader, ASCII and binary), and writing OBJ.
+//! Reading OBJ (tobj), glTF/GLB (gltf) and PLY (own reader, ASCII and binary), and writing OBJ (`export.rs` writes .glb).
 
 use std::collections::HashMap;
 use std::fs;
@@ -75,7 +75,9 @@ fn read_obj(path: &Path) -> Result<Mesh, String> {
 
 fn read_gltf(path: &Path) -> Result<Mesh, String> {
     let err = |e: gltf::Error| format!("{}: {e}", path.display());
-    let (doc, buffers, _images) = gltf::import(path).map_err(err)?;
+    // Only the geometry: textures are never loaded, so a model whose texture files are missing still opens.
+    let gltf::Gltf { document: doc, blob } = gltf::Gltf::open(path).map_err(err)?;
+    let buffers = gltf::import_buffers(&doc, path.parent(), blob).map_err(err)?;
     let mut mesh = Mesh::new();
     mesh.materials = doc.materials().map(|m| m.name().map_or_else(|| format!("material{}", m.index().unwrap_or(0)), str::to_string)).collect();
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or_else(|| format!("{}: no scene", path.display()))?;
@@ -262,6 +264,13 @@ fn read_ply(path: &Path) -> Result<Mesh, String> {
 // ------------------------------------------------------------------------------------------------------------ OBJ out
 
 pub fn write_obj(mesh: &Mesh, path: &Path) -> Result<(), String> {
+    write_obj_pieces(mesh, &[], path)
+}
+
+/// OBJ with each face in the object `piece[face]` (`o name_01`, ...). An empty or all-zero `piece` writes one object.
+pub fn write_obj_pieces(mesh: &Mesh, piece: &[usize], path: &Path) -> Result<(), String> {
+    let pieces = piece.iter().max().map_or(1, |m| m + 1);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
     let file = fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out = BufWriter::new(file);
     let w = |e: std::io::Error| e.to_string();
@@ -269,19 +278,24 @@ pub fn write_obj(mesh: &Mesh, path: &Path) -> Result<(), String> {
     for p in mesh.points.chunks_exact(3) {
         writeln!(out, "v {} {} {}", p[0], p[1], p[2]).map_err(w)?;
     }
-    let mut last = i64::MIN;
-    for f in 0..mesh.faces() {
-        let m = mesh.material[f];
-        if m != last && m >= 0 {
-            let name = mesh.materials.get(m as usize).cloned().unwrap_or_else(|| format!("material{m}"));
-            writeln!(out, "usemtl {name}").map_err(w)?;
+    for k in 0..pieces {
+        if pieces > 1 {
+            writeln!(out, "o {stem}_{:02}", k + 1).map_err(w)?;
         }
-        last = m;
-        write!(out, "f").map_err(w)?;
-        for v in mesh.face(f) {
-            write!(out, " {}", v + 1).map_err(w)?;
+        let mut last = i64::MIN;
+        for f in (0..mesh.faces()).filter(|&f| piece.get(f).copied().unwrap_or(0) == k) {
+            let m = mesh.material[f];
+            if m != last && m >= 0 {
+                let name = mesh.materials.get(m as usize).cloned().unwrap_or_else(|| format!("material{m}"));
+                writeln!(out, "usemtl {name}").map_err(w)?;
+            }
+            last = m;
+            write!(out, "f").map_err(w)?;
+            for v in mesh.face(f) {
+                write!(out, " {}", v + 1).map_err(w)?;
+            }
+            writeln!(out).map_err(w)?;
         }
-        writeln!(out).map_err(w)?;
     }
     out.flush().map_err(w)
 }
