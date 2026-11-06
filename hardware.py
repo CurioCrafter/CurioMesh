@@ -58,22 +58,12 @@ EFFORTS = {
 # --------------------------------------------------------------------------- the machine
 
 
-GUESS_RAM_GB = 16.0  # when the memory can't be read, a modest guess
+GUESS_RAM_GB = 16.0  # Windows: Python can't read the memory without calling into the system, so a modest guess
 
 
 def _memory() -> tuple[float | None, float | None]:
-    """(total GB, free GB) of RAM; a guess of `GUESS_RAM_GB`, half of it free, where it can't be read."""
+    """(total GB, free GB) of RAM from what Python can read; on Windows a guess of `GUESS_RAM_GB`, half of it free."""
     try:
-        if sys.platform == "win32":
-            import ctypes
-
-            class Status(ctypes.Structure):
-                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in ("total", "free", "ptotal", "pfree", "vtotal", "vfree", "ext")]
-
-            status = Status()
-            status.length = ctypes.sizeof(status)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return status.total / 2**30, status.free / 2**30
         if sys.platform.startswith("linux"):
             info = {}
             for line in Path("/proc/meminfo").read_text().splitlines():
@@ -114,7 +104,7 @@ def detect() -> dict:
     """Read the computer. Never raises; unknown things are left out."""
     total, free = _memory()
     machine = {"os": {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, "Linux" if sys.platform.startswith("linux") else sys.platform), "cores": os.cpu_count() or 1, "ram_gb": total, "free_gb": free}
-    if total == GUESS_RAM_GB and free == GUESS_RAM_GB * 0.5:
+    if sys.platform == "win32":
         machine["ram_guessed"] = True
     machine.update(_gpu())
     machine["cycles"] = _cycles_devices()
@@ -166,20 +156,7 @@ def peak_memory_mb() -> float:
     """The most memory this process has used so far, in MB (0 where it can't be read)."""
     try:
         if sys.platform == "win32":
-            import ctypes
-            from ctypes import wintypes
-
-            class Counters(ctypes.Structure):
-                _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD), ("peak", ctypes.c_size_t)] + [(n, ctypes.c_size_t) for n in ("ws", "pp", "ppp", "np", "npp", "pf", "ppf")]
-
-            counters = Counters()
-            counters.cb = ctypes.sizeof(counters)
-            kernel = ctypes.windll.kernel32
-            kernel.GetCurrentProcess.restype = wintypes.HANDLE
-            psapi = ctypes.windll.psapi
-            psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
-            psapi.GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb)
-            return counters.peak / 2**20
+            return 0.0  # Python has no reading for this on Windows without calling into the system
         import resource
 
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -211,20 +188,8 @@ def settings_for(effort: str, machine: dict | None = None) -> Settings:
 
 
 def busy_cores() -> float:
-    """About how many cores other programs keep busy right now (0 where it can't be read). Takes 0.2 s on Windows."""
+    """About how many cores other programs keep busy right now: the load average (0 on Windows, where Python can't read it)."""
     try:
-        if sys.platform == "win32":
-            import ctypes
-
-            def times():
-                idle, kernel, user = (ctypes.c_ulonglong() for _ in range(3))
-                ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user))
-                return idle.value, kernel.value + user.value  # kernel time includes idle time
-
-            idle_a, all_a = times()
-            time.sleep(0.2)
-            idle_b, all_b = times()
-            return max(0.0, 1.0 - (idle_b - idle_a) / max(all_b - all_a, 1)) * (os.cpu_count() or 1)
         return float(os.getloadavg()[0])
     except Exception:
         return 0.0
