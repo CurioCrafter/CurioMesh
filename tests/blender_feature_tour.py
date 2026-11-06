@@ -153,6 +153,7 @@ def run_all():
         if (ONLY and not any(w in label for w in ONLY)) or any(w in label for w in SKIPS):
             continue
         t = time.time()
+        P("RUN ", label)
         WATCH.update(label=label, since=t)
         status, why = "PASS", ""
         try:
@@ -172,6 +173,8 @@ def run_all():
         secs = time.time() - t
         RESULTS.append({"check": label, "status": status, "why": why, "seconds": round(secs, 1)})
         P(f"{status:4}  {label:48} {secs:6.1f}s  {why}")
+        with open(os.path.join(OUT, "report.json"), "w", encoding="utf-8") as fh:  # kept up to date, so a crash still leaves results
+            json.dump({"partial": True, "last": label, "results": RESULTS}, fh, indent=1)
     WATCH["label"] = ""
     counts = {s: sum(r["status"] == s for r in RESULTS) for s in ("PASS", "FAIL", "WARN", "SKIP")}
     P("=" * 78)
@@ -385,6 +388,11 @@ class Rec:
         except AttributeError:
             return True
 
+    class _Rna:
+        properties: dict = {}
+
+    bl_rna = _Rna()  # a panel may copy settings onto the operator it just drew
+
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
@@ -437,11 +445,14 @@ def draw_class(cls, ctx):
     fake = type("Fake", bases, {})()
     fake.layout = Rec(errors)
     for a in dir(cls):
-        if a.startswith("bl_"):
-            try:
-                setattr(fake, a, getattr(cls, a))
-            except Exception:
-                pass
+        try:
+            value = getattr(cls, a)
+            if a.startswith("bl_"):
+                setattr(fake, a, value)
+            elif callable(value) and a in cls.__dict__ and not a.startswith("__"):
+                setattr(fake, a, value.__get__(fake))  # the panel's own helper methods
+        except Exception:
+            pass
     for method in ("draw_header", "draw"):
         fn = getattr(cls, method, None)
         if fn is None or getattr(fn, "__module__", "").startswith("bpy"):
@@ -735,7 +746,7 @@ def _():
     for engine in items:
         t = time.time()
         try:
-            out = _remesh(engine, target=1500)
+            out = _remesh(engine, target=1500, preserve_attributes=False)  # True crashes Blender 5.2.3 (see the probe at the end)
         except RuntimeError as e:
             msg = str(e)
             ok("Traceback" not in msg and "Error: Python" not in msg, f"{engine}: Python error: {msg[-250:]}")
@@ -755,7 +766,7 @@ def _():
 def _():
     load_model(MAIN, faces=1500)
     obj = bpy.context.view_layer.objects.active
-    r = bpy.ops.curiomesh.remesh(target_faces=800, engine="QUADRIFLOW", output_mode="REPLACE")
+    r = bpy.ops.curiomesh.remesh(target_faces=800, engine="QUADRIFLOW", output_mode="REPLACE", preserve_attributes=False)
     ok(r == {"FINISHED"}, str(r))
     ok(bpy.context.view_layer.objects.active is obj and len(obj.data.polygons) not in (0, 1500), f"{len(obj.data.polygons)} faces")
 
@@ -1899,6 +1910,14 @@ def _():
     missing = [n for n in op_names() if f"curiomesh.{n}" not in text and f'"{n}"' not in text]
     ok(not missing, f"operators this tour never calls (add a check or a manual() line): {missing}")
     return f"{len(op_names())} operators all named in the tour"
+
+
+@check("zz_crash_probe", "quadriflow_with_keep_attributes")
+def _():
+    """Last on purpose: Blender 5.2.3 crashed (access violation in mesh_remesh_reproject_attributes) on this call. See bench/qa/BUGS.md."""
+    load_model(MAIN, faces=1500)
+    r = bpy.ops.curiomesh.remesh(target_faces=500, engine="QUADRIFLOW", output_mode="NEW", preserve_attributes=True)
+    ok(r == {"FINISHED"}, str(r))
 
 
 if __name__ == "__main__":
