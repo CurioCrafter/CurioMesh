@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.8.1 - unreleased
+
+### QA bugs
+- **register() twice** no longer raises "already registered": the second call unregisters first and starts clean.
+- **Selected Faces Only** is switched off in 0.9.8 and hidden in the panel (its seam is not stitched yet); Start now
+  ignores a leftover setting instead of storing a selection that did nothing.
+- **Base Quads on a mesh of many loose pieces**: when the result is far above Base Quads, the preview line says the
+  loose pieces each keep a few quads of their own.
+- **Reduce To / LOD set** that cannot reach its size on a mesh of many loose pieces now says so in the result box and the
+  LOD report.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

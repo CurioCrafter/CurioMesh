@@ -51,6 +51,14 @@ def main() -> int:
     for must in ("CURIOMESH_PT_guided", "CURIOMESH_PT_guided_apply"):
         if not hasattr(bpy.types, must):
             missing.append(must)
+    try:  # a second register() (scripts, reloads) must start clean, not raise "already registered"
+        sys.modules[module].register()
+        sys.modules[module].register()
+        again = []
+    except Exception as exc:
+        again = [f"{type(exc).__name__}: {exc}"]
+    print(f"REG twice={again}")
+    missing += again
     addon_utils.disable(module, default_set=True)
     left = [c.__name__ for c in classes if getattr(c, "is_registered", False)]
     print(f"UNREG left={left}")

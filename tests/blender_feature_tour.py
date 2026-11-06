@@ -1392,6 +1392,8 @@ def _():
 
 @check("region", "selected_faces_only_keeps_the_rest", needs="main")
 def _():
+    if not guided.REGION_READY:
+        raise Skip("Selected Faces Only is switched off in this release (guided.REGION_READY): its seam is not stitched yet, and the panel hides it")
     src = main_obj()
     select_only(src)
     bpy.ops.object.mode_set(mode="EDIT")

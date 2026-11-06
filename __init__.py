@@ -275,7 +275,14 @@ classes = (
 )
 
 
+_registered = False
+
+
 def register():
+    global _registered
+    if _registered:
+        unregister()  # a second register() (scripts, reloads) starts clean instead of raising "already registered"
+    _registered = True
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_settings = bpy.props.PointerProperty(type=CURIOMESH_PG_settings)
@@ -290,6 +297,10 @@ def register():
 
 
 def unregister():
+    global _registered
+    if not _registered:
+        return
+    _registered = False
     panel.unregister()
     game_export.unregister()
     fix_select.unregister()
