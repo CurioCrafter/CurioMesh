@@ -22,7 +22,7 @@ from .operators import (
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
-from . import batch, fix_select, game_export, guided, live, overlay, region
+from . import batch, fix_select, game_export, guided, live, overlay, panel, region
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
 D = overlay.PREF_DEFAULTS
@@ -79,23 +79,28 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         description="Smaller panels: fewer section labels and no explanatory text. Handy on small screens",
         default=D["compact_mode"],
     )
-    show_scan: bpy.props.BoolProperty(name="Scan", description="Show the Scan panel", default=True)
+    show_scan: bpy.props.BoolProperty(name="Scan", description="Show the panel that checks your mesh for holes and sharp edges and suggests a method", default=True)
     show_atlas: bpy.props.BoolProperty(
-        name="Smart Solver", description="Show the Atlas-Q solver options (when the method is Smart)", default=True
+        name="Smart Solver", description="Show the extra options of the Smart method", default=True
     )
     show_shape: bpy.props.BoolProperty(name="Features to Keep", description="Show the features-to-keep panel", default=True)
     show_pipeline: bpy.props.BoolProperty(
         name="Cleanup & Output", description="Show the cleanup and output panel", default=True
     )
     show_pairclosure: bpy.props.BoolProperty(
-        name="PairClosure", description="Show the PairClosure options (when the method is PairClosure)", default=True
+        name="PairClosure", description="Show the extra options of the PairClosure method (it pairs triangles into quads)", default=True
     )
     show_materials: bpy.props.BoolProperty(name="Materials & UVs", description="Show the materials and UVs panel", default=True)
     show_batch: bpy.props.BoolProperty(name="Batch", description="Show the batch remesh panel", default=True)
     show_diagnostics: bpy.props.BoolProperty(name="Diagnostics", description="Show the measurements panel", default=True)
-    show_debug: bpy.props.BoolProperty(name="Debug", description="Show the debug panel", default=True)
+    show_debug: bpy.props.BoolProperty(name="Debug", description="Show the panel with extra switches for finding problems", default=True)
     show_regions: bpy.props.BoolProperty(name="Regions", description="Show the Regions panel", default=True)
-    show_guided: bpy.props.BoolProperty(name="Guided", description="Show the Guided Retopo panel", default=True)
+    show_guided: bpy.props.BoolProperty(name="Guided", description="Show the main CurioMesh panel", default=True)
+    pro_mode: bpy.props.BoolProperty(
+        name="Pro Tab",
+        description="Shows the CurioMesh Pro tab: every setting and the classic tools. You never need it for a good result",
+        default=D["pro_mode"],
+    )
 
     hud_default: bpy.props.BoolProperty(
         name="HUD On in New Scenes",
@@ -186,6 +191,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         col = box.column()
         col.prop(self, "panel_tab")
         col.prop(self, "compact_mode")
+        col.prop(self, "pro_mode")
         shown = box.column()
         shown.use_property_split = False
         shown.label(text="Show these panels")
@@ -273,10 +279,12 @@ def register():
     guided.register()
     fix_select.register()
     game_export.register()
+    panel.register()
     apply_category()
 
 
 def unregister():
+    panel.unregister()
     game_export.unregister()
     fix_select.unregister()
     guided.unregister()

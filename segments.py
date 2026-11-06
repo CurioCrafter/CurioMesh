@@ -575,17 +575,39 @@ def keep_original(context, pieces) -> int:
     return len(wanted) if use_tries(context, wanted) else 0
 
 
+def original_cost(pieces) -> int:
+    """Faces that putting your own faces back on these parts would add (negative: it saves faces)."""
+    parts = seg["parts"]
+    return int(sum(len(parts[p]["source"]) - parts[p]["after"] for p in pieces if 0 <= p < len(parts) and "source" in parts[p]))
+
+
+def ask(operator, context, event, message: str):
+    """An OK / Cancel box with this question (just the title on Blender before 4.1)."""
+    try:
+        return context.window_manager.invoke_confirm(operator, event, title=operator.bl_label, message=message)
+    except TypeError:
+        return context.window_manager.invoke_confirm(operator, event)
+
+
 class CURIOMESH_OT_keep_original_bad(bpy.types.Operator):
     bl_idname = "curiomesh.keep_original_bad"
     bl_label = "Keep Original Where Bad"
-    bl_description = ("Every part with a problem spot (inward, folded or crossing faces) gets your original faces back, unchanged. "
-                      "The reduced version stays in that part's tries, so Fix Parts can switch it back")
+    bl_description = "Puts your own faces back on every part with bad faces. Each part can be switched back from its card"
     bl_options = {"INTERNAL"}
+
+    @classmethod
+    def description(cls, context, properties):
+        found = bad_parts()
+        return f"Puts your own faces back on the {len(found)} part{'s' if len(found) != 1 else ''} with bad faces. Adds about {original_cost(found):,} faces; each part can be switched back from its card"
 
     @classmethod
     def poll(cls, context):
         ensure()
         return ready() and not mirrored() and _g().progress_info() is None and bool(bad_parts())
+
+    def invoke(self, context, event):
+        found = bad_parts()
+        return ask(self, context, event, f"Your own faces go back on {len(found)} part{'s' if len(found) != 1 else ''}: about {original_cost(found):,} more faces.")
 
     def execute(self, context):
         changed = keep_original(context, bad_parts())
@@ -850,10 +872,10 @@ def _part_at(context, region_, event):
 class CURIOMESH_OT_seg_select(bpy.types.Operator):
     bl_idname = "curiomesh.seg_select"
     bl_label = "Select Parts"
-    bl_description = "Select parts in bulk"
+    bl_description = "Selects all the parts, none, the ten that changed most, or every part of one kind"
     bl_options = {"INTERNAL"}
 
-    what: bpy.props.EnumProperty(items=[("ALL", "All", ""), ("NONE", "None", ""), ("WORST", "Worst 10", ""), *KIND_ITEMS], default="ALL")
+    what: bpy.props.EnumProperty(name="Which", description="Which parts to select: all, none, the ten that changed most, or every part of one kind", items=[("ALL", "All", "Every part"), ("NONE", "None", "No part"), ("WORST", "Worst 10", "The ten parts that changed most"), *KIND_ITEMS], default="ALL")
 
     @classmethod
     def poll(cls, context):
@@ -876,7 +898,7 @@ class CURIOMESH_OT_seg_select(bpy.types.Operator):
 class CURIOMESH_OT_seg_redo(bpy.types.Operator):
     bl_idname = "curiomesh.seg_redo"
     bl_label = "Redo"
-    bl_description = "Remake the selected parts with this method. Only they are redone and the camera checks the whole object again. Every result stays in the list of tries"
+    bl_description = "Remakes the selected parts with this method; the rest stays. Every result stays in the part's tries"
     bl_options = {"INTERNAL"}
 
     @classmethod
@@ -905,7 +927,7 @@ class CURIOMESH_OT_seg_try(bpy.types.Operator):
     bl_description = "Switch the selected part back to this result. It is shown at once; the whole-object check follows in the background"
     bl_options = {"INTERNAL"}
 
-    index: bpy.props.IntProperty()
+    index: bpy.props.IntProperty(name="Try", description="Which earlier result of this part to switch to; 0 is the first")
 
     @classmethod
     def poll(cls, context):
@@ -937,7 +959,7 @@ def frame_selected(context) -> bool:
 class CURIOMESH_OT_seg_frame(bpy.types.Operator):
     bl_idname = "curiomesh.seg_frame"
     bl_label = "Frame"
-    bl_description = "Move the 3D view to the selected parts"
+    bl_description = "Moves the 3D view to the selected parts"
     bl_options = {"INTERNAL"}
 
     @classmethod
@@ -966,41 +988,6 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
         # the number the list is sorted by: the look, or Tidiness for an Animation part (a 98% look ranked low read as a mistake)
         row.label(text=f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
         row.label(text=f"{r['after']:,} f")
-
-
-def draw_parts(layout, context, gs) -> None:
-    """The Parts panel: switches, bulk selection, the worst-first list, and the selected part's numbers and tries."""
-    if not ready():
-        box = layout.box()
-        overlay.wrap_label(box, "Parts appear when the search is done", icon="INFO", width=30, limit=2)
-        return
-    col = layout.column(align=True)
-    row = col.row(align=True)
-    row.scale_y = 1.3
-    row.operator("curiomesh.seg_review", text="Stop Reviewing (Esc)" if seg.get("reviewing") else "Review Segments", icon="RESTRICT_SELECT_OFF", depress=bool(seg.get("reviewing")))
-    row = col.row(align=True)
-    row.prop(gs, "seg_colors", text="Colors", toggle=True, icon="COLOR")
-    row.prop(gs, "seg_heat", text="Heat", toggle=True, icon="SEQ_HISTOGRAM")
-    row.prop(gs, "seg_wire", text="Wire", toggle=True, icon="SHADING_WIRE")
-    row.prop(gs, "seg_bad", text="Bad", toggle=True, icon="ERROR")
-    col.row(align=True).prop(gs, "seg_compare", expand=True)
-    if gs.seg_heat:
-        overlay.wrap_label(layout, "Heat: purple looks the same, yellow changed most (bar at the bottom right)", icon="INFO", width=36, limit=2)
-    segment_goals.draw_tools(layout, gs)
-    issue_panel.draw(layout)
-
-    layout.label(text=f"{len(seg['parts']):,} parts, {len(seg['sel'])} selected")
-    row = layout.row(align=True)
-    for what, text in (("ALL", "All"), ("TUBE", "Tubes"), ("FLAT", "Flat"), ("ROUGH", "Rough"), ("NONE", "None")):
-        row.operator("curiomesh.seg_select", text=text).what = what
-    layout.label(text="Parts, least alike first:")
-    row = layout.row()
-    row.template_list("CURIOMESH_UL_segparts", "", gs, "seg_parts", gs, "seg_index", rows=5)
-    col = row.column(align=True)
-    col.operator("curiomesh.seg_select", text="", icon="SORTSIZE").what = "WORST"
-    col.operator("curiomesh.seg_frame", text="", icon="VIEWZOOM")
-
-    segment_goals.draw_selected(layout, gs)
 
 
 # --------------------------------------------------------------------------- registration
