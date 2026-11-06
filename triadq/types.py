@@ -6,10 +6,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import chain
-import threading
 from typing import Iterable
 
 import numpy as np
+
+from . import tasks
 
 
 Face = tuple[int, ...]
@@ -129,7 +130,7 @@ class Cancelled(Exception):
     """Raised inside a worker when the caller no longer wants its result."""
 
 
-_cancel = threading.local()
+_cancel = tasks.local()  # each worker has its own
 
 
 def cancel_with(check) -> None:

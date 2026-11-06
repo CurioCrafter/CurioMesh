@@ -6,7 +6,7 @@
 bl_info = {
     "name": "CurioMesh",
     "author": "CurioCrafter",
-    "version": (0, 9, 7),
+    "version": (0, 9, 8),
     "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
@@ -101,6 +101,11 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         description="Shows the CurioMesh Pro tab: every setting and the classic tools. You never need it for a good result",
         default=D["pro_mode"],
     )
+    flow_editor: bpy.props.BoolProperty(
+        name="Flow Editor (Experimental)",
+        description="Experimental: shows Draw on the mesh under Shape the flow. Draw rings, flow lines and edges on a finished result and the quads around each stroke are redone",
+        default=D["flow_editor"],
+    )
 
     hud_default: bpy.props.BoolProperty(
         name="HUD On in New Scenes",
@@ -192,6 +197,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         col.prop(self, "panel_tab")
         col.prop(self, "compact_mode")
         col.prop(self, "pro_mode")
+        col.prop(self, "flow_editor")
         shown = box.column()
         shown.use_property_split = False
         shown.label(text="Show these panels")

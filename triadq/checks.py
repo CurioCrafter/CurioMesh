@@ -246,8 +246,10 @@ def new_spots(before: Inspect, after: Inspect) -> list[int]:
     return sorted(bad, key=lambda p: (-bad[p], p))
 
 
-def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
-    """The outcome in plain words. Only what the result added counts."""
+def describe(before: Inspect, after: Inspect, fixed: int, left: int, overlap: int = 0) -> str:
+    """The outcome in plain words. Only what the result added counts. `overlap`: faces of the result lying on others
+    (`Defects.overlap`, which already leaves out what the source has itself), so a pipe whose walls fall onto each other
+    is never "no new problems"."""
     new = {
         "non-manifold edges": max(0, after.nm_edges - before.nm_edges),
         "non-manifold vertices": max(0, after.nm_verts - before.nm_verts),
@@ -256,6 +258,7 @@ def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
         "folded quads": max(0, after.folded - before.folded),
         "holes opened": max(0, after.holes - before.holes),
         "self-intersections": sum(after.new_cross.values()) if after.new_cross is not None else max(0, (after.selfx or 0) - (before.selfx or 0)),
+        "faces lying on each other": int(overlap),
     }
     found = ", ".join(f"{n:,} {name}" for name, n in new.items() if n)
     note = "" if after.selfx is not None else " (self-intersections not tested)"

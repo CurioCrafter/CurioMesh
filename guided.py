@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
+from . import autoretopo, blockout, flowedit, hard_surface, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -215,6 +216,9 @@ def _profile_update(self, context):
             self.auto_detail, self.auto_method, self.auto_output = values
             self.bend_use = self.auto_profile == "ANIMATION"  # Deformation Lines are for joints: on with Animation, off again with any other use
             self.auto_chords = self.auto_profile in CHORDS_PROFILES  # tidiness first: Animation and Subdivision
+            hard = self.auto_profile == "HARD"  # Hard Surface: clean panels, even cylinders, hard edges marked on Apply
+            self.hs_panels = self.hs_cylinders = hard
+            self.hs_edges = "MARK" if hard else "NONE"
         finally:
             _applying = False
     if self.multires_on != (self.auto_profile == "ANIMATION"):  # Animation's route: a QuadriFlow cage, with the detail in Multires levels
@@ -400,7 +404,18 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     organize: bpy.props.FloatProperty(name="Tidy Up", description="Lays out the same faces more tidily: fewer messy spots, straighter rows. Costs a little detail; the line below shows how much", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
     organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Stops Tidy Up before the look changes by more than the amount next to it", default=False, update=organize.on_cap)
     organize_cap: bpy.props.FloatProperty(name="Most Detail Loss", description="How much more of the look Tidy Up may change, in percent, on top of the result as it was", default=1.0, min=0.1, max=20.0, precision=1, subtype="NONE", update=organize.on_cap)
+    # Hard surface (hard_surface.py): two search switches and the hard-edge finish on Apply
+    hs_panels: hard_surface.prop("hs_panels")
+    hs_cylinders: hard_surface.prop("hs_cylinders")
+    hs_edges: hard_surface.prop("hs_edges")
+    hs_angle: hard_surface.prop("hs_angle")
+    hs_hold_unit: hard_surface.prop("hs_hold_unit")
+    hs_hold_percent: hard_surface.prop("hs_hold_percent")
+    hs_hold_mm: hard_surface.prop("hs_hold_mm")
     organize_flow: bpy.props.BoolProperty(name="Loop Flow", description="Draws each edge loop of the result in its own colour, and its poles (points where 3 or 5+ edges meet) as dots", default=False, update=_redraw_update)
+    flow_live: bpy.props.BoolProperty(name="Live", description="Flow Editor: redo the quads around each stroke as soon as you draw, move or erase it. Off: strokes are only kept for the next Start", default=True)
+    flow_size: bpy.props.FloatProperty(name="Shape Size", description="Flow Editor: how wide a clicked eye ring, mouth ring or nose-to-mouth shape is. 0 picks a size from your mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
+    flow_pair: bpy.props.BoolProperty(name="Both Sides", description="Flow Editor: a clicked eye ring also goes on the other side, mirrored across the middle of your mesh (always on when the result is mirrored)", default=True)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads; the middle keeps the quad size; right makes smaller quads with more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Classic Guided: draws each point's reach and the outline of the area it covers", default=True, update=_redraw_update)
     blockout_sides: bpy.props.IntProperty(name="Primitive Sides", description="How many sides each cylinder and ball has (small parts get half). More sides look rounder and cost faces", default=12, min=4, max=32, step=2)
@@ -1163,11 +1178,18 @@ class _PreviewOp:
 
 
 def library_path() -> str | None:
-    """The user's own file of remembered fixes, in Blender's user config folder (not in the add-on). None if that can't be written."""
-    try:
-        return os.path.join(bpy.utils.user_resource("CONFIG", path="curiomesh", create=True), "fixes.json")
-    except (OSError, ValueError):
+    """The user's own file of remembered fixes, in the add-on's user folder (not in the add-on). None if that can't be written."""
+    folder = hardware.user_folder()
+    if folder is None:
         return None
+    path = os.path.join(folder, "fixes.json")
+    old = os.path.join(bpy.utils.user_resource("CONFIG"), "curiomesh", "fixes.json")  # where 0.9.7 and older kept it
+    if not os.path.exists(path) and os.path.isfile(old):
+        try:
+            shutil.copyfile(old, path)
+        except OSError:
+            pass
+    return path
 
 
 def _library() -> list[dict]:
@@ -1765,7 +1787,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
     chords = gs.auto_chords and not baked and loose_pieces(src) <= CHORDS_MOST_PIECES
-    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6), tuple(tweaks(gs).values()), hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap)
+    key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6), tuple(tweaks(gs).values()), hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap, tuple(hard_surface.job_flags(gs).values()))
     state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
         return True
@@ -1820,7 +1842,7 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
     turbo.set_gpu(gs.auto_gpu)
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
-    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs))
+    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs), hard=hard_surface.job_flags(gs))
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
@@ -2953,6 +2975,7 @@ def _write_result(context, source, res, gs, name: str):
         _transfer_normals(mesh, _source_data(source), res)
     if gs.bend_crease or gs.bend_sharp:
         _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
+    hard_surface.finish(mesh, gs, context.scene.unit_settings.scale_length)
     out = bpy.data.objects.new(name, mesh)
     (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(out)
     out.matrix_world = source.matrix_world.copy()
@@ -3119,6 +3142,8 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             _transfer_normals(mesh, _source_data(source), written)
         if gs.bend_crease or gs.bend_sharp:
             _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
+        if not (gs.multires_on and gs.scope == "AUTO"):  # Multires creases its own cage
+            hard_surface.finish(mesh, gs, context.scene.unit_settings.scale_length)
         out = bpy.data.objects.new(source.name + "_Retopo", mesh)
         (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(out)
         out.matrix_world = source.matrix_world.copy()
@@ -3452,6 +3477,27 @@ class CURIOMESH_OT_guided_remove_guide(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def new_curve(context, source, kind: str, points, normals=None, name: str | None = None):
+    """A curve object of a stroke laid on `source` (points in its own space, lifted a hair along `normals` so it shows)."""
+    matrix = source.matrix_world
+    lift = 0.002 * max(max(source.dimensions), 1e-6)
+    name = name or {"GUIDE": "CM_Guide", "LOOP": "CM_Loop", "BEND": "CM_Bend"}[kind]
+    curve = bpy.data.curves.new(name, "CURVE")
+    curve.dimensions = "3D"
+    spline = curve.splines.new("POLY")
+    spline.points.add(len(points) - 1)
+    for k, p in enumerate(spline.points):
+        co = np.asarray(points[k], dtype=np.float64)
+        if normals is not None:
+            co = co + np.asarray(normals[k], dtype=np.float64) * lift
+        w = matrix @ Vector(co)
+        p.co = (w.x, w.y, w.z, 1.0)
+    obj = bpy.data.objects.new(name, curve)
+    obj.show_in_front = True
+    (context.collection or context.scene.collection).objects.link(obj)
+    return obj
+
+
 class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
     bl_idname = "curiomesh.guided_draw_guide"
     bl_label = "Draw Guide"
@@ -3482,19 +3528,7 @@ class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
         if points is None or len(points) < 2:
             return
         gs = _gs(context)
-        matrix = self.obj.matrix_world
-        lift = 0.002 * max(max(self.obj.dimensions), 1e-6)  # a hair above the surface, so it shows
-        name = {"GUIDE": "CM_Guide", "LOOP": "CM_Loop", "BEND": "CM_Bend"}[self.kind]
-        curve = bpy.data.curves.new(name, "CURVE")
-        curve.dimensions = "3D"
-        spline = curve.splines.new("POLY")
-        spline.points.add(len(points) - 1)
-        for p, (co, nrm) in zip(spline.points, points):
-            w = matrix @ Vector(co + nrm * lift)
-            p.co = (w.x, w.y, w.z, 1.0)
-        obj = bpy.data.objects.new(name, curve)
-        obj.show_in_front = True
-        (context.collection or context.scene.collection).objects.link(obj)
+        obj = new_curve(context, self.obj, self.kind, [co for co, _n in points], [n for _c, n in points])
         if self.replace and 0 <= gs.guide_index < len(gs.guide_curves):
             item = gs.guide_curves[gs.guide_index]
             old = item.obj
@@ -3820,16 +3854,11 @@ REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
 
 def problem_url() -> str:
     """New-issue link with Blender, OS and CurioMesh versions already filled in."""
+    import importlib
     import platform
-    import sys
     from urllib.parse import urlencode
 
-    info = getattr(sys.modules.get(__package__), "bl_info", None) or {}
-    if not info.get("version"):  # an extension keeps its version in the manifest
-        import addon_utils
-
-        module = sys.modules.get(__package__)
-        info = addon_utils.module_bl_info(module) if module is not None else {}
+    info = getattr(importlib.import_module(__package__), "bl_info", None) or {}  # kept equal to the manifest's version
     version = ".".join(str(v) for v in info.get("version", ())) or "?"
     body = (
         f"CurioMesh {version}, Blender {bpy.app.version_string}, {platform.system()} {platform.release()}\n\n"
@@ -3906,9 +3935,11 @@ _draw_handles: list = []
 
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
+    segments.seglive.add_handlers()  # Blender drops the add-on's other handlers when a file loads
     stop_work()
     ladder.cancel()
     segments.reset()
+    flowedit.cancel()
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None, curve_sig=None, region=None, found=[])
     for sc in bpy.data.scenes:
         gs = getattr(sc, "curiomesh_guided", None)
@@ -3917,7 +3948,7 @@ def _on_load_post(*_args):
 
 
 def register() -> None:
-    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES):
+    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes()):
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_guided = bpy.props.PointerProperty(type=CURIOMESH_PG_guided)
     bpy.types.Object.curiomesh_points = bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_point)
@@ -3925,6 +3956,7 @@ def register() -> None:
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_VIEW"))
     segments.register()
     organize.register()
+    flowedit.register()
     bpy.app.handlers.load_post.append(_on_load_post)
 
 
@@ -3936,12 +3968,15 @@ def unregister() -> None:
             pass
     segments.unregister()
     organize.unregister()
+    flowedit.unregister()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
-    if bpy.app.timers.is_registered(_poll):
-        bpy.app.timers.unregister(_poll)
+    for timer in (_poll, _auto_slice):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
     stop_work()
     ladder.cancel()
+    ladder.unregister()
     try:
         remove_preview()
     except Exception:
@@ -3950,5 +3985,5 @@ def unregister() -> None:
     for owner, name in ((bpy.types.Scene, "curiomesh_guided"), (bpy.types.Object, "curiomesh_points"), (bpy.types.Object, "curiomesh_point_index")):
         if hasattr(owner, name):
             delattr(owner, name)
-    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES)):
+    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes())):
         bpy.utils.unregister_class(cls)

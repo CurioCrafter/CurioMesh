@@ -3,62 +3,124 @@
 
 """Measure the parts of one Auto Segments job in several background Blenders at once.
 
-Python holds one core however many threads it has, so the job hands parts to helper processes (`parts_worker.py`):
+Python holds one core however many threads it has, so the job hands parts to helper processes (`helper_command`):
 each loads the job once, then measures the parts it is given with the very same `AutoJob._measure_piece` and writes
 what it found to a file. The job takes the results back in part order, so it ends up exactly where the serial path
 would. `Pool` starts, feeds and kills the helpers; `measure_in_worker` and `apply_result` are the two ends of one part.
 
-Files go in a private temporary folder that only this job and its own helpers write, and they are pickles: the sizes
-must come back exactly as they were made (NumPy types, face lists), and nothing outside that folder is ever read.
+Files go in a private temporary folder that only this job and its own helpers write. Each is one NumPy .npz (read
+with allow_pickle=False): the arrays as entries, everything else as JSON with tags that bring back tuples, sets,
+NumPy scalars and a short list of the add-on's own types exactly as they were sent, so the sizes come back as made.
 No `bpy`, so the tests run outside Blender.
 """
 
 from __future__ import annotations
 
 import atexit
+import dataclasses
+import importlib
+import json
 import os
-import pickle
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
 from pathlib import Path
 
+import numpy as np
+
 
 PACKAGE = __name__.rpartition(".")[0]  # the add-on's package: an extension's is longer in the user's Blender than in a helper
+# The add-on's own types a helper file may hold: name -> module, relative to the package. Nothing else is rebuilt.
+TYPES = {"Settings": "hardware", "Level": "triadq.budget", "FlatFaces": "triadq.types"}
+
+
+def _type(name: str):
+    if name not in TYPES:
+        raise ValueError(f"{name} is not something a helper sends")
+    return getattr(importlib.import_module((PACKAGE + "." + TYPES[name]).lstrip(".")), name)
+
+
+def _encode(value, arrays: list):
+    """A JSON-able tree for `value`; its arrays are appended to `arrays`. Raises TypeError for anything else."""
+    if value is None or isinstance(value, (bool, int, float, str)) and not isinstance(value, np.generic):
+        return value
+    if isinstance(value, (np.ndarray, np.generic)):
+        array = np.asarray(value)
+        if array.dtype.hasobject:
+            raise TypeError("an object array can't go to a helper")
+        arrays.append(array)
+        return {"$a": len(arrays) - 1, "s": isinstance(value, np.generic)}
+    if isinstance(value, list):
+        return [_encode(v, arrays) for v in value]
+    if isinstance(value, tuple):
+        return {"$t": [_encode(v, arrays) for v in value]}
+    if isinstance(value, (set, frozenset)):
+        return {"$set": [_encode(v, arrays) for v in value], "f": isinstance(value, frozenset)}
+    if isinstance(value, dict):
+        return {"$d": [[_encode(k, arrays), _encode(v, arrays)] for k, v in value.items()]}
+    name = type(value).__name__
+    if name in TYPES and type(value) is _type(name):
+        if name == "FlatFaces":
+            return {"$c": name, "f": {"indptr": _encode(value.indptr, arrays), "flat": _encode(value.flat, arrays)}}
+        return {"$c": name, "f": {f.name: _encode(getattr(value, f.name), arrays) for f in dataclasses.fields(value)}}
+    raise TypeError(f"{type(value).__module__}.{name} can't go to a helper")
+
+
+def _decode(tree, arrays):
+    if isinstance(tree, list):
+        return [_decode(v, arrays) for v in tree]
+    if not isinstance(tree, dict):
+        return tree
+    if "$a" in tree:
+        array = arrays[f"a{int(tree['$a'])}"]
+        return array[()] if tree["s"] else array
+    if "$t" in tree:
+        return tuple(_decode(v, arrays) for v in tree["$t"])
+    if "$set" in tree:
+        items = [_decode(v, arrays) for v in tree["$set"]]
+        return frozenset(items) if tree["f"] else set(items)
+    if "$d" in tree:
+        return {_decode(k, arrays): _decode(v, arrays) for k, v in tree["$d"]}
+    if "$c" in tree:
+        return _type(tree["$c"])(**{k: _decode(v, arrays) for k, v in tree["f"].items()})
+    raise ValueError("not a helper's file")
 
 
 def _write(path: Path, value) -> None:
-    """Pickle `value` to `path` so a reader never sees half a file. The writer's package name goes first."""
-    tmp = path.with_suffix(".tmp")
+    """Write `value` to `path` so a reader never sees half a file."""
+    arrays: list = []
+    tree = json.dumps(_encode(value, arrays))
+    tmp = path.with_name(path.stem + ".tmp.npz")
     with open(tmp, "wb") as handle:
-        pickle.dump(PACKAGE, handle)
-        pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        np.savez(handle, tree=np.asarray(tree), **{f"a{k}": a for k, a in enumerate(arrays)})
     os.replace(tmp, path)
 
 
-class _Reader(pickle.Unpickler):
-    """Only NumPy, plain Python values and the add-on's own types, with the writer's package name turned into ours."""
-
-    def __init__(self, handle, theirs: str):
-        super().__init__(handle)
-        self.theirs = theirs
-
-    def find_class(self, module, name):
-        if self.theirs and (module == self.theirs or module.startswith(self.theirs + ".")):
-            module = (PACKAGE + module[len(self.theirs) :]).lstrip(".")
-        elif not (module.split(".")[0] in ("numpy", "builtins", "collections", "copyreg", "_codecs") or (not self.theirs and not PACKAGE)):
-            raise pickle.UnpicklingError(f"{module}.{name} is not something a helper sends")
-        return super().find_class(module, name)
-
-
 def _read(path: Path):
-    with open(path, "rb") as handle:
-        theirs = _Reader(handle, "").load()
-        if not isinstance(theirs, str):
-            raise pickle.UnpicklingError("not a helper's file")
-        return _Reader(handle, theirs).load()
+    with np.load(path, allow_pickle=False) as data:
+        arrays = {name: data[name] for name in data.files}
+    return _decode(json.loads(str(arrays.pop("tree"))), arrays)
+
+
+def helper_command(entry: str, args: list[str], binary: str | None = None) -> tuple[list[str], dict]:
+    """(command, environment) for a background Blender that runs `<the add-on>.<entry>(sys.argv)` with `args` after "--".
+
+    The child finds the add-on through PYTHONPATH (the folder that holds the add-on's folder), so nothing edits sys.path;
+    the user's own Python packages are kept out of it. `binary` is Blender itself (bpy.app.binary_path) and nothing else.
+    """
+    if binary is None:
+        import bpy
+
+        binary = bpy.app.binary_path
+    here = Path(__file__).resolve().parent
+    module, _, function = entry.rpartition(".")
+    code = f"import importlib, sys; importlib.import_module({here.name + '.' + module!r}).{function}(sys.argv)"
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONHOME"}
+    env.update(PYTHONPATH=str(here.parent), PYTHONNOUSERSITE="1")
+    return [binary, "--background", "--factory-startup", "--python-use-system-env", "--python-expr", code, "--", *args], env
 
 
 class Pool:
@@ -80,7 +142,7 @@ class Pool:
         self.peak_mb: dict[int, float] = {}  # helper -> the most memory it reported using
         self.lost = 0  # helpers that stopped by themselves
         atexit.register(self.close)  # Blender quit in the middle
-        _write(self.folder / "job.pkl", setup)
+        _write(self.folder / "job.npz", setup)
         for _ in range(count):
             log = open(self.folder / f"log_{len(self.workers)}.txt", "wb")
             try:
@@ -112,7 +174,7 @@ class Pool:
     def poll(self) -> None:
         """Collect finished tasks and notice helpers that died; their tasks go to `failed`."""
         for worker, part in list(self.busy.items()):
-            path = self.folder / f"{self._names[part]}.pkl"
+            path = self.folder / f"{self._names[part]}.npz"
             if path.exists():
                 try:
                     result = _read(path)
@@ -189,14 +251,14 @@ def setup_of(job) -> dict:
     return {
         "co": job.co, "faces": FlatFaces.of(job.faces), "materials": np.asarray([int(m) for m in job.materials], dtype=np.int32),
         "detail": job.detail, "target_faces": job.target_faces, "mirror": job.mirror, "drop": job.drop, "method": job.method, "output": job.output_kind,
-        "methods": dict(job.methods), "style": job.style, "settings": job.cfg, "rough": job.rough, "baked": job.baked,
+        "methods": dict(job.methods), "style": job.style, "settings": job.cfg, "rough": job.rough, "baked": job.baked, "hard": job.hard,
         "pieces": job.pieces, "locked": job.locked, "chunks": job.chunks, "names": job.names, "picture_sizes": job.picture_sizes,
     }
 
 
 def worker_job(job_class, context, setup: dict):
     """The job a helper measures parts of: built like the one in the user's Blender, already cut into its parts."""
-    job = job_class(context, setup["co"], setup["faces"], setup["materials"], setup["detail"], setup["target_faces"], mirror=setup["mirror"], drop=setup["drop"], method=setup["method"], output=setup["output"], methods=setup["methods"], style=setup["style"], settings=setup["settings"], rough=setup["rough"], baked=setup["baked"])
+    job = job_class(context, setup["co"], setup["faces"], setup["materials"], setup["detail"], setup["target_faces"], mirror=setup["mirror"], drop=setup["drop"], method=setup["method"], output=setup["output"], methods=setup["methods"], style=setup["style"], settings=setup["settings"], rough=setup["rough"], baked=setup["baked"], hard=setup.get("hard"))
     for name in ("pieces", "locked", "chunks", "names", "picture_sizes"):
         setattr(job, name, setup[name])
     job.spot_copies = False  # the job that sent the part already knows it is no copy
@@ -256,28 +318,18 @@ def apply_result(job, part: int, result: dict) -> None:
 
 
 def worker_main(argv: list[str]) -> None:
-    """The loop of a helper process (see parts_worker.py): rebuild the job, then measure each part it is handed."""
-    import importlib
-    import queue
-    import sys
-    import threading
-
+    """The loop of a helper process (see `helper_command`): rebuild the job, then measure each part it is handed."""
     import bpy
 
     folder = Path(argv[argv.index("--") + 1])
     autoretopo = importlib.import_module(PACKAGE + ".autoretopo")
     hardware = importlib.import_module(PACKAGE + ".hardware")
-    job = worker_job(autoretopo.AutoJob, bpy.context, _read(folder / "job.pkl"))
-    tasks: queue.Queue = queue.Queue()
-
-    def read():
-        for line in sys.stdin:
-            tasks.put(line)
-        os._exit(0)  # the job stopped, or the Blender that started this one is gone
-
-    threading.Thread(target=read, daemon=True).start()
+    job = worker_job(autoretopo.AutoJob, bpy.context, _read(folder / "job.npz"))
     while True:
-        name, kind, part, number = tasks.get().split()
+        line = sys.stdin.readline()
+        if not line:
+            os._exit(0)  # the job stopped, or the Blender that started this one is gone
+        name, kind, part, number = line.split()
         started = time.perf_counter()
         if kind == "measure":
             result = measure_in_worker(job, int(part), float(number), hardware.peak_memory_mb)
@@ -286,7 +338,7 @@ def worker_main(argv: list[str]) -> None:
         print(f"{kind} {part} {number}: {time.perf_counter() - started:.1f} s", "failed" if "error" in result else "", flush=True)
         if "error" in result:
             print(result["error"], flush=True)
-        _write(folder / f"{name}.pkl", result)
+        _write(folder / f"{name}.npz", result)
 
 
 def find_may_start(runner) -> bool:

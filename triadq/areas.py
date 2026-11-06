@@ -1,21 +1,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
-"""Work areas: parts of a mesh remeshed one at a time on a worker thread, each at its own density and fill style.
+"""Work areas: parts of a mesh remeshed one at a time as a task (see `tasks`), each at its own density and fill style.
 
-Nothing here touches Blender data, so the thread is safe. Finished pieces are cached by their faces and settings:
+Nothing here touches Blender data, so it can run off the main thread. Finished pieces are cached by their faces and settings:
 changing one area leaves the others alone, and going back to an earlier setting is instant.
 """
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
-from . import patch
+from . import patch, tasks
 
 CACHE_PIECES = 256
 
@@ -85,59 +84,42 @@ class AreaRunner:
         self.output: Any = None
         self.output_id = 0
         self.warnings: list[str] = []
-        self._lock = threading.Lock()
-        self._wake = threading.Event()
-        self._idle = threading.Event()
-        self._idle.set()
-        self._plan: list[Job] = []
+        self._task: tasks.Task | None = None
         self._plan_id = 0
         self._stopped = False
-        self._thread: threading.Thread | None = None
         self._topology = None
 
     @property
     def busy(self) -> bool:
-        return not self._idle.is_set()
+        return self._task is not None and not self._task.done()
 
     def start(self, jobs: list[Job]) -> None:
-        with self._lock:
-            self._plan = list(jobs)
-            self._plan_id += 1
-            self._idle.clear()
-            self._wake.set()
-        if self._thread is None:
-            self._thread = threading.Thread(target=self._loop, daemon=True, name="CurioMeshAreas")
-            self._thread.start()
+        self._plan_id += 1
+        plan, plan_id, previous = list(jobs), self._plan_id, self._task
+
+        def work():
+            if previous is not None:
+                previous.wait(None)  # one plan at a time: the old one ends at its next look at `_stale`
+            if self._stale(plan_id):
+                return
+            try:
+                self._run(plan, plan_id)
+            except Exception as exc:  # a task has nobody above it to report to
+                self.warnings = [f"Area failed: {exc}"]
+            if plan_id == self._plan_id:
+                self.current = None
+
+        self._task = tasks.start(work, "CurioMeshAreas")
 
     def stop(self) -> None:
-        with self._lock:
-            self._stopped = True
-            self._plan_id += 1
-            self._wake.set()
+        self._stopped = True
+        self._plan_id += 1
 
     def wait(self, timeout: float | None = None) -> bool:
-        return self._idle.wait(timeout)
+        return self._task is None or self._task.wait(timeout)
 
     def _stale(self, plan_id: int) -> bool:
         return self._stopped or plan_id != self._plan_id
-
-    def _loop(self) -> None:
-        while True:
-            self._wake.wait()
-            with self._lock:
-                if self._stopped:
-                    self._idle.set()
-                    return
-                self._wake.clear()
-                plan, plan_id = self._plan, self._plan_id
-            try:
-                self._run(plan, plan_id)
-            except Exception as exc:  # a thread has nobody above it to report to
-                self.warnings = [f"Area failed: {exc}"]
-            with self._lock:
-                if plan_id == self._plan_id:
-                    self.current = None
-                    self._idle.set()
 
     def _publish(self, pieces: list[tuple], plan_id: int) -> None:
         results = [self.cache[key] for key, _job, _comp in pieces if key in self.cache and self.cache[key].ok]

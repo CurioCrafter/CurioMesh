@@ -3,8 +3,8 @@
 
 """Move an Auto Segments job to another computer and bring the result back.
 
-`export_job` writes a folder: the mesh, the settings, a copy of the engine and `run_job.py`, which runs the very
-same `AutoJob` headless (`blender --background --python run_job.py`) and writes `result.npz`. `load_result` reads
+`export_job` writes a folder: the mesh, the settings and `run_job.py`, which runs the very same `AutoJob` of the
+CurioMesh installed in the Blender that runs it, headless (`blender --background --python run_job.py`) and writes `result.npz`. `load_result` reads
 that file back as the dict the preview uses. Nothing here talks to a network, an account or a cloud service: you
 move the folder yourself. No `bpy` import, so the tests run outside Blender.
 """
@@ -13,31 +13,34 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from pathlib import Path
 
 import numpy as np
-
-ENGINE = "curiomesh_engine"
 
 RUN_JOB = '''# Runs one CurioMesh Auto Segments job without a window. Made by the CurioMesh add-on.
 #   blender --background --python run_job.py [-- --effort FULL]
 # Stopped or crashed? Run the same command again: parts already finished are in the curiomesh_resume folder and are kept.
+import importlib
 import json
 import sys
 from pathlib import Path
 
+import addon_utils
 import bpy
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
 args = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
 job = json.loads((HERE / "job.json").read_text())
 if "--effort" in args:
     job["effort"] = args[args.index("--effort") + 1].upper()
 
-from curiomesh_engine import autoretopo, hardware, jobpack  # noqa: E402
+# CurioMesh must be installed in this Blender (it need not be switched on): find it and switch it on for this run.
+found = [m.__name__ for m in addon_utils.modules() if m.__name__.rpartition(".")[2].lower() == "curiomesh" or getattr(m, "bl_info", {}).get("name") == "CurioMesh"]
+if not found:
+    raise SystemExit("CurioMesh is not installed in this Blender: install the add-on first, then run this again")
+addon_utils.enable(found[0], default_set=False)
+autoretopo, hardware, jobpack = (importlib.import_module(f"{found[0]}.{name}") for name in ("autoretopo", "hardware", "jobpack"))
 
 data = np.load(HERE / "mesh.npz", allow_pickle=False)
 loops, starts, totals = data["loops"].tolist(), data["start"].tolist(), data["total"].tolist()
@@ -75,8 +78,8 @@ print("Result written to", HERE / "result.npz", flush=True)
 README = """CurioMesh job: {faces:,} faces, {name}
 =======================================
 
-This folder is a CurioMesh Auto Segments job. It runs on any computer that has Blender (3.6 or newer) and does not
-need the CurioMesh add-on installed: a copy of the engine is inside ({engine}/).
+This folder is a CurioMesh Auto Segments job. It runs on any computer that has Blender with the CurioMesh add-on
+installed (the same version as yours is best; it does not have to be switched on).
 
 Run it
   1. Copy this whole folder to the computer that will do the work.
@@ -97,8 +100,8 @@ Good to know
   - Today the work runs on the CPU. A machine with many CPU cores and plenty of memory finishes soonest; a graphics
     card does not speed it up yet. See docs/CLOUD_WORKFLOW.md in the CurioMesh repository.
   - Keep the mesh private if it is private: nothing in this folder sends anything anywhere.
-  - run_job.py and the {engine}/ folder are Python programs. Only run a job folder you exported yourself or got
-    from someone you trust, the same as any script. Importing a result.npz back runs nothing.
+  - run_job.py is a Python program. Only run a job folder you exported yourself or got from someone you trust,
+    the same as any script. Importing a result.npz back runs nothing.
 """
 
 
@@ -112,19 +115,12 @@ def job_folder(directory, name: str) -> Path:
     return folder
 
 
-def _copy_engine(source: Path, target: Path) -> None:
-    """The add-on's Python files and the data tables they read (not tests, docs or compiled binaries) as a package next to run_job.py."""
-    for name in [*source.glob("*.py"), *source.glob("triadq/*.py"), *source.glob("triadq/*.json")]:
-        destination = target / name.relative_to(source)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(name, destination)
-
-
-def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, addon_dir, mirror=None, lines=(), drop=None, source=None) -> Path:
+def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, addon_dir=None, mirror=None, lines=(), drop=None, source=None) -> Path:
     """Write the job folder. `co`/`faces`/`mat` are what the search runs on (the solved half when `mirror` is set).
 
     `mirror` is (axis, offset, size, faces of the whole mesh, side solved); `lines` the guide strokes already on that half;
     `drop` the painted density per vertex; `source` the (faces, vertices) of the whole mesh the result must fit. Returns the folder.
+    `addon_dir` is no longer used (the folder holds no copy of the add-on).
     """
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -137,9 +133,8 @@ def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort:
     settings = {"detail": float(detail), "target_faces": int(target_faces), "effort": effort, "faces": len(faces), "verts": len(co), "source_faces": int(source[0]), "source_verts": int(source[1])}
     settings["mirror"] = None if mirror is None else [int(mirror[0]), float(mirror[1]), float(mirror[2]), int(mirror[3]), int(mirror[4])]
     (folder / "job.json").write_text(json.dumps(settings, indent=2))
-    _copy_engine(Path(addon_dir), folder / ENGINE)
     (folder / "run_job.py").write_text(RUN_JOB)
-    (folder / "README.txt").write_text(README.format(faces=len(faces), name=folder.name, engine=ENGINE, effort=effort))
+    (folder / "README.txt").write_text(README.format(faces=len(faces), name=folder.name, effort=effort))
     return folder
 
 

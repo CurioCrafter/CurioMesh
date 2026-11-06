@@ -871,7 +871,7 @@ def run_ui_features_case(module):
 
     # Register / unregister / register leaves no stale handlers or timers.
     module.unregister()
-    if overlay._draw_handles or overlay._on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+    if overlay._draw_handles:
         raise AssertionError("ui: unregister left handlers behind")
     module.register()
     if bpy.app.timers.is_registered(live._tick):

@@ -15,7 +15,6 @@ The work runs from its own timer in small slices, and waits while any job of you
 
 from __future__ import annotations
 
-import threading
 import time
 from itertools import chain
 
@@ -24,6 +23,7 @@ import numpy as np
 
 from . import autoretopo, organize, overlay, segments
 from .triadq import ladder as L
+from .triadq import tasks
 from .triadq import parts as P
 
 MOST_FACES = 400_000  # faces of your mesh: past this each rung is a long search, so there is no ladder
@@ -74,6 +74,12 @@ def cancel() -> None:
             pass
     lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None)
     drag.update(pending=False, settled=True)
+
+
+def unregister() -> None:
+    for timer in (_tick, _drag_tick):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
 
 
 def start(context) -> bool:
@@ -352,9 +358,7 @@ def settle(context) -> None:
             except Exception as exc:  # a thread has nobody above it to report to
                 box["error"] = exc
 
-        thread = threading.Thread(target=work, daemon=True, name="CurioMeshBlend")
-        thread.start()
-        lad["blend"] = (want, thread, box)
+        lad["blend"] = (want, tasks.start(work, "CurioMeshBlend"), box)
         return
     _finish(context)
 
@@ -376,8 +380,8 @@ def _finish(context) -> None:
 
 def _blend_done(context) -> bool:
     """Put a blend spliced on its thread on screen. False while it is still being made."""
-    want, thread, box = lad["blend"]
-    if thread.is_alive():
+    want, task, box = lad["blend"]
+    if not task.done():
         return False
     lad["blend"] = None
     if "out" in box and active() and lad.get("want") == want:

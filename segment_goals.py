@@ -18,17 +18,16 @@ Animation segment is ranked by its topology score, since that is what it is for.
 from __future__ import annotations
 
 import json
-import threading
 import time
 
 import bpy
 import numpy as np
 from mathutils import Vector
 
-from . import autoretopo, guides, loops, overlay, parallel, region
+from . import autoretopo, flowstroke, guides, loops, overlay, parallel, region
 from . import segments as view
 from .triadq import parts as P
-from .triadq import patch
+from .triadq import patch, tasks
 from .triadq import segment as S
 from .triadq.flatquad import flat_quad_remesh
 from .triadq.types import MeshData
@@ -44,7 +43,6 @@ LOOSE_TIMES, LOOSE_BY = 3.0, 15.0  # the other Uses change more on purpose, but 
 CLOSED_SHARE, STROKE_SHARE = 1.3, 0.8  # triangles to reduce to, per quad wanted, with closure and with drawn lines
 HISTORY = 20  # hand edits Undo Edit can go back through
 FIELD_MOST = 300_000  # faces of your mesh above which a part is too slow for the field mesher
-LAY_ROUNDS = 3  # steps pulling a run of edges onto a drawn line
 SHARPEN_DROP = 8.0  # topology score a sheet may give up for following the camera's misses
 GOAL_ITEMS = [
     ("KEEP", "Keep as Is", "Your original faces, unchanged except for the row along the seam, which joins the neighbours", "FREEZE", 0),
@@ -234,47 +232,7 @@ def _mismatched(labels, piece, src_areas, res_areas, src_centres, res_centres, s
     return np.flatnonzero((on_src > 0) & bad).tolist()
 
 
-def _is_closed(line) -> bool:
-    """A stroke that ends where it began."""
-    line = np.asarray(line, dtype=np.float64)
-    return len(line) >= 4 and float(np.linalg.norm(line[0] - line[-1])) < 0.03 * float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
-
-
-def _on_lines(points, tris, lines):
-    """For the field mesher: chains of edges hugging the drawn lines, moved onto them, each vertex told which way its line runs."""
-    spacing = float(np.median(np.linalg.norm(points[tris[:, 0]] - points[tris[:, 1]], axis=1)))
-    chains, _keys = guides.chain(points, tris, lines, spacing)
-    moved = guides.pull(points, tris, chains, lines, spacing) if chains else points
-    along = np.zeros_like(moved)
-    pinned = np.zeros(len(moved), dtype=np.int64)
-    for chain in chains:
-        ids = np.asarray(chain, dtype=np.int64)
-        if len(ids) < 3:
-            continue
-        closed = ids[0] == ids[-1]
-        ids = ids[:-1] if closed else ids
-        step = np.roll(moved[ids], -1, axis=0) - np.roll(moved[ids], 1, axis=0)
-        if not closed:
-            step[0], step[-1] = moved[ids[1]] - moved[ids[0]], moved[ids[-1]] - moved[ids[-2]]
-        along[ids] = step / np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-30)
-        pinned[ids] = 1
-    return moved, along, pinned
-
-
-def _lay_edges(co, faces, pinned, lines, project):
-    """The drawn lines become runs of the result's own edges: the cheapest path of edges along each is pulled onto it, and the faces beside it settle."""
-    edges = patch._unique_edges(faces)
-    cell = float(np.median(np.linalg.norm(co[edges[:, 0]] - co[edges[:, 1]], axis=1)))
-    chains, _keys = guides.chain(co, None, lines, cell, edges=(edges[:, 0], edges[:, 1]))
-    if not chains:
-        return co
-    fan = np.asarray([(f[0], f[k], f[k + 1]) for f in faces for k in range(1, len(f) - 1)], dtype=np.int64)
-    held = pinned.copy()
-    held[np.unique(np.concatenate([np.asarray(c, dtype=np.int64) for c in chains]))] = True
-    for _ in range(LAY_ROUNDS):
-        co = guides.pull(co, fan, chains, lines, cell, pinned)
-        co = patch.fit_to_surface(co, faces, held, project, 2, 0.5, guard=False)
-    return patch.fit_to_surface(co, faces, held, project, 1, 0.5)
+_is_closed, _on_lines, _lay_edges = flowstroke.is_closed, flowstroke.on_lines, flowstroke.lay_edges  # shared with the Flow Editor
 
 
 def _misses(reference, view, center, half, pixels) -> np.ndarray:
@@ -473,13 +431,9 @@ class FindJob(view.PartJob):
             except Exception as exc:  # a thread has nobody above it to report to
                 box["error"] = str(exc)[:100]
 
-        thread = threading.Thread(target=work, daemon=True, name="CurioMeshSegments")
-        thread.start()
-        while thread.is_alive():
-            if self._stopped:
-                return
-            thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
-            yield
+        yield from tasks.run(work, "CurioMeshSegments", stopped=lambda: self._stopped)
+        if self._stopped:
+            return
         if "tree" in box:
             view.seg.update(tree=box["tree"], tree_job=job)
         if "labels" not in box:
@@ -534,6 +488,20 @@ def start_find(context, fresh: bool = False) -> bool:
 # --------------------------------------------------------------------------- remaking a segment for its Use
 
 
+def in_thread(call):
+    """Generator: run `call` on a thread, yielding while it works. Returns {"out": result} or {"error": text}."""
+    box = {}
+
+    def work():
+        try:
+            box["out"] = call()
+        except Exception as exc:  # a thread has nobody above it to report to
+            box["error"] = str(exc)[:100]
+
+    yield from tasks.run(work, "CurioMeshSegment")
+    return box
+
+
 class GoalJob(view.PartJob):
     """Remake the chosen segments for their Use, one at a time, then look at the whole object again."""
 
@@ -544,19 +512,7 @@ class GoalJob(view.PartJob):
 
     def _in_thread(self, call):
         """Generator: run `call` on a thread. Returns its result, or None after noting what went wrong."""
-        box = {}
-
-        def work():
-            try:
-                box["out"] = call()
-            except Exception as exc:  # a thread has nobody above it to report to
-                box["error"] = str(exc)[:100]
-
-        thread = threading.Thread(target=work, daemon=True, name="CurioMeshSegment")
-        thread.start()
-        while thread.is_alive():
-            thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
-            yield
+        box = yield from in_thread(call)
         if "out" not in box and box.get("error") != "cancelled":
             self.warnings = [box.get("error", "no result")]
         return box.get("out")
@@ -1723,7 +1679,7 @@ def _outlines(res, piece):
                 seg["outline"] = (u[across], v[across], piece[fa[across]], piece[fb[across]])
                 overlay.tag_redraw()
 
-        threading.Thread(target=work, daemon=True, name="CurioMeshOutlines").start()
+        tasks.start(work, "CurioMeshOutlines")
     return seg["outline"]
 
 

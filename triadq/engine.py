@@ -191,7 +191,7 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
         report.message = (
             f"TRIAD-Q {closure_label} completed with a locally validated all-quad manifold."
             if report.quad_only_verified
-            else "TRIAD-Q Lite remesh completed."
+            else "TRIAD-Q remesh completed."
         )
     return best_mesh, report
 

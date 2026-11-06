@@ -1,6 +1,34 @@
 # Changelog
 
-## 0.9.8 - unreleased
+## 0.9.8 - 2026-11-06
+
+### Hard surface
+- **Hard Surface** use (under More Uses): Game Asset at Detail 5% with the two hard-surface rebuilds on and every hard
+  edge marked Sharp and Creased on Apply. The two rebuilds are also switches in Options; they are off in every other use.
+- **Clean Panels**: a part made of flat faces (box, plank, plate, bracket, bevel strip) is also offered laid out by
+  panels: each convex flat area one grid along its own edges (a rectangle an a x b grid, a round cap a grid with four
+  corner poles, never a fan), a flat area round one hole a ring of quads round it, other flat areas cut and split so
+  they stay all quads. Every panel border stays an exact edge loop and both sides of it agree, so it is watertight. A
+  chamfer strip comes out as one row. The camera keeps a layout only where the view holds; it counts as half its faces
+  when weighed against a reduced size.
+- **Even Cylinders**: a turned part is also read by the longest path through the tree of its rings, which holds where
+  the old ring walk wandered (on the hydrant 16 parts that were 8 to 20% off now fit within about 1%), and a scanned
+  tube is read wall by wall so its inside stays hollow. A visibly round part (radius at least 5% of the model) never
+  drops below about 16 sides: the scanned concrete pipe that became a 12-sided prism now keeps 192 faces and 3.9% view
+  change instead of 111 faces and 5.6%.
+- **Round parts at least 16 sides** in every use: a turned part whose radius is a tenth of its size or more is no
+  longer swept with 8 or 12 steps, and a hollow profile is never simplified until its walls fold onto each other.
+- **Faces lying on each other count as a problem**: the result line says "New problems: 22 faces lying on each other"
+  instead of "No new problems".
+- **Hard Edges** on Apply (Options): Leave, **Mark Sharp + Crease** (no extra faces, a Subdivision Surface keeps the
+  edge), or **Holding Edges**: a loop on both sides of every hard edge at a % of the next face or in millimetres
+  (Blender's bevel, two segments, square profile, so the shape does not move).
+- Measured (Game Asset, Keep Detail 6%, rebuilds off -> on, same branch): overhead crane Issue Finder total 5,612 ->
+  5,392, inward+folded+crossing 481 -> 425, slivers on flat parts 1,084 -> 1,014, Tidiness 40 -> 42; fire hydrant
+  inward+folded+crossing 234 -> 145 but poles 872 -> 1,430; old compressor worse (inward+folded+crossing 208 -> 287,
+  slivers on flat parts 506 -> 682); treasure chest a little worse; drill press, barrier and four Megascans scans
+  (column, stool, barrel, pipe joint) unchanged: the camera turned the rebuilds down. 0 to 25% more time. That is why
+  the rebuilds are opt-in.
 
 ### A tidier panel
 - **One path, in order.** The CurioMesh panel now shows only what the step you are on needs: pick a mesh, **What is
@@ -52,6 +80,40 @@
   Symmetrize) and barrier and by 4 on the compressor; poles down by a third on the organic ones; 4 to 13% fewer faces;
   the view changed by 0.8 to 1.4 points more; Issue Finder totals down on all five, though 7 to 80 bent quads appear
   where there were almost none.
+- **Loop Quality**: a 0-100 score of the edge loops the way an artist reads them (straight rows, no zig-zags, evenly
+  stacked loops, even quad widths, square corners, few and spread-out poles, few loops that die after a few quads),
+  shown in the Tidy Up line: "Loop Quality 16 -> 32 (straight 0 -> 17, even spacing 39 -> 56)" on the bust.
+- **Straighter rows at the top of the slider**: 0.5 now settles the quads fully and 0.75 and 1 straighten the loops
+  (each corner moves onto the smooth curve through its loop and to the middle of its neighbours along it, held on
+  your mesh, with the same guards). Drawn guide curves and edge loops stay where they are. Honest limit: on the bust
+  this adds only about 3 Loop Quality points over the settle; with about a third of the corners being poles the loops
+  are three or four quads long, so the rows cannot get much straighter without fewer poles.
+
+### Flow Editor (experimental, off by default)
+- Turn on **Flow Editor (Experimental)** in the add-on preferences and **Draw on the mesh** appears under Shape the
+  flow. Draw on a finished result and the quads around the stroke are redone on their seams; the rest stays as it is.
+- **Draw** recognises what you drew: a closed loop becomes a **Ring** (a clean closed edge loop with rows round it),
+  a line along a sharp crease an **Edge**, any other line a **Flow** line the rows follow. Change it with one click
+  (or F, R, E while drawing). On a test set of 57 drawn shapes (clean and shaky circles, ellipses, open arcs, loops
+  with a 5-15% gap, zig-zags, figure-eights, strokes along and across a crease) it was right on all 57.
+- **Flow**, **Ring** and **Edge** force a kind; **Place Circle** (drag to size, Shift for an ellipse); **Eye**,
+  **Mouth** and **Nose-Mouth** place those shapes where you click; **Erase** and **Erase All**. Strokes are curves in
+  the guide list, saved with the .blend and used by Start too; with a mirrored result they work on both sides.
+- Not yet measured inside Blender: on the bust outside Blender, a ring round the forehead redid 268 faces into 417 in
+  1.6 s with five closed loops round it, and a flow line redid 79 faces in 0.5 s, both with clean seams.
+
+### Fixes
+- **The Apply button was missing in 0.9.0 to 0.9.7** for everyone who kept the default sidebar tab: the "5. Apply" panel
+  was never registered. The new Finish section has it, and a new test (`tests/blender_registration.py`) checks that every
+  panel and button CurioMesh defines is registered and gone again after disabling.
+- **A crash in Blender 5.2** (inside Blender's attribute carry-over after QuadriFlow) is avoided: CurioMesh only asks
+  for it when the mesh has colours or vertex groups to keep.
+- **From the Blender Extensions review:** background work runs through one task runner; helper Blenders get the add-on
+  folder from their own environment instead of a `sys.path` change; no saved data uses pickle; the computer's graphics
+  card is read from Blender instead of running `nvidia-smi`; the depsgraph handlers are gone (the overlay and paint
+  watch check cheaply when they draw or only while painting); saved fixes and resume points live in the extension's own
+  user folder. "TRIAD-Q Lite" is now just "TRIAD-Q". The GitHub zips keep the native core and its speed.
+- A feature tour for testing in Blender (`tests/blender_feature_tour.py`), with an inventory of every button.
 
 ## 0.9.7 - 2026-11-05
 

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import math
 import os
 
@@ -28,6 +27,7 @@ OUTPUT_ITEMS = [
 PROFILES = {
     "LOW_POLY": ("Low Poly", "Fewest faces for a game prop or background: flat areas collapse into big polygons, then triangles. Small parts may vanish", 10.0, "FLAT", "TRIS"),
     "GAME": ("Game Asset", "All quads, few faces, good for a game model. The default", 6.0, "AUTO", "QUADS"),
+    "HARD": ("Hard Surface", "Machines, props and architecture: all quads, few faces, flat panels laid out as clean grids and round parts as even cylinders where the camera agrees, and every hard edge marked Sharp and Creased when you Apply. Keeps a little more detail than Game Asset, for crisp silhouettes", 5.0, "AUTO", "QUADS"),
     "ANIMATION": ("Animation", "All quads, even sizes and more faces, so the mesh bends cleanly. Check eyes, mouth and joints by hand", 1.5, "QUADRIFLOW", "QUADS"),
     "SUBDIV": ("Subdivision", "All quads with flat panels kept as single large quads, so smoothing keeps the shape", 1.5, "FLAT", "QUADS"),
     "SCAN": ("Scan Cleanup", "Keeps more of the detail of a dirty scan (scans have few true flats, so no flat merging)", 2.0, "AUTO", "QUADS"),
@@ -63,11 +63,14 @@ def multires_words(base_faces: int, levels: int) -> str:
 
 
 def free_memory_gb() -> float:
-    """Free memory on this computer, or a modest guess when it can't be read."""
+    """Free memory on this computer, or a modest guess (8 GB) where it can't be read."""
     try:
         if os.name == "nt":
+            import ctypes
+
             class Status(ctypes.Structure):
                 _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in ("total", "free", "pagefile", "free_pagefile", "virtual", "free_virtual", "extended")]
+
             status = Status()
             status.length = ctypes.sizeof(Status)
             if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):

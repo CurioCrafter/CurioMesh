@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 from . import guided as G
-from . import hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
+from . import flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
 from . import verdict as V
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
@@ -359,10 +359,11 @@ def draw_shape_flow(layout, context, gs) -> None:
     obj = G._source_mesh(context)
     col = layout.column(align=True)
     col.enabled = G.progress_info("AUTO") is None
-    if hasattr(bpy.types, FLOW_EDITOR_OP[0]):
+    if hasattr(bpy.types, FLOW_EDITOR_OP[0]) and getattr(overlay.get_prefs(), "flow_editor", False):  # experimental for 0.9.8
         row = col.row()
         row.scale_y = 1.4
         row.operator(FLOW_EDITOR_OP[1], text="Draw on the mesh", **icons.kw("tool_pen", "GREASEPENCIL"))
+        flowedit.draw_tools(col, gs)
         col.separator()
     if G.REGION_READY:
         col.prop(gs, "region_use", text="Selected Faces Only", toggle=True, icon="FACESEL")
@@ -454,6 +455,9 @@ def draw_options(layout, context, gs) -> None:
     if obj is not None and obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
         col.prop(gs, "keep_uvs", toggle=True, icon="UV")
     col.separator()
+    col.label(text="Hard Surface", icon="MOD_BEVEL")
+    hard_surface.draw(col, gs)
+    col.separator()
     col.label(text="Output", icon="MESH_DATA")
     col.row(align=True).prop(gs, "auto_output", expand=True)
     col.separator()
@@ -498,6 +502,7 @@ class CURIOMESH_PT_pop_uses(_Popover, bpy.types.Panel):
     def draw(self, context):
         gs = context.scene.curiomesh_guided
         col = self.layout.column(align=True)
+        col.operator("curiomesh.pick_use", text="Hard Surface", depress=not gs.use_auto and gs.auto_profile == "HARD", icon="MOD_BEVEL").use = "HARD"
         col.operator("curiomesh.pick_use", text="Hulls", depress=not gs.use_auto and gs.auto_profile == "HULL", **icons.kw("use_hull", "MESH_ICOSPHERE")).use = "HULL"
         if gs.auto_profile == "CUSTOM":
             col.label(text="Custom: your own settings from the Pro tab", icon="INFO")

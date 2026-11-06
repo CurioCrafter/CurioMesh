@@ -53,6 +53,7 @@ class CheckTests(unittest.TestCase):
         scan = checks.Inspect(nm_edges=2, selfx=0, per_piece={0: (4, 0, 0), 1: (0, 0, 0)})
         self.assertEqual(checks.new_spots(scan, scan), [])
         self.assertEqual(checks.describe(scan, scan, 0, 0), "No new problems")
+        self.assertEqual(checks.describe(scan, scan, 0, 0, overlap=22), "New problems: 22 faces lying on each other")
         self.assertIn("1 spot could not be fixed", checks.describe(clean, worse, 0, 1))
 
     def test_presets_keep_the_default_and_cover_a_wide_range(self):
