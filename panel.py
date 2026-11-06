@@ -359,7 +359,7 @@ def draw_shape_flow(layout, context, gs) -> None:
     obj = G._source_mesh(context)
     col = layout.column(align=True)
     col.enabled = G.progress_info("AUTO") is None
-    if hasattr(bpy.types, FLOW_EDITOR_OP[0]):
+    if hasattr(bpy.types, FLOW_EDITOR_OP[0]) and getattr(overlay.get_prefs(), "flow_editor", False):  # experimental for 0.9.8
         row = col.row()
         row.scale_y = 1.4
         row.operator(FLOW_EDITOR_OP[1], text="Draw on the mesh", **icons.kw("tool_pen", "GREASEPENCIL"))
