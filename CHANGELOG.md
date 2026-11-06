@@ -16,6 +16,11 @@
   Heatmap, Live, Style and Multires settings, the Quality Preset and Detail Marker buttons, and the region volume list
   and Paint mode. Wording only; no names or settings changed.
 
+### Never more faces than the source
+- The Quad Size steps skip any size with more faces than your mesh when a lighter one exists, and a heavier size on
+  screen is swapped for the lighter one as soon as it is ready. When none is lighter, the verdict says "This mesh is
+  already light: the result has more faces than the original. Keep the original or lower Detail."
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

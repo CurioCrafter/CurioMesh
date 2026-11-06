@@ -243,7 +243,7 @@ def draw_verdict(layout, gs) -> None:
     asked = gs.auto_detail if gs.auto_aim == "KEEP" and gs.auto_profile not in profiles.BLOCKOUT_USES and not gs.multires_on else None
     bad = serious_spots(res)
     use = USE_NAMES.get(gs.auto_profile, "")
-    level, title = V.verdict(use if gs.auto_profile != "CUSTOM" else "", after, report["loss"], asked, V.serious_count((res.get("issues") or {}).get("totals")), len(bad))
+    level, title = V.verdict(use if gs.auto_profile != "CUSTOM" else "", after, report["loss"], asked, V.serious_count((res.get("issues") or {}).get("totals")), len(bad), report.get("before"))
     box = layout.box()
     head = box.row()
     head.alert = level == "BAD"

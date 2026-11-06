@@ -21,6 +21,10 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(V.verdict("Game Asset", 1000, 1.0, 6.0, 3, 1), ("CHECK", "Check 1 spot"))
         self.assertEqual(V.verdict("Game Asset", 1000, 1.0, 6.0, 6, 2), ("BAD", "2 spots with bad faces left"))
 
+    def test_heavier_than_source_says_so(self):
+        self.assertEqual(V.verdict("Game Asset", 3000, 1.0, 6.0, 0, 0, 2500), ("CHECK", V.HEAVIER))
+        self.assertEqual(V.verdict("Game Asset", 2000, 1.0, 6.0, 0, 0, 2500)[0], "GOOD")
+
     def test_face_count_aim_ignores_change(self):
         self.assertEqual(V.verdict("Low Poly", 500, 40.0, None, 0, 0)[0], "GOOD")
 
