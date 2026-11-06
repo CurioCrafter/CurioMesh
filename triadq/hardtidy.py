@@ -35,7 +35,7 @@ from .trial import Base, Candidate, Trial
 NO_HARD_EDGES = "No hard edges in this area."
 NO_PANELS = "No flat panels found in this area."
 SLICE = 0.004  # seconds of work between two yields
-PROJECT_CHUNK = 2048  # points sent to the source per call
+PROJECT_CHUNK = 512  # points sent to the source per call
 WINDOW = 2  # chain edges each side of a corner whose side samples fit its crease planes
 CREASE_DEG = 15.0  # the two side planes must meet at more than this for a crease to be there
 CREASE_REACH = 0.5  # of an edge: a crease further than this from the chain is not the one it follows
@@ -82,47 +82,84 @@ def _project(base: Base, points: np.ndarray):
     return out
 
 
-def _edge_users(faces) -> dict:
-    out: dict[tuple[int, int], list[int]] = {}
-    for i, f in enumerate(faces):
-        for k in range(len(f)):
-            a, b = f[k], f[(k + 1) % len(f)]
-            out.setdefault((a, b) if a < b else (b, a), []).append(i)
-    return out
-
-
-def _newell(co, faces) -> np.ndarray:
-    """Newell's normal per face, length twice the area (faces grouped by size, so it is one NumPy call per size)."""
-    out = np.zeros((len(faces), 3))
+def _groups(faces) -> list:
+    """[(face numbers, (k, size) corners)] per face size, so per-face work is one NumPy call per size."""
     by_size: dict[int, list[int]] = {}
     for i, f in enumerate(faces):
         by_size.setdefault(len(f), []).append(i)
-    for _size, ids in by_size.items():
-        p = co[np.asarray([faces[i] for i in ids], dtype=np.int64)]
+    return [(np.asarray(ids, dtype=np.int64), np.asarray([faces[i] for i in ids], dtype=np.int64).reshape(len(ids), size)) for size, ids in by_size.items()]
+
+
+class Edges:
+    """Every edge of the faces once (`ab`, smaller corner first) with how many faces use it (`count`) and the first two
+    of them (`f0`, `f1`, -1 when there is none), worked out with NumPy; `find` looks edges up by their corners."""
+
+    def __init__(self, faces, n_corners: int):
+        self.groups = _groups(faces)
+        self.n = max(int(n_corners), 1)
+        if not self.groups:
+            self.ab = np.zeros((0, 2), dtype=np.int64)
+            self.keys = self.count = self.f0 = self.f1 = np.zeros(0, dtype=np.int64)
+            return
+        a = np.concatenate([idx.ravel() for _ids, idx in self.groups])
+        b = np.concatenate([np.roll(idx, -1, axis=1).ravel() for _ids, idx in self.groups])
+        face = np.concatenate([np.repeat(ids, idx.shape[1]) for ids, idx in self.groups])
+        lo, hi = np.minimum(a, b), np.maximum(a, b)
+        self.n = max(self.n, int(hi.max()) + 1)
+        key = lo * self.n + hi
+        order = np.lexsort((face, key))
+        key, face = key[order], face[order]
+        self.keys, first, self.count = np.unique(key, return_index=True, return_counts=True)
+        self.ab = np.stack((self.keys // self.n, self.keys % self.n), axis=1)
+        self.f0 = face[first]
+        self.f1 = np.where(self.count >= 2, face[np.minimum(first + 1, len(face) - 1)], -1)
+
+    def find(self, a, b) -> np.ndarray:
+        """Edge numbers of the corner pairs (a[i], b[i]); -1 where there is no such edge."""
+        a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
+        key = np.minimum(a, b) * self.n + np.maximum(a, b)
+        if not len(self.keys):
+            return np.full(len(key), -1, dtype=np.int64)
+        at = np.clip(np.searchsorted(self.keys, key), 0, len(self.keys) - 1)
+        return np.where(self.keys[at] == key, at, -1)
+
+
+def _edges(base: Base) -> Edges:
+    if "hard_edges" not in base.cache:
+        base.cache["hard_edges"] = Edges(base.faces, len(base.co))
+    return base.cache["hard_edges"]
+
+
+def _newell(co, faces, groups=None) -> np.ndarray:
+    """Newell's normal per face, length twice the area."""
+    out = np.zeros((len(faces), 3))
+    for ids, idx in _groups(faces) if groups is None else groups:
+        p = co[idx]
         out[ids] = np.cross(p, np.roll(p, -1, axis=1)).sum(axis=1)
     return out
 
 
-def face_normals(co, faces) -> np.ndarray:
+def face_normals(co, faces, groups=None) -> np.ndarray:
     """Unit normal per face (Newell's method)."""
-    n = _newell(np.asarray(co, dtype=np.float64), faces)
+    n = _newell(np.asarray(co, dtype=np.float64), faces, groups)
     length = np.linalg.norm(n, axis=1, keepdims=True)
     return np.divide(n, length, out=np.zeros_like(n), where=length > 1e-300)
 
 
-def movable(base: Base, users: dict | None = None) -> np.ndarray:
+def movable(base: Base) -> np.ndarray:
     """Corners these tools may move. Unlike `Base.free` this includes hard-edge corners and corners of triangles and
     n-gons (they are what the tools straighten), but never the edge of the scope or an open border."""
-    users = _edge_users(base.faces) if users is None else users
+    ed = _edges(base)
     inside = np.zeros(len(base.co), dtype=bool)
     outside = np.zeros(len(base.co), dtype=bool)
-    for i, f in enumerate(base.faces):
-        (inside if base.scope[i] else outside)[list(f)] = True
-    border = np.zeros(len(base.co), dtype=bool)
+    for ids, idx in ed.groups:
+        inn = base.scope[ids]
+        inside[idx[inn].ravel()] = True
+        outside[idx[~inn].ravel()] = True
     plane = _on_plane(base)
-    for (a, b), fs in users.items():
-        if len(fs) != 2 and not (plane[a] and plane[b]):
-            border[a] = border[b] = True
+    loose = ed.ab[(ed.count != 2) & ~(plane[ed.ab[:, 0]] & plane[ed.ab[:, 1]])]
+    border = np.zeros(len(base.co), dtype=bool)
+    border[loose.ravel()] = True
     return inside & ~outside & ~border
 
 
@@ -141,43 +178,47 @@ def _keep_plane(base: Base, co: np.ndarray) -> None:
         co[on, base.mirror[0]] = base.co[on, base.mirror[0]]
 
 
-def _guard(base: Base, co: np.ndarray, moved: np.ndarray, held: list) -> np.ndarray:
+def _guard(base: Base, co: np.ndarray, moved: np.ndarray, held: list):
     """Drift, turn and squash guards: a corner moved more than DRIFT of an edge goes back ("drift"); the corners of a
     face whose normal turned past WORST_TURN ("turn") or whose shortest edge was squashed under SQUASH ("squash") go
-    back."""
+    back. A generator: it yields between face sizes and rounds, and returns the guarded corners."""
     far = np.linalg.norm(co - base.co, axis=1) > DRIFT * base.edge
     for v in np.flatnonzero(far & moved).tolist():
         held.append((base.co[v].copy(), "drift"))
     co[far] = base.co[far]
-    touched = [i for i, f in enumerate(base.faces) if moved[list(f)].any()]
-    if not touched:
-        return co
-    sub = [base.faces[i] for i in touched]
-    start = face_normals(base.co, sub)
-    short0 = _shortest(base.co, sub)
-    for _round in range(4):
-        now = face_normals(co, sub)
-        turned = (now * start).sum(axis=1) < WORST_TURN
-        short = _shortest(co, sub)
-        squashed = (short < SQUASH * short0) & (short < SQUASH * base.edge)
-        bad = turned | squashed
-        if not bad.any():
+    for _round in range(4):  # putting a face back can turn a neighbour of another size, so all sizes again
+        any_bad = False
+        for _ids, idx in _edges(base).groups:
+            idx = idx[moved[idx].any(axis=1)]
+            if not len(idx):
+                continue
+            turned = (_normals_of(co, idx) * _normals_of(base.co, idx)).sum(axis=1) < WORST_TURN
+            short = _shortest(co, idx)
+            squashed = (short < SQUASH * _shortest(base.co, idx)) & (short < SQUASH * base.edge)
+            bad = (turned | squashed) & np.any(np.abs(co[idx] - base.co[idx]) > 0.0, axis=(1, 2))
+            for k in np.flatnonzero(bad).tolist():
+                held.append((base.co[idx[k]].mean(axis=0), "turn" if turned[k] else "squash"))
+            gone = idx[bad].ravel()
+            co[gone] = base.co[gone]
+            any_bad = any_bad or bool(bad.any())
+            yield
+        if not any_bad:
             break
-        for k in np.flatnonzero(bad).tolist():
-            f = list(sub[k])
-            if not np.allclose(co[f], base.co[f]):
-                held.append((base.co[f].mean(axis=0), "turn" if turned[k] else "squash"))
-            co[f] = base.co[f]
     return co
 
 
-def _shortest(co, faces) -> np.ndarray:
-    """Shortest edge of each face."""
-    out = np.full(len(faces), np.inf)
-    for i, f in enumerate(faces):
-        p = co[list(f)]
-        out[i] = float(np.linalg.norm(p - np.roll(p, -1, axis=0), axis=1).min())
-    return out
+def _normals_of(co, idx) -> np.ndarray:
+    """Unit normals of faces given as one (k, size) array of corners."""
+    p = co[idx]
+    n = np.cross(p, np.roll(p, -1, axis=1)).sum(axis=1)
+    length = np.linalg.norm(n, axis=1, keepdims=True)
+    return np.divide(n, length, out=np.zeros_like(n), where=length > 1e-300)
+
+
+def _shortest(co, idx) -> np.ndarray:
+    """Shortest edge of each face, faces given as one (k, size) array of corners."""
+    p = co[idx]
+    return np.linalg.norm(p - np.roll(p, -1, axis=1), axis=2).min(axis=1)
 
 
 def _fit_plane(points: np.ndarray):
@@ -203,15 +244,25 @@ def _fit_plane_trimmed(points: np.ndarray):
 # --------------------------------------------------------------------------- True Up Edges
 
 
-def hard_chains(co, faces, scope=None, users=None, sharp_deg: float = SHARP_DEG):
+def hard_mask(co, faces, scope=None, edges: Edges | None = None, sharp_deg: float = SHARP_DEG) -> np.ndarray:
+    """Per edge of `edges`: two faces fold past `sharp_deg` there and one of them is in the scope."""
+    co = np.asarray(co, dtype=np.float64)
+    edges = Edges(faces, len(co)) if edges is None else edges
+    if not len(edges.ab):
+        return np.zeros(0, dtype=bool)
+    scope = np.ones(len(faces), dtype=bool) if scope is None else np.asarray(scope, dtype=bool)
+    normals = face_normals(co, faces, edges.groups)
+    two = edges.count == 2
+    f0, f1 = edges.f0, np.where(two, edges.f1, edges.f0)
+    fold = (normals[f0] * normals[f1]).sum(axis=1) < math.cos(math.radians(sharp_deg))
+    return two & fold & (scope[f0] | scope[f1])
+
+
+def hard_chains(co, faces, scope=None, edges: Edges | None = None, sharp_deg: float = SHARP_DEG):
     """Chains of hard edges with a face of the scope on them: [(corners, closed)], ending where a chain meets a corner
     with one or three or more hard edges."""
-    co = np.asarray(co, dtype=np.float64)
-    users = _edge_users(faces) if users is None else users
-    scope = np.ones(len(faces), dtype=bool) if scope is None else scope
-    normals = face_normals(co, faces)
-    limit = math.cos(math.radians(sharp_deg))
-    hard = [(a, b) for (a, b), fs in users.items() if len(fs) == 2 and (scope[fs[0]] or scope[fs[1]]) and float(normals[fs[0]] @ normals[fs[1]]) < limit]
+    edges = Edges(faces, len(co)) if edges is None else edges
+    hard = edges.ab[hard_mask(co, faces, scope, edges, sharp_deg)].tolist()
     around: dict[int, list[int]] = {}
     for a, b in hard:
         around.setdefault(a, []).append(b)
@@ -246,14 +297,17 @@ def hard_chains(co, faces, scope=None, users=None, sharp_deg: float = SHARP_DEG)
     return [(p, c) for p, c in chains if len(p) >= (3 if c else 2)]
 
 
-def _side_samples(co, faces, users, path, closed):
+def _side_samples(co, faces, edges: Edges, path, closed):
     """Per chain edge: the points of the faces on its left and on its right (face middle and corners off the chain)."""
     on = set(path)
     n = len(path) if closed else len(path) - 1
+    nxt = [path[(k + 1) % len(path)] for k in range(n)]
+    found = edges.find(path[:n], nxt)
     left, right = [], []
     for k in range(n):
-        a, b = path[k], path[(k + 1) % len(path)]
-        fs = users.get((min(a, b), max(a, b)), [])
+        a, b = path[k], nxt[k]
+        e = int(found[k])
+        fs = [] if e < 0 else [int(i) for i in (edges.f0[e], edges.f1[e]) if i >= 0]
         pl, pr = [], []
         for i in fs:
             f = list(faces[i])
@@ -336,25 +390,26 @@ def _wave(co: np.ndarray, jobs) -> float:
     return sum(_off_crease(co, job) for job in jobs) / count if count else 0.0
 
 
-def _place(base: Base, users: dict, free, on_chain, moving, target, strength: float, held: list):
+def _place(base: Base, free, on_chain, moving, target, strength: float, held: list):
     """Generator: the chain corners `strength` of the way to `target`, the corners beside them following along their
     rungs, all put on your original mesh and guarded; returns the new corners."""
     co = base.co.copy()
     co[moving] = base.co[moving] + strength * (target[moving] - base.co[moving])
     push = np.zeros_like(co)
     count = np.zeros(len(co))
-    for a, b in users:
-        for x, y in ((a, b), (b, a)):
-            if moving[x] and not on_chain[y] and free[y]:
-                push[y] += co[x] - base.co[x]
-                count[y] += 1
+    ab = _edges(base).ab
+    for x, y in ((ab[:, 0], ab[:, 1]), (ab[:, 1], ab[:, 0])):
+        take = moving[x] & ~on_chain[y] & free[y]
+        np.add.at(push, y[take], co[x[take]] - base.co[x[take]])
+        np.add.at(count, y[take], 1.0)
+    yield
     follow = count > 0
     co[follow] = base.co[follow] + FOLLOW * push[follow] / count[follow, None]
     changed = moving | follow
     if changed.any():
         co[changed] = yield from _project(base, co[changed])
     _keep_plane(base, co)
-    return _guard(base, co, changed, held)
+    return (yield from _guard(base, co, changed, held))
 
 
 def _taubin(points: np.ndarray, closed: bool, fixed: np.ndarray) -> np.ndarray:
@@ -384,13 +439,15 @@ class TrueUpEdges(Trial):
     def check(self, base: Base) -> str:
         if not len(base.faces) or not base.scope.any():
             return NO_HARD_EDGES
-        return "" if hard_chains(base.co, base.faces, base.scope) else NO_HARD_EDGES
+        return "" if hard_mask(base.co, base.faces, base.scope, _edges(base)).any() else NO_HARD_EDGES
 
     def run(self, base: Base, settings: dict, rough: bool = False):
         strength = float(settings.get("strength", self.defaults["strength"]))
-        users = _edge_users(base.faces)
-        free = movable(base, users)
-        chains = hard_chains(base.co, base.faces, base.scope, users)
+        edges = _edges(base)
+        yield 0.0
+        free = movable(base)
+        chains = hard_chains(base.co, base.faces, base.scope, edges)
+        yield 0.0
         due = _ticker()
         co = base.co.copy()
         target = base.co.copy()
@@ -404,7 +461,7 @@ class TrueUpEdges(Trial):
             pts = co[idx]
             ring = np.vstack((pts, pts[:1])) if closed else pts
             length = float(np.linalg.norm(np.diff(ring, axis=0), axis=1).sum()) or base.edge
-            left, right = _side_samples(base.co, base.faces, users, path, closed)
+            left, right = _side_samples(base.co, base.faces, edges, path, closed)
             sl = [np.asarray(p).reshape(-1, 3) for p in left]
             sr = [np.asarray(p).reshape(-1, 3) for p in right]
             flat_l = np.concatenate(sl) if sl else np.zeros((0, 3))
@@ -488,8 +545,13 @@ class TrueUpEdges(Trial):
         early = held
         for _round in range(2):
             held = list(early)
-            co = yield from _place(base, users, free, on_chain, moving, target, strength, held)
-            worse = [job for job in trued_jobs if _off_crease(co, job) >= _off_crease(base.co, job) - 1e-9 * base.edge]
+            co = yield from _place(base, free, on_chain, moving, target, strength, held)
+            worse = []
+            for j, job in enumerate(trued_jobs):
+                if _off_crease(co, job) >= _off_crease(base.co, job) - 1e-9 * base.edge:
+                    worse.append(job)
+                if due():
+                    yield 0.8 + 0.2 * j / len(trued_jobs)
             if not worse:
                 break
             for job in worse:
@@ -513,22 +575,25 @@ class TrueUpEdges(Trial):
 # --------------------------------------------------------------------------- Press Panels Flat
 
 
-def find_panels(co, faces, scope, edge: float, users: dict | None = None):
+def find_panels(co, faces, scope, edge: float, edges: Edges | None = None):
     """Generator: panel id per face (-1: none), grown loosely on the result over the faces in scope, largest faces
     seeding first, as Clean Panels grows them (`flatquad._grow_regions`). The bumpy result has no exact plane, so a
     face joins when it faces the panel's mean way within PANEL_DEG and its middle is within PANEL_GAP of an edge of the
     panel's mean plane (both kept up to date as faces join, without refits); it yields between faces."""
     co = np.asarray(co, dtype=np.float64)
-    users = _edge_users(faces) if users is None else users
-    raw = _newell(co, faces)
+    edges = Edges(faces, len(co)) if edges is None else edges
+    raw = _newell(co, faces, edges.groups)
     areas = np.linalg.norm(raw, axis=1)
     normals = np.divide(raw, areas[:, None], out=np.zeros_like(raw), where=areas[:, None] > 1e-300)
-    middles = np.stack([co[list(f)].mean(axis=0) for f in faces]) if faces else np.zeros((0, 3))
-    neighbours: list[list[int]] = [[] for _ in faces]
-    for fs in users.values():
-        if len(fs) == 2:
-            neighbours[fs[0]].append(fs[1])
-            neighbours[fs[1]].append(fs[0])
+    middles = np.zeros((len(faces), 3))
+    for ids, idx in edges.groups:
+        middles[ids] = co[idx].mean(axis=1)
+    yield
+    two = edges.count == 2
+    a, b = np.concatenate((edges.f0[two], edges.f1[two])), np.concatenate((edges.f1[two], edges.f0[two]))
+    order = np.argsort(a, kind="stable")
+    nb, starts = b[order], np.searchsorted(a[order], np.arange(len(faces) + 1))
+    yield
     limit, gap = math.cos(math.radians(PANEL_DEG)), PANEL_GAP * edge
     labels = np.full(len(faces), -1, dtype=np.int64)
     due = _ticker()
@@ -538,7 +603,7 @@ def find_panels(co, faces, scope, edge: float, users: dict | None = None):
             continue
         labels[seed] = count
         weight, way, spot = areas[seed], raw[seed].copy(), middles[seed] * areas[seed]
-        frontier = list(neighbours[seed])
+        frontier = nb[starts[seed] : starts[seed + 1]].tolist()
         while frontier:
             f = frontier.pop()
             if labels[f] >= 0 or not scope[f]:
@@ -550,7 +615,7 @@ def find_panels(co, faces, scope, edge: float, users: dict | None = None):
             weight += areas[f]
             way += raw[f]
             spot += middles[f] * areas[f]
-            frontier.extend(neighbours[f])
+            frontier.extend(nb[starts[f] : starts[f + 1]].tolist())
             if due():
                 yield
         count += 1
@@ -579,20 +644,24 @@ class PressPanelsFlat(Trial):
 
     def run(self, base: Base, settings: dict, rough: bool = False):
         strength = float(settings.get("strength", self.defaults["strength"]))
-        users = _edge_users(base.faces)
-        free = movable(base, users)
-        labels = yield from find_panels(base.co, base.faces, base.scope, base.edge, users)
+        edges = _edges(base)
+        yield 0.0
+        free = movable(base)
+        labels = yield from find_panels(base.co, base.faces, base.scope, base.edge, edges)
         yield 0.1
         due = _ticker()
         planes = {}  # label -> (normal, offset, size, corners that go onto it)
+        middles = np.zeros((len(base.faces), 3))
+        for ids, idx in edges.groups:
+            middles[ids] = base.co[idx].mean(axis=1)
         order = np.argsort(labels, kind="stable")
         starts = np.searchsorted(labels[order], np.arange(int(labels.max(initial=-1)) + 2))
         found = np.unique(labels[labels >= 0]).tolist()
         around: list[set] = [set() for _ in base.co]
         for j, r in enumerate(found):
             members = order[starts[r] : starts[r + 1]]
-            corners = np.asarray(sorted({v for i in members.tolist() for v in base.faces[i]}), dtype=np.int64)
-            mids = np.stack([base.co[list(base.faces[i])].mean(axis=0) for i in members.tolist()])
+            corners = np.unique(np.concatenate([np.asarray(base.faces[i], dtype=np.int64) for i in members.tolist()]))
+            mids = middles[members]
             under = yield from _project(base, np.vstack((base.co[corners], mids)))
             n, d, res, keep = _fit_plane_trimmed(under)
             if keep.mean() < 0.8 or float(np.percentile(res[keep], 95)) > FLAT * base.edge:
@@ -614,13 +683,13 @@ class PressPanelsFlat(Trial):
             cand.refusal = NO_PANELS
             return cand
 
-        def bump(points):  # largest distance off its panel's plane of a corner that may move, of the panel's size
-            worst = 0.0
-            for n, d, size, on in planes.values():
+        def bump(points):  # mean distance of the corners that may move off their panels' planes, in edges
+            total, count = 0.0, 0
+            for n, d, _size, on in planes.values():
                 on = on[free[on]]
-                if len(on):
-                    worst = max(worst, float(np.abs(points[on] @ n - d).max()) / size)
-            return worst
+                total += float(np.abs(points[on] @ n - d).sum())
+                count += len(on)
+            return total / count / base.edge if count else 0.0
 
         bump_before = bump(base.co)
         co = base.co.copy()
@@ -647,14 +716,16 @@ class PressPanelsFlat(Trial):
             if due():
                 yield 0.7 + 0.25 * v / max(len(co), 1)
         _keep_plane(base, co)
-        co = _guard(base, co, moved, held)
+        co = yield from _guard(base, co, moved, held)
         bump_after = bump(co)
-        shared = [(a, b) for (a, b), fs in users.items() if len(fs) == 2 and labels[fs[0]] >= 0 and labels[fs[1]] >= 0 and labels[fs[0]] != labels[fs[1]]]
+        two = edges.count == 2
+        l0, l1 = labels[edges.f0], labels[np.where(two, edges.f1, edges.f0)]
+        shared = edges.ab[two & (l0 >= 0) & (l1 >= 0) & (l0 != l1)]
         cand.co = co
         cand.held = held
-        cand.lines = np.stack((base.co[[a for a, _b in shared]], base.co[[b for _a, b in shared]]), axis=1) if shared else np.zeros((0, 2, 3))
+        cand.lines = np.stack((base.co[shared[:, 0]], base.co[shared[:, 1]]), axis=1)
         count = len(planes)
         cand.note = f"{count} panel{'s' if count != 1 else ''} pressed flat"
         cand.numbers["panels"] = (f"{count} panel{'s' if count != 1 else ''}", 0)
-        cand.numbers["bump"] = (f"bump {100 * bump_before:.1f}% -> {100 * bump_after:.1f}%", 1 if bump_after < bump_before - 1e-4 else 0)
+        cand.numbers["bump"] = (f"bump {100 * bump_before:.1f}% -> {100 * bump_after:.1f}% of an edge", 1 if bump_after < bump_before - 1e-4 else 0)
         return cand

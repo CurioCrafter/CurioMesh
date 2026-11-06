@@ -99,7 +99,7 @@ class PressPanelsFlatTest(unittest.TestCase):
         self.assertTrue(np.allclose(cand.co[:, 2], 0.0, atol=1e-9))
         self.assertTrue(np.allclose(cand.co[:, :2], points[:, :2]))  # pressed straight down, not slid
         self.assertEqual(cand.numbers["panels"][0], "1 panel")
-        self.assertTrue(cand.numbers["bump"][0].endswith("-> 0.0%"))
+        self.assertIn("-> 0.0%", cand.numbers["bump"][0])
 
     def test_shared_border_lands_on_both_planes(self):
         points, faces, crease = _fold()
