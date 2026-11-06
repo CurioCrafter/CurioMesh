@@ -4,8 +4,9 @@
 """The Organize slider: a tidier layout of the result on screen, at about the same faces, and a meter of what it costs.
 
 Moving the slider the first time works out a few strengths on a worker thread (`triadq.organize`: messy patches around
-poles redrawn as grids and edges spun, then the quads settled on your mesh step by step). Each strength is measured (Tidiness, poles, how much of the view changed, the
-Issue Finder) and gets its own preview mesh, so dragging only swaps meshes. With a mirrored result one half is organized
+poles redrawn as grids and edges spun, then the quads settled on your mesh step by step, then the loops straightened and
+stacked evenly). Each strength is measured (Tidiness, Loop Quality, poles, how much of the view changed, the Issue
+Finder) and gets its own preview mesh, so dragging only swaps meshes. With a mirrored result one half is organized
 and mirrored again, so the seam stays exact. Most Detail Loss holds the slider back at the strongest one within it.
 
 Loop Flow draws the edge loops of the result in a colour each, and its poles as dots.
@@ -21,11 +22,12 @@ import numpy as np
 from mathutils.bvhtree import BVHTree
 
 from . import autoretopo, overlay, segments, symmetry, turbo
-from .triadq import checks, issues, patterns
+from . import guides
+from .triadq import checks, issues, loopscore, patterns
 from .triadq import organize as O
 from .triadq.chords import PictureJudge
 
-STRENGTHS = (0.25, 0.5, 0.75, 1.0)  # worked out once; the slider shows the nearest one at or below it. 0.25: poles cleaned, then the quads settle more and more
+STRENGTHS = (0.25, 0.5, 0.75, 1.0)  # worked out once; the slider shows the nearest one at or below it. 0.25: poles cleaned, 0.5: quads settled, 0.75 and 1: loops straightened half and fully
 GAP = 0.1  # seconds between looks at the worker thread
 LONG_LOOP = 4  # edges: shorter loops are not drawn in Loop Flow
 FACE_ARRAYS = ("mat", "piece", "parts", "new", "locked", "chart")  # per-face numbers of a result that organizing carries along
@@ -97,7 +99,9 @@ def start(context) -> bool:
     seg_piece = segments.seg.get("piece")
     org.update(base=base, origin=out, report=dict(base["report"]), box=box, seg_piece=seg_piece)
     org["meshes"][0.0] = _mesh_for(out)
-    threading.Thread(target=_work, args=(box, out, job.co, job.faces, job.mirror, tree, seg_piece), daemon=True, name="CurioMeshOrganize").start()
+    strokes = list(getattr(job, "guide_lines", None) or []) + [line for _tag, rows in (getattr(job, "bend_groups", None) or []) for line in rows]
+    gap = float(getattr(job, "gap", 0.0) or 0.0)
+    threading.Thread(target=_work, args=(box, out, job.co, job.faces, job.mirror, tree, seg_piece, (strokes, gap)), daemon=True, name="CurioMeshOrganize").start()
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=GAP)
     return True
@@ -117,7 +121,19 @@ def _kinds(out, faces: int, seg_piece):
     return kind, table
 
 
-def _work(box, out, src_co, src_faces, mirror, tree, seg_piece) -> None:
+def _held_by_strokes(points: np.ndarray, strokes) -> np.ndarray:
+    """Vertices on a guide curve, drawn edge loop or deformation line of the search: Organize leaves them where they are."""
+    lines, gap = strokes
+    out = np.zeros(len(points), dtype=bool)
+    if gap <= 0.0:
+        gap = 0.01 * (float(np.linalg.norm(np.ptp(points, axis=0))) or 1.0)
+    for line in lines:
+        if len(line) > 1:
+            out |= guides._to_line(points, np.asarray(line, dtype=np.float64)) < 0.3 * gap
+    return out
+
+
+def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0)) -> None:
     """On a worker thread: every strength, measured. Hands each over in `box["levels"]` as it is ready."""
     try:
         co, faces = np.asarray(out["co"], dtype=np.float64), [tuple(f) for f in out["faces"]]
@@ -158,7 +174,9 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece) -> None:
                 masks = {k: np.concatenate((m[kept], m[kept])) for k, m in masks.items()}
             spots, record = issues.analyse(np.asarray(full_co), full_faces, masks, whole.get("piece"), {"source_faces": len(src_faces)})
             whole.update(issue_spots=spots, issues=record, bad=np.any(list(masks.values()), axis=0))
-            return {"view": 100.0 * wrong / max(shown, 1), "tidy": score, "poles": O.poles(full_co, full_faces), "faces": len(full_faces), "issues": dict(record["totals"])}
+            loops = loopscore.loop_quality(full_co, full_faces)
+            loops.pop("numbers")
+            return {"view": 100.0 * wrong / max(shown, 1), "tidy": score, "loops": loops, "poles": O.poles(full_co, full_faces), "faces": len(full_faces), "issues": dict(record["totals"])}
 
         box["stage"] = "Measuring the result as it is"
         first, kept = whole_of(half, half_faces, half_kinds)
@@ -166,15 +184,18 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece) -> None:
         if box["stop"]:
             return
         box["stage"] = "Redrawing patches around poles"
-        stay = O.pinned(half, half_faces, plane=plane)
+        stay = O.pinned(half, half_faces, plane=plane) | _held_by_strokes(half, strokes)
         clean, clean_faces, clean_kinds, stay = O.clean_poles(half, half_faces, half_kinds, stay, judge, redraw=REDRAW)
         if box["stop"]:
             return
         box["stage"] = "Settling the quads"
-        steps = [round((s - STRENGTHS[0]) / (1.0 - STRENGTHS[0]) * O.SETTLE_STEPS) for s in STRENGTHS]  # the weakest only cleans the poles
         stay |= O.pinned(clean, clean_faces, plane=plane)
-        shots = O.settle(clean, clean_faces, lambda p: _nearest(tree, p), stay, plane, snapshots=steps[:-1], method=SETTLE_PULL)
-        for strength, (_step, points) in zip(STRENGTHS, shots):
+        project = lambda p: _nearest(tree, p)  # noqa: E731
+        shots = O.settle(clean, clean_faces, project, stay, plane, snapshots=(0,), method=SETTLE_PULL)  # the weakest only cleans the poles
+        box["stage"] = "Straightening the loops"
+        settled = shots[-1][1]
+        straight = O.settle(settled, clean_faces, project, stay, plane, snapshots=(O.STRAIGHT_STEPS // 2,), method="straighten", steps=O.STRAIGHT_STEPS)
+        for strength, (_step, points) in zip(STRENGTHS, shots + straight):
             if box["stop"]:
                 return
             box["stage"] = f"Measuring strength {strength:g}"
@@ -294,7 +315,7 @@ def draw(layout, gs) -> None:
     if active():
         text = meter_text(gs)
         if text:
-            overlay.wrap_label(box, text, icon="MESH_GRID", width=36, limit=3)
+            overlay.wrap_label(box, text, icon="MESH_GRID", width=36, limit=4)
     note = status() if active() else ""
     if note:
         overlay.wrap_label(box, note, icon="TIME", width=36, limit=2)

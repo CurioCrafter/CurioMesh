@@ -14,6 +14,10 @@ Two steps, both on the result as it is (any style, any size):
   damping (position-based dynamics, Mueller et al. 2007). Hard edges, borders and corners of triangles stay pinned;
   vertices on a mirror plane slide in the plane only.
 
+`method="straighten"` is the last step of the slider: each corner with four quads round it moves onto the fair curve
+through the loops that cross there (wiggles out, steady bends kept) and to the middle of its neighbours along them
+(even widths, evenly stacked loops), while poles keep the plain pull. Same guards.
+
 `method="smooth"` swaps the rectangle and loop pulls for the plain one (each vertex toward its neighbours' middle) in the
 same damped, guarded loop. On five test models the two changed the view the same within 0.2 points, and the plain pull
 left a few fewer slivers, so the Organize slider uses it; the rectangle pull is kept for the benchmark. Plain NumPy.
@@ -38,6 +42,7 @@ BEND_DEG = 30.0  # a vertex whose quads turn this far from its normal holds deta
 FOLD_COS = float(np.cos(np.radians(40.0)))  # a quad folding more than this along a diagonal is bent
 MOST_MOVE = 0.25  # of a vertex's mean edge length, per step
 MOST_DRIFT = 0.5  # of a vertex's mean edge length, in all: settling evens quads out where they are, it doesn't move them away
+STRAIGHT_STEPS = 40  # steps of the loop straightening that follows the settle (its own drift budget, as above)
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -182,6 +187,39 @@ def _neighbour_pull(co: np.ndarray, faces) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate((co[b] - co[a], co[a] - co[b])), np.concatenate((a, b))
 
 
+def _fair_rows(faces, count: int, stay: np.ndarray) -> np.ndarray:
+    """(vertex, one neighbour, opposite neighbour, the next one beyond each or -1) for every loop through a free vertex
+    with four quads round it: the five points of a loop that `_fair_pull` reads."""
+    lines = _line_pairs(faces, count, stay)
+    if not len(lines):
+        return np.zeros((0, 5), dtype=np.int64)
+    from .loopscore import _continuations
+    from .patterns import Topology
+
+    go = _continuations(Topology(np.zeros((count, 3)), faces))
+    v, u, w = lines[:, 0].tolist(), lines[:, 1].tolist(), lines[:, 2].tolist()
+    uu = [go.get(a * count + b, -1) for a, b in zip(v, u)]
+    ww = [go.get(a * count + b, -1) for a, b in zip(v, w)]
+    return np.column_stack((lines, np.asarray(uu, dtype=np.int64), np.asarray(ww, dtype=np.int64)))
+
+
+def _fair_pull(co: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """Per row of `_fair_rows`: across the loop, the move onto the fair curve through its five points (the point where
+    the fourth difference along the loop is zero: wiggles go, a steady bend such as a forehead's arch stays); along the
+    loop, the move to the middle of the two neighbours (even quad widths along it, so even gaps between the loops
+    stacked across it). Loop fairing in the spirit of discrete fairing (Kobbelt 1997), on our own loop rows."""
+    v, u, w = co[rows[:, 0]], co[rows[:, 1]], co[rows[:, 2]]
+    middle = 0.5 * (u + w)
+    both = (rows[:, 3] >= 0) & (rows[:, 4] >= 0)
+    fair = middle.copy()
+    uu, ww = co[rows[both, 3]], co[rows[both, 4]]
+    fair[both] = (4.0 * (u[both] + w[both]) - (uu + ww)) / 6.0
+    d = _unit(w - u)
+    across = fair - v
+    across -= (across * d).sum(axis=1, keepdims=True) * d
+    return across + ((middle - v) * d).sum(axis=1, keepdims=True) * d
+
+
 def settle(co, faces, project=None, stay=None, plane=None, strength: float = 1.0, snapshots=(), method: str = "settle", steps: int | None = None):
     """Pull the quads into shape on the surface. `project(points)` gives the nearest points of your mesh. `stay`: vertices
     that don't move (default `pinned`). `plane`: (axis, offset) of a mirror, whose vertices slide in it. Returns a list of
@@ -193,6 +231,7 @@ def settle(co, faces, project=None, stay=None, plane=None, strength: float = 1.0
     steps = int(round(SETTLE_STEPS * strength)) if steps is None else steps
     quads, _ids = _quads(faces)
     lines = _line_pairs(faces, len(co), stay)
+    rows = _fair_rows(faces, len(co), stay) if method == "straighten" else None
     on_plane = None if plane is None else on_mirror(co, *plane) & free
     start = _normals(co, quads)
     was_bent = _bent(co, quads)
@@ -246,6 +285,12 @@ def settle(co, faces, project=None, stay=None, plane=None, strength: float = 1.0
             np.add.at(pull, at, move)
             np.add.at(count, at, 1.0)
             pull /= np.maximum(count, 1.0)[:, None]
+            if rows is not None and len(rows):  # loop corners follow their loops; poles keep the plain pull
+                fair, extra = np.zeros_like(x), np.zeros(len(x))
+                np.add.at(fair, rows[:, 0], _fair_pull(x, rows))
+                np.add.at(extra, rows[:, 0], 1.0)
+                on_rows = extra > 0
+                pull[on_rows] = fair[on_rows] / extra[on_rows, None]
         n = _vertex_normals(x, quads)
         move = weight * (STIFF * pull + MOMENTUM * (x - last))
         move -= (move * n).sum(axis=1, keepdims=True) * n  # along the surface: the pull back onto it does the rest
@@ -312,9 +357,14 @@ def half_of(co, faces, axis: int, offset: float, keep: int):
 
 def meter(before: dict, after: dict) -> str:
     """The line under the Organize slider: each number from strength 0 to the one shown."""
+    loops = ""
+    if before.get("loops") and after.get("loops"):
+        from .loopscore import meter as loop_meter
+
+        loops = ". " + loop_meter(before["loops"], after["loops"])
     view = "" if before.get("view") is None or after.get("view") is None else f", view changed {before['view']:.1f}% -> {after['view']:.1f}%"
     faces = "" if before.get("faces") is None or after.get("faces") is None else f", faces {before['faces']:,} -> {after['faces']:,}"
-    return f"Tidiness {before['tidy']:.0f} -> {after['tidy']:.0f}{view}, poles {before['poles']:,} -> {after['poles']:,}{faces}"
+    return f"Tidiness {before['tidy']:.0f} -> {after['tidy']:.0f}{view}, poles {before['poles']:,} -> {after['poles']:,}{faces}{loops}"
 
 
 def pick(levels: dict, wanted: float, cap: float | None = None):
