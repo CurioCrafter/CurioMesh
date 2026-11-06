@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 from . import guided as G
-from . import flowedit, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
+from . import flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
 from . import verdict as V
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
@@ -455,6 +455,9 @@ def draw_options(layout, context, gs) -> None:
     if obj is not None and obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR":
         col.prop(gs, "keep_uvs", toggle=True, icon="UV")
     col.separator()
+    col.label(text="Hard Surface", icon="MOD_BEVEL")
+    hard_surface.draw(col, gs)
+    col.separator()
     col.label(text="Output", icon="MESH_DATA")
     col.row(align=True).prop(gs, "auto_output", expand=True)
     col.separator()
@@ -499,6 +502,7 @@ class CURIOMESH_PT_pop_uses(_Popover, bpy.types.Panel):
     def draw(self, context):
         gs = context.scene.curiomesh_guided
         col = self.layout.column(align=True)
+        col.operator("curiomesh.pick_use", text="Hard Surface", depress=not gs.use_auto and gs.auto_profile == "HARD", icon="MOD_BEVEL").use = "HARD"
         col.operator("curiomesh.pick_use", text="Hulls", depress=not gs.use_auto and gs.auto_profile == "HULL", **icons.kw("use_hull", "MESH_ICOSPHERE")).use = "HULL"
         if gs.auto_profile == "CUSTOM":
             col.label(text="Custom: your own settings from the Pro tab", icon="INFO")
