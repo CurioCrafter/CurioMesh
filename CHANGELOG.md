@@ -11,6 +11,11 @@
 - **Reduce To / LOD set** that cannot reach its size on a mesh of many loose pieces now says so in the result box and the
   LOD report.
 
+### Tooltips
+- Plainer tooltips for the Method, PairClosure, Scan Type, Voxel Repair, Keep UV Seams, Bake Margin, Debug Objects,
+  Heatmap, Live, Style and Multires settings, the Quality Preset and Detail Marker buttons, and the region volume list
+  and Paint mode. Wording only; no names or settings changed.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

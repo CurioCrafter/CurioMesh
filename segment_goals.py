@@ -1226,7 +1226,7 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
     bl_description = "Paint a new part on the mesh with the left mouse button. [ and ] change the brush; Enter ends, Esc cancels"
     bl_options = {"INTERNAL", "UNDO"}
 
-    mode: bpy.props.EnumProperty(items=[
+    mode: bpy.props.EnumProperty(description="New paints a new part. Grow and Shrink move the border of the selected part", items=[
         ("NEW", "New", "Paint a new segment"),
         ("GROW", "Grow", "Brush over the border of the selected segment to move it outwards. Ctrl paints the other way"),
         ("SHRINK", "Shrink", "Brush over the selected segment to give its faces to the neighbours beside them. Ctrl paints the other way"),

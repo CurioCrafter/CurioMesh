@@ -344,7 +344,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_profile: bpy.props.EnumProperty(name="Use", description="What you will do with the result. Each choice sets the Detail, layout and kind of faces for you", items=profiles.PROFILE_ITEMS, default="GAME", update=_profile_update)
-    multires_on: bpy.props.BoolProperty(name="Multires Detail", description="Makes a clean low mesh and, on Apply, Multires levels that bring your shape back. Animate or export level 0; your mesh is only read", default=False, update=_multires_update)
+    multires_on: bpy.props.BoolProperty(name="Multires Detail", description="Make a clean low-poly mesh and, on Apply, add a Multires modifier whose levels bring the detail back. Animate or export level 0; your mesh is only read", default=False, update=_multires_update)
     multires_levels: bpy.props.IntProperty(name="Levels", description="How many Multires levels to add. Each level has four times the faces of the one below it", default=2, min=1, max=5, update=_redraw_update)
     auto_why: bpy.props.StringProperty(name="Why", description="What Auto picked for this mesh and why", default="")
     use_auto: bpy.props.BoolProperty(name="Auto", description="Start looks at your mesh and picks the Use for it, then says what it picked and why. Pick another tile to choose yourself", default=False, update=_redraw_update)
@@ -359,7 +359,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_detail: bpy.props.FloatProperty(name="Detail", description="How close to your mesh the result must look, as the share of the view that may change. Lower keeps more faces; higher gives a rougher, lighter mesh", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
     auto_gpu: bpy.props.BoolProperty(name="Use Graphics Card", description="Draws the camera checks of big parts on the graphics card when one works. Off uses the processor: almost the same result, a little slower", default=True, update=_redraw_update)
     auto_effort: bpy.props.EnumProperty(name="Effort", description="How hard to work this computer. Light keeps Blender smooth while it works; Full finishes soonest; Auto picks from your cores and free memory", items=hardware.EFFORT_ITEMS, default="AUTO", update=_redraw_update)
-    auto_style: bpy.props.EnumProperty(name="Style", description="How the quads are laid out. Fewest Faces follows the shape; Even Rows makes tidy rows of square quads but changes the look a little more", items=STYLE_ITEMS, default="DETAIL", update=_redraw_update)
+    auto_style: bpy.props.EnumProperty(name="Style", description="What to favour. Fewest Faces keeps the look with the least faces, Balanced has fewer messy points but more faces, and Even Rows makes square quads but changes the look more", items=STYLE_ITEMS, default="DETAIL", update=_redraw_update)
     auto_method: bpy.props.EnumProperty(name="Method", description="How each part's faces are made. Auto suits nearly every mesh; you can give each part its own method after the search", items=profiles.METHOD_ITEMS, default="AUTO", update=_custom_update)
     auto_output: bpy.props.EnumProperty(name="Output", description="Which kind of faces the result has: all triangles, all quads, or quads with the leftover triangles kept", items=profiles.OUTPUT_ITEMS, default="QUADS", update=_custom_update)
     auto_aim: bpy.props.EnumProperty(name="Aim", description="Keep Detail aims for a look; Reduce To aims for a face count and then tells you how much the look changed", items=AIM_ITEMS, default="KEEP", update=_redraw_update)
@@ -3685,7 +3685,7 @@ class CURIOMESH_OT_guided_clear_density(bpy.types.Operator):
 class CURIOMESH_OT_guided_add_marker(bpy.types.Operator):
     bl_idname = "curiomesh.guided_add_marker"
     bl_label = "Add Detail Marker"
-    bl_description = "A marker ball at the 3D cursor. Scale it to change its reach"
+    bl_description = "Add a ball at the 3D cursor that asks for smaller quads inside it (or bigger ones, for Less Detail). Scale it to change how far it reaches"
     bl_options = {"REGISTER", "UNDO"}
 
     less: bpy.props.BoolProperty(name="Less Detail", description="On: bigger quads there (Less Detail). Off: smaller quads there (More Detail)", default=False, options={"SKIP_SAVE"})
