@@ -921,6 +921,126 @@ fn stop_running() {
     near::stop_running();
 }
 
+// main-only: uv begin seam
+mod uvseam;
+
+/// Compile probe of the `uvseam` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvseam_probe() -> usize {
+    uvseam::probe()
+}
+
+fn register_uvseam(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvseam_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end seam
+
+// main-only: uv begin snap
+mod uvsnap;
+
+/// Compile probe of the `uvsnap` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvsnap_probe() -> usize {
+    uvsnap::probe()
+}
+
+fn register_uvsnap(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvsnap_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end snap
+
+// main-only: uv begin qem
+mod uvqem;
+
+/// Compile probe of the `uvqem` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvqem_probe() -> usize {
+    uvqem::probe()
+}
+
+fn register_uvqem(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvqem_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end qem
+
+// main-only: uv begin score
+mod uvscore;
+
+/// Compile probe of the `uvscore` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvscore_probe() -> usize {
+    uvscore::probe()
+}
+
+fn register_uvscore(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvscore_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end score
+
+// main-only: uv begin sight
+mod uvsight;
+
+/// Compile probe of the `uvsight` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvsight_probe() -> usize {
+    uvsight::probe()
+}
+
+fn register_uvsight(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvsight_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end sight
+
+// main-only: uv begin flat
+mod uvflat;
+
+/// Compile probe of the `uvflat` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvflat_probe() -> usize {
+    uvflat::probe()
+}
+
+fn register_uvflat(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvflat_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end flat
+
+// main-only: uv begin chart
+mod uvchart;
+
+/// Compile probe of the `uvchart` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvchart_probe() -> usize {
+    uvchart::probe()
+}
+
+fn register_uvchart(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvchart_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end chart
+
+// main-only: uv begin pack
+mod uvpack;
+
+/// Compile probe of the `uvpack` kernel: 1 when every helper it needs is there.
+#[pyfunction]
+fn uvpack_probe() -> usize {
+    uvpack::probe()
+}
+
+fn register_uvpack(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(uvpack_probe, m)?)?;
+    Ok(())
+}
+// main-only: uv end pack
+
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -960,5 +1080,15 @@ fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Reducer>()?;
     m.add_class::<QuadReducer>()?;
     m.add_class::<QuadSaved>()?;
+    // main-only: uv begin init
+    register_uvseam(m)?;
+    register_uvsnap(m)?;
+    register_uvqem(m)?;
+    register_uvscore(m)?;
+    register_uvsight(m)?;
+    register_uvflat(m)?;
+    register_uvchart(m)?;
+    register_uvpack(m)?;
+    // main-only: uv end init
     Ok(())
 }

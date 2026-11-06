@@ -857,3 +857,111 @@ def cross_field_gl(
         int(steps),
     )
     return out
+
+
+# main-only: uv begin common
+class UvJob:
+    """A long UV kernel running on a worker thread: `done()`, `result()`, `stop()`. Creating one never blocks the caller.
+
+    `call(stop)` is the one-call kernel (it gets the StopFlag, or None). A stopped kernel ends with InterruptedError;
+    `result()` then raises it too. Any other error is raised from `result()` as well.
+    """
+
+    def __init__(self, call, stop=None, name: str = "CurioMeshUV"):
+        self._stop, self._out, self._error = stop, None, None
+        self._thread = threading.Thread(target=self._run, args=(call,), daemon=True, name=name)
+        self._thread.start()
+
+    def _run(self, call) -> None:
+        try:
+            self._out = call(self._stop)
+        except BaseException as exc:  # handed to result(); a worker must never die silently
+            self._error = exc
+
+    def done(self) -> bool:
+        return not self._thread.is_alive()
+
+    def stop(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+
+    def result(self):
+        if not self.done():
+            raise RuntimeError("the kernel is still running")
+        if self._error is not None:
+            raise self._error
+        return self._out
+
+
+def uv_job(function: str, *args, name: str = "CurioMeshUV") -> "UvJob | None":
+    """Start native `function(*args, stop)` on a worker thread, or None for "use the NumPy path"."""
+
+    module = native()
+    if module is None or not hasattr(module, function) or not hasattr(module, "StopFlag"):
+        return None
+    fn, stop = getattr(module, function), module.StopFlag()
+    return UvJob(lambda flag: fn(*args, flag), stop=stop, name=name)
+
+
+def _uv_probe(function: str) -> "int | None":
+    module = native()
+    if module is None or not hasattr(module, function):
+        return None
+    return int(getattr(module, function)())
+# main-only: uv end common
+
+# main-only: uv begin seam
+def uvseam_probe() -> "int | None":
+    """1 when the compiled `uvseam` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvseam_probe")
+# main-only: uv end seam
+
+# main-only: uv begin snap
+def uvsnap_probe() -> "int | None":
+    """1 when the compiled `uvsnap` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvsnap_probe")
+# main-only: uv end snap
+
+# main-only: uv begin qem
+def uvqem_probe() -> "int | None":
+    """1 when the compiled `uvqem` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvqem_probe")
+# main-only: uv end qem
+
+# main-only: uv begin score
+def uvscore_probe() -> "int | None":
+    """1 when the compiled `uvscore` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvscore_probe")
+# main-only: uv end score
+
+# main-only: uv begin sight
+def uvsight_probe() -> "int | None":
+    """1 when the compiled `uvsight` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvsight_probe")
+# main-only: uv end sight
+
+# main-only: uv begin flat
+def uvflat_probe() -> "int | None":
+    """1 when the compiled `uvflat` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvflat_probe")
+# main-only: uv end flat
+
+# main-only: uv begin chart
+def uvchart_probe() -> "int | None":
+    """1 when the compiled `uvchart` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvchart_probe")
+# main-only: uv end chart
+
+# main-only: uv begin pack
+def uvpack_probe() -> "int | None":
+    """1 when the compiled `uvpack` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvpack_probe")
+# main-only: uv end pack
