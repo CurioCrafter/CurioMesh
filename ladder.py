@@ -156,7 +156,7 @@ def work(seconds: float) -> None:
             _mesh_for((rung, rung, ()), compose(rung, rung, ()))  # made now, while nobody drags, so showing it is a swap
             overlay.tag_redraw()
             shown = lad["shown"]
-            if len(_g().state["res"]["faces"]) > (job.report.get("before") or 10**9) and shown[0] != rung:  # on screen is heavier than your mesh: take the lighter size
+            if len((_g().state["res"] or {"faces": ()})["faces"]) > (job.report.get("before") or 10**9) and shown[0] != rung:  # on screen is heavier than your mesh: take the lighter size
                 if preview(bpy.context):
                     settle(bpy.context)
         else:
