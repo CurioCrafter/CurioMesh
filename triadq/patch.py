@@ -37,7 +37,7 @@ import time
 import numpy as np
 
 from .engine import RemeshOptions, remesh_mesh
-from .topology import _turbo, parity_path_quad_closure, quad_only_closure, quads_locally_valid
+from .topology import parity_path_quad_closure, quad_only_closure, quads_locally_valid
 from .types import FlatFaces, MeshData
 
 
@@ -199,9 +199,6 @@ def winding_number(points: np.ndarray, triangles: np.ndarray, chunk: int = 2_000
     `abs(w) > 0.5` is a robust inside test even for holey or flipped cages.
     """
 
-    fast = _turbo.winding_number(points, triangles) if _turbo is not None else None
-    if fast is not None:
-        return fast
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     triangles = np.asarray(triangles, dtype=np.float64).reshape(-1, 3, 3)
     total = np.zeros(len(points))
@@ -226,9 +223,6 @@ def winding_number(points: np.ndarray, triangles: np.ndarray, chunk: int = 2_000
 def inside_volume(points: np.ndarray, triangles: np.ndarray) -> np.ndarray:
     """Winding-number inside test with a bounding-box early out."""
 
-    fast = _turbo.inside_volume(points, triangles) if _turbo is not None else None
-    if fast is not None:
-        return fast
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     triangles = np.asarray(triangles, dtype=np.float64).reshape(-1, 3, 3)
     inside = np.zeros(len(points), dtype=bool)

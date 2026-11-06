@@ -38,8 +38,8 @@ from .patch import (
     remesh_region,
     tutte_embedding,
 )
-from .topology import _turbo, parity_path_quad_closure
-from .types import Cancelled, MeshData
+from .topology import parity_path_quad_closure
+from .types import MeshData
 
 try:  # the scorer and the grids are features of their own
     from . import patterns
@@ -204,15 +204,6 @@ def _merge_all(inputs: dict, creases: float = 1.0, cancelled=None):
 
     count, pa, pb, leaf_area = inputs["count"], inputs["pa"], inputs["pb"], inputs["leaf_area"]
     rows = inputs["rows"] if creases == 1.0 else inputs["rows"] * np.array([1.0, creases, creases])
-    module = _turbo.native() if _turbo is not None else None
-    if module is not None and hasattr(module, "segment_merges"):  # the same merges in the same order
-        if cancelled is not None and cancelled():
-            raise ValueError("cancelled")
-        try:
-            merges, costs = _turbo._stoppable(module.segment_merges, count, pa, pb, np.ascontiguousarray(rows).reshape(-1), leaf_area, inputs["curve"], inputs["thick"], inputs["whole"], [CONVEX, USUAL, CURVE_STEP, THICK_STEP, NECK, BASE])
-        except Cancelled:
-            raise ValueError("cancelled") from None
-        return merges.reshape(-1, 2), costs
     near: list[dict] = [{} for _ in range(count)]
     for x, y, row in zip(pa.tolist(), pb.tolist(), rows.tolist()):
         near[x][y] = row

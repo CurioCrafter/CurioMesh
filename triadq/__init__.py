@@ -3,7 +3,6 @@
 
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
 from .flatquad import FlatQuadOptions, FlatQuadReport, flat_quad_remesh
-from .io import read_obj, write_obj
 from .topology import (
     TopologySummary,
     component_topology_preserved,
@@ -28,8 +27,6 @@ __all__ = [
     "quad_only_closure",
     "quad_is_locally_valid",
     "split_non_manifold_vertex_fans",
-    "read_obj",
     "remesh_mesh",
     "topology_summary",
-    "write_obj",
 ]

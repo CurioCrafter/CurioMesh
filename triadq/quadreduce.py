@@ -19,7 +19,6 @@ import math
 
 import numpy as np
 
-from .topology import _turbo
 from .types import MeshData
 
 MIN_QUALITY = 0.15  # no new quad worse than this, on `patch.quad_quality`'s scale (> 0 means convex and warped < 60 degrees)
@@ -198,7 +197,7 @@ class QuadReducer:
             elif count < 3:
                 return False
             elif count == 3:  # it would be left in two quads: they become one
-                first, second = sorted(f for f in users[side] if f != q)  # sorted, as a set's order isn't one the native core can match
+                first, second = sorted(f for f in users[side] if f != q)  # sorted: a set's order is not a fixed one
                 if self.locked[side] or first not in moved or second not in moved or len(faces[first]) != 4 or len(faces[second]) != 4:
                     return False
                 if first in merged_with or second in merged_with:  # both sides share a quad, which can't merge twice in one removal
@@ -359,16 +358,13 @@ class QuadReducer:
 
 
 def quad_reducer(mesh: MeshData):
-    """A reducer for this mesh: the native one, or else `QuadReducer`."""
+    """A reducer for this mesh."""
 
-    used = np.asarray(mesh.vertices, dtype=np.float64)
-    limit = DISSOLVE_SHARE * float(np.linalg.norm(np.ptp(used, axis=0))) if len(used) else 0.0
-    fast = _turbo.quad_reducer(mesh, limit, MOST_TURNED) if _turbo is not None else None
-    return fast if fast is not None else QuadReducer(mesh)
+    return QuadReducer(mesh)
 
 
 def _compensated_sum(values) -> float:
-    """Python 3.12's float `sum` (Neumaier), spelled out so 3.11 gives the same last digit and the native core can match it."""
+    """Python 3.12's float `sum` (Neumaier), spelled out so 3.11 gives the same last digit."""
 
     high = low = 0.0
     for x in values:
@@ -441,9 +437,6 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
     outside it. What can't be joined this way is left for closure.
     """
 
-    fast = _turbo.join_loose_triangles(mesh, farthest) if _turbo is not None else None
-    if fast is not None:
-        return fast
     points = [tuple(p) for p in np.asarray(mesh.vertices, dtype=np.float64).tolist()]
     faces: list[tuple[int, ...] | None] = list(mesh.faces)
     materials = list(mesh.face_materials)

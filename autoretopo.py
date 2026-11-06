@@ -32,7 +32,7 @@ from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
 from .triadq import tasks
-from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patterns, redo, repair, special, views
+from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patterns, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
@@ -43,7 +43,7 @@ from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.fieldmesh import MOST_TARGET, field_quads, is_clean
 from .triadq.smoothgrid import GridOptions, GridReport, crease_areas, grid_areas, smooth_areas
-from . import guides, hardware, loops, parallel, symmetry, turbo
+from . import guides, hardware, loops, parallel, symmetry
 from .triadq.types import Cancelled, FlatFaces, MeshData
 from .triadq.uvs import simplify_borders
 
@@ -99,7 +99,7 @@ REDUCE_FINEST = 0.015
 MOST_LOOKS = 40
 CHORDS_FINEST, CHORDS_LOOKS = 0.004, 60  # with Redraw Messy Quads, which can land closer
 NEARLY = 0.7  # when a part passes its limit, parts this close to theirs stop too
-CHORDS_UP_TO = 120_000  # quads: the redrawing Python reducer up to here, the native one past it
+CHORDS_UP_TO = 120_000  # quads: the redrawing reducer up to here, the plain quad reducer past it
 AIM = 0.9  # share of the amount asked for that a start should reach
 ROOM = 0.5  # a start this close to the amount asked for is good enough: taking quads away uses up the rest
 CHORDS_START = (0.4, 0.5, 0.25)  # with Redraw Messy Quads: start share, AIM and ROOM. Starting well inside what was asked for leaves the redraw room
@@ -139,16 +139,10 @@ REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots sel
 UNTANGLE_SECONDS = 60.0  # safety net only: turning folded faces back ends after its rounds (a big scan takes a few seconds)
 REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is selected on Apply (the crane spent 215 s for 71 spots)
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
-REDO_SECONDS = 60.0  # Redo Rough Spots: time per run; the spots not reached stay as they are
-REDO_ROUNDS = 2  # the second round goes back to spots still rough, in a region one ring wider
-REDO_SPOTS = 200  # spots looked at per round, worst first
-REDO_RINGS = 2  # faces round a spot taken into its region, in rings of neighbours
-REDO_MOST_FACES = 600  # a region never gets bigger than this
-REDO_SHARES = (0.5, 1.0, 0.25)  # per region: how far its inner corners are put back towards the source, each tried
 if os.environ.get("CURIOMESH_NO_TIME_LIMITS", "").strip().lower() in {"1", "true", "on", "yes"}:
     # The limits above end work by the clock, so a slower or busier computer stops at another point and the result differs a little.
     # Set this to run to the end instead: the same model and settings then give the same result every time.
-    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = REDO_SECONDS = float("inf")
+    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = float("inf")
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 STEP = 0.8  # each size made in steps is this share of the size before it
@@ -158,12 +152,9 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
     """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth, face)] when exhausted.
 
     `tree` is the BVH of this very mesh when the caller already has one (building it is a fifth of a picture set).
-    The native core makes the same pictures in one quick call, with no BVH; these rays are the fallback.
+    With `baked_from`, each normal is the source's nearest, what a bake paints there.
     """
 
-    fast = None if baked_from is not None else turbo.pictures(points, polys, center, half, pixels)  # `baked_from`: each normal is the source's nearest, what a bake paints there
-    if fast is not None:
-        return fast
     if tree is None:
         tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
     grid = (((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half).tolist()
@@ -258,7 +249,7 @@ def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
         out, solver = pair_and_close(mesh, seed_count=4 if method == "PAIRING" else 2, force_quads=output == "QUADS", **pairing)
         if solver.forced_pieces and notes is not None:
             notes.append(f"{solver.forced_pieces} part(s) only closed by the last-resort split: up to 3-4x the faces and poor quads there, so check them")
-    points, out_faces, mats = np.asarray(out.vertices, dtype=np.float64), turbo.shifted_faces(out.faces, 0), list(out.face_materials)
+    points, out_faces, mats = np.asarray(out.vertices, dtype=np.float64), [tuple(p) for p in out.faces], list(out.face_materials)
     if output == "TRIS" or method == "TRIS":
         points, out_faces, mats = triangulate(points, out_faces, mats)
     return points, out_faces, mats
@@ -410,8 +401,8 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
 KEEP_HERE = 0.5  # with helpers, a part of this share of the job's triangles or more is measured in the job itself
 OFF_MAIN_FROM = 100_000  # with this many faces in a job, its slow Python steps run on a worker thread, so Blender stays usable
 PAIR_CHUNK_FACES = 200_000  # Light only: above 0, pairing works per region of this many faces: less memory on a huge mesh, and a few more triangles at the seams
-NATIVE_FROM = 60_000  # a piece of this many triangles goes to the native reducer: Decimate would hold up Blender for seconds per size
-SPLIT_FACES = 2 * NATIVE_FROM  # with helpers, a piece of more faces is cut into regions of half to all of this: still big enough for the native reducer
+HUGE_FROM = 60_000  # a piece of this many triangles keeps no sizes of its own and is measured in the job itself
+SPLIT_FACES = 2 * HUGE_FROM  # with helpers, a piece of more faces is cut into regions of half to all of this
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
 
@@ -433,10 +424,6 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
     mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
     mesh.update()
     painted = drop is not None and float(drop.max(initial=0.0)) > 0.0
-    out = None if painted else _native_decimate(mesh, points, kinds, ratio, free)
-    if out is not None:
-        bpy.data.meshes.remove(mesh)
-        return out
     obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
     context.scene.collection.objects.link(obj)
     try:
@@ -464,29 +451,6 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
     return co.reshape(-1, 3), faces, materials
 
 
-def _native_decimate(mesh, points, kinds, ratio, free):
-    """Decimate's job done by the native reducer, which refuses the collapses that fold a face over (Decimate lets a face
-    turn almost 90 degrees per collapse, and many such turns put it inside out). None without the native core."""
-
-    mesh.calc_loop_triangles()
-    count = len(mesh.loop_triangles)
-    wanted = max(int(ratio * count), 1)
-    if wanted >= count or not turbo.available():
-        return None
-    tris, owner = np.empty(count * 3, dtype=np.int32), np.empty(count, dtype=np.int32)
-    mesh.loop_triangles.foreach_get("vertices", tris)
-    mesh.loop_triangles.foreach_get("polygon_index", owner)
-    keep = None
-    if free is not None:
-        keep = np.ones(len(points), dtype=bool)
-        keep[free] = False
-    run = turbo.reducer(points, FlatFaces(np.arange(0, 3 * count + 1, 3), tris.astype(np.int64)), keep, wanted)
-    if run is None or not hasattr(run, "level_owned"):  # an older binary
-        return None
-    co, flat, source = run.level_owned(wanted)
-    return co.reshape(-1, 3), [tuple(t) for t in flat.reshape(-1, 3).tolist()], [kinds[i] for i in owner[source].tolist()]
-
-
 def _triangle_count(polys) -> int:
     return len(polys.flat) - 2 * len(polys) if isinstance(polys, FlatFaces) else sum(len(p) - 2 for p in polys)
 
@@ -497,8 +461,8 @@ def _same_points(points: np.ndarray, these: np.ndarray) -> np.ndarray:
     return np.fromiter((p in seen for p in map(tuple, points.tolist())), dtype=bool, count=len(points))
 
 
-def _native_reducible(polys, kinds, drop) -> bool:
-    return len(polys) >= NATIVE_FROM and len(set(kinds)) == 1 and (drop is None or not float(drop.max(initial=0.0)) > 0.0) and _triangle_count(polys) == len(polys)
+def _huge_piece(polys, kinds, drop) -> bool:
+    return len(polys) >= HUGE_FROM and len(set(kinds)) == 1 and (drop is None or not float(drop.max(initial=0.0)) > 0.0) and _triangle_count(polys) == len(polys)
 
 
 def _face_areas(points: np.ndarray, polys) -> np.ndarray:
@@ -524,28 +488,22 @@ def _folded(points: np.ndarray, faces) -> int:
 
 
 def _point_tree(points: np.ndarray):
-    """A tree of points: the native one, else Blender's."""
+    """Blender's tree of points."""
 
-    tree = turbo.point_tree(points)
-    if tree is None:
-        tree = KDTree(len(points))
-        for index, point in enumerate(points.tolist()):
-            tree.insert(point, index)
-        tree.balance()
+    tree = KDTree(len(points))
+    for index, point in enumerate(points.tolist()):
+        tree.insert(point, index)
+    tree.balance()
     return tree
 
 
 def _nearest_points(tree, queries: np.ndarray) -> np.ndarray:
-    if isinstance(tree, KDTree):
-        return np.fromiter((tree.find(p)[1] for p in queries.tolist()), dtype=np.int64, count=len(queries))
-    return tree.nearest(queries)[0]
+    return np.fromiter((tree.find(p)[1] for p in queries.tolist()), dtype=np.int64, count=len(queries))
 
 
 def _nearest_of_kind(tree, queries: np.ndarray, query_kind: np.ndarray, point_kind: np.ndarray, count: int) -> np.ndarray:
     """For each query, the closest of its `count` nearest points of the same kind, or -1."""
 
-    if not isinstance(tree, KDTree):
-        return tree.first_of_kind(queries, query_kind, point_kind, count)
     owner = np.full(len(queries), -1, dtype=np.int64)
     for index, (point, kind) in enumerate(zip(queries.tolist(), query_kind.tolist())):
         for _found, vertex, _away in tree.find_n(point, count):
@@ -556,24 +514,20 @@ def _nearest_of_kind(tree, queries: np.ndarray, query_kind: np.ndarray, point_ki
 
 
 def _face_tree(points: np.ndarray, faces):
-    """A tree of faces: the native one, else Blender's."""
+    """Blender's tree of faces."""
 
-    return turbo.face_tree(points, faces) or BVHTree.FromPolygons(points.tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+    return BVHTree.FromPolygons(points.tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
 
 
 def _nearest_faces(tree, queries: np.ndarray) -> np.ndarray:
-    if isinstance(tree, BVHTree):
-        return np.fromiter((tree.find_nearest(p)[2] for p in queries.tolist()), dtype=np.int64, count=len(queries))
-    return tree.nearest(queries)[1]
+    return np.fromiter((tree.find_nearest(p)[2] for p in queries.tolist()), dtype=np.int64, count=len(queries))
 
 
 def _face_distances(tree, queries: np.ndarray) -> np.ndarray:
-    if isinstance(tree, BVHTree):
-        return np.fromiter((tree.find_nearest(p)[3] for p in queries.tolist()), dtype=np.float64, count=len(queries))
-    return tree.nearest(queries)[2]
+    return np.fromiter((tree.find_nearest(p)[3] for p in queries.tolist()), dtype=np.float64, count=len(queries))
 
 
-def _native_tree(context, co: np.ndarray, flat: np.ndarray, sizes: np.ndarray) -> BVHTree | None:
+def _blender_tree(context, co: np.ndarray, flat: np.ndarray, sizes: np.ndarray) -> BVHTree | None:
     """The BVH of a big mesh built inside Blender from arrays, with no Python lists of faces. None if this Blender won't take it."""
     mesh = obj = None
     try:
@@ -778,7 +732,6 @@ class AutoJob:
         self.started = time.perf_counter()
         self.shown_at = 0.0
         self._stopped = False
-        self._runs: dict = {}  # huge piece -> its native reduction, which holds every size of it
         self._paired = None
         self._labels = None
         self._shell = None
@@ -810,7 +763,6 @@ class AutoJob:
     def stop(self) -> None:
         self._stopped = True
         self.busy = False
-        turbo.stop_native()
         self._kill_worker()
         self._close_pool()
         self._search.close()  # runs what cleans up after it, such as the Clean Rows folder
@@ -869,28 +821,10 @@ class AutoJob:
         return not self.busy
 
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
-        """Generator: this piece reduced to `ratio`. A huge piece goes to the native reducer on a worker thread, anything else to `_decimate`.
-
-        The first size of a huge piece takes it all the way down, and every other size is then a quick replay. `one_off` doesn't keep that.
-        """
+        """Generator: this piece reduced to `ratio` by `_decimate`, which has to run on the main thread."""
         started = time.perf_counter()
-        out = None
-        if _native_reducible(polys, kinds, drop) and turbo.available():
-            wanted = max(int(ratio * len(polys)), 1)
-            key = None if one_off else (len(polys), hash(points.tobytes()), None if keep is None else hash(keep.tobytes()))
-            run = self._runs.get(key)
-            if run is None:
-                run = yield from self._background(lambda: turbo.reducer(points, polys, keep, wanted if key is None else 12))
-                if key is not None:
-                    self._runs[key] = run
-            if run is not None:
-                def level():
-                    co, flat = run.level(wanted)
-                    return co.reshape(-1, 3), FlatFaces(np.arange(0, len(flat) + 1, 3), flat), [str(int(kinds[0]))] * (len(flat) // 3)
-
-                out = yield from self._background(level)
-        if out is None:
-            out = _decimate(self.context, points, polys, kinds, ratio, drop, keep)
+        out = _decimate(self.context, points, polys, kinds, ratio, drop, keep)
+        yield from ()
         self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
         return out
 
@@ -1034,7 +968,7 @@ class AutoJob:
                 self._finish_piece(key, saved[1] + [whole], [Level(f, w) for f, w in saved[2]] + [Level(len(polys), 0.0)], ready, saved[3], file, False)
                 return
         known = self.cache.get(key)
-        if self._pool is not None and (known is None or known[0] > self.detail) and not _native_reducible(polys, kinds, self._piece_drop(ids)):
+        if self._pool is not None and (known is None or known[0] > self.detail) and not _huge_piece(polys, kinds, self._piece_drop(ids)):
             # Measured here (the biggest part): the helpers make its first sizes meanwhile, each a Decimate of seconds.
             self._todo[:0] = [("size", index, share) for share in (BAKED_LEVELS if self.baked else LEVELS) if share * triangles >= 12.0]
         if known is not None and known[0] <= self.detail:  # measured with the same or a stricter amount (more sizes tried): nothing to redo
@@ -1183,7 +1117,7 @@ class AutoJob:
                     spots.append(spots[k])
             # Reduced a little at a time, Decimate forgets the errors it has built up and leaves a closer surface: 15-20% fewer
             # triangles on skin and rock, about even on plates. So these go in beside the other sizes, and the camera chooses.
-            reduced = sizes[len(order) - 1] if triangles < NATIVE_FROM and not painted else None  # the native reducer keeps its own sizes
+            reduced = sizes[len(order) - 1] if triangles < HUGE_FROM and not painted else None  # a huge piece keeps no sizes
             while reduced is not None and len(reduced[1]) * STEP >= 12.0:
                 yield
                 before = len(reduced[1])
@@ -1232,7 +1166,7 @@ class AutoJob:
         count, machine, self._work = yield from self._background(size_up)
         if not count:
             return
-        threads = max(machine["cores"] // (count + 1), 1)  # the native steps of all helpers together use the cores once
+        threads = max(machine["cores"] // (count + 1), 1)  # all helpers' NumPy steps together use the cores once
         command, env = parallel.helper_command("parallel.worker_main", [])
         env.update(RAYON_NUM_THREADS=str(threads), OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")  # the child's only
         setup = yield from self._off(lambda: parallel.setup_of(self))
@@ -1378,7 +1312,7 @@ class AutoJob:
             all_points.append(points)
             if join:
                 seams.append(np.full(len(points), self._cut(ids)))
-            all_faces += turbo.shifted_faces(polys, offset)
+            all_faces += [tuple(v + offset for v in p) for p in polys]
             all_kinds += kinds
             owner += [index] * len(polys)
             offset += len(points)
@@ -1662,7 +1596,6 @@ class AutoJob:
     def _pictures(self, points, polys, center, half, pixels):
         """Generator: `pictures`, on a worker thread in a big job."""
         baked_from = self._bake_tree if self.baked else None
-        drawn = turbo.gpu_drawn()
         if len(self.faces) < OFF_MAIN_FROM and not self.threaded:
             view = yield from pictures(points, polys, center, half, pixels, baked_from=baked_from)
         else:
@@ -1675,11 +1608,6 @@ class AutoJob:
                         return done.value
 
             view = yield from self._background(run)
-        if turbo.gpu_drawn() > drawn and not any("graphics card" in note for note in self.notes):
-            self.notes.append("Camera pictures of the big parts drawn on the graphics card")
-        failed = turbo.gpu_note()  # said once: the graphics card gave up and the processor drew this
-        if failed:
-            self.notes.append(failed)
         return view
 
     def _allocate(self, allowed: float, piece_share: float) -> list[int]:
@@ -1749,8 +1677,8 @@ class AutoJob:
         """
         if loss > self.detail or (not take and not self.chords):
             return result, owner, loss
-        # Up to CHORDS_UP_TO quads, the Python reducer that redraws messy patches as grids and prices collapses by the
-        # pixels they change; past that, the native one, which only counts distance.
+        # Up to CHORDS_UP_TO quads, the reducer that redraws messy patches as grids and prices collapses by the
+        # pixels they change; past that, the plain one, which only counts distance.
         chords = self.chords and len(result.faces) <= CHORDS_UP_TO
         judge = PictureJudge(reference, center, half, self.max_pixels, TURNED_DEG) if chords else None
         reducer = yield from self._background(lambda: ChordReducer(result, judge) if chords else quad_reducer(result))
@@ -1872,15 +1800,13 @@ class AutoJob:
             for index, ids in enumerate(self.pieces):
                 owner[list(chain.from_iterable(self.faces[f] for f in ids.tolist()))] = index
             used = np.flatnonzero(owner >= 0)
-            kd = turbo.point_tree(self.co[used])
-            if kd is None:
-                kd = KDTree(len(used))
-                coordinates = self.co[used].tolist()
-                # In random order: a welded source's vertices come sorted, and Blender's balance took minutes on them, holding up everything.
-                for slot in np.random.default_rng(0).permutation(len(used)).tolist():
-                    kd.insert(coordinates[slot], slot)
-                del coordinates
-                kd.balance()
+            kd = KDTree(len(used))
+            coordinates = self.co[used].tolist()
+            # In random order: a welded source's vertices come sorted, and Blender's balance took minutes on them, holding up everything.
+            for slot in np.random.default_rng(0).permutation(len(used)).tolist():
+                kd.insert(coordinates[slot], slot)
+            del coordinates
+            kd.balance()
             self._kd, self._kd_owner = kd, owner[used]
         fa, fb = patch.face_adjacency(faces)
         labels = patch._labels(len(faces), fa, fb)
@@ -1944,10 +1870,7 @@ class AutoJob:
     def _inspected(self, points, faces, piece):
         """Generator: all the numbers for one mesh, the crossing test in slices and the rest on a worker thread."""
         began = time.perf_counter()
-        if hasattr(turbo.native(), "FaceLookup"):  # one native call on all cores, off the main thread
-            pairs = yield from self._off(lambda: checks.crossing_pairs(points, faces))
-        else:
-            pairs = yield from checks.crossing_slices(points, faces)
+        pairs = yield from checks.crossing_slices(points, faces)
         out = yield from self._background(lambda: checks.inspect(points, faces, piece, pairs=pairs))
         if self._known is not None:
             out.new_cross, new = repair.new_by_piece(self._known, pairs, points, faces, piece)
@@ -2071,7 +1994,6 @@ class AutoJob:
             fixed += len(bad) - len(checks.new_spots(before, after))
             points, faces, mats, piece, view, after, spots = yield from self._fix_locally(points, faces, mats, piece, view, after)
             fixed += spots
-        points, faces, mats, piece, view, after = yield from self._redo_rough(points, faces, mats, piece, view, after)
         left = checks.new_spots(before, after)
         flag = np.zeros(len(faces), bool)
         for p in left:
@@ -2094,121 +2016,6 @@ class AutoJob:
             self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
         check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
         return points, faces, mats, view, check
-
-    def _redo_rough(self, points, faces, mats, piece, view, after):
-        """Generator: the spots still bad after the repairs, each in a small region whose outline stays, laid out again:
-        its inner corners put back towards the source, part or all of the way. A region's redo is kept if it leaves fewer bad
-        faces there; a round is kept if nothing broke and the camera still agrees. Returns (points, faces, mats, piece, view, after)."""
-        same = (points, faces, mats, piece, view, after)
-        if not self.redo_rough or self.output_kind == "TRIS" or self.mirror is not None or self.outside is not None or self.guide_lines or self.strips or not turbo.available():
-            return same
-        began = time.perf_counter()
-        until = began + REDO_SECONDS
-        keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
-        redone, bad_before = 0, None
-        for round_index in range(REDO_ROUNDS):
-            if self._stopped or time.perf_counter() > until:
-                break
-            self.stage = f"Redoing rough spots, round {round_index + 1}"
-            yield
-            found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
-            bad = found.any()
-            if bad_before is None:
-                bad_before = int(bad.sum())
-            if not bad.any():
-                break
-            spots = issues.find_spots(points, faces, {k: getattr(found, k) for k in checks.Defects.KINDS}, piece, REDO_SPOTS)
-            rings = REDO_RINGS + round_index
-            moved, regions = yield from self._background(lambda: self._redo_spots(points, faces, piece, spots, rings, until))
-            if not regions:
-                break
-            now = yield from self._inspected(moved, faces, piece)
-            if any(getattr(now, k) > getattr(after, k) for k in keys):
-                # A moved corner can pass through a face outside its region's window: those regions go back, the rest stay.
-                touched = np.zeros(len(points), bool)
-                for f in np.flatnonzero(now.crossing | now.bent if len(now.bent) == len(faces) else now.crossing).tolist():
-                    touched[list(faces[f])] = True
-                kept = [ids for ids in regions if not touched[ids].any()]
-                back = np.array(points, dtype=np.float64)
-                for ids in kept:
-                    back[ids] = moved[ids]
-                self.redo_counts["undone"] = self.redo_counts.get("undone", 0) + len(regions) - len(kept)
-                moved, regions = back, kept
-                if kept:
-                    now = yield from self._inspected(moved, faces, piece)
-                if not kept or any(getattr(now, k) > getattr(after, k) for k in keys):
-                    self.redo_counts["broke"] = {k: (getattr(after, k), getattr(now, k)) for k in keys if getattr(now, k) != getattr(after, k)}
-                    break
-            seen = yield from self._look(moved, faces, *self._view)
-            if seen[0] > max(1.1 * self.detail, 1.02 * view[0]):
-                self.redo_counts["view"] = (view[0], seen[0])
-                break
-            points, view, after = moved, seen, now
-            faces = list(faces)  # a new list: copies placed as instances no longer match
-            redone += len(regions)
-        self.timings["redo rough spots"] = time.perf_counter() - began
-        if redone:
-            self.redo_numbers = (redone, bad_before)
-            self._defects = None
-        return points, faces, mats, piece, view, after
-
-    def _redo_spots(self, points, faces, piece, spots, rings: int, until: float):
-        """(points, the corners moved in each region redone): each spot's region with its inner corners laid out the way
-        that leaves the fewest bad faces round it, where that is fewer than now. Worker thread."""
-        if self._src_middles is None:
-            sizes = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
-            flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes.sum()))
-            self._src_middles = np.add.reduceat(self.co[flat], np.concatenate(([0], np.cumsum(sizes)[:-1])), axis=0) / sizes[:, None]
-        taken = np.zeros(len(faces), bool)
-        users = redo.corner_users(faces)
-        points = np.array(points, dtype=np.float64)
-        regions = []
-        for spot in spots:
-            if self._stopped or time.perf_counter() > until:
-                break
-            region = redo.carve(faces, spot["faces"], rings, REDO_MOST_FACES, taken, users)
-            if not len(region):
-                continue
-            taken[region] = True
-            window = redo.carve(faces, region, 2, 50 * REDO_MOST_FACES, users=users)
-            used = np.unique(np.fromiter((v for f in window.tolist() for v in faces[f]), dtype=np.int64))
-            local = {int(v): k for k, v in enumerate(used.tolist())}
-            near = [tuple(local[v] for v in faces[f]) for f in window.tolist()]
-            mine = np.flatnonzero(np.isin(window, region))
-            free = redo.free_corners(near, mine, len(used))
-            if not free.any():
-                continue
-            self.redo_counts["regions"] += 1
-            co = points[used]
-            region_faces = [near[i] for i in mine.tolist()]
-            edge = float(np.mean([np.linalg.norm(co[f[k]] - co[f[k - 1]]) for f in region_faces for k in range(len(f))]))
-            on = self._near_source(int(np.bincount(piece[window[mine]]).argmax()), co[free])[0]
-            close = np.linalg.norm(on - co[free], axis=1) < edge
-            best, best_co = self._bad_here(co, near), None
-            for share in REDO_SHARES:
-                tried = co.copy()
-                tried[free] = redo.toward(co[free], on, close, share)
-                bad = self._bad_here(tried, near)
-                if redo.better(best, bad):
-                    best, best_co = bad, tried
-            if best_co is None:
-                self.redo_counts["no better"] += 1
-                continue
-            points[used[free]] = best_co[free]
-            regions.append(used[free])
-            self.redo_counts["kept"] += 1
-        return points, regions
-
-    def _bad_here(self, points, faces) -> tuple[int, int]:
-        """(bad faces, bent quads) of this patch of the result, against the source round it. Sunk is not asked: that needs the whole source."""
-        low, high = points.min(axis=0), points.max(axis=0)
-        margin = 0.5 * float((high - low).max())
-        ids = np.flatnonzero(((self._src_middles >= low - margin) & (self._src_middles <= high + margin)).all(axis=1))
-        if not len(ids):
-            return 0, 0
-        src_co, src_faces, _kinds = self._piece_arrays(ids)
-        found = checks.defects(points, faces, src_co, src_faces)
-        return int(sum(getattr(found, k) for k in checks.Defects.KINDS if k != "sunk").sum()), int(found.bent.sum())
 
     def _kill_worker(self) -> None:
         if self._worker is not None:

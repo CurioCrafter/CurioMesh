@@ -875,7 +875,6 @@ class CURIOMESH_PT_pro_engine(_Pro, bpy.types.Panel):
         col = layout.column(align=True)
         col.enabled = G.progress_info("AUTO") is None
         col.label(text="Cleanup, one by one")
-        col.prop(gs, "auto_redo_rough", toggle=True, icon="MOD_SMOOTH")
         col.prop(gs, "auto_chords", toggle=True, icon="MOD_REMESH")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
         col.label(text="What is kept")
@@ -904,14 +903,13 @@ def draw_computer(layout, gs) -> None:
     if machine is None:
         col.label(text="Not checked yet", icon="INFO")
     else:
-        for line in hardware.describe(machine, G.turbo_words(G.turbo.status())):
+        for line in hardware.describe(machine):
             overlay.wrap_label(col, line, icon="BLANK1", width=WIDTH, limit=2)
         if hardware.weak_pc(machine):
             overlay.wrap_label(col, hardware.weak_pc(machine), icon="ERROR", width=WIDTH, limit=5)
     sub = layout.column()
     sub.enabled = not searching
     sub.prop(gs, "auto_effort")
-    sub.prop(gs, "auto_gpu", toggle=True, icon="SHADING_RENDERED")
     if machine is not None and gs.auto_effort == "AUTO":
         sub.label(text=f"Auto picked {hardware.settings_for(gs.auto_effort, machine).name}", icon="BLANK1")
     sub.prop(gs, "auto_parallel", toggle=True, icon="MOD_ARRAY")

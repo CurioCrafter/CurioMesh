@@ -5,11 +5,8 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 
-import json
 from pathlib import Path
-import subprocess
 import sys
-import tempfile
 
 import numpy as np
 
@@ -17,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from triadq import MeshData, RemeshOptions, read_obj, remesh_mesh, write_obj
+from triadq import MeshData, RemeshOptions, remesh_mesh
 
 
 def triangulated_grid(name: str, size: int = 6, material_split: bool = False, noise: float = 0.0) -> MeshData:
@@ -136,43 +133,12 @@ def assert_report(name: str, mesh: MeshData, *, min_quad_ratio: float) -> MeshDa
     return out
 
 
-def cli_round_trip(mesh: MeshData) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        src = root / "input.obj"
-        dst = root / "output.obj"
-        report_path = root / "report.json"
-        write_obj(mesh, src)
-        cmd = [
-            sys.executable,
-            "-m",
-            "triadq",
-            str(src),
-            str(dst),
-            "--target-faces",
-            "18",
-            "--seed-count",
-            "3",
-            "--report",
-            str(report_path),
-        ]
-        completed = subprocess.run(cmd, cwd=ROOT, check=False, text=True, capture_output=True)
-        if completed.returncode != 0:
-            raise AssertionError(f"CLI failed:\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}")
-        out = read_obj(dst)
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
-        if not out.faces or not payload["success"]:
-            raise AssertionError("CLI output/report invalid")
-        print(f"PASS cli_round_trip: faces={len(out.faces)} quad_ratio={payload['quad_ratio']:.3f}")
-
-
 def main() -> None:
     assert_report("cube", cube_mesh(), min_quad_ratio=0.90)
     assert_report("grid", triangulated_grid("grid", size=8), min_quad_ratio=0.80)
     assert_report("noisy_grid", triangulated_grid("noisy", size=8, noise=0.02), min_quad_ratio=0.60)
     assert_report("material_split_grid", triangulated_grid("split", size=8, material_split=True), min_quad_ratio=0.65)
     assert_report("non_manifold", non_manifold_stress(), min_quad_ratio=0.0)
-    cli_round_trip(triangulated_grid("cli", size=5, material_split=True))
 
 
 if __name__ == "__main__":

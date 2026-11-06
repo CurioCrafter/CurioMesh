@@ -16,7 +16,6 @@ from typing import Any
 
 import numpy as np
 
-from .topology import _turbo
 
 
 def _unit_rows(vectors: np.ndarray, fallback: np.ndarray) -> np.ndarray:
@@ -109,12 +108,7 @@ def estimate_field_gl(
 
     # ponytail: fixed-count relaxation (engine's 24 * smooth_iters budget); add a residual stop if needed.
     steps = 24 * max(0, int(smooth_iters))
-    fast = (
-        _turbo.cross_field_gl(cross, face_a, face_b, transport, pinned, denom, pin_term, steps, mu, dt)
-        if _turbo is not None
-        else None
-    )
-    for step in range(0 if fast is not None else steps):
+    for step in range(steps):
         val = np.concatenate((cross[face_b] * transport, cross[face_a] * np.conj(transport)))
         acc = np.bincount(idx, weights=val.real, minlength=face_count) + 1j * np.bincount(
             idx, weights=val.imag, minlength=face_count
@@ -123,8 +117,6 @@ def estimate_field_gl(
         if step >= steps // 2:  # diffuse first (kills seed noise), then sharpen with the double well
             relaxed = relaxed + dt * (1.0 - np.abs(relaxed) ** 2) * relaxed
         cross = np.where(pinned, cross, relaxed)
-    if fast is not None:
-        cross = fast
 
     magnitude = np.abs(cross)
     cross = np.where(magnitude > 1e-12, cross / np.maximum(magnitude, 1e-12), initial)

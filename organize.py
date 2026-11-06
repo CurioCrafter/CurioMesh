@@ -19,10 +19,9 @@ import bpy
 import numpy as np
 from mathutils.bvhtree import BVHTree
 
-from . import autoretopo, overlay, segments, symmetry, turbo
+from . import autoretopo, overlay, segments, symmetry
 from .triadq import checks, issues, patterns, tasks
 from .triadq import organize as O
-from .triadq.chords import PictureJudge
 
 STRENGTHS = (0.25, 0.5, 0.75, 1.0)  # worked out once; the slider shows the nearest one at or below it. 0.25: poles cleaned, then the quads settle more and more
 GAP = 0.1  # seconds between looks at the worker thread
@@ -91,7 +90,7 @@ def start(context) -> bool:
         return False
     cancel()
     out = base["out"]
-    tree = turbo.face_tree(job.co, job.faces) or BVHTree.FromPolygons(job.co.tolist(), [list(f) for f in job.faces], all_triangles=False, epsilon=0.0)
+    tree = BVHTree.FromPolygons(job.co.tolist(), [list(f) for f in job.faces], all_triangles=False, epsilon=0.0)
     box = {"stop": False, "levels": {}, "stage": "Getting ready", "error": None}
     seg_piece = segments.seg.get("piece")
     org.update(base=base, origin=out, report=dict(base["report"]), box=box, seg_piece=seg_piece)
@@ -133,7 +132,7 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece) -> None:
         centre, reach = (low + high) / 2.0, (float(np.ptp(src_co, axis=0).max()) or 1.0) * 0.55
         pixels = autoretopo.MAX_PIXELS
         reference = _drain(autoretopo.pictures(src_co, src_faces, centre, reach, pixels))
-        judge = PictureJudge(reference, centre, reach, pixels, autoretopo.TURNED_DEG) if turbo.available() else None
+        judge = None  # poles are redrawn by distance
 
         def whole_of(points, these, kinds):
             """The full result of an organized half (or of the whole): its arrays rebuilt from the kinds."""

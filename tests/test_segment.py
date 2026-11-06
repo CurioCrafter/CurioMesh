@@ -9,7 +9,6 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import turbo  # noqa: E402
 from triadq import patch, segment  # noqa: E402
 
 
@@ -42,18 +41,6 @@ def grid(nx, ny):
 
 
 class FindTests(unittest.TestCase):
-    @unittest.skipUnless(hasattr(turbo.native(), "segment_merges"), "native module without the segment merges")
-    def test_native_merges_are_python_s(self):
-        co, faces = dumbbell()
-        fast = segment.build(co, faces, cells=20)
-        turbo.set_enabled(False)
-        try:
-            slow = segment.build(co, faces, cells=20)
-        finally:
-            turbo.set_enabled(True)
-        np.testing.assert_array_equal(fast.merges, slow.merges)
-        np.testing.assert_array_equal(fast.costs, slow.costs)
-
     def test_splits_at_the_neck(self):
         co, faces = dumbbell()
         tree = segment.build(co, faces, cells=20)

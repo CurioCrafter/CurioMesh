@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
-"""Regression gate for bad faces (0.9.1 turned revolved triangle parts inside out). Pure Python; the source-aware checks
-run too when the native core is loaded."""
+"""Regression gate for bad faces (0.9.1 turned revolved triangle parts inside out). Pure Python."""
 
 import json
 import sys
@@ -15,16 +14,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq import checks, parts, special  # noqa: E402
 
-NATIVE = checks._turbo is not None and checks._turbo.available()  # the wrapper loads without the binary
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "turned_tube.json").read_text())
 SOURCE = (np.asarray(FIXTURE["source_co"]), [tuple(f) for f in FIXTURE["source_faces"]])
 FROZEN = (np.asarray(FIXTURE["result_co"]), [tuple(f) for f in FIXTURE["result_faces"]])
 FROZEN_FACES = 42  # the frozen result's size: a rebuild that grows past a third more fails the gate
-PURE = ("bent", "flat", "duplicate", "folded_over")  # the masks that need no source and no native core
+PURE = ("bent", "flat", "duplicate", "folded_over")  # the masks that need no source
 
 
 def turned_in(co, faces, axis_point=(0.0, 0.0, 0.0), axis=(0.0, 0.0, 1.0)) -> int:
-    """Faces of a tube whose normal points toward its axis (caps, with no sideways part, never count). No native core needed."""
+    """Faces of a tube whose normal points toward its axis (caps, with no sideways part, never count)."""
     co = np.asarray(co, dtype=np.float64)
     axis = np.asarray(axis, dtype=np.float64)
     pad = checks.corner_table(faces)
@@ -70,15 +68,6 @@ class GateTests(unittest.TestCase):
         counts = checks.defects(*FROZEN).counts()
         self.assertEqual({k: counts[k] for k in PURE}, dict.fromkeys(PURE, 0))
         self.assertLessEqual(len(FROZEN[1]), FROZEN_FACES * 4 // 3)
-
-    @unittest.skipUnless(NATIVE, "needs the native core")
-    def test_the_defect_checker_finds_no_inward_faces_against_the_source(self):
-        counts = checks.defects(*FROZEN, *SOURCE).counts()
-        self.assertEqual((counts["inward"], counts["sunk"], counts["crossing"]), (0, 0, 0))
-        for co, polys, _kinds in parts.rebuilds(*SOURCE):
-            self.assertEqual(checks.defects(co, parts.orient_like(co, polys, *SOURCE), *SOURCE).counts()["inward"], 0)
-        reversed_ = [f[::-1] for f in FROZEN[1]]  # and the checker still sees a mesh turned inside out
-        self.assertGreater(checks.defects(FROZEN[0], reversed_, *SOURCE).counts()["inward"], len(reversed_) // 2)
 
 
 if __name__ == "__main__":

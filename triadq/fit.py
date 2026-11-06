@@ -12,7 +12,6 @@ import numpy as np
 
 from .checks import FOLD, _edge_faces, _normals
 from .patch import _labels, face_adjacency, quad_quality
-from .topology import _turbo
 
 DOMINANT = 0.2  # a plane direction counts if it is this strong against the strongest: 1 on flat, 2 on a ridge, 3 at a corner
 MOST_MOVE = 0.3  # share of a vertex's shortest side it may move
@@ -79,20 +78,11 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
     return untangled(points, moved, quads)
 
 
-def _crossings(points: np.ndarray, quads: np.ndarray) -> np.ndarray:
-    """Each pair of quads that pass through each other, as one number (lower * count + higher). Empty without the native core."""
-
-    tree = _turbo.face_tree(points, quads) if _turbo is not None and len(quads) else None
-    if tree is None:  # the wrapper gives None when the native core didn't load
-        return np.zeros(0, dtype=np.int64)
-    pairs = np.asarray(tree.crossing_pairs(), dtype=np.int64).reshape(-1, 2)
-    return pairs.min(axis=1) * len(quads) + pairs.max(axis=1)
-
-
 def untangled(before: np.ndarray, after: np.ndarray, quads: np.ndarray, rounds: int = 6) -> np.ndarray:
     """`after` with the corners put back of every quad the move folded over its neighbour, bent across a diagonal, or
     pushed through another quad, where `before` had none of that. Fitting each corner to its own share of the source
-    pulls neighbouring corners different ways on thin walls and in creases, which tangles the faces between them."""
+    pulls neighbouring corners different ways on thin walls and in creases, which tangles the faces between them.
+    Quads pushed through others are not looked for in this build."""
 
     moved = after.copy()
     if not len(quads):
@@ -103,14 +93,11 @@ def untangled(before: np.ndarray, after: np.ndarray, quads: np.ndarray, rounds: 
         normal = _normals(at, quads)[0]
         return (normal[edge[:, 0]] * normal[edge[:, 1]]).sum(axis=1) < FOLD
 
-    was_folded, was_bent, was_crossing = folded(before), quad_quality(before[quads]) <= 0.0, _crossings(before, quads)
+    was_folded, was_bent = folded(before), quad_quality(before[quads]) <= 0.0
     for _ in range(rounds):
         bad = np.zeros(len(quads), dtype=bool)
         bad[edge[folded(moved) & ~was_folded].ravel()] = True
         bad |= (quad_quality(moved[quads]) <= 0.0) & ~was_bent
-        crossing = _crossings(moved, quads)
-        new = crossing[~np.isin(crossing, was_crossing)]
-        bad[new // len(quads)] = bad[new % len(quads)] = True
         ids = np.unique(quads[bad])
         ids = ids[(moved[ids] != before[ids]).any(axis=1)]
         if not len(ids):

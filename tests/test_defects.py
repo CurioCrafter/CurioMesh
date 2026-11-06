@@ -13,7 +13,6 @@ from triadq import checks, repair  # noqa: E402
 
 CUBE = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
 POINTS = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], float)
-NATIVE = checks._turbo is not None and checks._turbo.available()  # the wrapper loads without the binary
 
 
 def found(result, kind):
@@ -40,24 +39,6 @@ class DefectTests(unittest.TestCase):
         level[4:, 0] = -1.0  # opened out flat: fine
         level[4:, 2] = 0.0
         self.assertEqual(found(checks.defects(level, faces), "folded_over"), [])
-
-    @unittest.skipUnless(NATIVE, "needs the native core")
-    def test_turned_and_sunk_faces_against_the_source(self):
-        faces = list(CUBE)
-        faces[1] = faces[1][::-1]  # the top turned inward
-        co = np.vstack([POINTS, [(0.4, 0.4, 0.3), (0.6, 0.4, 0.3), (0.6, 0.6, 0.3), (0.4, 0.6, 0.3)]])
-        faces.append((8, 9, 10, 11))  # a small face deep inside, facing up: away from the floor it is nearest to
-        result = checks.defects(co, faces, POINTS, CUBE)
-        self.assertEqual(found(result, "inward"), [1, 6])
-        self.assertEqual(found(result, "sunk"), [6])
-
-    @unittest.skipUnless(NATIVE, "needs the native core")
-    def test_crossing_and_overlapping_faces(self):
-        co = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0.5, 0.5, -0.5), (0.5, 0.5, 0.5), (0.5, 1.5, 0.5), (0.5, 1.5, -0.5), (0.2, 0.2, 0.001), (1.2, 0.2, 0.001), (1.2, 1.2, 0.001), (0.2, 1.2, 0.001)], float)
-        faces = [(0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11)]  # a floor, a wall through it, a copy of the floor lying on it
-        result = checks.defects(co, faces)
-        self.assertEqual(result.pairs.tolist(), [[0, 1], [1, 2]])
-        self.assertEqual(found(result, "overlap"), [0, 2])
 
 
 class UntangleTests(unittest.TestCase):

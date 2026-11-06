@@ -15,7 +15,6 @@ import math
 
 import numpy as np
 
-from .topology import _turbo
 
 KINDS = ("TUBE", "FLAT", "ROUGH")
 KIND_WORDS = {"TUBE": "Tube", "FLAT": "Flat", "ROUGH": "Rough"}
@@ -125,9 +124,6 @@ def _axes(points: np.ndarray) -> list[np.ndarray]:
 def _cluster(values: np.ndarray, tol: float) -> np.ndarray:
     """Leader clustering of 2D points; returns a cluster id per point."""
 
-    fast = _turbo.leader_clusters(values, tol) if _turbo is not None else None
-    if fast is not None:
-        return fast
     cells: dict[tuple[int, int], list[int]] = {}
     leaders: list[np.ndarray] = []
     ids = np.zeros(len(values), dtype=np.int64)

@@ -10,25 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .types import Face, FlatFaces, MeshData  # noqa: F401 (FlatFaces: for turbo.py)
-
-
-def _load_turbo():
-    """CurioMesh Turbo (native kernels) when this package lives inside the add-on, else None."""
-
-    try:
-        from .. import turbo  # the add-on package: curiomesh.turbo
-    except ImportError:
-        try:
-            import turbo  # repository checkout (tests put the repo root on sys.path)
-        except ImportError:
-            return None
-    return turbo if getattr(turbo, "MODULE_NAME", None) == "_curiomesh_turbo" else None
-
-
-# Every wrapper returns None when the native module is missing or disabled, and
-# the caller then runs its Python path, so results never depend on the binary.
-_turbo = _load_turbo()
+from .types import Face, MeshData
 
 
 MAX_QUAD_WARP_DEGREES = 60.0
@@ -247,9 +229,6 @@ def _quad_points_valid(points: np.ndarray, epsilon: float | np.ndarray) -> np.nd
     if count == 0:
         return np.zeros(0, dtype=bool)
     epsilon = np.broadcast_to(np.asarray(epsilon, dtype=np.float64), (count,))
-    fast = _turbo.quad_points_valid(points, epsilon, math.cos(math.radians(MAX_QUAD_WARP_DEGREES))) if _turbo is not None else None
-    if fast is not None:
-        return fast
     valid = np.all(np.isfinite(points), axis=(1, 2))
     with np.errstate(all="ignore"):
         following_points = np.roll(points, -1, axis=1)
@@ -330,9 +309,6 @@ def quad_is_locally_valid(vertices: np.ndarray, face: Face) -> bool:
 
 
 def topology_summary(mesh: MeshData) -> TopologySummary:
-    fast = _turbo.topology_summary(mesh) if _turbo is not None else None
-    if fast is not None:
-        return fast
     edge_occurrences = _edge_occurrences(mesh.faces)
     edge_counts = Counter({edge: len(items) for edge, items in edge_occurrences.items()})
     used_vertices = {vertex for face in mesh.faces for vertex in face}
@@ -644,13 +620,6 @@ def _parity_template_validity(
     corners, as `quad_is_locally_valid` does on a local coordinate array.
     """
 
-    fast = (
-        _turbo.parity_template_validity(mesh.faces, vertices, base_coordinates, selected_edges, midpoint_indices, math.cos(math.radians(MAX_QUAD_WARP_DEGREES)))
-        if _turbo is not None
-        else None
-    )
-    if fast is not None:
-        return fast
     center_offset = len(base_coordinates)
     centers = [vertices[list(face)].mean(axis=0) for face in mesh.faces]
     quads: list[tuple[int, int, int, int]] = []
@@ -757,11 +726,7 @@ def parity_path_quad_closure(
         raise ValueError(f"ParityPath source topology is not certifiable: {details}.")
 
     frozen_midpoints = frozen_midpoints or {}
-    selected_edges = (
-        _turbo.parity_path_edges(mesh, frozenset(frozen_midpoints)) if _turbo is not None else None
-    )
-    if selected_edges is None:  # an empty set is a valid native answer
-        selected_edges = _parity_path_edges(mesh, frozenset(frozen_midpoints))
+    selected_edges = _parity_path_edges(mesh, frozenset(frozen_midpoints))
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     output_vertices = vertices.tolist()
     midpoint_indices: dict[tuple[int, int], int] = {}
@@ -954,9 +919,7 @@ def parity_path_quad_closure(
 def _unclosable_quads(mesh: MeshData) -> list[int]:
     """Quads ParityPath would refuse: every template for them comes out warped or folded."""
 
-    selected = _turbo.parity_path_edges(mesh, frozenset()) if _turbo is not None else None
-    if selected is None:
-        selected = _parity_path_edges(mesh, frozenset())
+    selected = _parity_path_edges(mesh, frozenset())
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     midpoints = {edge: len(vertices) + k for k, edge in enumerate(sorted(selected))}
     middles = [(vertices[a] + vertices[b]) * 0.5 for a, b in sorted(selected)]
@@ -1012,13 +975,6 @@ def quad_only_closure(
     `checked=False` skips validating the result, for a last resort that must be all quads whatever they look like.
     """
 
-    fast = (
-        _turbo.quad_only_closure(mesh, name=name, frozen_midpoints=frozen_midpoints)
-        if _turbo is not None and checked
-        else None
-    )
-    if fast is not None:
-        return fast
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     output_vertices = vertices.tolist()
     edge_midpoints: dict[tuple[int, int], int] = dict(frozen_midpoints or {})

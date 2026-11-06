@@ -120,7 +120,7 @@ def active() -> bool:
 def _drop_heavy(job) -> None:
     """A finished rung keeps its result and sizes; what it only needed while searching is made again if ever asked for."""
     job._samples = job._kd = job._tree = job._view = job._labels = job._src_check = job._known = None
-    job._piece_trees, job._runs, job._unmeasured = {}, {}, {}
+    job._piece_trees, job._unmeasured = {}, {}
 
 
 def work(seconds: float) -> None:

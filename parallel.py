@@ -108,7 +108,7 @@ def _read(path: Path):
 def helper_command(entry: str, args: list[str], binary: str | None = None) -> tuple[list[str], dict]:
     """(command, environment) for a background Blender that runs `<the add-on>.<entry>(sys.argv)` with `args` after "--".
 
-    The child finds the add-on through PYTHONPATH (the folder that holds the add-on's folder), so nothing edits sys.path;
+    The child finds the add-on through PYTHONPATH (the folder that holds the add-on's folder), so nothing edits Python's import path;
     the user's own Python packages are kept out of it. `binary` is Blender itself (bpy.app.binary_path) and nothing else.
     """
     if binary is None:

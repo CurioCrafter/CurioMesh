@@ -9,7 +9,6 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import turbo  # noqa: E402
 from triadq.chords import ChordReducer, PictureJudge, _closed_walk, _grid_cells  # noqa: E402
 from triadq.topology import topology_summary  # noqa: E402
 from triadq.types import MeshData  # noqa: E402
@@ -125,40 +124,6 @@ class JudgeTests(unittest.TestCase):
         tilted = ((-0.5, -0.5, -0.5), (0.5, -0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, -0.5))
         self.assertEqual(self.judge.wrong(flat), 0)
         self.assertGreater(self.judge.wrong(tilted), 100)
-
-
-@unittest.skipUnless(hasattr(turbo.native(), "PictureJudgeCore"), f"native module without the chords kernels: {turbo.status()}")
-class NativeChordsTests(unittest.TestCase):
-    """The native walk and judge must give exactly what the Python ones give."""
-
-    def test_walks_match(self):
-        rng = np.random.default_rng(7)
-        for count in (4, 7, 12, 20, 31):
-            for _ in range(6):
-                costs = [tuple(row) for row in rng.integers(0, 4, (count, 3)).astype(float) + rng.random((count, 3)) * 0.3]
-                limit = float(rng.uniform(0.0, 3.0 * count))
-                turbo.set_enabled(False)
-                try:
-                    slow = _closed_walk(costs, limit)
-                finally:
-                    turbo.set_enabled(True)
-                self.assertEqual(_closed_walk(costs, limit), slow)
-
-    def test_judges_match(self):
-        rng = np.random.default_rng(8)
-        size = 48
-        views = [(rng.random((size, size)) > 0.2, rng.normal(size=(size, size, 3)), rng.uniform(1.5, 2.5, (size, size)), np.zeros((size, size), dtype=np.int64)) for _ in range(6)]
-        turbo.set_enabled(False)
-        try:
-            slow = PictureJudge(views, (0.1, -0.1, 0.0), 1.0, size, 20.0)
-        finally:
-            turbo.set_enabled(True)
-        fast = PictureJudge(views, (0.1, -0.1, 0.0), 1.0, size, 20.0)
-        self.assertIsNot(fast.wrong.__func__ if hasattr(fast.wrong, "__func__") else None, PictureJudge.wrong)
-        for _ in range(300):
-            middle, spread = rng.uniform(-0.8, 0.8, 3), rng.choice([0.02, 0.1, 0.6])
-            quad = [tuple(middle + rng.normal(0.0, spread, 3)) for _ in range(4)]
-            self.assertEqual(fast.wrong(quad), slow.wrong(quad))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ def look(points: np.ndarray, normals: np.ndarray, reach: float, ray, nearest) ->
 
     targets = points.copy()
     found = np.zeros(len(points), dtype=bool)
-    # ponytail: a plain Python loop over every vertex, about 1 s per 100k; the native core can take this if it hurts
+    # ponytail: a plain Python loop over every vertex, about 1 s per 100k; vectorize it if it hurts
     for i, (p, n) in enumerate(zip(points.tolist(), normals.tolist())):
         best, best_at = reach * 2.0, None
         for sign in (1.0, -1.0):

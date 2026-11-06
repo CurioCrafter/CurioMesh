@@ -14,7 +14,6 @@ import numpy as np
 
 from .field import estimate_field_gl
 from .topology import (
-    _turbo,
     parity_path_quad_closure,
     quad_only_closure,
     quads_locally_valid,
@@ -158,7 +157,6 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
     best_report: RemeshReport | None = None
     candidate_reports: list[dict[str, Any]] = []
     seed_count = max(1, int(options.seed_count))
-    tri_mesh.cache["paired"] = _pair_natively(tri_mesh, _pairing_prep(tri_mesh, _options_for_mode(options, mode), mode), list(range(seed_count)))
 
     for seed in range(seed_count):
         check_cancelled()
@@ -191,7 +189,7 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
         report.message = (
             f"TRIAD-Q {closure_label} completed with a locally validated all-quad manifold."
             if report.quad_only_verified
-            else "TRIAD-Q Lite remesh completed."
+            else "TRIAD-Q remesh completed."
         )
     return best_mesh, report
 
@@ -261,8 +259,7 @@ def _classify_mesh(mesh: _TriMesh, options: RemeshOptions) -> str:
 
 def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int) -> _Candidate:
     prep = _pairing_prep(mesh, _options_for_mode(options, mode), mode)
-    paired = mesh.cache.get("paired")
-    output_mesh, feature_breaks, rescued_pairs = paired.pop(seed) if paired else _pair_triangles(mesh, prep, seed)
+    output_mesh, feature_breaks, rescued_pairs = _pair_triangles(mesh, prep, seed)
     closure_applied = bool(options.force_quads)
     closure_method = ""
     closure_error = ""
@@ -612,12 +609,7 @@ def _estimate_field(
     # ponytail: fixed-count Jacobi diffusion; switch to a sparse linear solve if
     # very large scans need the field converged across hundreds of rings.
     steps = 24 * max(0, int(smooth_iters))
-    fast = (
-        _turbo.cross_field_jacobi(cross, face_a, face_b, transport, pinned, degree, steps)
-        if _turbo is not None
-        else None
-    )
-    for _ in range(0 if fast is not None else steps):
+    for _ in range(steps):
         check_cancelled()
         into_a = cross[face_b] * transport
         into_b = cross[face_a] * np.conj(transport)
@@ -628,8 +620,6 @@ def _estimate_field(
             face_b, weights=into_b.imag, minlength=face_count
         )
         cross = np.where(pinned, cross, (cross + real + 1j * imag) / degree)
-    if fast is not None:
-        cross = fast
 
     cross = np.where(np.abs(cross) > 1e-12, cross, initial)
     theta = np.angle(cross) / 4.0
@@ -749,26 +739,6 @@ def _min_scaled_jacobians(points: np.ndarray) -> np.ndarray:
     minimum = np.minimum(corners.min(axis=1), 1.0)
     degenerate = (normal_length <= 1e-20) | np.any(denominator <= 1e-20, axis=1)
     return np.where(degenerate, -1.0, minimum)
-
-
-def _pair_natively(mesh: _TriMesh, prep: _PairingPrep, seeds: list[int]) -> dict[int, tuple[MeshData, int, int]] | None:
-    """`_pair_triangles` for these seeds in the native core, side by side. None when Python has to do it."""
-
-    if _turbo is None or (mesh.uvs is not None and mesh.face_uvs is not None):
-        return None
-    face_a, face_b, quads, scores = prep.candidates
-    rows = _turbo.pair_seeds(len(mesh.faces), face_a, face_b, quads, scores, prep.minimum, seeds)
-    if rows is None:
-        return None
-    triangles = np.asarray(mesh.faces, dtype=np.int64).reshape(-1, 3)
-    materials = mesh.face_materials
-    out = {}
-    for seed, (found, tris, owner, rescued) in zip(seeds, rows):
-        result = MeshData(vertices=mesh.vertices.copy(), faces=[], name=f"{mesh.name}_triadq")
-        result.faces = list(map(tuple, found.tolist())) + list(map(tuple, triangles[tris].tolist()))
-        result.face_materials = list(map(materials.__getitem__, owner.tolist()))
-        out[seed] = (result, 0, rescued)
-    return out
 
 
 def _pair_triangles(mesh: _TriMesh, prep: _PairingPrep, seed: int) -> tuple[MeshData, int, int]:

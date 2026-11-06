@@ -20,7 +20,6 @@ import time
 import numpy as np
 
 from .quadreduce import MIN_QUALITY, MOST_TURNED, QuadReducer, _cross, _dot, _normal, _quality, _sub
-from .topology import _turbo
 from .types import MeshData
 
 SMOOTH_COS = math.cos(math.radians(45.0))  # a corner with faces further apart than this sits on an edge of the shape
@@ -59,10 +58,6 @@ def _closed_walk(costs: list[tuple[float, float, float]], limit: float) -> tuple
     count = len(costs)
     if sum(min(row) for row in costs) > limit:
         return None
-    module = _turbo.native() if _turbo is not None else None
-    if module is not None and hasattr(module, "closed_walk"):
-        found = module.closed_walk([tuple(row) for row in costs], float(limit))
-        return None if found is None else _laid_out(found[0], found[1])
     middle = count // 2 + 1  # a walk that has to come back never gets further away than this
     width = 2 * middle + 1
     grid = np.full((4, width, width), np.inf)
@@ -148,14 +143,7 @@ class PictureJudge:
         self.pixel = 2.0 * self.half / pixels
         self.cosine = math.cos(math.radians(turned_deg))
         self.total = sum(int(view[0].sum()) for view in reference)
-        module = _turbo.native() if _turbo is not None else None
-        self._core = None
-        if module is not None and hasattr(module, "PictureJudgeCore"):
-            stack = [np.ascontiguousarray(np.stack([view[k] for view in reference]), dtype=t).reshape(-1) for k, t in ((0, bool), (1, np.float64), (2, np.float64))]
-            self._core = module.PictureJudgeCore(*stack, self.center, self.half, pixels, self.cosine, BEHIND_PIXELS)
-            self.wrong = self._core.wrong  # the same count, about a hundred times sooner
-        else:
-            self.lists = [(view[0].tolist(), view[1].tolist(), view[2].tolist()) for view in reference]
+        self.lists = [(view[0].tolist(), view[1].tolist(), view[2].tolist()) for view in reference]
 
     def wrong(self, corners) -> float:
         return self._triangle(corners[0], corners[1], corners[2]) + self._triangle(corners[0], corners[2], corners[3])

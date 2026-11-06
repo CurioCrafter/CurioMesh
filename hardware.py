@@ -43,7 +43,7 @@ class Settings:
     max_rays: int  # budget of camera rays for one look at every piece
     max_pixels: int  # a side of one picture
     chunk_faces: int  # a piece with more faces than this is cut into regions
-    threads: int  # Turbo threads (0 = all of them)
+    threads: int  # cores the job may keep busy (0 = all of them)
     show_every: float  # seconds between preview updates
     only_done: bool  # the preview shows the parts that are finished, not the unmeasured rest at full size
 
@@ -111,7 +111,7 @@ def detect() -> dict:
     return machine
 
 
-def describe(machine: dict, turbo: str = "") -> list[str]:
+def describe(machine: dict) -> list[str]:
     """The machine in plain words, one short line each."""
     lines = [f"{machine['os']}, {machine['cores']} cores"]
     if machine.get("ram_guessed"):
@@ -124,10 +124,6 @@ def describe(machine: dict, turbo: str = "") -> list[str]:
         lines.append(f"Graphics: {machine['gpu']}")
     else:
         lines.append("Graphics: no supported card found")
-    if machine.get("picture_card"):
-        lines.append(f"Draws big parts' pictures on {machine['picture_card']}")
-    if turbo:
-        lines.append(turbo)
     return lines
 
 
@@ -462,21 +458,12 @@ def _private_dir(folder: Path) -> bool:
 
 
 def user_folder(sub: str = "") -> Path | None:
-    """The add-on's own folder for files it keeps (Blender's extension user folder), None outside Blender.
-
-    The legacy add-on (Blender before 4.2) has no such folder and uses curiomesh/ in Blender's config folder.
-    """
-    package = __package__ or ""
+    """The extension's own folder for files it keeps (Blender's extension user folder), None outside Blender."""
     try:
         import bpy
 
-        try:
-            return Path(bpy.utils.extension_path_user(package, path=sub, create=True))
-        except (AttributeError, ValueError):  # Blender before 4.2, or loaded as a legacy add-on
-            folder = Path(bpy.utils.user_resource("CONFIG", path="curiomesh"), sub)
-            folder.mkdir(parents=True, exist_ok=True)
-            return folder
-    except Exception:  # no bpy (tests), or the folder can't be made
+        return Path(bpy.utils.extension_path_user(__package__ or "", path=sub, create=True))
+    except Exception:  # no bpy (tests), not loaded as an extension (a helper process), or the folder can't be made
         return None
 
 

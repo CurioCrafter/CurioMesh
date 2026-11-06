@@ -17,7 +17,7 @@ MIN_QUALITY = 0.05  # a snap may not push a quad below this, unless it was alrea
 
 
 def _closest(find_nearest, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """(closest source point, distance) for each of `points`, infinite where there is none. `find_nearest` is a native tree or Blender's one-at-a-time lookup."""
+    """(closest source point, distance) for each of `points`, infinite where there is none. `find_nearest` is a tree with `nearest` for many points at once, or Blender's one-at-a-time lookup."""
 
     if hasattr(find_nearest, "nearest"):
         at, _faces, away = find_nearest.nearest(points)
@@ -197,9 +197,7 @@ def split_faces(mesh: MeshData, marked: set[int]) -> MeshData:
     wanted = frozenset(
         tuple(sorted((faces[f][k], faces[f][(k + 1) % len(faces[f])]))) for f in marked for k in range(len(faces[f]))
     )
-    selected = topology._turbo.parity_path_edges(mesh, wanted) if topology._turbo is not None else None
-    if selected is None:
-        selected = topology._parity_path_edges(mesh, wanted)
+    selected = topology._parity_path_edges(mesh, wanted)
     points = np.asarray(mesh.vertices, dtype=np.float64)
     new_points: list[np.ndarray] = []
     middle: dict[tuple[int, int], int] = {}

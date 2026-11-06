@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +28,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
+from . import autoretopo, blockout, hardware, jobpack, ladder, multires, organize, profiles, teach
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -354,7 +353,6 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     ui_lod_open: bpy.props.BoolProperty(name="LOD Set", description="Make three levels of detail in one go", default=False)
     ui_teach_open: bpy.props.BoolProperty(name="Show It How", description="Fix a spot by hand and CurioMesh remembers the fix for next time", default=False)
     auto_detail: bpy.props.FloatProperty(name="Detail", description="How close to your mesh the result must look, as the share of the view that may change. Lower keeps more faces; higher gives a rougher, lighter mesh", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
-    auto_gpu: bpy.props.BoolProperty(name="Use Graphics Card", description="Draws the camera checks of big parts on the graphics card when one works. Off uses the processor: almost the same result, a little slower", default=True, update=_redraw_update)
     auto_effort: bpy.props.EnumProperty(name="Effort", description="How hard to work this computer. Light keeps Blender smooth while it works; Full finishes soonest; Auto picks from your cores and free memory", items=hardware.EFFORT_ITEMS, default="AUTO", update=_redraw_update)
     auto_style: bpy.props.EnumProperty(name="Style", description="How the quads are laid out. Fewest Faces follows the shape; Even Rows makes tidy rows of square quads but changes the look a little more", items=STYLE_ITEMS, default="DETAIL", update=_redraw_update)
     auto_method: bpy.props.EnumProperty(name="Method", description="How each part's faces are made. Auto suits nearly every mesh; you can give each part its own method after the search", items=profiles.METHOD_ITEMS, default="AUTO", update=_custom_update)
@@ -885,7 +883,7 @@ def adaptive_triangles(co, tris, pts, L0, project, crease_deg, max_iter=8):
 
 
 def _proxy(context, obj, src, max_tris):
-    """Source triangles, decimated (native, fast) when there are many more than the result needs."""
+    """Source triangles, decimated by Blender (fast) when there are many more than the result needs."""
     tris = src["tris"]
     if len(tris) <= max_tris:
         return src["co"], tris
@@ -1168,14 +1166,7 @@ def library_path() -> str | None:
     folder = hardware.user_folder()
     if folder is None:
         return None
-    path = os.path.join(folder, "fixes.json")
-    old = os.path.join(bpy.utils.user_resource("CONFIG"), "curiomesh", "fixes.json")  # where 0.9.7 and older kept it
-    if not os.path.exists(path) and os.path.isfile(old):
-        try:
-            shutil.copyfile(old, path)
-        except OSError:
-            pass
-    return path
+    return os.path.join(folder, "fixes.json")
 
 
 def _library() -> list[dict]:
@@ -1713,7 +1704,6 @@ def machine_info(refresh: bool = False) -> dict:
     if state["machine"] is None or refresh:
         state["machine"] = hardware.detect()
         state["rays"] = hardware.benchmark()
-        state["machine"]["picture_card"] = turbo.gpu_name()  # opens the card (about a second); None when there is none
     return state["machine"]
 
 
@@ -1825,9 +1815,6 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
     saved = None if quiet else hardware.checkpoint_dir(co, len(faces))
     resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
-    turbo.set_gpu(gs.auto_gpu)
-    if not turbo.limit_threads(settings.threads) and settings.threads:
-        note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
     job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs))
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
@@ -3725,15 +3712,6 @@ def fold(layout, data, prop: str, text: str):
     return layout.column() if is_open else None
 
 
-def turbo_words(line: str) -> str:
-    """The speed-up module's status for an artist: the import error belongs in Diagnostics, not the panel."""
-    if line.startswith("Turbo unavailable"):
-        return "Speed-up module not installed: works, but slower"
-    if line.startswith("Turbo disabled"):
-        return "Speed-up module turned off: works, but slower"
-    return line
-
-
 def draw_progress(layout, fraction: float, text: str) -> None:
     """A real progress bar on Blender 4.0 and later, a text bar before that."""
     fraction = min(max(float(fraction), 0.0), 1.0)
@@ -3841,19 +3819,9 @@ def problem_url() -> str:
     return f"{REPO_URL}/issues/new?" + urlencode({"title": "Problem: ", "body": body})
 
 
-SHOW_STAR = True  # the only promotional prompt in the add-on; the extensions.blender.org build sets this False
-
-
 def _draw_thanks(layout) -> None:
-    """Shown once a result is applied: the moment the tool has just helped. Without SHOW_STAR only Report a Problem."""
-    if not SHOW_STAR:
-        layout.operator("wm.url_open", text="Report a Problem", icon="ERROR").url = problem_url()
-        return
-    box = layout.box()
-    box.label(text="Did CurioMesh help? A star helps others find it.", icon="SOLO_ON")
-    row = box.row(align=True)
-    row.operator("wm.url_open", text="Star on GitHub", icon="SOLO_ON").url = REPO_URL
-    row.operator("wm.url_open", text="Report a Problem", icon="ERROR").url = problem_url()
+    """Shown once a result is applied: a plain help link (extensions.blender.org: no promotional prompts)."""
+    layout.operator("wm.url_open", text="Report a Problem (opens browser)", icon="ERROR").url = problem_url()
 
 
 CLASSES = (

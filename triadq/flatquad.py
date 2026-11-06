@@ -26,12 +26,10 @@ import numpy as np
 from .engine import RemeshOptions, RemeshReport, remesh_mesh
 from .quadreduce import collapse_loose_triangles, join_loose_triangles
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
-from .topology import MAX_QUAD_WARP_DEGREES, _turbo, parity_path_closure_unpairing, quad_only_closure, topology_summary
-from . import tasks
+from .topology import parity_path_closure_unpairing, quad_only_closure, topology_summary
 from .types import FlatFaces, MeshData, cancel_with, check_cancelled
 
 
-PAIR_WORKERS = 4  # regions paired at once: more would hold more regions in memory, and Python's share of the work won't go faster
 
 
 @dataclass(slots=True)
@@ -645,9 +643,6 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
     vertices added).
     """
 
-    fast = _turbo.make_closable(mesh) if _turbo is not None else None
-    if fast is not None:
-        return fast
     vertices = mesh.vertices
     seen: set[tuple[int, ...]] = set()
     faces: list[tuple[int, ...]] = []
@@ -776,10 +771,9 @@ def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[Me
         flat = FlatFaces.of(made.faces)
         return np.diff(flat.indptr).astype(np.int8), used[flat.flat].astype(np.int32), made.face_materials, report
 
-    workers = min(_turbo.thread_count() if _turbo is not None else 1, PAIR_WORKERS)
     parts = []
-    for done in tasks.each(one, regions, workers):
-        parts.append(done)
+    for region in regions:
+        parts.append(one(region))
         check_cancelled()
     counts = np.concatenate([part[0] for part in parts]).astype(np.int64)
     indptr = np.zeros(len(counts) + 1, dtype=np.int64)
@@ -795,10 +789,10 @@ def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[Me
 
 
 def _flat_mesh(vertices, faces: FlatFaces, materials: list, name: str) -> MeshData:
-    """MeshData holding faces as arrays: no millions of tuples to make and check again."""
+    """MeshData from faces held as arrays; the steps after this edit lists."""
 
     mesh = MeshData(vertices, [], name=name)
-    mesh.faces, mesh.face_materials = (faces if _turbo is not None else list(faces)), materials  # the Python steps edit lists
+    mesh.faces, mesh.face_materials = list(faces), materials  # the Python steps edit lists
     return mesh
 
 
@@ -878,10 +872,6 @@ def _close_piece(piece: MeshData) -> tuple[MeshData, int]:
 def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
     """(closed mesh, pieces closed by ParityPath, by corner closure, left as all-quad, forced with no check of the quads)."""
 
-    fast = _turbo.close_pieces(paired, math.cos(math.radians(MAX_QUAD_WARP_DEGREES))) if _turbo is not None else None
-    if fast is not None:
-        check_cancelled()
-        return (fast[0], *fast[1])
     fa, fb = face_adjacency(paired.faces)
     labels = _labels(len(paired.faces), fa, fb)
     order = np.argsort(labels, kind="stable")
