@@ -3838,8 +3838,14 @@ def problem_url() -> str:
     return f"{REPO_URL}/issues/new?" + urlencode({"title": "Problem: ", "body": body})
 
 
+SHOW_STAR = True  # the only promotional prompt in the add-on; the extensions.blender.org build sets this False
+
+
 def _draw_thanks(layout) -> None:
-    """Shown once a result is applied: the moment the tool has just helped."""
+    """Shown once a result is applied: the moment the tool has just helped. Without SHOW_STAR only Report a Problem."""
+    if not SHOW_STAR:
+        layout.operator("wm.url_open", text="Report a Problem", icon="ERROR").url = problem_url()
+        return
     box = layout.box()
     box.label(text="Did CurioMesh help? A star helps others find it.", icon="SOLO_ON")
     row = box.row(align=True)
