@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 
 FACTORS = (0.25, 0.4, 0.63, 1.0, 1.59, 2.52, 4.0)  # of the Detail you searched with: smallest quads first
-ROWS_FACTORS = (1.0, 2.52)  # Clean Rows takes minutes a rung, so only these
+ROWS_FACTORS = (1.0, 2.52)  # Even Rows takes minutes a rung, so only these
 STYLES = ("DETAIL", "BALANCED", "ROWS")  # left to right on the Organization bar
 STOPS = (0.0, 0.5, 1.0)
 LOWEST, HIGHEST = 0.1, 80.0  # what the Detail setting allows
@@ -52,11 +52,6 @@ def size_detail(base: float, size: float) -> float:
     """Quad Size 0..1 as a Detail: 0 the smallest quads, 0.5 the size you searched with, 1 the biggest."""
     size = min(max(size, 0.0), 1.0)
     return base * FACTORS[-1] ** (2.0 * size - 1.0)
-
-
-def size_of(base: float, detail: float) -> float:
-    """The Quad Size slider position of a Detail (the inverse of `size_detail`)."""
-    return min(max(0.5 + 0.5 * math.log(detail / base) / math.log(FACTORS[-1]), 0.0), 1.0)
 
 
 def nearest(ready, wanted: float):

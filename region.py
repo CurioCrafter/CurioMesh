@@ -1020,14 +1020,14 @@ class CURIOMESH_PT_regions(bpy.types.Panel):
     bl_idname = "CURIOMESH_PT_regions"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh Pro"
-    bl_order = 11  # below Classic Remesh in the Pro tab
+    bl_category = "CurioMesh Advanced"
+    bl_order = 11  # below Classic Remesh in the Advanced tab
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
         prefs = overlay.get_prefs()
-        return bool(prefs.show_regions) and bool(getattr(prefs, "pro_mode", False))
+        return bool(prefs.show_regions) and bool(getattr(prefs, "advanced_mode", False))
 
     def draw_header(self, context):
         self.layout.label(icon="SELECT_SUBTRACT")
@@ -1104,7 +1104,7 @@ class CURIOMESH_PT_regions_advanced(bpy.types.Panel):
     bl_idname = "CURIOMESH_PT_regions_advanced"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh Pro"
+    bl_category = "CurioMesh Advanced"
     bl_parent_id = "CURIOMESH_PT_regions"
     bl_options = {"DEFAULT_CLOSED"}
 

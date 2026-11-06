@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
-"""The CurioMesh sidebar: every panel and popover of the main tab and the Pro tab.
+"""The CurioMesh sidebar: every panel and popover of the main tab and the Advanced tab.
 
 Main tab, top to bottom: CurioMesh (pick, What is it for?, Start, verdict), Adjust, Fix, Finish. Each sub-panel shows
-only when it can do something. Everything else is one click away in a popover, or in the CurioMesh Pro tab.
+only when it can do something. Everything else is one click away in a popover, or in the CurioMesh Advanced tab.
 
 Adding a control: find the section function of its area (draw_setup, draw_options, draw_shape_flow, draw_adjust,
-draw_fix, draw_finish, or a Pro panel) and add it there; nothing else needs to change. The Flow Editor plugs into
+draw_fix, draw_finish, or an Advanced panel) and add it there; nothing else needs to change. The Flow Editor plugs into
 draw_shape_flow through FLOW_EDITOR_OP."""
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ HELP = {  # one line under a section title, hidden by Compact Panels (DESIGN.md 
     "adjust": "Move a slider to see another version right away. Nothing is lost until you Apply.",
     "fix": "Go through the spots that need a look, one at a time, and fix each one here.",
     "finish": "Write the result into your scene, then bake or export it if you need to.",
-    "pro": "Every setting and the classic tools. You never need these for a good result.",
+    "advanced": "Every setting and the classic tools. You never need these for a good result.",
 }
 
 
@@ -67,10 +67,10 @@ def _ends(layout, left: str, right: str) -> None:
     sub.label(text=right)
 
 
-def _pro_toggle(layout, text: str = "Pro") -> None:
+def _advanced_toggle(layout, text: str = "Advanced") -> None:
     prefs = _prefs()
     if isinstance(prefs, bpy.types.AddonPreferences):
-        layout.prop(prefs, "pro_mode", text=text, toggle=True, **icons.kw("pro", "PREFERENCES"))
+        layout.prop(prefs, "advanced_mode", text=text, toggle=True, icon="PREFERENCES")
 
 
 def result_ready() -> bool:
@@ -295,7 +295,7 @@ def draw_classic_notice(layout, gs) -> None:
     words = gs.bl_rna.properties["scope"].enum_items[gs.scope].name
     box.label(text=f"This file uses Classic Guided ({words})", icon="INFO")
     row = box.row(align=True)
-    _pro_toggle(row, "Open in Pro")
+    _advanced_toggle(row, "Open in Advanced")
     row.prop_enum(gs, "scope", "AUTO", text="Use the main path")
 
 
@@ -314,7 +314,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         self.layout.label(text="", **icons.kw("logo", "PIVOT_ACTIVE"))
 
     def draw_header_preset(self, context):
-        _pro_toggle(self.layout)
+        _advanced_toggle(self.layout)
 
     def draw(self, context):
         layout, gs = self.layout, context.scene.curiomesh_guided
@@ -429,7 +429,7 @@ class CURIOMESH_PT_pop_flow(_Popover, bpy.types.Panel):
 
 
 def draw_options(layout, context, gs) -> None:
-    """How the result is made, in three small groups. The rest is in the Pro tab."""
+    """How the result is made, in three small groups. The rest is in the Advanced tab."""
     obj = G._source_mesh(context)
     col = layout.column(align=True)
     col.enabled = G.progress_info("AUTO") is None
@@ -463,7 +463,7 @@ def draw_options(layout, context, gs) -> None:
     col.label(text="Output", icon="MESH_DATA")
     col.row(align=True).prop(gs, "auto_output", expand=True)
     col.separator()
-    _pro_toggle(col, "More in the Pro tab")
+    _advanced_toggle(col, "More in the Advanced tab")
 
 
 class CURIOMESH_PT_pop_options(_Popover, bpy.types.Panel):
@@ -507,7 +507,7 @@ class CURIOMESH_PT_pop_uses(_Popover, bpy.types.Panel):
         col.operator("curiomesh.pick_use", text="Hard Surface", depress=not gs.use_auto and gs.auto_profile == "HARD", icon="MOD_BEVEL").use = "HARD"
         col.operator("curiomesh.pick_use", text="Hulls", depress=not gs.use_auto and gs.auto_profile == "HULL", **icons.kw("use_hull", "MESH_ICOSPHERE")).use = "HULL"
         if gs.auto_profile == "CUSTOM":
-            col.label(text="Custom: your own settings from the Pro tab", icon="INFO")
+            col.label(text="Custom: your own settings from the Advanced tab", icon="INFO")
 
 
 # --------------------------------------------------------------------------- Adjust
@@ -842,31 +842,31 @@ class CURIOMESH_PT_pop_lod(_Popover, bpy.types.Panel):
             overlay.wrap_label(col, line, icon="CHECKMARK", width=WIDTH, limit=2)
 
 
-# --------------------------------------------------------------------------- Pro tab
+# --------------------------------------------------------------------------- Advanced tab
 
 
-class _Pro:
+class _Advanced:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh Pro"
+    bl_category = "CurioMesh Advanced"
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
-        return bool(getattr(_prefs(), "pro_mode", False))
+        return bool(getattr(_prefs(), "advanced_mode", False))
 
 
-class CURIOMESH_PT_pro_engine(_Pro, bpy.types.Panel):
+class CURIOMESH_PT_advanced_engine(_Advanced, bpy.types.Panel):
     bl_label = "Engine"
-    bl_idname = "CURIOMESH_PT_pro_engine"
+    bl_idname = "CURIOMESH_PT_advanced_engine"
     bl_order = 0
 
     def draw_header(self, context):
-        self.layout.label(text="", **icons.kw("pro", "PREFERENCES"))
+        self.layout.label(text="", icon="PREFERENCES")
 
     def draw(self, context):
         layout, gs = self.layout, context.scene.curiomesh_guided
-        _help(layout, "pro")
+        _help(layout, "advanced")
         col = layout.column(align=True)
         col.enabled = G.progress_info("AUTO") is None
         col.use_property_split = True
@@ -931,9 +931,9 @@ def draw_computer(layout, gs) -> None:
     row.operator("curiomesh.guided_import_result", text="Import Result", icon="IMPORT")
 
 
-class CURIOMESH_PT_pro_computer(_Pro, bpy.types.Panel):
+class CURIOMESH_PT_advanced_computer(_Advanced, bpy.types.Panel):
     bl_label = "This Computer"
-    bl_idname = "CURIOMESH_PT_pro_computer"
+    bl_idname = "CURIOMESH_PT_advanced_computer"
     bl_order = 1
 
     def draw_header(self, context):
@@ -943,7 +943,7 @@ class CURIOMESH_PT_pro_computer(_Pro, bpy.types.Panel):
         draw_computer(self.layout, context.scene.curiomesh_guided)
 
 
-class CURIOMESH_PT_guided_shapes(_Pro, bpy.types.Panel):
+class CURIOMESH_PT_guided_shapes(_Advanced, bpy.types.Panel):
     bl_label = "Inside Shapes"
     bl_idname = "CURIOMESH_PT_guided_shapes"
     bl_order = 2
@@ -1006,9 +1006,9 @@ def draw_teach(layout, obj) -> None:
         col.operator("curiomesh.teach_forget_kept", text=f"Forget {kept} Kept Fix{'' if kept == 1 else 'es'}", icon="X")
 
 
-class CURIOMESH_PT_pro_teach(_Pro, bpy.types.Panel):
+class CURIOMESH_PT_advanced_teach(_Advanced, bpy.types.Panel):
     bl_label = "Show It How"
-    bl_idname = "CURIOMESH_PT_pro_teach"
+    bl_idname = "CURIOMESH_PT_advanced_teach"
     bl_order = 3
 
     def draw_header(self, context):
@@ -1018,9 +1018,9 @@ class CURIOMESH_PT_pro_teach(_Pro, bpy.types.Panel):
         draw_teach(self.layout, G._source_mesh(context))
 
 
-class CURIOMESH_PT_pro_reports(_Pro, bpy.types.Panel):
+class CURIOMESH_PT_advanced_reports(_Advanced, bpy.types.Panel):
     bl_label = "Issue Reports"
-    bl_idname = "CURIOMESH_PT_pro_reports"
+    bl_idname = "CURIOMESH_PT_advanced_reports"
     bl_order = 4
 
     def draw_header(self, context):
@@ -1030,11 +1030,11 @@ class CURIOMESH_PT_pro_reports(_Pro, bpy.types.Panel):
         issue_panel.draw_reports(self.layout)
 
 
-class CURIOMESH_PT_pro_classic(_Pro, bpy.types.Panel):
+class CURIOMESH_PT_advanced_classic(_Advanced, bpy.types.Panel):
     """The point tools from before Auto Segments: Whole Mesh, Points Only and Work Areas."""
 
     bl_label = "Classic Guided"
-    bl_idname = "CURIOMESH_PT_pro_classic"
+    bl_idname = "CURIOMESH_PT_advanced_classic"
     bl_order = 5
 
     def draw_header(self, context):
@@ -1139,10 +1139,10 @@ def draw_classic(layout, context, gs) -> None:
         overlay.wrap_label(layout, "Nothing changes until you press Apply.", icon="LOCKED", width=WIDTH, limit=2)
 
 
-class CURIOMESH_PT_guided_advanced(_Pro, bpy.types.Panel):
+class CURIOMESH_PT_guided_advanced(_Advanced, bpy.types.Panel):
     bl_label = "Advanced"
     bl_idname = "CURIOMESH_PT_guided_advanced"
-    bl_parent_id = "CURIOMESH_PT_pro_classic"
+    bl_parent_id = "CURIOMESH_PT_advanced_classic"
 
     def draw_header(self, context):
         self.layout.label(icon="PREFERENCES")
@@ -1161,12 +1161,12 @@ class CURIOMESH_PT_guided_advanced(_Pro, bpy.types.Panel):
 
 MAIN_PANELS = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_adjust, CURIOMESH_PT_guided_parts, CURIOMESH_PT_guided_apply)
 PRO_PANELS = (
-    CURIOMESH_PT_pro_engine,
-    CURIOMESH_PT_pro_computer,
+    CURIOMESH_PT_advanced_engine,
+    CURIOMESH_PT_advanced_computer,
     CURIOMESH_PT_guided_shapes,
-    CURIOMESH_PT_pro_teach,
-    CURIOMESH_PT_pro_reports,
-    CURIOMESH_PT_pro_classic,
+    CURIOMESH_PT_advanced_teach,
+    CURIOMESH_PT_advanced_reports,
+    CURIOMESH_PT_advanced_classic,
     CURIOMESH_PT_guided_advanced,
 )
 POPOVERS = (

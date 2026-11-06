@@ -153,7 +153,7 @@ def is_see_through(material) -> bool:
         if node.type in {"BSDF_GLASS", "BSDF_TRANSPARENT", "BSDF_REFRACTION"}:
             return True
         if node.type == "BSDF_PRINCIPLED":
-            for name, opaque in (("Alpha", 1.0), ("Transmission Weight", 0.0), ("Transmission", 0.0)):  # the name changed in Blender 4.0
+            for name, opaque in (("Alpha", 1.0), ("Transmission Weight", 0.0)):
                 plug = node.inputs.get(name)
                 if plug is not None and (plug.is_linked or plug.default_value != opaque):
                     return True

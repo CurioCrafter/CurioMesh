@@ -100,21 +100,6 @@ def preset(key: str):
     return None if p is None else (p[2], p[3], p[4])
 
 
-def detail_words(detail: float) -> str:
-    """What a Detail value means, in plain words."""
-    for limit, words in (
-        (0.5, "Almost nothing may change: very many faces"),
-        (2.0, "High detail: many faces, small bumps are kept"),
-        (5.0, "Good detail: fine features are kept, thin parts survive"),
-        (10.0, "Shape kept; only the smallest bumps may soften"),
-        (20.0, "Low: small parts and thin edges start to vanish"),
-        (35.0, "Very low: only the large shapes remain"),
-    ):
-        if detail < limit:
-            return words
-    return "Extreme: a rough block of the object"
-
-
 LOD_LEVELS = 3
 LOD_PERCENTS = (50.0, 25.0, 12.5)  # each half the last, a common starting point; the view change each LOD reports is the real test
 

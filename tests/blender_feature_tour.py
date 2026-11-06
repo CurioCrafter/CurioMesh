@@ -1970,7 +1970,7 @@ STATE_NEEDS = {
 
 
 def ui_state(label):
-    """Draw every main panel, popover and Pro panel in the current state; return (poll results, drawn set, problems)."""
+    """Draw every main panel, popover and Advanced panel in the current state; return (poll results, drawn set, problems)."""
     pnl = mod("panel")
     ctx = bpy.context
     polls, drawn, problems = {}, set(), []
@@ -2077,10 +2077,10 @@ def _():
     ui_expect("result")
     ok(mod("panel").result_ready(), "result_ready() is False with a result on screen")
     prefs = get_prefs()
-    if prefs is not None:  # the Pro tab: every panel draws with Pro on
-        prefs.pro_mode = True
+    if prefs is not None:  # the Advanced tab: every panel draws with Advanced on
+        prefs.advanced_mode = True
         _p, _d, problems = ui_state("result/pro")
-        prefs.pro_mode = False
+        prefs.advanced_mode = False
         ok(not problems, "; ".join(problems[:4]))
 
 

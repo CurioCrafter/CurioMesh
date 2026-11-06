@@ -11,6 +11,7 @@ fixed; Redraw Strip rebuilds a selected strip; Next spot points at the worst are
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -29,7 +30,7 @@ from mathutils.kdtree import KDTree
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
 from . import autoretopo, blockout, flowedit, hard_surface, hardware, jobpack, ladder, multires, organize, parallel, profiles, teach
-from .triadq import areas, detail, fit, patch
+from .triadq import areas, detail, fit, patch, tasks
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
@@ -65,7 +66,7 @@ CURVE_KIND_ITEMS = [
 SCOPE_ITEMS = [
     ("WHOLE", "Whole Mesh", "Remesh the whole mesh; the points change the quad size across it", "MESH_DATA", 0),
     ("POINTS", "Points Only", "Remesh only inside the point spheres; the rest of the mesh stays exactly as it is", "SELECT_SET", 1),
-    ("AREAS", "Work Areas", "Each point is its own area with its own density and fill style. They are remeshed one at a time in the background, so you can keep working", "BRUSH_DATA", 2),
+    ("AREAS", "Work Areas", "Each point is its own area with its own density and fill style. They are remeshed one at a time", "BRUSH_DATA", 2),
     ("AUTO", "Auto Segments", "Splits the mesh into parts, finds the fewest faces that still look the same (checked by camera), then makes quads. Blender stays usable while it works", "MOD_EXPLODE", 3),
 ]
 AIM_ITEMS = [
@@ -308,7 +309,7 @@ def _cleanup_get(self) -> int:
 
 
 def _cleanup_set(self, value: int) -> None:
-    """Quick, Normal, Thorough over the three tidy switches (still in Pro > Engine one by one)."""
+    """Quick, Normal, Thorough over the three tidy switches (still in Advanced > Engine one by one)."""
     self.auto_redo_rough = value >= 1
     self.auto_tidy = value == 2
     self.auto_chords = value == 2 or self.auto_profile in CHORDS_PROFILES
@@ -335,7 +336,7 @@ class CURIOMESH_PG_guided_guide(bpy.types.PropertyGroup):
 class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(name="Guided Preview", description="Classic Guided: shows the point cage and keeps a live preview of the new quads beside your mesh", default=False, update=_enabled_update)
     preset: bpy.props.EnumProperty(name="Mesh Type", description="Classic Guided: the starting quad size, point type and fill style for this kind of mesh", items=PRESET_ITEMS, default="CHARACTER", update=_preset_update)
-    scope: bpy.props.EnumProperty(name="Remesh", description="Which tool rebuilds the mesh. Auto Segments is the main path; the other three are the older point tools in the Pro tab", items=SCOPE_ITEMS, default="AUTO")
+    scope: bpy.props.EnumProperty(name="Remesh", description="Which tool rebuilds the mesh. Auto Segments is the main path; the other three are the older point tools in the Advanced tab", items=SCOPE_ITEMS, default="AUTO")
     strategy: bpy.props.EnumProperty(name="Fill Style", description="Pattern of the new quads in a region: Flow follows the surface, Grid is a regular grid", items=region.STRATEGY_ITEMS, default="FLOW")
     base_faces: bpy.props.IntProperty(name="Base Quads", description="Roughly how many quads the whole mesh would get with no points. The points make some areas denser or coarser than this", default=3000, min=50, soft_max=60000)
     new_kind: bpy.props.EnumProperty(name="New Point Type", description="Type of the next point you place (keys 1-4 while placing)", items=KIND_ITEMS, default="DETAIL", update=_redraw_update)
@@ -392,7 +393,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redoes the result inside the shapes, live; everything outside stays as it is. Move or resize a shape and the quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
-    quad_size: bpy.props.FloatProperty(name="Quad Size", description="Left: smaller quads that keep more detail. Right: bigger quads and fewer faces. Each stop is a full result, worked out in the background", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
+    quad_size: bpy.props.FloatProperty(name="Quad Size", description="Left: smaller quads that keep more detail. Right: bigger quads and fewer faces. Each stop is a full result, worked out in short steps while you keep working", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
     quad_order: bpy.props.FloatProperty(name="Rows", description="Left: fewest faces, quads follow the shape. Right: even rows of square quads, with more faces and a little softer detail", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
     organize: bpy.props.FloatProperty(name="Tidy Up", description="Lays out the same faces more tidily: fewer messy spots, straighter rows. Costs a little detail; the line below shows how much", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
     organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Stops Tidy Up before the look changes by more than the amount next to it", default=False, update=organize.on_cap)
@@ -1529,7 +1530,7 @@ def _find_spot(res, project, L0) -> None:
 
 
 def _start_areas(source, gs, pts, src, L0) -> bool:
-    """Hand the areas to the worker. Blender stays free; _collect_work picks up each finished piece."""
+    """Remesh the areas (one synchronous call per plan); _collect_work picks up each finished piece."""
     lock = state["lock"]
     co, faces = (lock["co"], lock["faces"]) if lock else (src["co"], src["faces"])
     frozen = lock["locked"] if lock else np.zeros(len(faces), dtype=bool)
@@ -1882,7 +1883,7 @@ def _shape_mask(context, source, base, shapes) -> np.ndarray:
 
 
 def _start_boolean(context, gs, source, src, coarser: float = 1.0) -> bool:
-    """Step 4: redo the faces inside the shapes on the worker, from the finished Auto Segments result."""
+    """Step 4: redo the faces inside the shapes, from the finished Auto Segments result."""
     base = state["auto_base"]
     if base is None or base["sig"] != src["sig"]:
         state["auto_base"] = None
@@ -1940,7 +1941,7 @@ def _auto_slice():
 
 
 def _collect_work(context) -> None:
-    """Show what the worker finished since the last look."""
+    """Show what the job finished since the last look."""
     segments.ensure()
     work = state["work"]
     source = state_source()
@@ -2003,14 +2004,21 @@ def _collect_work(context) -> None:
     overlay.tag_redraw()
 
 
-def finish_work(context) -> None:
-    """Wait for the worker, for whoever needs the finished result now (Apply)."""
-    while state["work"] is not None:  # finishing one job can start the next (the search, then finding its segments)
+def job_running() -> bool:
+    """True while a job is still running in timer slices."""
+    return state["work"] is not None and state["work"]["runner"].busy
+
+
+def finish_work(context) -> bool:
+    """Take in a finished job's last result (Apply). Never waits: False while a job is still running."""
+    while state["work"] is not None:  # taking in one job's result can start the next (the search, then its segments)
         work = state["work"]
-        work["runner"].wait()
+        if work["runner"].busy:
+            return False
         _collect_work(context)
-        if state["work"] is work and not work["runner"].busy:
+        if state["work"] is work:
             break
+    return True
 
 
 def run_update(context, force: bool = False) -> bool:
@@ -2503,7 +2511,7 @@ class CURIOMESH_OT_guided_work(_SurfaceTool, bpy.types.Operator):
     bl_idname = "curiomesh.guided_work"
     bl_label = "Work Live"
     bl_description = (
-        "Click or drag on the mesh to add an area; it is remeshed in the background. Over an area: scroll for size, Shift+scroll for density, F for fill style"
+        "Click or drag on the mesh to add an area; it is remeshed right away. Over an area: scroll for size, Shift+scroll for density, F for fill style"
     )
 
     def invoke(self, context, event):
@@ -3085,19 +3093,27 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
+        if job_running():
+            cls.poll_message_set("Still working: wait for the job to finish or press Stop")
+            return False
         return state["res"] is not None and state_source() is not None
 
     def _question(self, context):
         return _ask_lines(context, applying=True)
 
     def execute(self, context):
+        with tasks.busy_cursor():  # writing the mesh, its UVs and hard edges takes a few seconds on a big result
+            return self._apply(context)
+
+    def _apply(self, context):
         self._remember()
         gs = _gs(context)
         source = state_source()
-        res = state["res"]
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
-        finish_work(context)
+        if not finish_work(context):
+            self.report({"WARNING"}, "Still working: wait for the job to finish or press Stop")
+            return {"CANCELLED"}
         res = state["res"]
         if res is None:
             self.report({"WARNING"}, "Nothing to apply")
@@ -3616,7 +3632,7 @@ class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
         context.view_layer.objects.active = obj
         if obj.mode != "WEIGHT_PAINT":
             bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
-        try:  # a full red brush; the setting moved between versions
+        try:  # a full red brush; Blender 5.0 keeps unified settings per paint mode, without this one
             paint = context.tool_settings.unified_paint_settings
             paint.use_unified_weight = True
             paint.weight = 1.0
@@ -3815,6 +3831,7 @@ def _bake_tag(layout, gs) -> None:
 REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
 
 
+@functools.cache  # built once: the panel draws it on every redraw
 def problem_url() -> str:
     """New-issue link with Blender, OS and CurioMesh versions already filled in."""
     import platform

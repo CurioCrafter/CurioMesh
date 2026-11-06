@@ -9,7 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from profiles import PROFILES, detail_words, lod_name, lod_targets, preset  # noqa: E402
+from profiles import PROFILES, lod_name, lod_targets, preset  # noqa: E402
 from triadq import checks, repair  # noqa: E402
 
 CUBE = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
@@ -61,7 +61,6 @@ class CheckTests(unittest.TestCase):
         self.assertIsNone(preset("CUSTOM"))
         self.assertEqual(preset("LOW_POLY")[2], "TRIS")
         self.assertEqual(len({v[2:] for v in PROFILES.values()}), len(PROFILES))  # no two uses are the same preset
-        self.assertNotEqual(detail_words(0.2), detail_words(40.0))
 
 
 class CrossingTests(unittest.TestCase):

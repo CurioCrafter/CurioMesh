@@ -21,7 +21,6 @@ SHARP_DEG = 40.0
 FLAT_TURN = 0.1  # radians turned across one quad: below this a quad counts as flat
 CYLINDER_RATIO = 0.3  # the weaker curvature is below this share of the stronger one
 SMALL_PART = 200  # quads: a loose piece this small is a bolt or strap, built with its own rules
-MOST_CODES = 64  # kept per class in the data file
 VALENCE_TOP = 8  # valences at or above this share a bin
 
 

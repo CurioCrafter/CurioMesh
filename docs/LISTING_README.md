@@ -26,23 +26,26 @@ This is the extensions.blender.org build. It contains Python code only.
   Editor (experimental, off by default).
 - **Finish:** Apply, Bake Detail (normal or normal + color maps), LOD sets, Multires Detail and Export for Game Engine
   (Unreal, Unity, Godot, Roblox).
-- **Job folders:** Export Job writes a folder you can run in any Blender that has CurioMesh installed
-  (`blender --background --python run_job.py`). Import Result brings the result back.
+- **Job folders:** Export Job writes a folder with a Python script, `run_job.py`, that you run yourself in any
+  Blender that has CurioMesh installed (`blender --background --python run_job.py`). Import Result brings the result
+  back.
 
 ## Notes
 
-- Every feature is free. The **Pro** tab (off by default, in the add-on preferences) only holds the advanced settings.
+- The **Advanced** tab (off by default, in the add-on preferences) holds every setting and the older tools.
 - **Background Blender Processes** (add-on preferences, off by default): when you turn it on, CurioMesh may start
   background copies of the same Blender, never any other program. They run only while a job runs and close when it
   ends. Two features use them:
-  - **Use Several Cores** (Pro tab) measures the parts of a big job in several of them at once.
+  - **Use Several Cores** (Advanced tab) measures the parts of a big job in several of them at once.
   - The **Even Rows** style runs Blender's own QuadriFlow in one, so a QuadriFlow crash on a hard mesh cannot close your
     session. With background processes off, Even Rows is not available and the panel says so.
-- Blender stays usable while a job runs: the work is done in short steps from a timer. A few single steps on a big
-  mesh (pairing, the result check) can still hold Blender for some seconds; **Stop** takes effect after them.
+- Blender stays usable while a job runs: the work is done in short steps from a timer. A few single steps (reducing
+  a part, pairing, the topology check) can still hold Blender for a few seconds; the wait cursor shows while they run,
+  and **Stop** takes effect after them. **Apply** is available once the job has finished, or after **Stop**.
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
-- Remembered fixes and resume points are kept in the extension's user folder.
+- Remembered fixes and resume points are kept in the extension's user folder. A job's working files go in a folder
+  there too (`jobs`) and are deleted when the job ends; folders left by a Blender that quit mid-job are cleared later.
 - Ideas credited: fitting each source point to its nearest vertex, shading read from the nearest source points, and
   the finite test cases come from ideas by cav3dw3ll3r (https://github.com/cav3dw3ll3r).
 - **Report a Problem** opens a GitHub issue in your web browser. The add-on itself never connects to the internet.
@@ -50,6 +53,6 @@ This is the extensions.blender.org build. It contains Python code only.
   `docs/PATTERN_SOURCES.md`). `triadq/cases_table.json` holds camera-check results measured on CC0 Poly Haven models. The
   icons are CC0 (`icons/LICENSE.txt`).
 
-Source code, documentation and issues: https://github.com/CurioCrafter/CurioMesh
+Issues: https://github.com/CurioCrafter/CurioMesh/issues
 
 License: GPL-3.0-or-later.

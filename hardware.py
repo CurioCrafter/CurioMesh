@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -87,17 +88,6 @@ def _gpu() -> dict:
         return {}
 
 
-def _cycles_devices() -> list[str]:
-    """Names of the non-CPU devices in Cycles' device list, read only (nothing is refreshed or changed there)."""
-    try:
-        import bpy
-
-        prefs = bpy.context.preferences.addons["cycles"].preferences
-        return sorted({f"{d.name} ({d.type})" for d in prefs.devices if d.type != "CPU"})
-    except Exception:
-        return []
-
-
 def detect() -> dict:
     """Read the computer. Never raises; unknown things are left out."""
     total, free = _memory()
@@ -105,7 +95,6 @@ def detect() -> dict:
     if sys.platform == "win32":
         machine["ram_guessed"] = True
     machine.update(_gpu())
-    machine["cycles"] = _cycles_devices()
     return machine
 
 
@@ -116,9 +105,7 @@ def describe(machine: dict) -> list[str]:
         lines.append(f"Memory: not read on Windows, assumed {machine['ram_gb']:.0f} GB")
     elif machine.get("ram_gb"):
         lines.append(f"Memory: {machine['ram_gb']:.0f} GB, {machine['free_gb']:.0f} GB free")
-    if machine.get("cycles"):
-        lines.append("Graphics: " + ", ".join(machine["cycles"][:2]))
-    elif machine.get("gpu"):
+    if machine.get("gpu"):
         lines.append(f"Graphics: {machine['gpu']}")
     else:
         lines.append("Graphics: no supported card found")
@@ -250,7 +237,7 @@ def clock(seconds: float) -> str:
     return f"about {seconds / 3600.0:.1f} hours"
 
 
-SLOW_SPREAD = 4.0  # timed runs took 1.3x to 4x the estimate with Auto; Clean Rows, Field Rows and QuadriFlow far longer
+SLOW_SPREAD = 4.0  # timed runs took 1.3x to 4x the estimate with Auto; Even Rows, Field Rows and QuadriFlow far longer
 SLOW_METHODS_SPREAD = 20.0
 
 
@@ -261,7 +248,7 @@ def span(seconds: float, slow: bool = False) -> str:
 
 
 def rate(machine: dict, est: dict, settings: Settings, slow: bool = False) -> tuple[str, str]:
-    """(level, sentence) for the panel. Level is OK, LARGE or TOO_BIG. `slow`: Clean Rows, Field Rows or QuadriFlow."""
+    """(level, sentence) for the panel. Level is OK, LARGE or TOO_BIG. `slow`: Even Rows, Field Rows or QuadriFlow."""
     free = machine.get("free_gb")
     level = "OK"
     if est["seconds"] > 600 or (free and est["gb"] > 0.25 * free):
@@ -289,7 +276,7 @@ BAKE_S_PER_MPIX_MAP = 1.18
 BAKE_FIT_THREADS = 4  # more cores bake faster, up to BAKE_MOST_THREADS (limitation: linear in threads, GPU bakes are not modelled)
 BAKE_MOST_THREADS = 16
 BAKE_MAPS = {"OFF": 0, "NORMAL": 1, "NORMAL_COLOR": 2}
-# Not fitted: how much longer than Keep Detail each style runs. Clean Rows (QuadriFlow, capped at 10 minutes a try) and the
+# Not fitted: how much longer than Keep Detail each style runs. Even Rows (QuadriFlow, capped at 10 minutes a try) and the
 # field methods are the ones the 20x spread above is for.
 STYLE_FACTOR = {"DETAIL": 1.0, "BALANCED": 1.0, "ROWS": 2.0}
 METHOD_FACTOR = {"FIELD": 2.0, "QUADRIFLOW": 2.0}
@@ -338,7 +325,7 @@ def cheaper_ways(style: str, bake: str, size: int, effort: str, lods: bool = Fal
     if effort != "LIGHT":
         ways.append("Effort: Light (gentler on this PC, slower)")
     if style == "ROWS":
-        ways.append("Style: Keep Detail instead of Clean Rows")
+        ways.append("Style: Keep Detail instead of Even Rows")
     if bake != "OFF" and int(size) > 1024:
         ways.append(f"A smaller bake: {int(size) // 2} px takes a quarter of the time")
     ways.append("Export Job (This Computer) to run it on a stronger machine")
@@ -346,7 +333,7 @@ def cheaper_ways(style: str, bake: str, size: int, effort: str, lods: bool = Fal
 
 
 def weak_pc(machine: dict | None) -> str:
-    """One plain sentence when this computer is weak (4 cores or fewer, 8 GB or less, or no card for Cycles), else an empty string."""
+    """One plain sentence when this computer is weak (4 cores or fewer, 8 GB or less, or no graphics card found), else an empty string."""
     if not machine:
         return ""
     small = []
@@ -354,10 +341,10 @@ def weak_pc(machine: dict | None) -> str:
         small.append(f"{machine['cores']} cores")
     if (machine.get("ram_gb") or 99) <= 8:
         small.append(f"{machine['ram_gb']:.0f} GB of memory")
-    card = bool(machine.get("cycles"))
+    card = bool(machine.get("gpu"))  # the card Blender draws with (gpu module)
     if not small and card:
         return ""
-    why = ", ".join(small) if small else "no graphics card Cycles can use, so bakes run on the processor"
+    why = ", ".join(small) if small else "no graphics card found, so bakes run on the processor"
     if small and not card:
         why += ", no graphics card for baking"
     return f"This PC is on the small side ({why}). Big meshes and bakes will be slow. Effort Light, a smaller bake, Keep Detail and Export Job (to another computer) all help."
@@ -462,6 +449,24 @@ def user_folder(sub: str = "") -> Path | None:
         return Path(bpy.utils.extension_path_user(__package__ or "", path=sub, create=True))
     except Exception:  # no bpy (tests), not loaded as an extension (a helper process), or the folder can't be made
         return None
+
+
+STALE_JOB_S = 12 * 3600  # a job folder nothing has touched for this long was left by a Blender that quit or crashed
+
+
+def job_folder(prefix: str) -> Path:
+    """A new folder for one job's working files, in the extension's user folder ("jobs"). Clears folders left there by
+    a Blender that quit mid-job. Outside Blender (unit tests) it is made in the system temp folder."""
+    base = user_folder("jobs")
+    if base is not None:
+        # ponytail: age-based, since another Blender may be running a job here right now
+        for old in base.iterdir():
+            try:
+                if old.is_dir() and time.time() - old.stat().st_mtime > STALE_JOB_S:
+                    shutil.rmtree(old, ignore_errors=True)
+            except OSError:
+                pass
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=base))
 
 
 def checkpoint_dir(co: np.ndarray, face_count: int, root: str | None = None) -> Path | None:

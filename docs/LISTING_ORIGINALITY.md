@@ -24,7 +24,7 @@ Instant Meshes source is not included.
 | `triadq/organize.py`, `organize.py` (Organize slider) | Cleans poles, then settles quads like damped cloth on the surface | Published: Tarini et al. 2010, Mueller et al. 2005 (shape matching), Mueller et al. 2007 (position-based dynamics) | The pulls, guards and slider steps are our own |
 | `triadq/patterns.py` | Tidiness score against statistics from hand-made meshes | Our design | Data sources and licences in [PATTERN_SOURCES.md](PATTERN_SOURCES.md) |
 | `triadq/loopscore.py` (Loop Quality) | Scores edge loops for straightness, spacing, poles | Our design | Targets are our own reading of artist practice |
-| `triadq/flatquad.py` (Flat Quads) | Few faces on flat areas, all of them on detail | Our design | Rebuilt from the owner's own earlier NEST / WreckQuad write-up |
+| `triadq/flatquad.py` (Flat Quads) | Few faces on flat areas, all of them on detail | Our design | |
 | `triadq/fit.py`, `triadq/cases.py` | Fits vertices and shading to the nearest source points; named test cases | Ideas from cav3dw3ll3r, credited in the README | Code is our own |
 | `triadq/smoothgrid.py` | Rebuilds domes and rings as concentric rows | Our design | |
 | `triadq/hardsurf.py`, `hard_surface.py` | Clean Panels, Even Cylinders, hard-edge finish | Published pieces: Coons 1967 patches, constrained Delaunay, Catmull-Clark split, EMST curve reading (Figueiredo and Miranda Gomes 1995) | Layout rules are our own. Mark Sharp, Crease and Bevel are Blender's |

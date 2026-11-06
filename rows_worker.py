@@ -3,7 +3,7 @@
 
 """Run in a separate background Blender (`main`): QuadriFlow on each piece of a job folder.
 
-QuadriFlow can't be interrupted and blocks the Blender that runs it, so Clean Rows gives it another Blender, which keeps
+QuadriFlow can't be interrupted and blocks the Blender that runs it, so Even Rows gives it another Blender, which keeps
 the user's responsive and can be killed if a piece takes too long. Reads in_<k>.npz, writes out_<k>.npz. A piece that
 QuadriFlow refuses gets an out file with no faces.
 """

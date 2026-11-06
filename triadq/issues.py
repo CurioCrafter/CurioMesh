@@ -14,7 +14,6 @@ import math
 
 import numpy as np
 
-DEFECT_KINDS = ("inward", "sunk", "crossing", "folded_over", "bent", "flat", "duplicate", "overlap")
 TOPOLOGY_KINDS = ("sliver", "pinched", "pole", "concave")
 
 SLIVER_ANGLE = 10.0  # degrees: a face with a corner sharper than this is a sliver

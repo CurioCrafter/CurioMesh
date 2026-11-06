@@ -1,6 +1,6 @@
 # Pattern sources
 
-`triadq/patterns.json` holds statistics measured on the hand-made meshes below: valence shares, corner pattern counts, medians per shape class. It holds no vertices, faces or other geometry from them. Rebuild it with `scripts/build_patterns.py`.
+`triadq/patterns.json` holds statistics measured on the hand-made meshes below: valence shares, corner pattern counts, medians per shape class. It holds no vertices, faces or other geometry from them. Rebuild it with `scripts/build_patterns.py` in the CurioMesh source repository.
 
 | Source | Use | License | Attribution | Meshes used |
 |---|---|---|---|---|

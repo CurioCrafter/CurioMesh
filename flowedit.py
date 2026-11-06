@@ -29,7 +29,7 @@ KIND_KEY = "curiomesh_flow"  # custom property of a stroke's curve: FLOW, RING o
 RAW_KEY = "curiomesh_flow_raw"  # the stroke as drawn (flat x y z list), so "change to" starts from the hand's line
 LIST_KIND = {"FLOW": "GUIDE", "EDGE": "GUIDE", "RING": "LOOP"}
 COLOURS = {"FLOW": (0.25, 0.6, 1.0, 1.0), "RING": (0.3, 0.95, 0.4, 1.0), "EDGE": (1.0, 0.55, 0.1, 1.0)}
-GAP = 0.15  # seconds between looks at the worker and at the strokes (moved in Edit Mode, say)
+GAP = 0.15  # seconds between timer slices of the job and looks at the strokes (moved in Edit Mode, say)
 SHAPE_SIZE = {"EYE": 0.06, "MOUTH": 0.09, "NOSE_MOUTH": 0.09}  # of the mesh's diagonal, when Shape Size is 0
 CREASE_DEG = 40.0  # a source edge folding more than this is a crease Draw can lay an Edge on
 CREASE_NEAR = 0.006  # of the diagonal: how near a stroke has to run to a crease to be on it
@@ -146,8 +146,8 @@ def _issues(co, faces, mask, src_co, src_tris) -> int:
 
 
 def _job(box, origin, plan, project, src_co, src_tris):
-    """Generator, stepped by the timer: each patch redone in the background (or taken from the cache), then put in and
-    measured in the background too."""
+    """Generator, stepped by the timer in short slices: each patch redone (or taken from the cache), then put in and
+    measured, a slice at a time."""
     from .segment_goals import in_step
 
     co, faces = origin["co"], origin["faces"]
@@ -205,7 +205,7 @@ def _tick():
     gs = getattr(context.scene, "curiomesh_guided", None)
     job = fe.get("job")
     if job is not None:
-        ends = time.perf_counter() + 0.02  # each step only looks at the background work
+        ends = time.perf_counter() + 0.02  # one short slice of the job per tick
         try:
             while time.perf_counter() < ends:
                 next(job)
@@ -231,7 +231,7 @@ def _tick():
         if now != fe["sig"]:
             request(context)
     fe["batch"] = None
-    return GAP
+    return GAP if fe["job"] is not None or (gs is not None and gs.flow_live) else None  # idle and not Live: the timer ends
 
 
 # --------------------------------------------------------------------------- creases of your mesh (for Draw)
@@ -721,4 +721,6 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_handles.pop(), "WINDOW")
         except Exception:
             pass
+    if bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.unregister(_tick)
     cancel()

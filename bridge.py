@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-import json
 import math
 import random
 import time
@@ -320,10 +319,7 @@ def _cleanup_mesh(mesh: bpy.types.Mesh, config: RemeshConfig) -> None:
 
         if bm.verts and strength > 0.0:
             bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=merge_distance)
-            try:
-                bmesh.ops.dissolve_degenerate(bm, edges=list(bm.edges), dist=merge_distance * 0.5)
-            except Exception:
-                pass
+            bmesh.ops.dissolve_degenerate(bm, edges=list(bm.edges), dist=merge_distance * 0.5)
         if bm.faces:
             bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
         bm.normal_update()
@@ -333,11 +329,8 @@ def _cleanup_mesh(mesh: bpy.types.Mesh, config: RemeshConfig) -> None:
 
     if config.preserve_seams:
         for edge in mesh.edges:
-            try:
-                if edge.use_seam:
-                    edge.use_edge_sharp = True
-            except Exception:
-                pass
+            if edge.use_seam:
+                edge.use_edge_sharp = True
 
     try:
         mesh.validate(clean_customdata=False)
@@ -505,11 +498,6 @@ def _run_pair_closure(obj: bpy.types.Object, config: RemeshConfig) -> bool:
         _solver_errors.append(f"TRIAD-Q: {report.message}"[:300])
         return False
     _apply_meshdata_to_object(obj, result)
-    obj["curiomesh_triadq_mode"] = report.mode
-    obj["curiomesh_triadq_seed"] = int(report.selected_seed)
-    obj["curiomesh_triadq_score"] = float(report.score)
-    obj["curiomesh_triadq_feature_edges"] = int(report.feature_edges)
-    obj["curiomesh_vertex_fan_splits"] = int(report.vertex_fan_splits)
     obj["curiomesh_triadq_rescued_pairs"] = int(report.rescued_pairs)
     _log(
         config,
@@ -530,9 +518,6 @@ def _run_flat_quads(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     options = FlatQuadOptions(tolerance=max(0.0, float(config.flat_tolerance)) / 100.0, seed_count=max(1, int(config.triad_seed_count)))
     coarse, flat = flatten_regions(MeshData(source.vertices, source.faces, source.face_materials, name=source.name), options)
     _apply_meshdata_to_object(obj, coarse)
-    obj["curiomesh_flat_regions"] = int(flat.regions)
-    obj["curiomesh_flat_faces_in"] = int(flat.flat_faces_in)
-    obj["curiomesh_flat_faces_out"] = int(flat.flat_faces_out)
     _log(config, f"Flat Quads: {flat.message}; {flat.detail_faces} detail faces kept")
 
     _prepare_pair_closure_proxy(obj, config)  # a cap, not a goal: already below it, nothing happens
@@ -565,19 +550,13 @@ def _apply_decimate_proxy(
     modifier = obj.modifiers.new("CurioMesh target-scale QEM proxy", "DECIMATE")
     modifier.decimate_type = "COLLAPSE"
     modifier.ratio = max(0.00001, min(1.0, target / max(1.0, float(current_triangles))))
-    try:
-        modifier.use_collapse_triangulate = True
-    except Exception:
-        pass
+    modifier.use_collapse_triangulate = True
     if preserve_features:
-        try:
-            modifier.delimit = {"SHARP", "SEAM", "MATERIAL"}
-        except Exception:
-            pass
+        modifier.delimit = {"SHARP", "SEAM", "MATERIAL"}
     try:
         bpy.ops.object.modifier_apply(modifier=modifier.name)
-        obj["curiomesh_proxy_input_faces"] = int(current_faces)
-        obj["curiomesh_proxy_faces"] = int(len(obj.data.polygons))
+        if config.debug_logs:  # read by the smoke tests only
+            obj["curiomesh_proxy_faces"] = int(len(obj.data.polygons))
         _log(config, f"Built QEM proxy: {current_faces} -> {len(obj.data.polygons)} faces")
         return True
     except Exception:
@@ -696,9 +675,6 @@ def _normalize_proxy_vertex_fans(
     if splits <= 0:
         return 0
     _apply_meshdata_to_object(obj, normalized)
-    obj["curiomesh_pair_unlock_vertex_fan_splits"] = int(
-        obj.get("curiomesh_pair_unlock_vertex_fan_splits", 0)
-    ) + int(splits)
     _log(config, f"Normalized {splits} QEM-created disconnected vertex fan(s)")
     return int(splits)
 
@@ -796,18 +772,12 @@ def _unlock_pair_closure_proxy(
             break
 
     final_triangles = _triangle_count(obj)
-    obj["curiomesh_pair_unlock_initial_triangles"] = int(initial_triangles)
-    obj["curiomesh_pair_unlock_final_triangles"] = int(final_triangles)
-    obj["curiomesh_pair_unlock_rounds"] = int(accepted_rounds)
-    obj["curiomesh_pair_unlock_rejected_rounds"] = int(rejected_rounds)
-    obj["curiomesh_pair_unlock_rotated_edges"] = int(rotated_edges)
-    obj["curiomesh_pair_unlock_output_estimate"] = int(math.ceil(final_triangles * 2.8))
     _log(
         config,
         (
             "Topology-gated QEM unlock: "
             f"triangles={initial_triangles}->{final_triangles}, "
-            f"rounds={accepted_rounds}, rejected={rejected_rounds}, "
+            f"rounds={accepted_rounds}, rejected={rejected_rounds}, rotated_edges={rotated_edges}, "
             f"estimated_closure={math.ceil(final_triangles * 2.8)}/{cap}"
         ),
     )
@@ -836,7 +806,6 @@ def _prepare_pair_closure_proxy(obj: bpy.types.Object, config: RemeshConfig) -> 
         if configured_base > 0
         else max(4, int(round(max(4, config.target_faces) / 2.2)))
     )
-    obj["curiomesh_pair_closure_base_target"] = int(base_target)
     _apply_decimate_proxy(
         obj,
         base_target,
@@ -849,7 +818,6 @@ def _prepare_pair_closure_proxy(obj: bpy.types.Object, config: RemeshConfig) -> 
         if configured_cap > 0
         else max(4, int(math.ceil(config.target_faces * (1.75 if config.quality == "DRAFT" else 1.35))))
     )
-    obj["curiomesh_pair_closure_output_cap"] = int(output_cap)
     if configured_base > 0 or not (config.preserve_sharp or config.preserve_seams):
         _unlock_pair_closure_proxy(
             obj,
@@ -1269,24 +1237,6 @@ def _sampled_surface_error_stats(
     )
 
 
-def _sampled_surface_error(
-    source: bpy.types.Object,
-    target: bpy.types.Object,
-    *,
-    sample_limit: int = 5000,
-    reference: _SurfaceReference | None = None,
-) -> tuple[float, float]:
-    """Compatibility wrapper returning RMS and p95 normalized error."""
-
-    stats = _sampled_surface_error_stats(
-        source,
-        target,
-        sample_limit=sample_limit,
-        reference=reference,
-    )
-    return stats.rms, stats.p95
-
-
 def _run_atlas_candidate(
     candidate: bpy.types.Object,
     source: bpy.types.Object,
@@ -1692,29 +1642,14 @@ def _finalize_output(
     return output_obj, work_obj
 
 
-def _annotate_output(output_obj: bpy.types.Object, result: RemeshResult) -> None:
+def _annotate_output(output_obj: bpy.types.Object, result: RemeshResult, debug: bool = False) -> None:
     output_obj["curiomesh_engine"] = result.engine
     output_obj["curiomesh_elapsed_ms"] = round(result.elapsed_ms, 2)
     output_obj["curiomesh_quad_ratio"] = round(result.diagnostics.quad_ratio, 4)
-    output_obj["curiomesh_face_count_error"] = round(result.diagnostics.face_count_error, 4)
-    output_obj["curiomesh_uv_status"] = result.uv_status
-    output_obj["curiomesh_materials_preserved"] = bool(result.materials_preserved)
     output_obj["curiomesh_strategy"] = result.strategy
-    output_obj["curiomesh_scan_profile"] = result.profile
-    output_obj["curiomesh_candidate_count"] = int(result.candidate_count)
-    output_obj["curiomesh_geometry_rms"] = round(result.geometry_rms, 8)
-    output_obj["curiomesh_geometry_p95"] = round(result.geometry_p95, 8)
-    output_obj["curiomesh_geometry_max"] = round(result.geometry_max, 8)
-    output_obj["curiomesh_component_sampling"] = result.sampling_status
-    output_obj["curiomesh_fidelity_reference"] = result.fidelity_status
-    output_obj["curiomesh_quad_only_verified"] = bool(result.quad_only_verified)
-    output_obj["curiomesh_topology_status"] = result.topology_status
-    if result.candidates:
-        output_obj["curiomesh_candidates_json"] = json.dumps(
-            result.candidates,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+    # Only what the overlay reads; the rest of the numbers stay in the returned RemeshResult.
+    if debug:  # read by the smoke tests only
+        output_obj["curiomesh_topology_status"] = result.topology_status
 
 
 def _merge_proxy_topology_profile(source: ScanProfile, proxy: ScanProfile) -> ScanProfile:
@@ -2025,7 +1960,8 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
                 )
 
-            work_obj["curiomesh_projection_status"] = projection_status
+            if config.debug_logs:  # read by the smoke tests only
+                work_obj["curiomesh_projection_status"] = projection_status
 
             material_count = _copy_material_slots(source_surface, work_obj)
             materials_preserved = material_count > 0
@@ -2104,7 +2040,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 topology_status=topology_status,
                 candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
             )
-            _annotate_output(output_obj, result)
+            _annotate_output(output_obj, result, config.debug_logs)
             context_state.final_active = output_obj
             _log(
                 config,

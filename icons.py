@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
-"""CurioMesh's own coloured icons (icons/*.png, drawn by bench/uidesign/make_icons.py), loaded once per session.
+"""CurioMesh's own coloured icons (icons/*.png, drawn by a script in the CurioMesh source repository), loaded once per session.
 
 `kw(name, fallback)` gives the keyword for any layout call: {"icon_value": id} when the picture loaded, else
 {"icon": fallback} with a stock Blender icon, so the panel draws the same way headless and in tests."""
@@ -25,7 +25,7 @@ def load() -> None:
         for path in sorted(FOLDER.glob("*.png")):
             pcoll.load(path.stem, str(path), "IMAGE")
         _pcoll = pcoll
-    except Exception:  # background mode or an old Blender: the stock icons stand in
+    except Exception:  # background mode: the stock icons stand in
         _pcoll = None
 
 

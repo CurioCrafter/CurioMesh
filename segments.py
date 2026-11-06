@@ -167,7 +167,7 @@ def build_table(base: dict) -> None:
 
 
 def mirrored() -> bool:
-    """A mirrored result holds both sides but the job only solved one, Clean Rows has no sizes to pick from, a cut piece's parts are one surface, and an imported result has no job: no part redos."""
+    """A mirrored result holds both sides but the job only solved one, Even Rows has no sizes to pick from, a cut piece's parts are one surface, and an imported result has no job: no part redos."""
     base = _g().state["auto_base"]
     return base is not None and (base["job"] is None or base["job"].mirror is not None or base["job"].style == "ROWS" or bool(base["job"].chunks))
 
@@ -325,6 +325,7 @@ class PartJob:
             self.busy = False
 
     def wait(self, timeout: float | None = None) -> bool:
+        """Run to the end in one call, for a script in background mode (an exported run_job.py, the tests). The panel never calls it."""
         ends = None if timeout is None else time.perf_counter() + timeout
         while self.busy and (ends is None or time.perf_counter() < ends):
             self.step(1.0)
@@ -474,7 +475,7 @@ def start_redo(context, pieces, method: str) -> bool:
 
 
 def use_try(context, piece: int, index: int) -> bool:
-    """Go back to a result you tried: shown at once, then the whole view is checked again in the background."""
+    """Go back to a result you tried: shown at once, then the whole view is checked again in short timer slices."""
     return use_tries(context, {piece: index})
 
 
@@ -742,10 +743,7 @@ def _draw_legend() -> None:
             idx += [(k - 2, k - 1, k), (k - 1, k + 1, k)]
     shader = gpu.shader.from_builtin("SMOOTH_COLOR")
     batch_for_shader(shader, "TRIS", {"pos": pos, "color": col}, indices=idx).draw(shader)
-    try:
-        blf.size(0, 12.0 * ui)
-    except TypeError:  # before Blender 4.0 the size also takes a dpi
-        blf.size(0, int(12 * ui), 72)
+    blf.size(0, 12.0 * ui)
     blf.color(0, 1.0, 1.0, 1.0, 1.0)
     blf.position(0, left, bottom + high + 6 * ui, 0)
     blf.draw(0, "View change per part")
@@ -769,10 +767,7 @@ def _draw_text() -> None:
         lines = info_lines(hover) + ["Click: select   Arrows: next   Esc: done"]
         ui = overlay._ui_scale()
         size, step, pad = 13.0 * ui, 18.0 * ui, 8.0 * ui
-        try:
-            blf.size(0, size)
-        except TypeError:  # before Blender 4.0 the size also takes a dpi
-            blf.size(0, int(size), 72)
+        blf.size(0, size)
         wide = max(blf.dimensions(0, line)[0] for line in lines)
         edge = bpy.context.region.width - overlay._sidebar_inset()  # the N-panel is drawn over the viewport's right side
         left = x + 22 if x + 22 + wide + pad < edge else max(x - 22 - wide - pad, pad)
@@ -899,7 +894,7 @@ class CURIOMESH_OT_seg_redo(bpy.types.Operator):
 class CURIOMESH_OT_seg_try(bpy.types.Operator):
     bl_idname = "curiomesh.seg_try"
     bl_label = "Use This Result"
-    bl_description = "Switch the selected part back to this result. It is shown at once; the whole-object check follows in the background"
+    bl_description = "Switch the selected part back to this result. It is shown at once; the whole-object check follows in short steps while you keep working"
     bl_options = {"INTERNAL"}
 
     index: bpy.props.IntProperty(name="Try", description="Which earlier result of this part to switch to; 0 is the first")

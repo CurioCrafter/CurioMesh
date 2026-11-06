@@ -9,7 +9,7 @@ each loads the job once, then measures the parts it is given with the very same 
 what it found to a file. The job takes the results back in part order, so it ends up exactly where the serial path
 would. `Pool` starts, feeds and kills the helpers; `measure_in_worker` and `apply_result` are the two ends of one part.
 
-Files go in a private temporary folder that only this job and its own helpers write. Each is one NumPy .npz (read
+Files go in a private folder of the extension's user folder that only this job and its own helpers write. Each is one NumPy .npz (read
 with allow_pickle=False): the arrays as entries, everything else as JSON with tags that bring back tuples, sets,
 NumPy scalars and a short list of the add-on's own types exactly as they were sent, so the sizes come back as made.
 No `bpy`, so the tests run outside Blender.
@@ -25,7 +25,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -143,8 +142,8 @@ class Pool:
     input, one a line, and quits when that closes, so a helper never outlives the Blender that started it.
     """
 
-    def __init__(self, command: list[str], count: int, setup: dict, env: dict | None = None):
-        self.folder = Path(tempfile.mkdtemp(prefix="curiomesh_parts_"))
+    def __init__(self, command: list[str], count: int, setup: dict, env: dict | None, folder: Path):
+        self.folder = Path(folder)  # a new, empty folder of this job (hardware.job_folder); removed by `close`
         self.workers: list[subprocess.Popen] = []
         self.busy: dict[int, object] = {}  # helper -> the task it is doing
         self.handed: dict = {}  # task -> the helper doing it
@@ -334,8 +333,7 @@ def worker_main(argv: list[str]) -> None:
     import bpy
 
     folder = Path(argv[argv.index("--") + 1])
-    autoretopo = importlib.import_module(PACKAGE + ".autoretopo")
-    hardware = importlib.import_module(PACKAGE + ".hardware")
+    from . import autoretopo, hardware
     job = worker_job(autoretopo.AutoJob, bpy.context, _read(folder / "job.npz"))
     while True:
         line = sys.stdin.readline()

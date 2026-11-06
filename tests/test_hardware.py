@@ -205,10 +205,10 @@ class CostTests(unittest.TestCase):
         self.assertEqual(len(hardware.cheaper_ways("DETAIL", "OFF", 512, "LIGHT")), 1)
 
     def test_weak_pc_notice(self):
-        self.assertIn("4 cores", hardware.weak_pc(dict(SMALL, cycles=["x (CUDA)"])))
+        self.assertIn("4 cores", hardware.weak_pc(dict(SMALL, gpu="x")))
         self.assertIn("no graphics card", hardware.weak_pc(SMALL))
         self.assertIn("processor", hardware.weak_pc(dict(BIG)))  # plenty of power but no card: bakes use the processor
-        self.assertEqual(hardware.weak_pc(dict(BIG, cycles=["RTX (OPTIX)"])), "")
+        self.assertEqual(hardware.weak_pc(dict(BIG, gpu="RTX")), "")
         self.assertEqual(hardware.weak_pc(None), "")
 
 

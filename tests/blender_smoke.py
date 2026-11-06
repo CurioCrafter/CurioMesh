@@ -33,6 +33,16 @@ def load_addon():
     return module
 
 
+def finish_jobs(guided, limit: int = 50) -> None:
+    """Run the job (and any job it starts next) to the end, then take in its result. Apply itself never waits."""
+    for _ in range(limit):
+        work = guided.state["work"]
+        if work is not None and work["runner"].busy:
+            work["runner"].wait()
+        if guided.finish_work(bpy.context):
+            return
+
+
 def reset_scene():
     bpy.ops.object.mode_set(mode="OBJECT") if bpy.context.object else None
     bpy.ops.object.select_all(action="SELECT")
@@ -312,7 +322,8 @@ def run_transformed_surface_error_case():
     bpy.context.view_layer.update()
 
     bridge = sys.modules["curiomesh.bridge"]
-    rms, p95 = bridge._sampled_surface_error(source, target)
+    stats = bridge._sampled_surface_error_stats(source, target)
+    rms, p95 = stats.rms, stats.p95
     if rms > 1e-6 or p95 > 1e-6:
         raise AssertionError(
             f"transformed_surface_error: identical world surfaces scored rms={rms:.12f} p95={p95:.12f}"
@@ -596,6 +607,7 @@ def run_projection_rollback_case():
                     shrinkwrap_project=True,
                     texture_mode="NONE",
                     output_mode="NEW",
+                    debug_logs=True,
                 ),
             )
         finally:
@@ -1001,17 +1013,17 @@ def run_ui_prefs_case(module):
         if value != want and not (isinstance(want, float) and abs(value - want) < 1e-6):
             raise AssertionError(f"ui prefs: default of {name} is {value!r}, expected {want!r}")
 
-    # Tab rename re-registers every panel: the main ones to the tab, the Pro ones to "<tab> Pro".
-    prefs.pro_mode = True
+    # Tab rename re-registers every panel: the main ones to the tab, the Advanced ones to "<tab> Advanced".
+    prefs.advanced_mode = True
     prefs.panel_tab = "Retopo"
     for cls in ui.panel_classes():
-        want = "Retopo Pro" if cls in ui.pro_panel_classes() else "Retopo"
+        want = "Retopo Advanced" if cls in ui.advanced_panel_classes() else "Retopo"
         if cls.bl_category != want or getattr(bpy.types, cls.__name__).bl_category != want:
             raise AssertionError(f"ui prefs: {cls.__name__} did not move to the {want} tab")
-    if bpy.types.CURIOMESH_PT_guided.bl_category != "Retopo" or bpy.types.CURIOMESH_PT_panel.bl_category != "Retopo Pro":
-        raise AssertionError("ui prefs: main or Pro panel in the wrong tab")
+    if bpy.types.CURIOMESH_PT_guided.bl_category != "Retopo" or bpy.types.CURIOMESH_PT_panel.bl_category != "Retopo Advanced":
+        raise AssertionError("ui prefs: main or Advanced panel in the wrong tab")
     prefs.panel_tab = "   "
-    if bpy.types.CURIOMESH_PT_panel.bl_category != "CurioMesh Pro":
+    if bpy.types.CURIOMESH_PT_panel.bl_category != "CurioMesh Advanced":
         raise AssertionError("ui prefs: blank tab name should fall back to CurioMesh")
     prefs.panel_tab = "CurioMesh"
 
@@ -1057,12 +1069,8 @@ def run_ui_prefs_case(module):
     if tuple(custom[1][0].tolist()) != (1.0, 1.0, 0.0, 1.0):
         raise AssertionError("ui prefs: explicit heatmap colours ignored")
     # Overlay never raises when a preferences object is incomplete.
-    overlay._prefs_override = SimpleNamespace(**{**overlay.PREF_DEFAULTS, "heat_tri_color": "bad"})
-    try:
-        if overlay.heat_colors()[0] != overlay.TRI_COLOR:
-            raise AssertionError("ui prefs: a malformed colour should fall back to the default")
-    finally:
-        overlay._prefs_override = None
+    if overlay.heat_colors(SimpleNamespace(**{**overlay.PREF_DEFAULTS, "heat_tri_color": "bad"}))[0] != overlay.TRI_COLOR:
+        raise AssertionError("ui prefs: a malformed colour should fall back to the default")
     if any(abs(a - b) > 1e-5 for a, b in zip(region.SEAM_COLOR, overlay.pref_color(overlay.get_prefs(), "region_seam_color"))):
         raise AssertionError("ui prefs: region seam colour default mismatch")
 
@@ -1142,7 +1150,7 @@ def run_ui_prefs_case(module):
     prefs.hud_scale = 1.8
     prefs.panel_tab = "Temp"
     bpy.ops.curiomesh.reset_preferences()
-    if prefs.hud_scale != 1.0 or bpy.types.CURIOMESH_PT_guided.bl_category != "CurioMesh" or prefs.pro_mode:
+    if prefs.hud_scale != 1.0 or bpy.types.CURIOMESH_PT_guided.bl_category != "CurioMesh" or prefs.advanced_mode:
         raise AssertionError("ui prefs: reset_preferences did not restore defaults")
     print("PASS ui_prefs")
 
@@ -1303,7 +1311,7 @@ def run_multires_case(module):
     guided.state["auto_base"] = None
     if "FINISHED" not in bpy.ops.curiomesh.guided_auto_all():
         raise AssertionError(f"auto button: did not start: {guided.status()}")
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     if guided.state["res"] is None or not gs.auto_why:
         raise AssertionError(f"auto button: no result or no reason: {guided.status()}")
     print(f"PASS auto button: {gs.auto_profile}, {len(guided.state['res']['faces'])} faces. {gs.auto_why}")
@@ -1341,7 +1349,7 @@ def run_auto_apply_lod_case():
     if not gs.enabled:
         gs.enabled = True
     guided.run_update(bpy.context, force=True)
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     if guided.state["res"] is None or guided.state["auto_base"] is None:
         raise AssertionError(f"auto apply: no result: {guided.status()}")
     if "FINISHED" not in bpy.ops.curiomesh.guided_apply():
@@ -1355,7 +1363,7 @@ def run_auto_apply_lod_case():
     gs.lod0_percent, gs.lod1_percent, gs.lod2_percent = 50.0, 25.0, 12.0
     if "FINISHED" not in bpy.ops.curiomesh.guided_make_lods():
         raise AssertionError("lod: Make LOD Set did not start")
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     lods = [bpy.data.objects.get(profiles.lod_name(ball.name, level)) for level in range(profiles.LOD_LEVELS)]
     if any(obj is None for obj in lods):
         raise AssertionError(f"lod: missing objects {[obj is not None for obj in lods]}: {guided.status()}")
@@ -1518,7 +1526,7 @@ def run_guided_case(module):
     guided.add_point(sphere, (1.0, 0.0, 0.0), (1.0, 0.0, 0.0), "DETAIL", 0.5, 2.0)
     guided.add_point(sphere, (-1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), "CALM", 0.5, 1.0, fill="GRID")
     guided.run_update(bpy.context, force=True)
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     runner = guided.state["work"]["runner"]
     res = guided.state["res"]
     if res is None or not res["new"].any() or runner.warnings:
@@ -1530,7 +1538,7 @@ def run_guided_case(module):
     pieces = len(runner.cache)
     sphere.curiomesh_points[0].strength = 1.0
     guided.run_update(bpy.context, force=True)
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     if len(runner.cache) != pieces + 1:
         raise AssertionError(f"guided: changing one area redid {len(runner.cache) - pieces} pieces")
     print(f"PASS guided areas: {dense} and {coarse} new quads, one area redone on its own")
@@ -1539,7 +1547,7 @@ def run_guided_case(module):
     sphere.curiomesh_points.clear()
     gs.scope = "AUTO"
     guided.run_update(bpy.context, force=True)
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     runner = guided.state["work"]["runner"]
     res = guided.state["res"]
     if res is None or runner.report is None or runner.report["tris"] or res["parts"].shape[0] != len(res["faces"]):
@@ -1565,7 +1573,7 @@ def run_guided_case(module):
     guided.state["auto_base"] = None
     guided.state["source"] = duo.name
     guided.run_update(bpy.context, force=True)
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     if len(segments.seg["parts"]) != 2 or not segments.ready():
         raise AssertionError(f"segments: expected two parts, got {len(segments.seg['parts'])}: {guided.status()}")
     kinds = sorted(r["kind"] for r in segments.seg["parts"])
@@ -1577,7 +1585,7 @@ def run_guided_case(module):
     gs.seg_method = "TRIS"
     if "FINISHED" not in bpy.ops.curiomesh.seg_redo():
         raise AssertionError("segments: redo did not start")
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     record = segments.seg["parts"][target]
     if len(record["tries"]) != 2 or record["method"] != "TRIS" or segments.seg["parts"][other]["after"] != before_other:
         raise AssertionError(f"segments: redo changed the wrong thing: {record['method']} {len(record['tries'])}")
@@ -1585,7 +1593,7 @@ def run_guided_case(module):
         raise AssertionError("segments: the result did not take the redone part")
     if "FINISHED" not in bpy.ops.curiomesh.seg_try(index=0):
         raise AssertionError("segments: could not go back to the first result")
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     if len(guided.state["res"]["faces"]) != first_faces or segments.seg["parts"][target]["method"] == "TRIS":
         raise AssertionError("segments: going back did not restore the first result")
     gs.seg_goal, gs.seg_method, gs.seg_goal_detail = "REDUCE", "PAIRING", 0.35
@@ -1593,7 +1601,7 @@ def run_guided_case(module):
     gs.seg_goal, gs.seg_method, gs.seg_goal_detail = "REDUCE", "PAIRING", 0.35
     if "FINISHED" not in bpy.ops.curiomesh.seg_goal():  # a loose part takes a Use and Detail the same way a segment does
         raise AssertionError("segments: Use on a loose part did not start")
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     if segments.seg["parts"][other]["method"] != "REDUCE" or segments.seg["parts"][other]["tries"][-1].get("choice") != "PAIRING":
         raise AssertionError(f"segments: Use on a loose part: {segments.seg['parts'][other]['method']}: {guided.status()}")
     order = segments.P.worst_first([segments.judged(r) for r in segments.seg["parts"]])
@@ -1633,7 +1641,7 @@ def run_guided_case(module):
     guided.state["auto_base"] = None
     guided.state["source"] = bell.name
     guided.run_update(bpy.context, force=True)
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     goals = segments.segment_goals
     SEG = goals.S
     if segments.seg["src"] is None or len(segments.seg["parts"]) < 2:
@@ -1646,7 +1654,7 @@ def run_guided_case(module):
         gs.seg_goal_detail = 0.5
         if "FINISHED" not in bpy.ops.curiomesh.seg_goal():
             raise AssertionError(f"segments: {use} did not start")
-        guided.finish_work(bpy.context)
+        finish_jobs(guided)
         made = guided.state["auto_base"]["out"]
         record = segments.seg["parts"][0]
         if record["method"] != use or SEG.open_edges(made["faces"]) != start_open:
@@ -1654,7 +1662,7 @@ def run_guided_case(module):
     other = segments.seg["parts"][1]["after"]
     if "FINISHED" not in bpy.ops.curiomesh.seg_try(index=0):
         raise AssertionError("segments: could not go back to the first try")
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     if SEG.open_edges(guided.state["auto_base"]["out"]["faces"]) != start_open or segments.seg["parts"][1]["after"] != other:
         raise AssertionError("segments: going back opened a seam or changed a neighbour")
     centres_src, centres_res = goals._centres()
@@ -1697,7 +1705,7 @@ def run_guided_case(module):
     bpy.context.view_layer.objects.active = sphere
     guided.state["auto_base"] = None
     guided.run_update(bpy.context, force=True)
-    guided.finish_work(bpy.context)
+    finish_jobs(guided)
     runner = guided.state["auto_base"]["job"]
     if not runner.bend_groups or not runner.report or not runner.report.get("bend"):
         raise AssertionError(f"guided: the drawn edge loop was not built: {runner.why} {guided.status()}")
@@ -2141,6 +2149,7 @@ def main():
             "output_mode": "NEW",
             "texture_mode": "NONE",
             "seed": 31,
+            "debug_logs": True,
         },
         min_quad_ratio=1.0,
         require_uv=False,

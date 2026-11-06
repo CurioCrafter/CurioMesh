@@ -21,7 +21,6 @@ import math
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -73,19 +72,19 @@ FINER_TRIANGLES = 200  # pieces smaller than this have too few faces for a size 
 LOCKED_SHARE = 0.2  # vertices held in the first pass, as a share of those the piece ends with
 HELD_SIZE = 1.5  # the first pass stops at this many times the faces asked for
 ROUNDS = 4  # tries at landing on the amount asked for
-ROWS_SMALLEST = 32  # Clean Rows: a piece due fewer quads than this is paired instead
-ROWS_START = 0.04  # Clean Rows: first try, as a share of the source's triangles
-ROWS_MOST = 0.8  # Clean Rows: most faces, as a share of the source's triangles
-ROWS_SECONDS = 30.0  # Clean Rows: QuadriFlow's time limit per piece, plus...
+ROWS_SMALLEST = 32  # Even Rows: a piece due fewer quads than this is paired instead
+ROWS_START = 0.04  # Even Rows: first try, as a share of the source's triangles
+ROWS_MOST = 0.8  # Even Rows: most faces, as a share of the source's triangles
+ROWS_SECONDS = 30.0  # Even Rows: QuadriFlow's time limit per piece, plus...
 ROWS_SECONDS_PER_QUAD = 0.01  # ...this much for each quad asked for
 EVEN_FLAT_UP_TO = 150_000  # faces before pairing: past this, flat areas keep the long triangles reduction left (Python, about 1 s per 10k)
 EVEN_FLAT = FlatQuadOptions(tolerance=0.0002, angle_deg=8.0, refine=True, min_faces=4, min_saving=-3.0)  # points added inside flat areas, so no long thin quads cross them
 FLAT_SNAP_SHARE = 0.015  # Balanced: a face whose new vertices would move less than this share of its size stays whole
-ROWS_TIME = 600.0  # Clean Rows: a denser layout is only asked for if it should finish within this many seconds
-ROWS_SECONDS_ESTIMATE = 0.003  # Clean Rows: rough QuadriFlow time per quad, measured on a 74,000 quad rock
-ROWS_SHARP_INPUT = 6  # Clean Rows: source triangles per quad needed before vertices seek creases
-ROWS_BAD = 0.05  # Clean Rows: a piece where repair leaves more than this many triangles per quad gets paired instead
-ROWS_ROUNDS = 3  # Clean Rows: layouts tried, at most
+ROWS_TIME = 600.0  # Even Rows: a denser layout is only asked for if it should finish within this many seconds
+ROWS_SECONDS_ESTIMATE = 0.003  # Even Rows: rough QuadriFlow time per quad, measured on a 74,000 quad rock
+ROWS_SHARP_INPUT = 6  # Even Rows: source triangles per quad needed before vertices seek creases
+ROWS_BAD = 0.05  # Even Rows: a piece where repair leaves more than this many triangles per quad gets paired instead
+ROWS_ROUNDS = 3  # Even Rows: layouts tried, at most
 CLOSE_ENOUGH = 0.10  # Reduce To: a face count this near the one asked for is a hit
 PAIRED_SHARE = 0.6  # first guess of faces after pairing per face before it, corrected after each try
 TURNED_DEG = 20.0
@@ -131,7 +130,6 @@ def flat_options(flat: float) -> FlatQuadOptions | None:
 PART_PIXELS = 100  # a part showing fewer pixels than this over the six views can't be judged by itself
 REFINE_PIECES = 8
 REFINE_COVER = 0.8  # share of the faces the extra sizes need to cover
-SHOW_EVERY = 1.0  # seconds between preview updates
 USE_CASES = True  # let the table of part cases say which size of a part to look at first
 POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surface more; the camera decides
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
@@ -535,43 +533,6 @@ def _face_distances(tree, queries: np.ndarray) -> np.ndarray:
     return np.fromiter((tree.find_nearest(p)[3] for p in queries.tolist()), dtype=np.float64, count=len(queries))
 
 
-def _blender_tree(context, co: np.ndarray, flat: np.ndarray, sizes: np.ndarray) -> BVHTree | None:
-    """The BVH of a big mesh built inside Blender from arrays, with no Python lists of faces. None if this Blender won't take it."""
-    mesh = obj = None
-    try:
-        starts = np.cumsum(sizes) - sizes
-        counts = sizes - 2  # fan-triangulate like BVHTree.FromPolygons does, so a quad is cut the same way and the pictures match
-        face = np.repeat(np.arange(len(sizes)), counts)
-        local = np.arange(int(counts.sum())) - np.repeat(np.cumsum(counts) - counts, counts)
-        base = starts[face]
-        flat = np.stack((flat[base], flat[base + local + 1], flat[base + local + 2]), axis=1).ravel()
-        sizes = np.full(len(face), 3, dtype=np.int64)
-        mesh = bpy.data.meshes.new("CurioMesh_Tree")
-        mesh.vertices.add(len(co))
-        mesh.vertices.foreach_set("co", np.ascontiguousarray(co, dtype=np.float32).ravel())
-        mesh.loops.add(len(flat))
-        mesh.loops.foreach_set("vertex_index", flat.astype(np.int32))
-        mesh.polygons.add(len(sizes))
-        mesh.polygons.foreach_set("loop_start", (np.cumsum(sizes) - sizes).astype(np.int32))
-        try:
-            mesh.polygons.foreach_set("loop_total", sizes.astype(np.int32))  # read-only from Blender 4.0, where the starts are enough
-        except Exception:
-            pass
-        mesh.update()
-        if len(mesh.polygons) != len(sizes) or mesh.polygons[len(sizes) - 1].loop_total != int(sizes[-1]) or mesh.polygons[0].loop_total != int(sizes[0]):
-            return None
-        obj = bpy.data.objects.new("CurioMesh_Tree", mesh)
-        context.scene.collection.objects.link(obj)
-        return BVHTree.FromObject(obj, context.evaluated_depsgraph_get(), epsilon=0.0)
-    except Exception:
-        return None
-    finally:
-        if obj is not None:
-            bpy.data.objects.remove(obj, do_unlink=True)
-        if mesh is not None:
-            bpy.data.meshes.remove(mesh)
-
-
 def _picture_sizes(sizes: np.ndarray, most_rays: int = MOST_RAYS, max_pixels: int = MAX_PIXELS) -> np.ndarray:
     """Pixels per side for pieces of these sizes (the whole object is 1.0), coarser for a model with very many parts."""
 
@@ -644,7 +605,7 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, helpers: bool = True, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, helpers: bool = False, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
         self.hard = dict(HARD if hard is None else hard)  # Clean Panels and Even Cylinders: more rebuilt sizes per part
         self.redo_rough = bool(redo_rough)  # Redo Rough Spots: regions round the spots still bad after the repairs are made again, finer
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
@@ -774,11 +735,12 @@ class AutoJob:
         self.busy = False
         self._kill_worker()
         self._close_pool()
-        self._search.close()  # runs what cleans up after it, such as the Clean Rows folder
+        self._search.close()  # runs what cleans up after it, such as the Even Rows folder
         self._drop_tmp()
 
     def _drop_tmp(self) -> None:
         if self._tmp is not None:
+            atexit.unregister(self._drop_tmp)
             shutil.rmtree(self._tmp, ignore_errors=True)
             self._tmp = None
 
@@ -795,7 +757,8 @@ class AutoJob:
         if self.chunks:
             if file is None:
                 if self._tmp is None:
-                    self._tmp = Path(tempfile.mkdtemp(prefix="curiomesh_"))
+                    self._tmp = hardware.job_folder("curiomesh_")
+                    atexit.register(self._drop_tmp)  # Blender quit in the middle
                 file = hardware.piece_file(self._tmp, repr(key[2]).encode() + key[1])
             if fresh:
                 hardware.save_piece(file, self.detail, sizes[:-1], pairs[:-1], seen)
@@ -825,6 +788,7 @@ class AutoJob:
             self.busy = False
 
     def wait(self, timeout: float | None = None) -> bool:
+        """Run to the end in one call, for a script in background mode (an exported run_job.py, the tests). The panel never calls it."""
         ends = None if timeout is None else time.perf_counter() + timeout
         while self.busy and (ends is None or time.perf_counter() < ends):
             self.step(1.0)
@@ -833,7 +797,8 @@ class AutoJob:
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
         """Generator: this piece reduced to `ratio` by `_decimate`, which has to run on the main thread."""
         started = time.perf_counter()
-        out = _decimate(self.context, points, polys, kinds, ratio, drop, keep)
+        with tasks.busy_cursor():
+            out = _decimate(self.context, points, polys, kinds, ratio, drop, keep)
         yield from ()
         self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
         return out
@@ -1016,6 +981,7 @@ class AutoJob:
                 turned_levels.append(Level(len(rebuilt[1]) * weight, REBUILD_MARGIN * wrong * pixel * pixel))
                 if wrong <= enough * shown:
                     break
+            yield  # the last try above can end with a long fit: the special shapes start in a slice of their own
             hopeless = HOPELESS * PIECE_LIMIT * self.detail / 100.0
             for family in special.rebuilds(points, polys, max(set(kinds), key=kinds.count)):  # wires, stacks of fins, cloth
                 for out in family:  # most faces first: once one is far off, the smaller ones won't do either
@@ -1186,7 +1152,7 @@ class AutoJob:
         command, env = parallel.helper_command("parallel.worker_main", [])
         env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")  # the child's own copy: each helper's NumPy keeps to one core
         setup = yield from self._off(lambda: parallel.setup_of(self))
-        self._pool = parallel.Pool(command, count, setup, env)
+        self._pool = parallel.Pool(command, count, setup, env, hardware.job_folder("curiomesh_parts_"))
         self._copy_plan = {}
         self.notes.append(f"Parts were measured {count} at a time, in helper processes")
 
@@ -1869,10 +1835,11 @@ class AutoJob:
         return (yield from self._off(lambda: self._splice(points, faces, mats, piece, builds)))
 
     def _inspected(self, points, faces, piece):
-        """Generator: all the numbers for one mesh, the crossing test in slices and the rest as one step."""
+        """Generator: all the numbers for one mesh, the crossing test and the other checks in slices."""
         began = time.perf_counter()
         pairs = yield from checks.crossing_slices(points, faces)
-        out = yield from self._background(lambda: checks.inspect(points, faces, piece, pairs=pairs))
+        self._feed()
+        out = yield from checks.inspect_steps(points, faces, piece, pairs=pairs)
         if self._known is not None:
             out.new_cross, new = repair.new_by_piece(self._known, pairs, points, faces, piece)
             out.crossing[:] = False
@@ -2165,7 +2132,7 @@ class AutoJob:
         """Generator: QuadriFlow on every piece big enough, in a second Blender, snapped to the source. Returns (points, faces, materials)."""
 
         total = float(areas.sum()) or 1.0
-        folder = tempfile.mkdtemp(prefix="curiomesh_rows_")
+        folder = str(hardware.job_folder("curiomesh_rows_"))
 
         def clean_up():  # also run if Blender quits in the middle
             self._kill_worker()
@@ -2280,7 +2247,7 @@ class AutoJob:
         return np.vstack(all_points), all_faces, all_kinds
 
     def _run_rows(self):
-        """Clean Rows: order first. Lands near the amount asked for by the density of the layout, and reports what it got when time or faces run out."""
+        """Even Rows: order first. Lands near the amount asked for by the density of the layout, and reports what it got when time or faces run out."""
         if not self.helpers:
             self.warnings = [ROWS_NEEDS_HELPERS]
             return
@@ -2375,7 +2342,7 @@ class AutoJob:
         try:
             return (yield from tasks.run(work, stopped=lambda: self._stopped))
         except Exception as exc:
-            self.warnings = [f"Clean Rows: {exc}"]
+            self.warnings = [f"Even Rows: {exc}"]
             return None
 
     def _drop_hidden_pieces(self):
@@ -2762,21 +2729,6 @@ class AutoJob:
         tidy = "" if r.get("topology") is None else f"Tidiness: {r['topology']:.0f}/100. "
         text = f"{r['faces']:,} faces, {r['tris']} triangles, {r['pieces']:,} pieces | Camera: {r['loss']:.1f}% of the view differs in shape{' once baked' if r.get('baked') else ''}{shade}. {tidy}{r['seconds']:.0f} s{extra}"
         bad = r.get("check") and r["check"].get("bad")
-        text += f" | {bad:,} bad face{'s' if bad != 1 else ''} (red under Show Bad Faces)" if bad else ""
+        text += f" | {bad:,} bad face{'s' if bad != 1 else ''} (red under Show Bad Faces; after Apply, Fix Selection repairs most of them)" if bad else ""
         return text + (f" | {r['check']['text']}" if r.get("check") else "") + "".join(f" | {n}" for n in r.get("notes", []))
 
-
-def retopo_region(context, co, faces, materials, region, strokes=(), detail: float = 6.0, target_faces: int = 0, nearest=None, loops_per_stroke: int = 3, gap: float = 0.0):
-    """Redo only the faces in `region` (a boolean per face), the rest left exactly as it is, and run it to the end.
-
-    `strokes` are drawn edge loops and flow lines, polylines in the mesh's own space; each becomes continuous edge
-    loops with rows of regular quads beside them (see loops.py). `nearest(p)` gives (closest surface point, normal). Returns the finished job: `.output` has co, faces, new
-    (True for the redone faces), `.report` the numbers, `.seam` how many outline vertices of the region joined the rest.
-    """
-    mine, rest = loops.split_region(co, faces, materials, region)
-    strips = None
-    if len(strokes):
-        strips = ([(np.asarray(line, dtype=np.float64), loops_per_stroke, "LOOP") for line in strokes], gap, nearest)
-    job = AutoJob(context, mine[0], mine[1], mine[2], detail, target_faces, project=(lambda p: nearest(p)[0]) if nearest else None, strips=strips, outside=rest)
-    job.wait()
-    return job

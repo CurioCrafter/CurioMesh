@@ -10,7 +10,6 @@ tagline = "Quad retopology for scans and game assets"
 maintainer = "CurioCrafter"
 type = "add-on"
 
-website = "https://github.com/CurioCrafter/CurioMesh"
 tags = ["Mesh"]
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
@@ -20,4 +19,4 @@ copyright = [
 ]
 
 [permissions]
-files = "Export and import jobs, results and fix libraries"
+files = "Import and export meshes, bakes, jobs, results and reports"

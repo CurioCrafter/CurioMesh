@@ -17,8 +17,6 @@ class LadderTest(unittest.TestCase):
         self.assertAlmostEqual(L.size_detail(6.0, 1.0), 24.0)
         values = [L.size_detail(6.0, s / 10) for s in range(11)]
         self.assertEqual(values, sorted(values))
-        for s in (0.0, 0.2, 0.5, 0.9, 1.0):
-            self.assertAlmostEqual(L.size_of(6.0, L.size_detail(6.0, s)), s)
 
     def test_plan_covers_every_rung_once_coarse_first(self):
         order = L.plan(6.0, "DETAIL")

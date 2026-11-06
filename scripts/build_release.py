@@ -190,6 +190,9 @@ BANNED_CODE = (
     (r"(?m)^if __name__ == .__main__.:", "test or debug entry points"),
     (r"urllib\.request|http\.client|\bsocket\.|\brequests\.(get|post)\b", "network use"),
     (r"Star on GitHub|star helps", "promotional prompts"),
+    (r"Clean Rows|WreckQuad|\bbl_info\b|bench/", "old names and repository-only paths"),
+    (r"(?i)\bpro\b", "a 'Pro' tab or tier"),
+    (r"tempfile\.mkdtemp\((?![^)]*dir=)", "job folders in system temp (use hardware.job_folder)"),
     (r"(?i)soft ?wrap|quad ?remesher|retopo ?flow|hard ?ops|box ?cutter|zremesher", "names of other add-ons"),
     (r"(?<![\w.])(eval|exec)\(", "eval / exec"),
     (r"[\"'](bl_ext|user_default|blender_org|user_repository)\b", "hard-coded repository names"),
@@ -197,7 +200,7 @@ BANNED_CODE = (
     (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
     (r"__pycache__|\.pyc\b", "bytecode"),
 )
-BANNED_TEXT = ("CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
+BANNED_TEXT = ("Clean Rows", "WreckQuad", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
 LISTING_NOTICES = """# Third-party notices (extensions.blender.org build)
 
 CurioMesh is GPL-3.0-or-later. This build is Python only and contains no compiled code.
@@ -336,6 +339,25 @@ def verify_archive(path: Path, *, prefix: str, series: str | None = None, listin
         raise ValueError(f"Archive filename must be {expected_name!r}, got {path.name!r}")
 
 
+def unused_names(sources: dict[str, str]) -> list[str]:
+    """Top-level functions, classes and constants whose name appears only once in all the code: nothing uses them."""
+    counts: dict[str, int] = {}
+    for text in sources.values():
+        for word in re.findall(r"\w+", text):
+            counts[word] = counts.get(word, 0) + 1
+    found = []
+    for name, text in sources.items():
+        for node in ast.parse(text).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                names = [t.id for t in (node.targets if isinstance(node, ast.Assign) else [node.target]) if isinstance(t, ast.Name)]
+            else:
+                continue
+            found += [f"{name}:{node.lineno}: {n} is never used" for n in names if counts.get(n, 0) <= 1 and not n.startswith("__") and n not in ("register", "unregister")]
+    return found
+
+
 def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
     """What extensions.blender.org's review asks of the zip: only Python and CC0 assets, none of the banned code patterns."""
     problems = []
@@ -363,6 +385,7 @@ def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
                 problems.append(f"{folder or '.'}: images without a CC0 note ({note})")
         if re.search(r"(?m)^bl_info\s*=", archive.read("__init__.py").decode("utf-8")):
             problems.append("__init__.py: bl_info (the manifest replaces it)")
+        problems += unused_names({e: archive.read(e).decode("utf-8") for e in entries if e.endswith(".py")})
     tagline = manifest.get("tagline", "")
     if len(tagline) > 64 or tagline.endswith((".", "!", "?")):
         problems.append(f"manifest tagline: at most 64 characters, no ending punctuation: {tagline!r}")

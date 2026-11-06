@@ -61,7 +61,6 @@ FINAL_SWEEPS = 16
 FINEST_SWEEPS = 6
 CONFORMAL = 1.0
 MOST_LOG = 0.5
-CAMERA_PULL = 1.0
 MOST_FIT = 0.75  # share of a cell a vertex may move while fitting
 SQUARE_ENOUGH = 0.6  # cosine of the worst corner a first-round pair may have
 FIT_STRONG = 0.05  # a plane direction counts if this strong against the strongest: flat moves only along the normal

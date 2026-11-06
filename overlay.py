@@ -46,7 +46,7 @@ PREF_DEFAULTS = {
     "show_debug": True,
     "show_regions": True,
     "show_guided": True,
-    "pro_mode": False,
+    "advanced_mode": False,
     "flow_editor": False,
     "allow_helpers": False,
     "hud_default": True,
@@ -71,7 +71,6 @@ PREF_DEFAULTS = {
     "guided_lock_color": (0.3, 0.5, 1.0, 0.4),
 }
 _DEFAULT_PREFS = SimpleNamespace(**PREF_DEFAULTS)
-_prefs_override = None  # tests may point this at any object with the PREF_DEFAULTS attributes
 
 _draw_handles: list = []
 _stats_cache: dict[str, "_CacheEntry"] = {}
@@ -174,8 +173,6 @@ def invalidate(name: str | None = None) -> None:
 
 def get_prefs():
     """The add-on preferences, or the built-in defaults when the add-on is not enabled."""
-    if _prefs_override is not None:
-        return _prefs_override
     try:
         addon = bpy.context.preferences.addons.get(__package__)
         if addon is not None and addon.preferences is not None:

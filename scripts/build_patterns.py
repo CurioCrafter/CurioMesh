@@ -21,6 +21,7 @@ sys.path.insert(0, ROOT)
 from triadq import patterns  # noqa: E402
 
 MIN_QUADS = 16
+MOST_CODES = 64  # kept per class in the data file
 MESH_WEIGHT = 2000  # quads a mesh may count for, so one big body doesn't outvote many small parts
 FEATURES = ("valence", "poles", "interior_poles", "skew", "slanted", "aspect", "flow", "short_loops", "size_jump")
 # Proven hand-made work only. Poly Haven props stay out: nobody knows if a remesher made them.
@@ -111,7 +112,7 @@ def combine(rows: list[dict]) -> dict:
         scale = min(row["quads"], MESH_WEIGHT) / max(row["quads"], 1)
         for code, count in row["codes"].items():
             pooled[str(code)] = pooled.get(str(code), 0.0) + count * scale
-    top = sorted(pooled.items(), key=lambda kv: -kv[1])[: patterns.MOST_CODES]
+    top = sorted(pooled.items(), key=lambda kv: -kv[1])[:MOST_CODES]
     out["codes"] = {code: max(int(round(count)), 1) for code, count in top}
     out["code_cost"] = round(float(np.median([patterns.code_cost(r, out) for r in rows])), 3)
     return out

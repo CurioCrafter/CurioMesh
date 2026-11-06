@@ -36,7 +36,7 @@ if "--effort" in args:
     job["effort"] = args[args.index("--effort") + 1].upper()
 
 # CurioMesh must be installed in this Blender (it need not be switched on): find it and switch it on for this run.
-found = [m.__name__ for m in addon_utils.modules() if m.__name__.rpartition(".")[2].lower() == "curiomesh" or getattr(m, "bl_info", {}).get("name") == "CurioMesh"]
+found = [m.__name__ for m in addon_utils.modules() if m.__name__.rpartition(".")[2].lower() == "curiomesh"]
 if not found:
     raise SystemExit("CurioMesh is not installed in this Blender: install the add-on first, then run this again")
 addon_utils.enable(found[0], default_set=False)
@@ -63,6 +63,7 @@ print(f"Working at {settings.name}: {len(faces):,} faces", flush=True)
 runner = autoretopo.AutoJob(
     bpy.context, data["co"], faces, data["mat"], job["detail"], job["target_faces"], mirror=mirror, guide_lines=lines, project=project, drop=drop,
     settings=settings, checkpoint=hardware.checkpoint_dir(data["co"], len(faces), str(HERE)), keep_progress=True, parallel=True,
+    helpers=True,  # you started this script yourself, outside your working Blender: helper Blenders may run here
 )
 while runner.busy:
     runner.wait(10.0)
@@ -98,7 +99,7 @@ Good to know
   - The job uses the same engine as the button in Blender, so the result is the same kind of result.
   - Mirror, guide curves and painted density are carried in the folder (mesh.npz, guides.npz, job.json).
   - Today the work runs on the CPU. A machine with many CPU cores and plenty of memory finishes soonest; a graphics
-    card does not speed it up yet. See docs/CLOUD_WORKFLOW.md in the CurioMesh repository.
+    card does not speed it up yet.
   - Keep the mesh private if it is private: nothing in this folder sends anything anywhere.
   - run_job.py is a Python program. Only run a job folder you exported yourself or got from someone you trust,
     the same as any script. Importing a result.npz back runs nothing.

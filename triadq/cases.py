@@ -5,7 +5,7 @@
 
 Idea from cav3dw3ll3r (https://github.com/cav3dw3ll3r). A few cheap measurements put a piece in one of a small set of
 named cases. `cases_table.json` holds what the camera saw on parts of those cases on other models (rebuild it with
-`scripts/build_case_table.py`), so the loss at each size can be guessed before looking. The guess only decides what to
+`scripts/build_case_table.py` in the CurioMesh source repository), so the loss at each size can be guessed before looking. The guess only decides what to
 look at first and what to skip. The camera still measures every size that gets picked and the whole result. Pure NumPy.
 """
 
@@ -17,7 +17,6 @@ import os
 
 import numpy as np
 
-CASES = ("tiny part", "flat plate", "thin sheet", "box", "tube", "dome", "rough scan", "ornament", "organic smooth")
 FLAT_DEG = 1.0  # an edge bent less than this is flat
 SHARP_DEG = 30.0  # and more than this is a hard edge
 BEND_BINS = (0.0, 1.0, 5.0, 15.0, 30.0, 60.0, 180.0)  # the curvature histogram: edge length per bend angle in degrees

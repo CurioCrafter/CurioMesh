@@ -66,7 +66,7 @@ def area_masks(centroids: np.ndarray, areas: list[Area], groups: list[list[int]]
 
 
 class AreaRunner:
-    """Runs one plan of jobs, to its end, each time `start` is called.
+    """Runs one plan of jobs, to its end, each time `start` is called. Synchronous: `start` returns when the plan is done.
 
     `fit(result)` settles a finished piece on the surface; `merge(results)` builds what `output` shows;
     `finish(output)` runs once the whole plan is done.
@@ -87,8 +87,7 @@ class AreaRunner:
         self._plan_id = 0
         self._stopped = False
         self._topology = None
-
-    busy = False  # `start` runs the whole plan before it returns; the other runners answer the same questions
+        self.busy = False  # never True: `start` finishes the whole plan before it returns
 
     def start(self, jobs: list[Job]) -> None:
         self._plan_id += 1
@@ -104,9 +103,6 @@ class AreaRunner:
     def stop(self) -> None:
         self._stopped = True
         self._plan_id += 1
-
-    def wait(self, timeout: float | None = None) -> bool:
-        return True
 
     def _stale(self, plan_id: int) -> bool:
         return self._stopped or plan_id != self._plan_id

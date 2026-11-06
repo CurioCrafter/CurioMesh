@@ -3,6 +3,7 @@
 
 import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -59,7 +60,7 @@ class PoolTests(unittest.TestCase):
     def test_parts_come_back_out_of_order_failures_are_reported_and_close_kills_every_helper(self):
         code = Path(__file__).resolve().parents[1]
         env = dict(os.environ, PYTHONPATH=str(code))  # the stand-in is plain Python; real helpers enable the add-on instead
-        pool = parallel.Pool([sys.executable, "-c", FAKE], 2, {"anything": 1}, env)
+        pool = parallel.Pool([sys.executable, "-c", FAKE], 2, {"anything": 1}, env, tempfile.mkdtemp())
         try:
             todo, got = [0, 1, 2, 3, 4, 5, 6], {}
             ends = time.perf_counter() + 30.0

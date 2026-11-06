@@ -284,7 +284,7 @@ class CURIOMESH_OT_seg_paint_size(bpy.types.Operator):
         context.view_layer.objects.active = source
         if source.mode != "WEIGHT_PAINT":
             bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
-        try:  # a full red brush; the setting moved between versions
+        try:  # a full red brush; Blender 5.0 keeps unified settings per paint mode, without this one
             paint = context.tool_settings.unified_paint_settings
             paint.use_unified_weight = True
             paint.weight = 1.0

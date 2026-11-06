@@ -42,7 +42,7 @@ class AreaTests(unittest.TestCase):
         runner = areas.AreaRunner(vertices, faces)
         self.addCleanup(runner.stop)
         runner.start(_jobs(cent, [dense, coarse]))
-        self.assertTrue(runner.wait(120))
+        self.assertFalse(runner.busy)
         first = {r.quads: r for r in runner.output}
         self.assertEqual(len(first), 2)
         self.assertGreater(max(first), 2 * min(first))
@@ -59,7 +59,7 @@ class AreaTests(unittest.TestCase):
         kept = next(r for r in runner.output if r.quads == min(first))
         dense.target = 0.03
         runner.start(_jobs(cent, [dense, coarse]))
-        self.assertTrue(runner.wait(120))
+        self.assertFalse(runner.busy)
         self.assertIs(next(r for r in runner.output if r.removed_faces.tobytes() == kept.removed_faces.tobytes()), kept)
         self.assertEqual(len(runner.cache), 3)
 
@@ -70,7 +70,7 @@ class AreaTests(unittest.TestCase):
         self.addCleanup(runner.stop)
         runner.start(_jobs(cent, [areas.Area(np.array([0.5, 0.5, 0.0]), 0.3, 0.01)]))
         runner.start([])
-        self.assertTrue(runner.wait(120))
+        self.assertFalse(runner.busy)
         self.assertEqual(runner.output, [])
 
 

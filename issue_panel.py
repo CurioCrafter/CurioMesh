@@ -19,7 +19,6 @@ from mathutils import Vector
 from . import overlay
 from .triadq import issues
 
-LISTED = 8  # spots shown in the panel; Next Issue walks through all of them
 SPOT_COLOUR = (1.0, 0.45, 0.0, 0.6)
 CURRENT_COLOUR = (1.0, 1.0, 0.0, 0.95)
 KIND_WORDS = {
@@ -320,7 +319,7 @@ class CURIOMESH_OT_issue_compare(_IssueOp, bpy.types.Operator, ImportHelper):
 
 
 def draw_reports(layout) -> None:
-    """Save the spot list and compare a later run with it (Pro > Issue Reports)."""
+    """Save the spot list and compare a later run with it (Advanced > Issue Reports)."""
     found = spots()
     res = _g().state["res"]
     if res is None or res.get("issues") is None:

@@ -194,13 +194,26 @@ def folded_quads(co, faces) -> np.ndarray:
 
 def inspect(co, faces, piece, pairs=...) -> Inspect:
     """All the numbers for one mesh. `piece` gives each face's piece. `pairs` defaults to a BVH test (Blender only)."""
+    steps = inspect_steps(co, faces, piece, pairs)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+def inspect_steps(co, faces, piece, pairs=...):
+    """Generator: `inspect` with a yield between its parts, so a job's timer can end its slice there. Returns the Inspect."""
     faces = [tuple(f) for f in faces]
     piece = np.asarray(piece, dtype=np.int64)
     broken, nm, flipped, dups = edge_flags(faces)
+    yield
     holes, holes_by = hole_counts(faces, piece)
     folded = folded_quads(co, faces)
     broken = np.asarray(broken, dtype=bool) | folded  # a folded quad is a new problem like a flipped one: its part goes a size up
+    yield
     summary = topology_summary(MeshData(co, faces))
+    yield
     if pairs is ...:
         pairs = crossing_pairs(co, faces)
     crossing = np.zeros(len(faces), bool)

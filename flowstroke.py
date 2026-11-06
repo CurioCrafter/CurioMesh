@@ -158,13 +158,6 @@ def ellipse(centre, normal, right, rx: float, ry: float, count: int = 48) -> np.
     return np.vstack((out, out[:1]))
 
 
-SHAPES = {
-    "EYE": "Eye Ring",
-    "MOUTH": "Mouth Ring",
-    "NOSE_MOUTH": "Nose-to-Mouth Loops",
-}
-
-
 def template(shape: str, centre, normal, right, size: float) -> list[tuple[str, np.ndarray]]:
     """[(kind, line)] for a clicked shape `size` wide: an eye ring (an almond, wider than tall), a mouth ring, or the two
     lines from beside the nose wings round the mouth corners to below the lip (click the middle of the mouth)."""

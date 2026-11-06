@@ -139,7 +139,7 @@ def draw(cls, label):
 
 
 def snapshot(panel, label, out):
-    """Draw the main tab as a user sees it at the default open state, then every popover and Pro panel on its own."""
+    """Draw the main tab as a user sees it at the default open state, then every popover and Advanced panel on its own."""
     main_total, lines = 0, []
     for cls in panel.MAIN_PANELS:
         if not cls.poll(bpy.context):
@@ -159,7 +159,7 @@ def snapshot(panel, label, out):
         extra.append(f"{cls.bl_label} {controls(draw(cls, label))}")
     out.append(f"### {label}: {main_total} controls in the main tab\n")
     out += lines
-    out.append(f"\nPopovers and Pro panels (controls when opened): {', '.join(extra)}\n")
+    out.append(f"\nPopovers and Advanced panels (controls when opened): {', '.join(extra)}\n")
     print(f"STATE {label}: main tab {main_total} controls", flush=True)
     if main_total > BUDGET[label]:
         raise AssertionError(f"{label}: {main_total} controls in the main tab, budget {BUDGET[label]}")
@@ -173,7 +173,7 @@ def main():
     addons = bpy.context.preferences.addons
     entry = addons.get("curiomesh") or addons.new()
     entry.module = "curiomesh"
-    overlay.get_prefs().pro_mode = True
+    overlay.get_prefs().advanced_mode = True
     out = ["# Recorded panel layout per state\n", "Drawn headless by tests/blender_panel_states.py against a recording layout.\n"]
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()

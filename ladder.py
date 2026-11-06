@@ -3,7 +3,7 @@
 
 """Quad Size and Organization: two sliders over a ladder of finished results.
 
-When Auto Segments is done, the same search runs again in the background at other Details (a "rung" each) and Styles,
+When Auto Segments is done, the same search runs again in timer slices at other Details (a "rung" each) and Styles,
 reusing what it measured, so most rungs take seconds. Each rung is a whole result that lands on its own amount of
 change, with faces where the camera sees detail missing. Moving a slider puts the nearest ready rung on screen at once;
 in between two Styles the loose pieces change over one at a time (`triadq.ladder.switched`). Bigger and Smaller Quads
@@ -26,8 +26,8 @@ from .triadq import ladder as L
 from .triadq import parts as P
 
 MOST_FACES = 400_000  # faces of your mesh: past this each rung is a long search, so there is no ladder
-ROWS_MOST = 100_000  # Clean Rows rungs only up to here: one took over three minutes on a 17,000 face bust
-SLOW = 120.0  # seconds: a search slower than this gets only the sizes next to its own, and no Clean Rows (a 79,000 triangle machine took about 6 minutes a rung)
+ROWS_MOST = 100_000  # Even Rows rungs only up to here: one took over three minutes on a 17,000 face bust
+SLOW = 120.0  # seconds: a search slower than this gets only the sizes next to its own, and no Even Rows (a 79,000 triangle machine took about 6 minutes a rung)
 SLICE, GAP, WAIT = 0.03, 0.02, 0.25  # seconds of work per tick, between ticks, and between looks while a job of yours runs
 THROTTLE = 0.1  # while you drag a slider the preview changes at most this often
 SETTLE = 0.4  # seconds after the last move: then the segments of the result are found (and a blend is looked at)

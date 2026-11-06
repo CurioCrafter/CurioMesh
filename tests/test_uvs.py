@@ -68,7 +68,7 @@ class SeeThroughTests(unittest.TestCase):
     def test_glass_is_kept_out_of_the_bake(self):
         glass = SimpleNamespace(type="BSDF_GLASS", inputs={})
         faded = SimpleNamespace(type="BSDF_PRINCIPLED", inputs={"Alpha": _plug(0.4)})
-        clear = SimpleNamespace(type="BSDF_PRINCIPLED", inputs={"Transmission": _plug(1.0)})
+        clear = SimpleNamespace(type="BSDF_PRINCIPLED", inputs={"Transmission Weight": _plug(1.0)})
         for node in (glass, faded, clear):
             self.assertTrue(is_see_through(_material(node)))
         self.assertTrue(is_see_through(_material(blend_method="BLEND")))

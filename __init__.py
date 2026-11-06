@@ -96,10 +96,10 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     show_debug: bpy.props.BoolProperty(name="Debug", description="Show the panel with extra switches for finding problems", default=True)
     show_regions: bpy.props.BoolProperty(name="Regions", description="Show the Regions panel", default=True)
     show_guided: bpy.props.BoolProperty(name="Guided", description="Show the main CurioMesh panel", default=True)
-    pro_mode: bpy.props.BoolProperty(
-        name="Pro Tab",
-        description="Shows the CurioMesh Pro tab: every setting and the classic tools. You never need it for a good result",
-        default=D["pro_mode"],
+    advanced_mode: bpy.props.BoolProperty(
+        name="Advanced Tab",
+        description="Shows the CurioMesh Advanced tab: every setting and the classic tools. You never need it for a good result",
+        default=D["advanced_mode"],
     )
     flow_editor: bpy.props.BoolProperty(
         name="Flow Editor (Experimental)",
@@ -202,7 +202,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         col = box.column()
         col.prop(self, "panel_tab")
         col.prop(self, "compact_mode")
-        col.prop(self, "pro_mode")
+        col.prop(self, "advanced_mode")
         col.prop(self, "flow_editor")
         shown = box.column()
         shown.use_property_split = False
