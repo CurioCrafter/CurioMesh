@@ -2163,7 +2163,7 @@ class AutoJob:
                 bad_before = int(bad.sum())
             if not bad.any():
                 break
-            spots = issues.find_spots(points, faces, {k: getattr(found, k) for k in checks.Defects.KINDS}, piece, REDO_SPOTS)
+            spots = issues.find_spots(points, faces, {k: getattr(found, k) for k in checks.Defects.BROKEN}, piece, REDO_SPOTS)
             rings = REDO_RINGS + round_index
             moved, regions = yield from self._background(lambda: self._redo_spots(points, faces, piece, spots, rings, until))
             if not regions:

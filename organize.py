@@ -157,7 +157,7 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece) -> None:
             if mirror is not None:  # the half was checked: its mirror has the same faces
                 masks = {k: np.concatenate((m[kept], m[kept])) for k, m in masks.items()}
             spots, record = issues.analyse(np.asarray(full_co), full_faces, masks, whole.get("piece"), {"source_faces": len(src_faces)})
-            whole.update(issue_spots=spots, issues=record, bad=np.any(list(masks.values()), axis=0))
+            whole.update(issue_spots=spots, issues=record, bad=np.any([masks[k] for k in checks.Defects.BROKEN], axis=0))
             return {"view": 100.0 * wrong / max(shown, 1), "tidy": score, "poles": O.poles(full_co, full_faces), "faces": len(full_faces), "issues": dict(record["totals"])}
 
         box["stage"] = "Measuring the result as it is"
