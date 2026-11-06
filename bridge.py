@@ -497,8 +497,8 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     )
     result, report = triad_remesh_mesh(source, options)
     if not report.success or not result.faces:
-        _log(config, f"TRIAD-Q Lite failed: {report.message}")
-        _solver_errors.append(f"TRIAD-Q Lite: {report.message}"[:300])
+        _log(config, f"TRIAD-Q failed: {report.message}")
+        _solver_errors.append(f"TRIAD-Q: {report.message}"[:300])
         return False
     _apply_meshdata_to_object(obj, result)
     obj["curiomesh_triadq_mode"] = report.mode
@@ -510,7 +510,7 @@ def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     _log(
         config,
         (
-            f"TRIAD-Q Lite: mode={report.mode} seed={report.selected_seed} "
+            f"TRIAD-Q: mode={report.mode} seed={report.selected_seed} "
             f"faces={report.output_faces} quad_ratio={report.quad_ratio:.3f} "
             f"vertex_fan_splits={report.vertex_fan_splits} "
             f"rescued_pairs={report.rescued_pairs}"

@@ -66,7 +66,7 @@ def read_obj(path: str | Path) -> MeshData:
 def write_obj(mesh: MeshData, path: str | Path) -> None:
     dst = Path(path)
     lines: list[str] = [
-        "# CurioMesh TRIAD-Q Lite OBJ",
+        "# CurioMesh TRIAD-Q OBJ",
         f"o {mesh.name or 'triadq_mesh'}",
     ]
     for vertex in mesh.vertices:
