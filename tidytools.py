@@ -234,6 +234,7 @@ class CURIOMESH_OT_tool_hard_edges(_Tool, bpy.types.Operator):
 
     def execute(self, context):
         self._set(context, self.degrees)
+        tidylive._remember(context, self.bl_idname, "Hard Edges", f"angle {self.degrees:.0f} degrees", {})
         return {"FINISHED"}
 
 
