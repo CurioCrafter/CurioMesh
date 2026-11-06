@@ -270,6 +270,21 @@ for key in WANTED:
     redo(can, one + 1)
     ok(np.allclose(res_co(), again), f"{name}: and the Again")
 
+# --- the first-run button: Source Relax on the roughest part
+if "source" in WANTED:
+    seg = importlib.import_module(pkg.__name__ + ".segments").seg
+    before, was = res_co(), step()
+    r = bpy.ops.curiomesh.tool_source_relax("EXEC_DEFAULT", first=True)
+    part = seg.get("sel")
+    ok(r == {"FINISHED"} and step() == was + 1 and bool(part), f"Even out the roughest patch: one step on part {part} ({r})")
+    if part and seg.get("piece") is not None:
+        outside = np.ones(len(before), dtype=bool)
+        for f, p in zip(guided.state["res"]["faces"], seg["piece"]):
+            if int(p) in part:
+                outside[list(f)] = False
+        ok(np.allclose(res_co()[outside], before[outside]), "Even out the roughest patch: nothing outside that part moved")
+    H.settings().tool_scope = "WHOLE"
+
 # --- nothing selected, then a tiny mesh
 print("INFO nothing selected", flush=True)
 H.settings().tool_scope = "SELECTION"  # fetched again: an undo reloads the scene, so older handles to it are gone
