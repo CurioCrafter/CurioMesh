@@ -28,14 +28,12 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             name: linux-x64
+          # One universal app for every Mac (Apple silicon and Intel), built on one machine: GitHub's Macs are scarce,
+          # and a second Mac job doubled the chance of a release waiting on one.
           - os: macos-15
             target: aarch64-apple-darwin
-            name: macos-apple-silicon
-          # Built on Apple Silicon, so not run in CI.
-          - os: macos-15
-            target: x86_64-apple-darwin
-            name: macos-intel
-            cross: true
+            also: x86_64-apple-darwin
+            name: macos-universal
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -45,15 +43,24 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }}${{ matrix.also && format(',{0}', matrix.also) || '' }}
       - name: Linux libraries for the window and dialogs
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
       - name: Tests
-        if: ${{ !matrix.cross }}
         run: cargo test --release --manifest-path standalone/Cargo.toml --target ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --manifest-path standalone/Cargo.toml --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          cargo build --release --manifest-path standalone/Cargo.toml --target ${{ matrix.target }}
+          if [ -n "${{ matrix.also }}" ]; then
+            cargo build --release --manifest-path standalone/Cargo.toml --target ${{ matrix.also }}
+            mkdir -p standalone/target/universal/release
+            for bin in curiomesh curiomesh-gui; do
+              lipo -create -output "standalone/target/universal/release/$bin"                 "standalone/target/${{ matrix.target }}/release/$bin" "standalone/target/${{ matrix.also }}/release/$bin"
+              lipo -info "standalone/target/universal/release/$bin"
+            done
+          fi
       - name: Package
         shell: bash
         run: |
@@ -61,8 +68,10 @@ jobs:
           case "$GITHUB_REF" in refs/tags/*) ;; *) version="dev-${GITHUB_SHA::7}";; esac
           dir="CurioMesh-${version}-${{ matrix.name }}"
           mkdir -p "dist/$dir"
+          built="standalone/target/${{ matrix.target }}/release"
+          if [ -n "${{ matrix.also }}" ]; then built="standalone/target/universal/release"; fi
           for bin in curiomesh curiomesh-gui; do
-            cp "standalone/target/${{ matrix.target }}/release/$bin${{ matrix.exe }}" "dist/$dir/"
+            cp "$built/$bin${{ matrix.exe }}" "dist/$dir/"
           done
           cp standalone/README.md "dist/$dir/README.md"
           cp LICENSE "dist/$dir/LICENSE.txt"

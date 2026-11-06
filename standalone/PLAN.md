@@ -214,3 +214,13 @@ Three ideas the add-on can't afford inside Blender, each measured on the bench m
   scale, while small parts cover only a few pixels at the whole view's pixel size, so their camera numbers are coarse.
   This is also likely why the standalone loses less view than the add-on at the add-on's own face counts. Worth
   trying in the add-on: one global reduction order instead of sizes per part.
+
+### Tidy Up (0.9.8's Organize) tried, not shipped (2026-11-06)
+
+`organize.settle` was ported (plain smoothing and loop straightening, all its guards: pinned hard edges and borders,
+no flipped, folded or caved-in quads, held on the source, at most half an edge length of drift) and run after the pole
+spinning. Game Asset at strength 0, 0.5 and 1: chess set squareness 0.741 -> 0.744 with the view change 6.06% -> 6.78%,
+drill press and hydrant within 0.004 squareness and 0.2 points, irregular corners unchanged on all three. Settling
+moves corners but doesn't change which corners are poles; the add-on's measured Organize gains come from
+`ChordReducer.redraw_all`, which redraws the patches round poles as plain grids. That redraw (chords.py, about 800
+lines) is the piece to port for a Tidy Up that pays off.
