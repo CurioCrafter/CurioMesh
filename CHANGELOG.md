@@ -20,8 +20,11 @@
 - **Fix Every Strip**: straightens every wiggly strip of the result and evens out the uneven ones in one step. Places
   where the surface bends stay, and it keeps only as much of the change as costs at most 1 point of the camera check;
   on the marble bust after Tidy Up, Loop Quality 29 -> 33 for 0.8 points.
-- **Ring Round This**: press on the middle of an eye, mouth or hole and drag out to its edge; the quads there are
-  redone as closed rings round it (the Flow Editor's Ring, over a narrower area than a drawn Ring).
+- **Ring Round This** builds the rings itself now, without the Flow Editor: click an eye, a mouth or a hole (its rim
+  is read off your mesh) or drag from its middle out to its edge, then move out to set how far the new faces reach
+  (drawn as two ovals) and click. The opening is filled with a small grid of quads, 2 to 4 closed rings go round it,
+  and one band joins them to the faces round it with matching edge counts: all quads, and the band's few poles (6 at
+  most) sit where the old border turns. Faces past the reach are never touched, so an eye no longer takes the nose.
 
 ## 0.9.8 - 2026-11-06
 

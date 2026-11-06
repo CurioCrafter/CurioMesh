@@ -20,6 +20,7 @@ from . import autoretopo, icons, overlay, region, segments
 from . import organize as ORG
 from .triadq import loopscore
 from .triadq import organize as O
+from .triadq import rings as RG
 from .triadq import strips as S
 from .triadq.patterns import Topology
 
@@ -28,7 +29,7 @@ UNEVEN = 0.15  # Fix This evens out a strip whose width varies more than this
 SHORT = 3  # quads: Fix This takes away an open strip this short (a dead end between two poles)
 VIEW_COST = 1.0  # points of view change Fix Every Strip may spend
 SHARP_DEG = 60.0  # an edge folding more than this holds its vertices: Tidy Up's 35 held 40% of a coarse bust's face
-RING_REACH = 2.5  # quad widths round a ring that are redone: the Flow Editor's 6 took the nose with an eye on a coarse result
+RING_VIEW = 3.0  # points of view change Ring Round This may spend
 POLE_PIXELS = 14  # how near the mouse has to be to a pole dot to drag it
 DRAG_PIXELS = 250.0  # mouse travel that slides a strip a whole quad over
 SEL_COLOUR = (1.0, 0.55, 0.1, 0.4)
@@ -48,7 +49,8 @@ fl = {
     "hist": {},  # strip_step -> (result, selected element)
     "batch": None,
     "note": "",
-    "look": None,  # (source signature, its pictures, centre, reach) for the camera check  # the last Fix Every Strip's Loop Quality change
+    "look": None,  # (source signature, its pictures, centre, reach) for the camera check
+    "ring_show": None,  # (centre, u, v, [(width, height), ...]): ovals drawn while Ring Round This is dragged
 }
 
 
@@ -59,7 +61,7 @@ def _g():
 
 
 def cancel() -> None:
-    fl.update(res=None, strips=None, tree=None, stay=None, go=None, walks={}, hover=None, sel=None, live=None, base=None, hist={}, batch=None, note="")
+    fl.update(res=None, strips=None, tree=None, stay=None, go=None, walks={}, hover=None, sel=None, live=None, base=None, hist={}, batch=None, note="", ring_show=None)
 
 
 def _cache(res) -> None:
@@ -509,78 +511,152 @@ class CURIOMESH_OT_strip_pick(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
 
-def ring(context, centre, normal, right, rx: float, ry: float) -> bool:
-    """Closed rings of strips round `centre` (a point on the result): an oval `rx` by `ry` laid on your mesh and handed
-    to the Flow Editor as a Ring, which redoes the quads round it."""
-    from . import flowedit
-    from . import flowstroke as F
+def opening(res, centre, right, rx=None, ry=None):
+    """(normal, width, height, quad width) of the opening at `centre` on the result: the given oval, else the one read
+    off the source there, else one 3 quads wide and 2 high."""
+    h = RG.quad_size(res["co"], res["faces"], centre, 0.05 * float(np.linalg.norm(np.ptp(np.asarray(res["co"]), axis=0))))
+    n = RG.facing(res["co"], res["faces"], centre, 3.0 * h)
+    if rx is None or ry is None or max(rx, ry) <= 0.0:
+        source = _g().state_source()
+        src = None if source is None else _g()._source_data(source)
+        found = None if src is None else RG.find_rim(src["co"], src["tris"], centre, n, right, h)
+        rx, ry = found or (1.5 * h, 1.0 * h)
+    return n, float(rx), float(ry), h
 
-    source = _g().state_source()
-    if source is None:
-        return False
-    context.scene.curiomesh_guided.flow_live = True
-    n = np.asarray(normal, dtype=np.float64)
-    r = np.asarray(right, dtype=np.float64)
-    r = r - (r @ n) * n
-    line = F.ellipse(np.asarray(centre, dtype=np.float64), n, r / max(float(np.linalg.norm(r)), 1e-30), rx, ry, 48)
-    obj = flowedit.add_stroke(context, source, "RING", flowedit._nearest_surface(source)(line))
-    obj[flowedit.REACH_KEY] = RING_REACH
-    return flowedit.request(context)
+
+def ring(context, centre, normal, right, rx=None, ry=None, band: float = RG.BAND, rings: int = 0) -> str:
+    """Rings of quads round the opening at `centre` (a point on the result), built into it as one step: the rim is
+    the `rx` by `ry` oval (None: read off the source), the faces up to `band` quad widths past it are redone. Returns
+    an error in words, or ""."""
+    sync(context)
+    res = _g().state["res"]
+    if res is None:
+        return "No result yet"
+    centre = np.asarray(centre, dtype=np.float64)
+    n, rx, ry, _h = opening(res, centre, right, rx, ry)
+    try:
+        made = RG.build(res["co"], res["faces"], centre, n if normal is None else normal, right, rx, ry, band, rings or None, _project())
+    except ValueError as exc:
+        return f"Can't ring round this: {exc}"
+    out = _faces_changed(res, made["co"], made["faces"], made["parent"])
+    seen, now = _view(res["co"], res["faces"]), _view(out["co"], out["faces"])
+    if now > seen + RING_VIEW:
+        return f"Rings here would change the look too much (view change {seen:.1f}% -> {now:.1f}%); set a smaller reach"
+    commit(context, out, None, made["parent"])
+    fl["note"] = f"Ring Round This: {made['rings']} rings of {made['count']} quads, {made['corners']} poles in the band; faces {len(res['faces'])} -> {len(out['faces'])}"
+    return ""
 
 
 class CURIOMESH_OT_strip_ring(bpy.types.Operator):
     bl_idname = "curiomesh.strip_ring"
     bl_label = "Ring Round This"
-    bl_description = "Press on the middle of an eye, a mouth or a hole and drag out to its edge. The quads there are redone as closed rings of strips round it"
+    bl_description = "Click an eye, a mouth or a hole (or drag from its middle out to its edge), then move out to set how far the new faces reach and click. Its quads are rebuilt as clean rings round it, joined to the faces round them"
     bl_options = {"REGISTER", "UNDO"}
-    HINT = "Press on the middle of an eye or mouth and drag out to its edge (sideways: width, up: height). Right-click: cancel"
+    HINT = "Click the middle of an eye or mouth, or drag out to its edge (sideways: width, up: height). Right-click: cancel"
+    BAND_HINT = "Move the mouse out or in to set how far the new rings reach, then click. Right-click: cancel"
+
+    centre: bpy.props.FloatVectorProperty(size=3, options={"HIDDEN", "SKIP_SAVE"})
+    normal: bpy.props.FloatVectorProperty(size=3, options={"HIDDEN", "SKIP_SAVE"})
+    right: bpy.props.FloatVectorProperty(size=3, default=(1.0, 0.0, 0.0), options={"HIDDEN", "SKIP_SAVE"})
+    width: bpy.props.FloatProperty(name="Width", description="Half the opening's width. 0 finds it on your mesh", default=0.0, min=0.0, subtype="DISTANCE")
+    height: bpy.props.FloatProperty(name="Height", description="Half the opening's height. 0 finds it on your mesh", default=0.0, min=0.0, subtype="DISTANCE")
+    band: bpy.props.FloatProperty(name="Reach", description="How far past the opening's edge the faces are redone, in quad widths. Faces further out are never touched", default=RG.BAND, min=1.0, max=6.0)
+    rings: bpy.props.IntProperty(name="Rings", description="How many rings go round the opening. 0 fits as many as there is room for, 2 to 4", default=0, min=0, max=4)
 
     @classmethod
     def poll(cls, context):
         return _has_result(context) and _g().state_source() is not None
 
+    def execute(self, context):
+        normal = tuple(self.normal) if any(self.normal) else None
+        error = ring(context, tuple(self.centre), normal, tuple(self.right), self.width or None, self.height or None, self.band, self.rings)
+        fl["ring_show"] = None
+        overlay.tag_redraw()
+        if error:
+            self.report({"WARNING"}, error)
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
     def invoke(self, context, event):
         sync(context)
-        self.centre = None
+        self.stage, self.found = 0, None
         context.window_manager.modal_handler_add(self)
         context.workspace.status_text_set(self.HINT)
         return {"RUNNING_MODAL"}
 
+    def _stop(self, context, result):
+        fl["ring_show"] = None
+        context.workspace.status_text_set(None)
+        overlay.tag_redraw()
+        return result
+
+    def _show(self):
+        _n, rx, ry, h = self.found
+        reach = self.band * h
+        fl["ring_show"] = (np.asarray(self.centre), self.u, self.v, [(rx, ry), (rx + reach, ry + reach)])
+        overlay.tag_redraw()
+
+    def _drag(self, event):
+        dx, dy = abs(event.mouse_x - self.start[0]) * self.per_pixel, abs(event.mouse_y - self.start[1]) * self.per_pixel
+        size = max(dx, dy)
+        return None if size < 6.0 * self.per_pixel else (max(dx, 0.4 * size), max(dy, 0.4 * size))
+
+    def _press(self, context, event, res):
+        ray = _ray(context, event)
+        at = None if ray is None else hit(res, *ray)
+        if at is None:
+            return
+        preview = bpy.data.objects[_g().PREVIEW_NAME]
+        inv = preview.matrix_world.inverted().to_3x3()
+        right = np.asarray(inv @ (context.space_data.region_3d.view_rotation @ Vector((1, 0, 0))))
+        right /= max(float(np.linalg.norm(right)), 1e-30)
+        one = _screen(context, preview, [at[0], at[0] + right])
+        if one is None:
+            return
+        self.per_pixel = 1.0 / max(float(np.linalg.norm(one[1] - one[0])), 1e-9)  # the result's units per pixel here
+        self.centre, self.right, self.start = tuple(at[0]), tuple(right), (event.mouse_x, event.mouse_y)
+        self.found = opening(res, at[0], right, 1.0, 1.0)
+        n = self.found[0]
+        self.normal = tuple(n)
+        u = right - (right @ n) * n
+        self.u = u / max(float(np.linalg.norm(u)), 1e-30)
+        self.v = np.cross(n, self.u)
+        self.band, self.stage = RG.BAND, 1
+
     def modal(self, context, event):
         if event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
-            context.workspace.status_text_set(None)
-            return {"CANCELLED"}
+            return self._stop(context, {"CANCELLED"})
         if _navigation(event):
             return {"PASS_THROUGH"}
         res = _g().state["res"]
-        ray = _ray(context, event)
-        if ray is None or res is None:
-            return {"PASS_THROUGH"}
-        if event.type == "LEFTMOUSE" and event.value == "PRESS":
-            found = hit(res, *ray)
-            if found is not None:
-                p = np.asarray(res["co"])[list(res["faces"][found[1]])]
-                n = np.cross(p[2] - p[0], p[-1] - p[1])
-                self.centre, self.normal = found[0], n / max(float(np.linalg.norm(n)), 1e-30)
-                self.start = (event.mouse_x, event.mouse_y)
+        if res is None:
+            return self._stop(context, {"CANCELLED"})
+        if self.stage == 0:
+            if event.type == "LEFTMOUSE" and event.value == "PRESS":
+                self._press(context, event, res)
             return {"RUNNING_MODAL"}
-        if event.type == "LEFTMOUSE" and event.value == "RELEASE" and self.centre is not None:
+        if self.stage == 1:
+            oval = self._drag(event)
+            if event.type == "MOUSEMOVE" and oval is not None:
+                self.found = (self.found[0], *oval, self.found[3])
+                self._show()
+            elif event.type == "LEFTMOUSE" and event.value == "RELEASE":
+                if oval is None:  # a click: read the opening off the source
+                    self.found = opening(res, np.asarray(self.centre), np.asarray(self.right))
+                self.width, self.height = self.found[1], self.found[2]
+                self.stage = 2
+                self.out = float(np.hypot(event.mouse_x - self.start[0], event.mouse_y - self.start[1]))
+                self._show()
+                context.workspace.status_text_set(self.BAND_HINT)
+            return {"RUNNING_MODAL"}
+        if event.type == "MOUSEMOVE":
+            far = float(np.hypot(event.mouse_x - self.start[0], event.mouse_y - self.start[1]))
+            self.band = float(np.clip(RG.BAND + (far - self.out) * self.per_pixel / self.found[3], 1.0, 6.0))
+            self._show()
+            context.workspace.status_text_set(f"Reach: {self.band:.1f} quad widths. " + self.BAND_HINT)
+        elif event.type in {"LEFTMOUSE", "RET", "NUMPAD_ENTER"} and event.value == "PRESS":
             context.workspace.status_text_set(None)
-            preview = bpy.data.objects[_g().PREVIEW_NAME]
-            rot = context.space_data.region_3d.view_rotation
-            inv = preview.matrix_world.inverted().to_3x3()
-            right = np.asarray(inv @ (rot @ Vector((1, 0, 0))))
-            unit = np.linalg.norm(right)
-            one = _screen(context, preview, [self.centre, self.centre + right / max(unit, 1e-30)])
-            if one is None:
-                return {"CANCELLED"}
-            per_pixel = 1.0 / max(float(np.linalg.norm(one[1] - one[0])), 1e-9)  # the result's units per pixel here
-            dx, dy = abs(event.mouse_x - self.start[0]) * per_pixel, abs(event.mouse_y - self.start[1]) * per_pixel
-            size = max(dx, dy)
-            if size <= 0.0:
-                return {"CANCELLED"}
-            ring(context, self.centre, self.normal, right, max(dx, 0.4 * size), max(dy, 0.4 * size))
-            return {"FINISHED"}
+            return self.execute(context)
         return {"RUNNING_MODAL"}
 
 
@@ -764,6 +840,25 @@ def _strip_batches(points, strip, matrix, colour):
     return batch_for_shader(shader, "TRIS", {"pos": world(tris)}), batch_for_shader(shader, "LINES", {"pos": world(rails)}), colour
 
 
+def _draw_ring(preview) -> None:
+    """The opening's rim and how far the new rings reach, as two ovals while Ring Round This is dragged."""
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    centre, u, v, ovals = fl["ring_show"]
+    t = np.linspace(0.0, 2.0 * np.pi, 65)[:, None]
+    n = np.cross(u, v)
+    shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+    gpu.state.line_width_set(2.0)
+    shader.bind()
+    for (a, b), colour in zip(ovals, ((1.0, 0.55, 0.1, 1.0), (1.0, 1.0, 1.0, 0.8))):
+        line = centre + a * np.cos(t) * u + b * np.sin(t) * v + 0.1 * min(a, b) * n
+        pts = _g()._world(preview.matrix_world, line).astype(np.float32)
+        shader.uniform_float("color", colour)
+        batch_for_shader(shader, "LINE_STRIP", {"pos": pts}).draw(shader)
+    gpu.state.line_width_set(1.0)
+
+
 def _draw() -> None:
     try:
         guided = _g()
@@ -774,6 +869,8 @@ def _draw() -> None:
         if getattr(context.scene, "curiomesh_guided", None) is not None:
             sync(context)
             res = guided.state["res"]
+        if fl["ring_show"] is not None:
+            _draw_ring(preview)
         found = selected()
         shown = []
         if fl["hover"] is not None and fl["res"] is res and (found is None or fl["hover"] != found[1]):
