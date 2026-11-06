@@ -149,7 +149,7 @@ Pick what comes first when the two disagree:
 
 ![Blender quad retopology with the Keep Detail style on a marble bust, wireframe before and after](docs/images/marble_bust_01.jpg)
 ![Quad retopology with the Balanced style on a marble bust, wireframe before and after](docs/images/bust_balanced.jpg)
-![Quad remesh with the Clean Rows style on a marble bust, even quads in rows, wireframe before and after](docs/images/bust_rows.jpg)
+![Retopology with the Clean Rows style on a marble bust, even quads in rows, wireframe before and after](docs/images/bust_rows.jpg)
 
 | Style | Model | CurioMesh quads | View changed | Tidiness | Wire pictures |
 |---|---|---:|---:|---:|---|
@@ -459,7 +459,7 @@ object on top and a close-up below.
 
 *Chess set (33 pieces), [Poly Haven](https://polyhaven.com/a/chess_set), CC0.*
 
-![Quad remesh of an overhead crane in Blender: 89,964 faces become 22,541 quads, wireframe before and after, whole object and close-up](docs/images/overhead_crane.jpg)
+![Retopology of an overhead crane in Blender: 89,964 faces become 22,541 quads, wireframe before and after, whole object and close-up](docs/images/overhead_crane.jpg)
 
 *Overhead crane, [Poly Haven](https://polyhaven.com/a/overhead_crane), CC0.*
 
@@ -573,7 +573,7 @@ Pick the Game Asset or Low Poly Use and press Start. Turn on Bake Detail with No
 </details>
 
 <details>
-<summary><b>Can I get all quads from an automatic quad remesh?</b></summary>
+<summary><b>Can I get all quads from automatic retopology?</b></summary>
 
 Yes. Output defaults to Quads, and the summary reports leftover triangles, which are normally zero. Quads can still be slanted on smooth surfaces with Keep Detail. Balanced and Clean Rows give tidier layouts for more faces.
 
