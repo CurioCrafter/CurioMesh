@@ -175,8 +175,8 @@ How the region tools work:
 - Quad size blends from the seam's edge length to your target over a falloff
   distance, so the patch does not jump in density at the border.
 - On jagged borders a **Border Ring** of quads runs along the seam, and an
-  untangling pass reshapes any bent quad with the seam held still. On a whale
-  region this cut bent or caved-in quads from about 5% to 0.5%, and on a noisy
+  untangling pass reshapes any bent quad with the seam held still. On a large organic
+  scan this cut bent or caved-in quads from about 5% to 0.5%, and on a noisy
   scan from about 31% to 2.8%.
 - **Flow: Follow Curvature** (Advanced) lines quads up with the surface's main
   bending directions as well as its sharp edges. The same option is in the

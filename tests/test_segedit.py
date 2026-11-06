@@ -135,7 +135,7 @@ def tank(sides=24, rings=10, radius=1.0, length=4.0):
     return co, faces
 
 
-class WreckTests(unittest.TestCase):
+class CrushedShapeTests(unittest.TestCase):
     def test_a_fair_reduce_keeps_its_shape(self):
         co, faces = tank()
         fewer = tank(sides=12, rings=4)
