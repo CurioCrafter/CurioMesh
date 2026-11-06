@@ -35,7 +35,7 @@ SETTLE = 0.4  # seconds after the last move: then the segments of the result are
 QUIET = 1.0  # the ladder's own work waits this long after a slider moved, so dragging never competes with it
 MOST_MESHES = 40  # preview meshes kept, one per size or blend shown
 GOAL_STEP = 0.15  # Bigger or Smaller Quads on a segment: this much of its Detail slider
-STYLE_WORDS = {"DETAIL": "Keep Detail", "BALANCED": "Balanced", "ROWS": "Clean Rows"}
+STYLE_WORDS = {"DETAIL": "Fewest Faces", "BALANCED": "Balanced", "ROWS": "Even Rows"}  # the names of guided.STYLE_ITEMS
 
 lad = {
     "key": None,  # the search these rungs belong to
@@ -525,7 +525,7 @@ class CURIOMESH_OT_part_size(bpy.types.Operator):
     bl_description = "Bigger or smaller quads on the selected parts only; the rest stays as it is"
     bl_options = {"INTERNAL"}
 
-    bigger: bpy.props.BoolProperty(name="Bigger", default=True, options={"SKIP_SAVE"})
+    bigger: bpy.props.BoolProperty(name="Bigger", description="On: bigger quads on the selected parts (fewer faces). Off: smaller quads (more faces)", default=True, options={"SKIP_SAVE"})
 
     @classmethod
     def description(cls, context, properties):

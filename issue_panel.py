@@ -106,9 +106,9 @@ class _IssueOp:
 class CURIOMESH_OT_issue_view(_IssueOp, bpy.types.Operator):
     bl_idname = "curiomesh.issue_view"
     bl_label = "View"
-    bl_description = "Move the 3D view to this problem spot and highlight it"
+    bl_description = "Moves the 3D view to this bad spot and highlights it"
 
-    index: bpy.props.IntProperty()
+    index: bpy.props.IntProperty(name="Spot", description="Which bad spot, 0 is the worst")
 
     def execute(self, context):
         _go(context, self.index)
@@ -120,7 +120,7 @@ class CURIOMESH_OT_issue_select(_IssueOp, bpy.types.Operator):
     bl_label = "Select"
     bl_description = "Select the faces of this problem spot in Edit Mode"
 
-    index: bpy.props.IntProperty()
+    index: bpy.props.IntProperty(name="Spot", description="Which bad spot, 0 is the worst")
 
     def execute(self, context):
         found = spots()
@@ -137,12 +137,134 @@ class CURIOMESH_OT_issue_select(_IssueOp, bpy.types.Operator):
 class CURIOMESH_OT_issue_step(_IssueOp, bpy.types.Operator):
     bl_idname = "curiomesh.issue_step"
     bl_label = "Next Issue"
-    bl_description = "Go to the next (or previous) problem spot, worst first, and move the view to it"
+    bl_description = "Goes to the next (or previous) bad spot, worst first, and moves the view to it"
 
-    step: bpy.props.IntProperty(default=1)
+    step: bpy.props.IntProperty(name="Step", description="1 goes to the next bad spot, -1 to the one before", default=1)
 
     def execute(self, context):
         _go(context, ui["cur"] + self.step if ui["cur"] >= 0 else (0 if self.step > 0 else -1))
+        return {"FINISHED"}
+
+
+def spot_part(index: int) -> int:
+    """The part a spot sits on, or -1."""
+    found = spots()
+    return int(found[index].get("part", -1)) if 0 <= index < len(found) else -1
+
+
+class _SpotPartOp(_IssueOp):
+    index: bpy.props.IntProperty(name="Spot", description="Which bad spot, 0 is the worst")
+
+    @classmethod
+    def poll(cls, context):
+        from . import segments
+
+        segments.ensure()
+        return bool(spots()) and segments.ready() and not segments.mirrored() and _g().progress_info() is None
+
+    def _part(self):
+        from . import segments
+
+        p = spot_part(self.index)
+        return p if 0 <= p < len(segments.seg["parts"]) else None
+
+
+class CURIOMESH_OT_issue_redo(_SpotPartOp, bpy.types.Operator):
+    bl_idname = "curiomesh.issue_redo"
+    bl_label = "Redo This Spot"
+    bl_description = "Remakes the part under this spot with smaller quads, which usually clears folded or crossing faces. The old version stays in the part's tries"
+
+    @classmethod
+    def description(cls, context, properties):
+        from . import segments
+
+        p = spot_part(properties.index)
+        if not 0 <= p < len(segments.seg["parts"]):
+            return cls.bl_description
+        return f"Remakes {segments.name_of(p)} ({segments.seg['parts'][p]['after']:,} faces now) with smaller quads, which usually clears folded or crossing faces. The old version stays in its tries"
+
+    def execute(self, context):
+        from . import ladder, segments
+
+        p = self._part()
+        if p is None:
+            self.report({"WARNING"}, "This spot is not on a part that can be redone")
+            return {"CANCELLED"}
+        ui["cur"] = self.index
+        segments.select([p])
+        changed, why = ladder.part_sizes(context, [p], bigger=False)
+        if why:
+            self.report({"WARNING"}, why[0])
+        overlay.tag_redraw()
+        return {"FINISHED"} if changed else {"CANCELLED"}
+
+
+class CURIOMESH_OT_issue_keep_original(_SpotPartOp, bpy.types.Operator):
+    bl_idname = "curiomesh.issue_keep_original"
+    bl_label = "Keep Original Here"
+    bl_description = "Puts your own faces back on the part under this spot. It asks first; Put Reduced Back undoes it"
+
+    @classmethod
+    def description(cls, context, properties):
+        from . import segments
+
+        p = spot_part(properties.index)
+        if not 0 <= p < len(segments.seg["parts"]):
+            return cls.bl_description
+        return f"Puts your own faces back on {segments.name_of(p)}: about {segments.original_cost([p]):,} more faces. Put Reduced Back undoes it"
+
+    def invoke(self, context, event):
+        from . import segments
+
+        p = self._part()
+        if p is None:
+            return {"CANCELLED"}
+        return segments.ask(self, context, event, f"Your own faces go back on {segments.name_of(p)}: about {segments.original_cost([p]):,} more faces.")
+
+    def execute(self, context):
+        from . import segments
+
+        p = self._part()
+        if p is None or not segments.keep_original(context, [p]):
+            self.report({"WARNING"}, "This part could not be put back")
+            return {"CANCELLED"}
+        ui["cur"] = self.index
+        return {"FINISHED"}
+
+
+def original_parts() -> list[int]:
+    """Parts that show your own faces now (Keep Original), which Put Reduced Back can switch back."""
+    from . import segments
+
+    return [p for p, r in enumerate(segments.seg["parts"]) if r["method"] == segments.ORIGINAL]
+
+
+class CURIOMESH_OT_issue_put_back(bpy.types.Operator):
+    bl_idname = "curiomesh.issue_put_back"
+    bl_label = "Put Reduced Back"
+    bl_description = "Switches the parts that got your own faces back to the reduced faces they had before Keep Original"
+    bl_options = {"INTERNAL"}
+
+    part: bpy.props.IntProperty(name="Part", description="Which part to switch back; -1 for every part showing your own faces", default=-1)
+
+    @classmethod
+    def poll(cls, context):
+        from . import segments
+
+        segments.ensure()
+        return segments.ready() and _g().progress_info() is None and bool(original_parts())
+
+    def execute(self, context):
+        from . import segments
+
+        wanted = {}
+        for p in original_parts() if self.part < 0 else [self.part]:
+            tries = segments.seg["parts"][p]["tries"]
+            index = next((i for i in range(len(tries) - 1, -1, -1) if tries[i]["method"] != segments.ORIGINAL), None)
+            if index is not None:
+                wanted[p] = index
+        if not wanted or not segments.use_tries(context, wanted):
+            return {"CANCELLED"}
         return {"FINISHED"}
 
 
@@ -156,7 +278,7 @@ def _record(context) -> dict:
 class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
     bl_idname = "curiomesh.issue_save"
     bl_label = "Save Issue Report"
-    bl_description = "Save the list of problem spots as a JSON file (next to your .blend file if it is saved), so a later run can be compared with it"
+    bl_description = "Saves the list of bad spots as a file next to your .blend, so a later run can be compared with it"
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
 
@@ -182,7 +304,7 @@ class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
 class CURIOMESH_OT_issue_compare(_IssueOp, bpy.types.Operator, ImportHelper):
     bl_idname = "curiomesh.issue_compare"
     bl_label = "Compare With Report..."
-    bl_description = "Load an older issue report and show which of its problem spots are fixed, still there, or new"
+    bl_description = "Loads an older report and shows which of its bad spots are fixed, still there, or new"
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
 
@@ -198,42 +320,24 @@ class CURIOMESH_OT_issue_compare(_IssueOp, bpy.types.Operator, ImportHelper):
         return {"FINISHED"}
 
 
-def draw(layout) -> None:
-    """The Issues box. Nothing before a result exists."""
+def draw_reports(layout) -> None:
+    """Save the spot list and compare a later run with it (Pro > Issue Reports)."""
     found = spots()
     res = _g().state["res"]
     if res is None or res.get("issues") is None:
+        layout.label(text="Reports need a finished result", icon="INFO")
         return
-    box = layout.box()
-    totals = res["issues"]["totals"]
-    box.label(text=f"Issues: {len(found)} spot{'s' if len(found) != 1 else ''}" if found else "Issues: none found", icon="ERROR" if found else "CHECKMARK")
-    if not found:
-        return
-    for kind, count in sorted(totals.items(), key=lambda kv: -issues.WEIGHTS.get(kv[0], 0)):
-        box.label(text=f"{count:,} {KIND_WORDS.get(kind, kind)}")
-    box.operator("curiomesh.keep_original_bad", icon="LOOP_BACK")
-    row = box.row(align=True)
-    row.operator("curiomesh.issue_step", text="Previous", icon="TRIA_LEFT").step = -1
-    row.operator("curiomesh.issue_step", text="Next Issue", icon="TRIA_RIGHT").step = 1
-    for i, spot in enumerate(found[:LISTED]):
-        line = box.row(align=True)
-        line.alignment = "LEFT"
-        line.label(text=f"{'>' if i == ui['cur'] else ' '} #{i + 1}: {summary(spot['kinds'])}", icon="DOT")
-        sub = box.row(align=True)
-        part = f"part {spot['part'] + 1}" if spot["part"] >= 0 else "no part"
-        sub.label(text=f"{len(spot['faces']):,} faces, {part}")
-        sub.operator("curiomesh.issue_view", text="View").index = i
-        sub.operator("curiomesh.issue_select", text="Select").index = i
-    if len(found) > LISTED:
-        box.label(text=f"... and {len(found) - LISTED} more (use Next Issue)")
-    row = box.row(align=True)
+    layout.label(text=f"{len(found)} spot{'s' if len(found) != 1 else ''} with bad faces" if found else "No bad spots found", icon="ERROR" if found else "CHECKMARK")
+    for kind, count in sorted(res["issues"]["totals"].items(), key=lambda kv: -issues.WEIGHTS.get(kv[0], 0)):
+        layout.label(text=f"{count:,} {KIND_WORDS.get(kind, kind)}", icon="BLANK1")
+    row = layout.row(align=True)
     row.operator("curiomesh.issue_save", icon="FILE_TICK")
     row.operator("curiomesh.issue_compare", icon="FILE_REFRESH")
     diff = ui["diff"]
     if diff is not None:
-        box.label(text=f"Since that report: {len(diff['fixed'])} fixed, {len(diff['still'])} still there, {len(diff['new'])} new", icon="INFO")
+        layout.label(text=f"Since that report: {len(diff['fixed'])} fixed, {len(diff['still'])} still there, {len(diff['new'])} new", icon="INFO")
         for kind, t in diff["totals"].items():
-            box.label(text=f"   {KIND_WORDS.get(kind, kind)}: {t['old']:,} before, {t['new']:,} now")
+            layout.label(text=f"   {KIND_WORDS.get(kind, kind)}: {t['old']:,} before, {t['new']:,} now")
 
 
 def draw_overlay(guided, preview, res, flat, batch_for_shader) -> None:
@@ -261,4 +365,13 @@ def draw_overlay(guided, preview, res, flat, batch_for_shader) -> None:
         batch.draw(flat)
 
 
-CLASSES = (CURIOMESH_OT_issue_view, CURIOMESH_OT_issue_select, CURIOMESH_OT_issue_step, CURIOMESH_OT_issue_save, CURIOMESH_OT_issue_compare)
+CLASSES = (
+    CURIOMESH_OT_issue_view,
+    CURIOMESH_OT_issue_select,
+    CURIOMESH_OT_issue_step,
+    CURIOMESH_OT_issue_redo,
+    CURIOMESH_OT_issue_keep_original,
+    CURIOMESH_OT_issue_put_back,
+    CURIOMESH_OT_issue_save,
+    CURIOMESH_OT_issue_compare,
+)

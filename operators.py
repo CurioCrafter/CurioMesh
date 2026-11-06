@@ -236,7 +236,7 @@ class CURIOMESH_OT_apply_preset(bpy.types.Operator):
             "HERO": "Hero: slowest. Tries more candidates and cleans up harder, for final assets",
         }.get(str(properties.preset), cls.bl_description)
 
-    preset: bpy.props.EnumProperty(name="Preset", items=QUALITY_ITEMS, default="BALANCED")
+    preset: bpy.props.EnumProperty(name="Preset", description="Which quality preset to load: Draft (fast), Balanced or Hero (slowest, best)", items=QUALITY_ITEMS, default="BALANCED")
 
     def execute(self, context: bpy.types.Context):
         settings = context.scene.curiomesh_settings
