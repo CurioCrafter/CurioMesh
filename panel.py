@@ -551,6 +551,10 @@ def draw_adjust(layout, gs) -> None:
     col.label(text="Tidy Up", **icons.kw("tidy", "MESH_GRID"))
     col.prop(gs, "organize", text="", slider=True)
     _ends(col, "as found", "tidiest")
+    grid = col.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
+    for prop in ("tidy_poles", "tidy_rows", "tidy_sizes", "tidy_square"):
+        grid.prop(gs, prop, toggle=True)
+    col.prop(gs, "tidy_selected", toggle=True, icon="RESTRICT_SELECT_OFF")
     if organize.active():
         text = organize.meter_text(gs)
         if text:

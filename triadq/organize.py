@@ -28,6 +28,7 @@ from __future__ import annotations
 import numpy as np
 
 from .chords import ChordReducer
+from .fewerpoles import PoleCleaner
 from .types import MeshData
 
 SHARP_DEG = 35.0  # a vertex on an edge folding more than this is a hard edge and stays where it is
@@ -43,6 +44,8 @@ FOLD_COS = float(np.cos(np.radians(40.0)))  # a quad folding more than this alon
 MOST_MOVE = 0.25  # of a vertex's mean edge length, per step
 MOST_DRIFT = 0.5  # of a vertex's mean edge length, in all: settling evens quads out where they are, it doesn't move them away
 STRAIGHT_STEPS = 40  # steps of the loop straightening that follows the settle (its own drift budget, as above)
+CYCLES = 3  # rounds of pole cleaning in `fewer_poles`, with a short settle between them
+CYCLE_STEPS = 20  # settle steps between two rounds
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -312,9 +315,10 @@ def settle(co, faces, project=None, stay=None, plane=None, strength: float = 1.0
     return out
 
 
-def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: bool = True):
+def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: bool = True, pairs: bool = True):
     """Fewer poles: messy patches around poles redrawn as plain grids (`ChordReducer.redraw_all`), then edges spun to
-    walk the poles left together (`turn_poles`). `keys` per face: faces with different keys (another material or part)
+    walk the poles left together (`turn_poles`), then with `pairs` pole pairs walked until they cancel
+    (`fewerpoles.PoleCleaner`). `keys` per face: faces with different keys (another material or part)
     are never mixed, and every new face takes the key of the patch it replaced. `stay`: vertices that don't move.
     Returns (co, faces, keys, stay) of the cleaned mesh, with unused vertices dropped."""
     co = np.asarray(co, dtype=np.float64)
@@ -327,6 +331,8 @@ def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: 
         reducer.redraw_all(rounds=2)
         reducer.judge = judge
     reducer.turn_poles(depth=depth)
+    if pairs:
+        PoleCleaner(reducer).run()
     alive = [i for i, f in enumerate(reducer.faces) if f is not None]
     used = np.unique(np.fromiter((v for i in alive for v in reducer.faces[i]), dtype=np.int64))
     remap = np.full(len(reducer.points), -1, dtype=np.int64)
@@ -334,6 +340,19 @@ def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: 
     points = np.asarray(reducer.points, dtype=np.float64)[used]
     held = np.concatenate((stay, np.zeros(len(reducer.points) - len(stay), dtype=bool)))[used]
     return points, [tuple(int(remap[v]) for v in reducer.faces[i]) for i in alive], [reducer.materials[i] for i in alive], held
+
+
+def fewer_poles(co, faces, keys, stay=None, judge=None, project=None, plane=None, cycles: int = CYCLES, redraw: bool = True):
+    """`clean_poles` a few times with a short settle in between: once the quads are even, more patches fit a grid and
+    more pole pairs can walk. Same arguments and result as `clean_poles`; `project` and `plane` as in `settle`."""
+    co = np.asarray(co, dtype=np.float64)
+    stay = np.zeros(len(co), dtype=bool) if stay is None else np.asarray(stay, dtype=bool)
+    for k in range(cycles):
+        co, faces, keys, stay = clean_poles(co, faces, keys, stay, judge, redraw=redraw)
+        if k < cycles - 1:
+            stay = stay | pinned(co, faces, plane=plane)
+            co = settle(co, faces, project, stay, plane, method="smooth", steps=CYCLE_STEPS)[-1][1]
+    return co, faces, keys, stay
 
 
 def poles(co, faces) -> int:
@@ -375,4 +394,4 @@ def pick(levels: dict, wanted: float, cap: float | None = None):
     return max(fine, default=0.0)
 
 
-__all__ = ["clean_poles", "half_of", "meter", "pick", "pinned", "poles", "settle"]
+__all__ = ["clean_poles", "fewer_poles", "half_of", "meter", "pick", "pinned", "poles", "settle"]
