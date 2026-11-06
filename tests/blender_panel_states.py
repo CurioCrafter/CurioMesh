@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Draw every CurioMesh panel and popover in each state of the main path against a recording layout, headless.
 

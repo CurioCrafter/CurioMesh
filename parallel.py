@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Measure the parts of one Auto Segments job in several background Blenders at once.
 
-Python holds one core however many threads it has, so the job hands parts to helper processes (`helper_command`):
+The add-on's own Python runs on Blender's main thread only, so a big job can hand parts to helper processes
+(`helper_command`), but only once the user has turned on Background Blender Processes in the preferences (`allowed`):
 each loads the job once, then measures the parts it is given with the very same `AutoJob._measure_piece` and writes
 what it found to a file. The job takes the results back in part order, so it ends up exactly where the serial path
 would. `Pool` starts, feeds and kills the helpers; `measure_in_worker` and `apply_result` are the two ends of one part.
@@ -105,22 +106,33 @@ def _read(path: Path):
     return _decode(json.loads(str(arrays.pop("tree"))), arrays)
 
 
+def allowed() -> bool:
+    """The user's choice in the add-on preferences: may CurioMesh start background Blenders? Off until turned on."""
+    from . import overlay
+
+    return bool(getattr(overlay.get_prefs(), "allow_helpers", False))
+
+
 def helper_command(entry: str, args: list[str], binary: str | None = None) -> tuple[list[str], dict]:
     """(command, environment) for a background Blender that runs `<the add-on>.<entry>(sys.argv)` with `args` after "--".
 
-    The child finds the add-on through PYTHONPATH (the folder that holds the add-on's folder), so nothing edits Python's import path;
-    the user's own Python packages are kept out of it. `binary` is Blender itself (bpy.app.binary_path) and nothing else.
+    `binary` is Blender itself (bpy.app.binary_path) and nothing else, started without a shell. The child enables the
+    add-on by its own package name (`bl_ext.<repo>.curiomesh`) with `addon_utils.enable`, the way Blender loads it, and
+    then imports the module; nothing edits Python's import path. If the add-on can't be enabled there, the child exits
+    and the job does that work itself.
     """
     if binary is None:
         import bpy
 
         binary = bpy.app.binary_path
-    here = Path(__file__).resolve().parent
     module, _, function = entry.rpartition(".")
-    code = f"import importlib, sys; importlib.import_module({here.name + '.' + module!r}).{function}(sys.argv)"
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONHOME"}
-    env.update(PYTHONPATH=str(here.parent), PYTHONNOUSERSITE="1")
-    return [binary, "--background", "--factory-startup", "--python-use-system-env", "--python-expr", code, "--", *args], env
+    package = PACKAGE
+    code = (
+        "import addon_utils, importlib, sys; "
+        f"addon_utils.enable({package!r}, default_set=False); "
+        f"importlib.import_module({package + '.' + module!r}).{function}(sys.argv)"
+    )
+    return [binary, "--background", "--factory-startup", "--python-expr", code, "--", *args], dict(os.environ)
 
 
 class Pool:

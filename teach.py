@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Teach by example: remember how an artist fixed one patch of quads, and offer the same fix where the same patch shows up.
 

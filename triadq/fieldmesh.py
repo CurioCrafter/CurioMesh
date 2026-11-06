@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Quads in rows, built directly from a direction field and a lattice over the surface, with cells that shrink at detail.
 

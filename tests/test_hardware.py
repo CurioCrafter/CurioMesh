@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 import sys
 import tempfile
@@ -11,7 +11,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hardware  # noqa: E402
-import jobpack  # noqa: E402
+import _addon  # noqa: E402
+
+jobpack = _addon.load("jobpack")
 
 BIG = {"os": "Linux", "cores": 16, "ram_gb": 64.0, "free_gb": 48.0}
 SMALL = {"os": "Windows", "cores": 4, "ram_gb": 8.0, "free_gb": 3.0}
@@ -151,7 +153,7 @@ class JobFolderTests(unittest.TestCase):
         co = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float)
         faces = [(0, 1, 2, 3)]
         with tempfile.TemporaryDirectory() as folder:
-            out = jobpack.export_job(Path(folder) / "job", co, faces, [0], 6.0, 0, "FULL", Path(__file__).resolve().parents[1], mirror=(0, 0.5, 1.0, 2, 1), lines=[np.zeros((2, 3))], drop=np.zeros(4), source=(2, 6))
+            out = jobpack.export_job(Path(folder) / "job", co, faces, [0], 6.0, 0, "FULL", mirror=(0, 0.5, 1.0, 2, 1), lines=[np.zeros((2, 3))], drop=np.zeros(4), source=(2, 6))
             for name in ("mesh.npz", "guides.npz", "job.json", "run_job.py", "README.txt"):
                 self.assertTrue((out / name).exists(), name)
             settings = __import__("json").loads((out / "job.json").read_text())

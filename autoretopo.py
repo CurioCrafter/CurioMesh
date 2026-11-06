@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Auto Segments: you say how much of the view may change, and it finds the fewest faces that hold it.
 
@@ -8,8 +8,8 @@ object, so a bolt is judged by how big it looks on the object, not blown up to f
 they remove the most visible change (`budget.allocate`), with a limit no single piece may pass. The pieces are paired
 into quads, the whole result is looked at, and the sharing is redone until it lands on what was asked for.
 
-Blender's Decimate has to run on the main thread, so the search is a generator that runs in short slices from a timer,
-which keeps Blender usable. Only the pairing, which is plain NumPy, goes to a worker thread.
+Everything runs on Blender's main thread. The search is a generator that runs in short slices from a timer, so Blender
+stays usable between them; a single slow NumPy step (such as the pairing) runs as one slice.
 """
 
 from __future__ import annotations
@@ -244,7 +244,7 @@ def triangulate(points, faces, kinds):
 
 
 def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
-    """The faces for one group of pieces by NumPy alone (runs on a worker thread): (points, faces, materials)."""
+    """The faces for one group of pieces by NumPy alone, no Blender data: (points, faces, materials)."""
     if method == "FLAT":
         if output == "TRIS":
             out = flatten_regions(mesh)[0]
@@ -405,8 +405,9 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
     return np.flatnonzero((shown >= PART_PIXELS) & (wrong > limit * shown))
 
 
+WAITING = "waiting"  # yielded while only helper Blenders are working: the timer slice ends early, without sleeping
+ROWS_NEEDS_HELPERS = "Even Rows runs Blender's QuadriFlow in a background Blender, so a QuadriFlow crash can't close yours. Turn on Background Blender Processes in the CurioMesh preferences to use it"
 KEEP_HERE = 0.5  # with helpers, a part of this share of the job's triangles or more is measured in the job itself
-OFF_MAIN_FROM = 100_000  # with this many faces in a job, its slow Python steps run on a worker thread, so Blender stays usable
 PAIR_CHUNK_FACES = 200_000  # Light only: above 0, pairing works per region of this many faces: less memory on a huge mesh, and a few more triangles at the seams
 HUGE_FROM = 60_000  # a piece of this many triangles keeps no sizes of its own and is measured in the job itself
 SPLIT_FACES = 2 * HUGE_FROM  # with helpers, a piece of more faces is cut into regions of half to all of this
@@ -643,13 +644,13 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, helpers: bool = True, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
         self.hard = dict(HARD if hard is None else hard)  # Clean Panels and Even Cylinders: more rebuilt sizes per part
         self.redo_rough = bool(redo_rough)  # Redo Rough Spots: regions round the spots still bad after the repairs are made again, finer
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
         self.redo_counts = {"regions": 0, "no better": 0, "kept": 0}  # what happened to the regions tried, for the bench
         self.parallel = bool(parallel)  # measure parts in helper processes when the job and the computer suit it (parallel.py)
-        self.threaded = False  # every slow Python step on a worker thread, however small the job (the size ladder runs while you work)
+        self.helpers = bool(helpers)  # may start background Blenders at all (the add-on preference); False: Use Several Cores and Even Rows are off
         self._pool = None
         self._copy_plan: dict | None = None  # with helpers: part -> (the part it copies, how to move onto it) or None, found ahead of time
         self._plan_reps: list = []
@@ -808,14 +809,15 @@ class AutoJob:
             hardware.save_piece(file, self.detail, sizes[:-1], pairs[:-1], seen)
 
     def step(self, seconds: float | None = None) -> None:
-        """Do the next slice of work on this (the main) thread."""
+        """Do the next slice of work (called from a timer on the main thread)."""
         if not self.busy:
             return
         seconds = self.cfg.slice_s if seconds is None else seconds
         ends = time.perf_counter() + seconds
         try:
             while time.perf_counter() < ends:
-                next(self._search)
+                if next(self._search) is WAITING:
+                    break
         except StopIteration:
             self.busy = False
         except Exception as exc:  # a timer has nobody above it to report to
@@ -1164,7 +1166,7 @@ class AutoJob:
 
     def _start_pool(self):
         """Generator: helper processes for measuring the parts, when this job and this computer suit them (see parallel.py)."""
-        if not self.parallel or self.guide_lines or self.strips or len(self.pieces) < 2:
+        if not self.parallel or not self.helpers or self.guide_lines or self.strips or len(self.pieces) < 2:
             return
 
         def size_up():
@@ -1178,12 +1180,11 @@ class AutoJob:
             busy = 0.0 if most else hardware.busy_cores()
             return hardware.worker_count(machine, self.cfg.name, len(self.faces), max(len(ids) for ids in self.pieces), work, measured, busy, most), machine, work
 
-        count, machine, self._work = yield from self._background(size_up)
+        count, _machine, self._work = yield from self._background(size_up)
         if not count:
             return
-        threads = max(machine["cores"] // (count + 1), 1)  # all helpers' NumPy steps together use the cores once
         command, env = parallel.helper_command("parallel.worker_main", [])
-        env.update(RAYON_NUM_THREADS=str(threads), OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")  # the child's only
+        env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")  # the child's own copy: each helper's NumPy keeps to one core
         setup = yield from self._off(lambda: parallel.setup_of(self))
         self._pool = parallel.Pool(command, count, setup, env)
         self._copy_plan = {}
@@ -1224,7 +1225,7 @@ class AutoJob:
                     result["saved"] = True
 
     def _feed(self) -> None:
-        """Collect what the helpers finished and hand idle ones the next tasks. Quick: also called while this job waits on a thread."""
+        """Collect what the helpers finished and hand idle ones the next tasks. Quick: also called just before each long step."""
         pool = self._pool
         if pool is None:
             return
@@ -1253,8 +1254,7 @@ class AutoJob:
             ahead = sum(float(self._done_share[k + 1] - self._done_share[k]) for k in pool.ready if isinstance(k, int))
             self.fraction = MEASURE_SHARE * min(float(self._done_share[index]) + ahead, 1.0)
             self.stage = f"{stage} ({len(pool.busy)} at once)"
-            time.sleep(0.01)  # nothing to do here but wait: leave the core to the helpers
-            yield
+            yield WAITING  # nothing to do here but wait: the slice ends and the core is left to the helpers
 
     def _sized(self, index: int, ratio: float, points, polys, kinds, drop=None, keep=None):
         """Generator: `_reduced` at `ratio`, from a helper when one was asked to make it, else here."""
@@ -1563,9 +1563,9 @@ class AutoJob:
                 made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
             self._paired = made
             self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
-        except Cancelled:  # Stop was pressed: the thread ends at its next stopping point
+        except Cancelled:  # Stop was pressed: the step ends at its next stopping point
             pass
-        except Exception as exc:  # a thread has nobody above it to report to
+        except Exception as exc:  # shown as the job's warning
             self.warnings = [f"Auto Segments failed: {exc}"]
 
     def _turn_poles(self, mesh: MeshData, owner: np.ndarray) -> MeshData:
@@ -1580,7 +1580,7 @@ class AutoJob:
     def _score(self, points, faces) -> None:
         try:
             self.topology = patterns.score(patterns.measure(points, faces))["score"]
-        except Exception as exc:  # a thread has nobody above it to report to; the score is only a report
+        except Exception as exc:  # the score is only a report: a warning, and the job goes on
             self.warnings = [f"No tidiness score: {exc}"]
 
     def _polish(self, points, faces, materials, level) -> None:
@@ -1591,17 +1591,15 @@ class AutoJob:
             after = patterns.measure(tidied.vertices, tidied.faces)
             if patterns.score(after)["score"] > patterns.score(before)["score"] and after["non_manifold_edges"] <= before["non_manifold_edges"] and _folded(tidied.vertices, tidied.faces) <= _folded(np.asarray(points), faces):
                 self._paired = tidied
-        except Exception as exc:  # a thread has nobody above it to report to
+        except Exception as exc:  # shown as the job's warning; the untidied quads stay
             self.warnings = [f"Tidying failed, kept the quads as they were: {exc}"]
 
     def _background(self, work):
-        """Generator: run this on a worker thread, so a very large mesh can't hold up Blender. Returns its result."""
-        return (yield from tasks.run(work, "CurioMeshReduce", tick=self._feed))
+        """Generator: `work()` as a slice of its own, after handing the helpers their next tasks. Returns its result."""
+        return (yield from tasks.run(work, tick=self._feed))
 
     def _off(self, work):
-        """Generator: `work()`, on a worker thread when this job is big enough for it to hold up Blender. Returns its result."""
-        if len(self.faces) < OFF_MAIN_FROM and not self.threaded:
-            return work()
+        """Generator: `work()` as a slice of its own. Returns its result."""
         return (yield from self._background(work))
 
     def _counts(self, reference, view, pixel: float) -> tuple[int, int]:
@@ -1609,21 +1607,9 @@ class AutoJob:
         return bakescore.picture_counts(reference, view, pixel) if self.baked else views.picture_counts(reference, view, pixel, self.rough)
 
     def _pictures(self, points, polys, center, half, pixels):
-        """Generator: `pictures`, on a worker thread in a big job."""
+        """Generator: `pictures`, a few rows of rays per slice."""
         baked_from = self._bake_tree if self.baked else None
-        if len(self.faces) < OFF_MAIN_FROM and not self.threaded:
-            view = yield from pictures(points, polys, center, half, pixels, baked_from=baked_from)
-        else:
-            def run():
-                work = pictures(points, polys, center, half, pixels, baked_from=baked_from)
-                while True:
-                    try:
-                        next(work)
-                    except StopIteration as done:
-                        return done.value
-
-            view = yield from self._background(run)
-        return view
+        return (yield from pictures(points, polys, center, half, pixels, baked_from=baked_from))
 
     def _allocate(self, allowed: float, piece_share: float) -> list[int]:
         """A size per piece. Copies stay alike: a piece and its copies are chosen as one, costing and losing what they all do."""
@@ -1800,7 +1786,7 @@ class AutoJob:
                 self.notes.append(f"{method.title()} did not work on a part ({str(exc)[:60]}): Auto was used there")
                 method = "AUTO"
         self._paired = None
-        yield from tasks.run(lambda: self._pair(co, faces, kinds, method), "CurioMeshPair", stopped=lambda: self._stopped)
+        yield from tasks.run(lambda: self._pair(co, faces, kinds, method), stopped=lambda: self._stopped)
         return None if self._stopped else self._paired
 
     def _method(self, piece: int) -> str:
@@ -1883,7 +1869,7 @@ class AutoJob:
         return (yield from self._off(lambda: self._splice(points, faces, mats, piece, builds)))
 
     def _inspected(self, points, faces, piece):
-        """Generator: all the numbers for one mesh, the crossing test in slices and the rest on a worker thread."""
+        """Generator: all the numbers for one mesh, the crossing test in slices and the rest as one step."""
         began = time.perf_counter()
         pairs = yield from checks.crossing_slices(points, faces)
         out = yield from self._background(lambda: checks.inspect(points, faces, piece, pairs=pairs))
@@ -2113,7 +2099,7 @@ class AutoJob:
 
     def _redo_spots(self, points, faces, piece, spots, rings: int, until: float):
         """(points, the corners moved in each region redone): each spot's region with its inner corners laid out the way
-        that leaves the fewest bad faces round it, where that is fewer than now. Worker thread."""
+        that leaves the fewest bad faces round it, where that is fewer than now. Plain NumPy and BVH queries."""
         if self._src_middles is None:
             sizes = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
             flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes.sum()))
@@ -2180,8 +2166,12 @@ class AutoJob:
 
         total = float(areas.sum()) or 1.0
         folder = tempfile.mkdtemp(prefix="curiomesh_rows_")
-        atexit.register(shutil.rmtree, folder, True)  # Blender quit in the middle
-        atexit.register(self._kill_worker)
+
+        def clean_up():  # also run if Blender quits in the middle
+            self._kill_worker()
+            shutil.rmtree(folder, ignore_errors=True)
+
+        atexit.register(clean_up)
         try:
             sizes = np.asarray([len(ids) for ids in self.pieces], dtype=np.float64)
             wants = (target * 0.5 * (areas / total + sizes / sizes.sum())).astype(np.int64)  # a small part with many faces is usually detail
@@ -2215,8 +2205,7 @@ class AutoJob:
                             self._refused += 1
                             at += 1
                             break
-                    time.sleep(0.005)
-                    yield
+                    yield WAITING
             self._kill_worker()
             all_points, all_faces, all_kinds = [], [], []
             offset = 0
@@ -2253,7 +2242,7 @@ class AutoJob:
 
                 # With few source triangles per quad, their planes say more about noise than about shape.
                 wanted_sharp = len(triangles) >= ROWS_SHARP_INPUT * len(faces)
-                done = yield from self._in_thread(lambda: snap_rows(rows["co"], faces, find, sharpen=sharpen if wanted_sharp else None))
+                done = yield from self._step(lambda: snap_rows(rows["co"], faces, find, sharpen=sharpen if wanted_sharp else None))
                 if self._stopped:
                     return None
                 moved, quads = done if done is not None else (None, [])
@@ -2273,8 +2262,8 @@ class AutoJob:
                 offset += len(moved)
                 yield
         finally:
-            self._kill_worker()
-            shutil.rmtree(folder, ignore_errors=True)
+            atexit.unregister(clean_up)
+            clean_up()
         if leftovers:
             pts, fcs, knd, cursor = [], [], [], 0
             for points, polys, kinds in leftovers:
@@ -2282,7 +2271,7 @@ class AutoJob:
                 fcs += [tuple(v + cursor for v in p) for p in polys]
                 knd += kinds
                 cursor += len(points)
-            closed = yield from self._in_thread(lambda: pair_and_close(MeshData(np.vstack(pts), fcs, knd), seed_count=1)[0])
+            closed = yield from self._step(lambda: pair_and_close(MeshData(np.vstack(pts), fcs, knd), seed_count=1)[0])
             if closed is None:
                 return None
             all_points.append(np.asarray(closed.vertices))
@@ -2292,6 +2281,9 @@ class AutoJob:
 
     def _run_rows(self):
         """Clean Rows: order first. Lands near the amount asked for by the density of the layout, and reports what it got when time or faces run out."""
+        if not self.helpers:
+            self.warnings = [ROWS_NEEDS_HELPERS]
+            return
 
         fa, fb = patch.face_adjacency(self.faces)
         shell = np.unique(patch._labels(len(self.faces), fa, fb), return_inverse=True)[1]
@@ -2357,7 +2349,7 @@ class AutoJob:
             self.notes.append(f"QuadriFlow gave up on {self._refused} parts: they were paired instead")
         if self.output_kind == "QUADS" and any(len(face) != 4 for face in out_faces):  # stuck quads came back as triangles: Quads means all quads
             mesh = MeshData(points, out_faces, kinds)
-            closed = yield from self._in_thread(lambda: _close_pieces(mesh))
+            closed = yield from self._step(lambda: _close_pieces(mesh))
             if closed is not None:
                 points, out_faces, kinds = np.asarray(closed[0].vertices, dtype=np.float64), [tuple(f) for f in closed[0].faces], list(closed[0].face_materials)
                 if closed[4]:
@@ -2367,7 +2359,7 @@ class AutoJob:
         loss, shading, soft = yield from self._look(points, out_faces, *self._view)
         self.face_piece, self.flag = self._vote(points, out_faces), np.zeros(len(out_faces), dtype=bool)
         if any(len(face) == 4 for face in out_faces):
-            yield from self._in_thread(lambda: self._score(points, out_faces))
+            yield from self._step(lambda: self._score(points, out_faces))
         out_fa, out_fb = patch.face_adjacency(out_faces)
         parts = np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]
         self.fraction = 1.0
@@ -2377,11 +2369,11 @@ class AutoJob:
         quads = sum(1 for face in shown if len(face) == 4)
         self.report = {"before": whole, "faces": len(shown), "quads": quads, "tris": sum(1 for face in shown if len(face) == 3), "pieces": len(self.pieces), "looks": self.looks, "loss": loss, "shading": shading, "shading_soft": soft, "topology": self.topology, "asked": self.target_faces * (2 if self.mirror is not None else 1), "seconds": time.perf_counter() - self.started, "timings": {k: round(v, 1) for k, v in self.timings.items()}, "guides": None, "bend": None, "check": None, "notes": list(dict.fromkeys(self.notes))}
 
-    def _in_thread(self, work):
-        """Generator: run plain NumPy work on a worker thread, so the timer's slices stay short. Returns its result, or None if it failed."""
+    def _step(self, work):
+        """Generator: plain NumPy work as a slice of its own. Returns its result, or None if it failed."""
 
         try:
-            return (yield from tasks.run(work, "CurioMeshRows", stopped=lambda: self._stopped))
+            return (yield from tasks.run(work, stopped=lambda: self._stopped))
         except Exception as exc:
             self.warnings = [f"Clean Rows: {exc}"]
             return None
@@ -2635,7 +2627,7 @@ class AutoJob:
         for level in POLISH_LEVELS if self.tidy and self.output_kind != "TRIS" else ():  # an option: it is slow and the loss goes up a little
             self.stage = "Tidying the quads..."
             self._paired = None
-            yield from tasks.run(lambda: self._polish(points, out_faces, materials, level), "CurioMeshPolish", stopped=lambda: self._stopped)
+            yield from tasks.run(lambda: self._polish(points, out_faces, materials, level), stopped=lambda: self._stopped)
             if self._stopped:
                 return
             if self._paired is None:
@@ -2654,7 +2646,7 @@ class AutoJob:
             self.instances = None
         self.stage = "Scoring the quads"
         if any(len(face) == 4 for face in out_faces):
-            yield from tasks.run(lambda: self._score(points, out_faces), "CurioMeshScore", stopped=lambda: self._stopped)
+            yield from tasks.run(lambda: self._score(points, out_faces), stopped=lambda: self._stopped)
             if self._stopped:
                 return
         def last_look():

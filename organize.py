@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """The Organize slider: a tidier layout of the result on screen, at about the same faces, and a meter of what it costs.
 
-Moving the slider the first time works out a few strengths on a worker thread (`triadq.organize`: messy patches around
+Moving the slider the first time works out a few strengths (`triadq.organize`: messy patches around
 poles redrawn as grids and edges spun, then the quads settled on your mesh step by step, then the loops straightened and
 stacked evenly). Each strength is measured (Tidiness, Loop Quality, poles, how much of the view changed, the Issue
 Finder) and gets its own preview mesh, so dragging only swaps meshes. With a mirrored result one half is organized
@@ -22,11 +22,11 @@ from mathutils.bvhtree import BVHTree
 
 from . import autoretopo, overlay, segments, symmetry
 from . import guides
-from .triadq import checks, issues, loopscore, patterns, tasks
+from .triadq import checks, issues, loopscore, patterns
 from .triadq import organize as O
 
 STRENGTHS = (0.25, 0.5, 0.75, 1.0)  # worked out once; the slider shows the nearest one at or below it. 0.25: poles cleaned, 0.5: quads settled, 0.75 and 1: loops straightened half and fully
-GAP = 0.1  # seconds between looks at the worker thread
+GAP = 0.1  # seconds between looks at what is ready
 LONG_LOOP = 4  # edges: shorter loops are not drawn in Loop Flow
 FACE_ARRAYS = ("mat", "piece", "parts", "new", "locked", "chart")  # per-face numbers of a result that organizing carries along
 SETTLE_PULL = "smooth"  # neighbours' middle; "settle" (rectangles and straight loops) measured the same view change with a few more slivers on five test models
@@ -37,7 +37,7 @@ org = {
     "origin": None,  # its output at strength 0
     "report": None,  # its report at strength 0
     "levels": {},  # strength -> {"out", "tidy", "poles", "view", "issues"}
-    "box": None,  # what the worker thread hands over
+    "box": None,  # the strengths worked out so far
     "meshes": {},  # strength -> preview mesh
     "shown": 0.0,
     "flow": None,  # (id of the result, line batch data, pole points)
@@ -99,7 +99,7 @@ def start(context) -> bool:
     org["meshes"][0.0] = _mesh_for(out)
     strokes = list(getattr(job, "guide_lines", None) or []) + [line for _tag, rows in (getattr(job, "bend_groups", None) or []) for line in rows]
     gap = float(getattr(job, "gap", 0.0) or 0.0)
-    tasks.start(lambda: _work(box, out, job.co, job.faces, job.mirror, tree, seg_piece, (strokes, gap)), "CurioMeshOrganize")
+    _work(box, out, job.co, job.faces, job.mirror, tree, seg_piece, (strokes, gap))
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=GAP)
     return True
@@ -132,7 +132,7 @@ def _held_by_strokes(points: np.ndarray, strokes) -> np.ndarray:
 
 
 def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0)) -> None:
-    """On a worker thread: every strength, measured. Hands each over in `box["levels"]` as it is ready."""
+    """Every strength, measured. Hands each over in `box["levels"]` as it is ready."""
     try:
         co, faces = np.asarray(out["co"], dtype=np.float64), [tuple(f) for f in out["faces"]]
         kind, table = _kinds(out, len(faces), seg_piece)
@@ -201,7 +201,7 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0
             row = measured(points, clean_faces, whole, kept)
             box["levels"][strength] = dict(row, out=whole)
         box["stage"] = ""
-    except Exception as exc:  # a thread has nobody above it to report to
+    except Exception as exc:  # shown under the slider
         box["error"] = f"Organize failed: {exc}"
 
 

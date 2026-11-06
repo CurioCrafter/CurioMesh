@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 """Test helper: load an add-on module that uses relative imports, without the add-on's __init__ (it needs bpy).
 
 The module is loaded as part of a stand-in package that shares the top-level `triadq` and `guides` the other tests

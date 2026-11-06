@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 # ruff: noqa: E402
 
@@ -107,6 +107,12 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         default=D["flow_editor"],
     )
 
+    allow_helpers: bpy.props.BoolProperty(
+        name="Background Blender Processes",
+        description="Lets CurioMesh start background copies of this Blender (never any other program) for Use Several Cores and for Even Rows, which runs QuadriFlow there so a QuadriFlow crash can't close your Blender. They end with the job. Off: everything runs inside this Blender and Even Rows is not available",
+        default=D["allow_helpers"],
+    )
+
     hud_default: bpy.props.BoolProperty(
         name="HUD On in New Scenes",
         description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet",
@@ -206,6 +212,15 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
             flow.prop(self, name, text=label, toggle=True)
 
         box = layout.box()
+        box.label(text="Background Processes", icon="MOD_ARRAY")
+        col = box.column()
+        col.prop(self, "allow_helpers")
+        note = box.column(align=True)
+        note.scale_y = 0.8
+        note.label(text="Starts background copies of this Blender for Use Several Cores and Even Rows.")
+        note.label(text="Each uses its own memory and ends with the job. Off by default.")
+
+        box = layout.box()
         box.label(text="Dashboard (HUD)", icon="OVERLAY")
         col = box.column()
         col.prop(self, "hud_default")
@@ -280,7 +295,6 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_settings = bpy.props.PointerProperty(type=CURIOMESH_PG_settings)
     overlay.register()
-    live.register()
     region.register()
     guided.register()
     fix_select.register()
@@ -302,6 +316,3 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
-
-if __name__ == "__main__":
-    register()

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Curvature-aware 4-RoSy cross field via Ginzburg-Landau relaxation.
 
@@ -106,7 +106,7 @@ def estimate_field_gl(
     pin_term = pull * curv
     dt = 0.4
 
-    # ponytail: fixed-count relaxation (engine's 24 * smooth_iters budget); add a residual stop if needed.
+    # Limitation: fixed-count relaxation (engine's 24 * smooth_iters budget); add a residual stop if needed.
     steps = 24 * max(0, int(smooth_iters))
     for step in range(steps):
         val = np.concatenate((cross[face_b] * transport, cross[face_a] * np.conj(transport)))

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Hard-surface tools for Auto Segments: what the switches mean, what goes to the search, the hard-edge finish on Apply
 and the controls (one small draw function, to be placed wherever the panel wants it).

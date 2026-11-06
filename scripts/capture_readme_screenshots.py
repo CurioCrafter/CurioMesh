@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Capture the README screenshots in a real Blender window.
 
@@ -102,7 +102,7 @@ def remesh(source, name, rescue):
     source.select_set(True)
     bpy.context.view_layer.objects.active = source
     bpy.ops.curiomesh.remesh(
-        engine="TRIAD_Q_LITE",
+        engine="PAIR_CLOSURE",
         target_faces=len(source.data.polygons) // 2,
         quality="BALANCED",
         output_mode="NEW",
@@ -158,7 +158,7 @@ for obj in (source, before, after):
     obj.select_set(True)
 bpy.context.view_layer.objects.active = after
 settings = bpy.context.scene.curiomesh_settings
-settings.engine = "TRIAD_Q_LITE"
+settings.engine = "PAIR_CLOSURE"
 settings.require_quads = False
 settings.target_faces = len(source.data.polygons) // 2
 settings.triad_seed_count = 2

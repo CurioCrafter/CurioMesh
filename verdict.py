@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """The one-line verdict over a result (green, amber or red) and the word for its Tidiness score. No bpy: unit tested."""
 
@@ -40,11 +40,3 @@ def verdict(use: str, faces: int, loss: float, asked: float | None, serious: int
     if ratio > GOOD_CHANGE:
         return "CHECK", "Changed a little more than asked"
     return "GOOD", f"Good for {use.lower()}" if use else "Good"
-
-
-if __name__ == "__main__":
-    assert verdict("Animation", 6000, 1.5, 1.5, 0, 0) == ("GOOD", "Good for animation")
-    assert verdict("Game Asset", 1000, 1.0, 6.0, 2, 1)[0] == "CHECK"
-    assert verdict("Game Asset", 1000, 1.0, 6.0, 20, 4)[0] == "BAD"
-    assert tidiness_words(56) == "like a quick hand retopo"
-    print("ok")

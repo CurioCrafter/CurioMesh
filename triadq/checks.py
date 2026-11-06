@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Exact checks on a finished result: non-manifold edges and vertices, flipped or duplicate faces, holes, and faces that
 pass through each other. The same numbers are taken on the source, because a scan may already be broken: only what the

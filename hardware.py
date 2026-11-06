@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """What this computer can do, and how to cut a job down to fit it.
 
@@ -38,20 +38,19 @@ class Settings:
     """The knobs of one job. Everything an effort changes is here."""
 
     name: str
-    slice_s: float  # seconds of work per timer call on the main thread
+    slice_s: float  # seconds of work per timer call
     gap_s: float  # seconds Blender gets back between slices
     max_rays: int  # budget of camera rays for one look at every piece
     max_pixels: int  # a side of one picture
     chunk_faces: int  # a piece with more faces than this is cut into regions
-    threads: int  # cores the job may keep busy (0 = all of them)
     show_every: float  # seconds between preview updates
     only_done: bool  # the preview shows the parts that are finished, not the unmeasured rest at full size
 
 
 EFFORTS = {
-    "LIGHT": Settings("Light", 0.015, 0.06, 5_000_000, 128, 40_000, 1, 3.0, True),
-    "NORMAL": Settings("Normal", 0.04, 0.01, 20_000_000, 192, 150_000, 0, 1.0, False),
-    "FULL": Settings("Full", 0.12, 0.002, 30_000_000, 192, 400_000, 0, 1.0, False),
+    "LIGHT": Settings("Light", 0.015, 0.06, 5_000_000, 128, 40_000, 3.0, True),
+    "NORMAL": Settings("Normal", 0.04, 0.01, 20_000_000, 192, 150_000, 1.0, False),
+    "FULL": Settings("Full", 0.12, 0.002, 30_000_000, 192, 400_000, 1.0, False),
 }
 
 
@@ -89,12 +88,11 @@ def _gpu() -> dict:
 
 
 def _cycles_devices() -> list[str]:
-    """Names of the non-CPU devices Blender's Cycles can see."""
+    """Names of the non-CPU devices in Cycles' device list, read only (nothing is refreshed or changed there)."""
     try:
         import bpy
 
         prefs = bpy.context.preferences.addons["cycles"].preferences
-        prefs.refresh_devices() if hasattr(prefs, "refresh_devices") else None
         return sorted({f"{d.name} ({d.type})" for d in prefs.devices if d.type != "CPU"})
     except Exception:
         return []
@@ -180,11 +178,10 @@ def settings_for(effort: str, machine: dict | None = None) -> Settings:
     machine = machine or {"cores": os.cpu_count() or 1, "free_gb": None}
     key = pick_effort(machine) if effort == "AUTO" else effort
     base = EFFORTS[key]
-    threads = base.threads if key == "LIGHT" else (max(machine["cores"] // 2, 1) if key == "NORMAL" else 0)
     chunk = base.chunk_faces
     if machine.get("free_gb"):
         chunk = min(chunk, max(int(machine["free_gb"] * 2**30 * 0.2 / BYTES_PER_FACE), 20_000))
-    return Settings(base.name, base.slice_s, base.gap_s, base.max_rays, base.max_pixels, chunk, threads, base.show_every, base.only_done)
+    return Settings(base.name, base.slice_s, base.gap_s, base.max_rays, base.max_pixels, chunk, base.show_every, base.only_done)
 
 
 def busy_cores() -> float:
@@ -289,7 +286,7 @@ def rate(machine: dict, est: dict, settings: Settings, slow: bool = False) -> tu
 # makes each ray dearer); the unwrap of 3,000 faces is inside the fixed part.
 BAKE_FIXED_S = 0.04
 BAKE_S_PER_MPIX_MAP = 1.18
-BAKE_FIT_THREADS = 4  # more cores bake faster, up to BAKE_MOST_THREADS (ponytail: linear in threads, GPU bakes are not modelled)
+BAKE_FIT_THREADS = 4  # more cores bake faster, up to BAKE_MOST_THREADS (limitation: linear in threads, GPU bakes are not modelled)
 BAKE_MOST_THREADS = 16
 BAKE_MAPS = {"OFF": 0, "NORMAL": 1, "NORMAL_COLOR": 2}
 # Not fitted: how much longer than Keep Detail each style runs. Clean Rows (QuadriFlow, capped at 10 minutes a try) and the

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
-"""Work areas: parts of a mesh remeshed one at a time as a task (see `tasks`), each at its own density and fill style.
+"""Work areas: parts of a mesh remeshed one at a time, each at its own density and fill style.
 
-Nothing here touches Blender data, so it can run off the main thread. Finished pieces are cached by their faces and settings:
+Nothing here touches Blender data. Finished pieces are cached by their faces and settings:
 changing one area leaves the others alone, and going back to an earlier setting is instant.
 """
 
@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from . import patch, tasks
+from . import patch
 
 CACHE_PIECES = 256
 
@@ -66,11 +66,11 @@ def area_masks(centroids: np.ndarray, areas: list[Area], groups: list[list[int]]
 
 
 class AreaRunner:
-    """Runs one plan of jobs at a time; a new plan stops the old one right away.
+    """Runs one plan of jobs, to its end, each time `start` is called.
 
     `fit(result)` settles a finished piece on the surface; `merge(results)` builds what `output` shows;
     `finish(output)` runs once the whole plan is done.
-    `output_id` changes each time a new `output` is ready, so the main thread can pick it up from a timer.
+    `output_id` changes each time a new `output` is ready, so a timer can pick it up.
     """
 
     def __init__(self, vertices, faces, frozen=None, *, fit=None, merge=None, finish=None, max_faces: int = 40_000):
@@ -84,39 +84,29 @@ class AreaRunner:
         self.output: Any = None
         self.output_id = 0
         self.warnings: list[str] = []
-        self._task: tasks.Task | None = None
         self._plan_id = 0
         self._stopped = False
         self._topology = None
 
-    @property
-    def busy(self) -> bool:
-        return self._task is not None and not self._task.done()
+    busy = False  # `start` runs the whole plan before it returns; the other runners answer the same questions
 
     def start(self, jobs: list[Job]) -> None:
         self._plan_id += 1
-        plan, plan_id, previous = list(jobs), self._plan_id, self._task
-
-        def work():
-            if previous is not None:
-                previous.wait(None)  # one plan at a time: the old one ends at its next look at `_stale`
-            if self._stale(plan_id):
-                return
-            try:
-                self._run(plan, plan_id)
-            except Exception as exc:  # a task has nobody above it to report to
-                self.warnings = [f"Area failed: {exc}"]
-            if plan_id == self._plan_id:
-                self.current = None
-
-        self._task = tasks.start(work, "CurioMeshAreas")
+        plan_id = self._plan_id
+        if self._stopped:
+            return
+        try:
+            self._run(list(jobs), plan_id)
+        except Exception as exc:  # kept as the runner's warning, shown in the panel
+            self.warnings = [f"Area failed: {exc}"]
+        self.current = None
 
     def stop(self) -> None:
         self._stopped = True
         self._plan_id += 1
 
     def wait(self, timeout: float | None = None) -> bool:
-        return self._task is None or self._task.wait(timeout)
+        return True
 
     def _stale(self, plan_id: int) -> bool:
         return self._stopped or plan_id != self._plan_id

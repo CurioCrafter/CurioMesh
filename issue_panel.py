@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """The Issues box of the Fix Parts panel: the worst spots of a finished result (faces turned inward, folded, crossing,
 slivers, pinched faces, poles...), a way to jump to each, a saved record, and a comparison with an older record.
@@ -279,16 +279,14 @@ def _record(context) -> dict:
 class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
     bl_idname = "curiomesh.issue_save"
     bl_label = "Save Issue Report"
-    bl_description = "Saves the list of bad spots as a file next to your .blend, so a later run can be compared with it"
+    bl_description = "Saves the list of bad spots to a file you pick, so a later run can be compared with it"
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
 
     def invoke(self, context, event):
         name = f"curiomesh_issues_{bpy.path.clean_name(_g().state['source'] or 'mesh')}.json"  # an object name can hold : or /
-        if bpy.data.filepath:  # next to the .blend: no question asked
-            self.filepath = os.path.join(os.path.dirname(bpy.data.filepath), name)
-            return self.execute(context)
-        self.filepath = name
+        # The file browser always opens; it starts next to the .blend when there is one.
+        self.filepath = os.path.join(os.path.dirname(bpy.data.filepath), name) if bpy.data.filepath else name
         return super().invoke(context, event)
 
     def execute(self, context):

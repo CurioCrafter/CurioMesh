@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 from __future__ import annotations
 
@@ -24,6 +24,15 @@ def _live_update(self, context):
 
 def _live_toggle_update(self, context):
     live.on_live_toggled(self, context)
+
+
+def _hud_get(self) -> bool:
+    """The scene's own choice once the HUD button was used there, else the preference (nothing is written into the file)."""
+    return bool(self.get("hud_enabled", overlay.get_prefs().hud_default))
+
+
+def _hud_set(self, value) -> None:
+    self["hud_enabled"] = bool(value)
 
 
 def _redraw_update(self, context):
@@ -70,7 +79,7 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", description="Print step-by-step details to the system console", default=False)
 
     hud_enabled: bpy.props.BoolProperty(
-        name="HUD", description="Show the quad-quality dashboard in the 3D viewport (position and size: add-on Preferences)", default=True, update=_redraw_update
+        name="HUD", description="Show the quad-quality dashboard in the 3D viewport (position and size: add-on Preferences)", get=_hud_get, set=_hud_set, update=_redraw_update
     )
     heatmap_enabled: bpy.props.BoolProperty(
         name="Heatmap",
@@ -438,7 +447,7 @@ class CURIOMESH_PT_pairclosure(_SubPanel, bpy.types.Panel):
 
     @classmethod
     def extra_poll(cls, context):
-        return context.scene.curiomesh_settings.engine == "TRIAD_Q_LITE"
+        return context.scene.curiomesh_settings.engine == "PAIR_CLOSURE"
 
     def draw_header(self, context):
         self.layout.label(icon="MESH_GRID")

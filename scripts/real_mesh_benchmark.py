@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Headless real-mesh benchmark for the CurioMesh add-on.
 
@@ -421,7 +421,7 @@ def task_mesh(entry, out_dir):
 
     rec["runs"] = []
     slow = False
-    pc = ("pairclosure", dict(engine="TRIAD_Q_LITE", quality="BALANCED", require_quads=True))
+    pc = ("pairclosure", dict(engine="PAIR_CLOSURE", quality="BALANCED", require_quads=True))
     plan = (
         (pc,)
         if EXTRA == "pc"
@@ -463,7 +463,7 @@ def task_batch(entries, out_dir):
         x += max(src.dimensions.x, 1.0) * 1.5
         names.append(src.name)
     settings = bpy.context.scene.curiomesh_settings
-    configure(settings, target_faces=1000, engine="TRIAD_Q_LITE", quality="BALANCED", require_quads=True)
+    configure(settings, target_faces=1000, engine="PAIR_CLOSURE", quality="BALANCED", require_quads=True)
     bpy.ops.object.select_all(action="DESELECT")
     for n in names:
         bpy.data.objects[n].select_set(True)
@@ -514,7 +514,7 @@ def task_live(entries, out_dir):
     src, _, _ = import_mesh(small)
     n = len(src.data.polygons)
     rec["small"] = {"id": small["id"], "faces": n}
-    configure(settings, target_faces=max(200, min(2000, n)), engine="TRIAD_Q_LITE", require_quads=True)
+    configure(settings, target_faces=max(200, min(2000, n)), engine="PAIR_CLOSURE", require_quads=True)
     try:
         t0 = time.perf_counter()
         settings.live_enabled = True  # toggles timer; background never ticks it

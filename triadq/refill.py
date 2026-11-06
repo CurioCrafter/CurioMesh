@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Replace patches full of poles with one plain grid, keeping every border vertex so neighbours still fit.
 
@@ -47,7 +47,7 @@ def _nearest_triangle(q: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray
     v = np.clip((d11 * d1 - d01 * d2) / denominator, 0.0, 1.0)
     w = np.clip((d00 * d2 - d01 * d1) / denominator, 0.0, 1.0)
     total = np.maximum(v + w, 1.0)
-    v, w = v / total, w / total  # ponytail: clamped, not the true closest point; only ever overestimates a distance
+    v, w = v / total, w / total  # Limitation: clamped, not the true closest point; only ever overestimates a distance
     nearest = a + v[..., None] * ab + w[..., None] * ac
     distance = np.linalg.norm(q[:, None] - nearest, axis=2)
     at = np.argmin(distance, axis=1)

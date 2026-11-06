@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Move an Auto Segments job to another computer and bring the result back.
 
@@ -115,12 +115,11 @@ def job_folder(directory, name: str) -> Path:
     return folder
 
 
-def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, addon_dir=None, mirror=None, lines=(), drop=None, source=None) -> Path:
+def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, mirror=None, lines=(), drop=None, source=None) -> Path:
     """Write the job folder. `co`/`faces`/`mat` are what the search runs on (the solved half when `mirror` is set).
 
     `mirror` is (axis, offset, size, faces of the whole mesh, side solved); `lines` the guide strokes already on that half;
     `drop` the painted density per vertex; `source` the (faces, vertices) of the whole mesh the result must fit. Returns the folder.
-    `addon_dir` is no longer used (the folder holds no copy of the add-on).
     """
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -158,10 +157,7 @@ def save_result(path, output: dict, report: dict, source_faces: int, source_vert
 
 def load_result(path, source_faces: int, source_verts: int):
     """(result dict like the preview's, report). Raises ValueError when it was made from a different mesh."""
-    try:
-        from .hardware import load_npz
-    except ImportError:  # loaded as a plain module (tests)
-        from hardware import load_npz
+    from .hardware import load_npz
 
     with load_npz(path) as data:
         made_from = data["source"].tolist()

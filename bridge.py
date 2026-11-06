@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 from __future__ import annotations
 
@@ -455,7 +455,7 @@ def _meshdata_from_object(obj: bpy.types.Object) -> MeshData:
 
 def _apply_meshdata_to_object(obj: bpy.types.Object, data: MeshData) -> None:
     old_mesh = obj.data
-    mesh = bpy.data.meshes.new(name=f"{obj.name}_TriadQLiteMesh")
+    mesh = bpy.data.meshes.new(name=f"{obj.name}_PairClosureMesh")
     mesh.from_pydata(data.vertices.tolist(), [], [tuple(face) for face in data.faces])
     mesh.update(calc_edges=True)
     for index, material in enumerate(data.face_materials[: len(mesh.polygons)]):
@@ -486,7 +486,7 @@ def _apply_meshdata_to_object(obj: bpy.types.Object, data: MeshData) -> None:
         pass
 
 
-def _run_triadq_lite(obj: bpy.types.Object, config: RemeshConfig) -> bool:
+def _run_pair_closure(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     source = _meshdata_from_object(obj)
     mode = str(config.triad_flow_mode or "AUTO").upper()
     options = TriadRemeshOptions(
@@ -1306,7 +1306,7 @@ def _run_atlas_candidate(
     _take_solver_error()
     if spec.pair_closure:
         _prepare_pair_closure_proxy(candidate, candidate_config)
-        ok = _run_triadq_lite(candidate, candidate_config)
+        ok = _run_pair_closure(candidate, candidate_config)
     else:
         if spec.repair and candidate_config.voxel_repair:
             ok = _voxel_repair(candidate, candidate_config)
@@ -1831,7 +1831,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 # Keep BMesh cleanup and Python adjacency off the full-resolution
                 # scan whenever Blender's native QEM proxy can reduce it first.
                 _prepare_flow_proxy(work_obj, config)
-            elif engine == "TRIAD_Q_LITE" or large_pair_first:
+            elif engine == "PAIR_CLOSURE" or large_pair_first:
                 # PairClosure is an exact closure, not a simplifier. Reduce to
                 # its expected output scale before Python pairing/adjacency so a
                 # dense scan cannot expand by roughly three times.
@@ -1879,14 +1879,14 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 _take_solver_error()
                 ok = _run_flat_quads(work_obj, config)
                 strategy = "FLAT_QUADS"
-            elif engine == "TRIAD_Q_LITE":
+            elif engine == "PAIR_CLOSURE":
                 _take_solver_error()
                 triad_config = replace(
                     config,
                     triad_force_quads=bool(config.require_quads),
                 )
-                ok = _run_triadq_lite(work_obj, triad_config)
-                strategy = "PAIR_CLOSURE" if triad_config.triad_force_quads else "TRIAD_Q_LITE"
+                ok = _run_pair_closure(work_obj, triad_config)
+                strategy = "PAIR_CLOSURE" if triad_config.triad_force_quads else "PAIRING"
             else:
                 ok = _run_quadriflow(work_obj, config)
                 strategy = "QUADRIFLOW"

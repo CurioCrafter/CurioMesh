@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ ENGINE_ITEMS = [
     ),
     ("QUADRIFLOW", "QuadriFlow", "Blender's built-in QuadriFlow remesher. Fast and tidy on clean, closed meshes"),
     (
-        "TRIAD_Q_LITE",
+        "PAIR_CLOSURE",
         "PairClosure (pure quads)",
         "Pairs triangles into quads along the surface flow, then closes any leftovers so every face is a quad. Always finishes, but makes more poles",
     ),

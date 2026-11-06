@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Flow Editor: draw how the loops should run on a finished result, and only the quads around each stroke are redone.
 
 The strokes are ordinary curves in the guide list (saved with the .blend, used again by Start), marked with their kind
 (`flowstroke`: Flow, Ring or Edge). Draw recognises the kind itself; Draw Flow, Draw Ring and Draw Edge force one;
 Place Circle and the face shapes are clicked. After each change the faces around the strokes are worked out again in
-the background (the parts' redo runner, `segment_goals.in_thread`), from the result as it was before any stroke;
+timer slices (the parts' redo runner, `segment_goals.in_step`), from the result as it was before any stroke;
 strokes that did not change reuse their patch, and the timer only steps the job and swaps the preview mesh. With a mirrored result every stroke also works on the other side.
 """
 
@@ -110,7 +110,7 @@ def _begin() -> bool:
 
 
 def request(context) -> bool:
-    """Work out the strokes again (only the patches whose strokes changed) on a worker thread."""
+    """Work out the strokes again (only the patches whose strokes changed), in timer slices."""
     gs = context.scene.curiomesh_guided
     if not gs.flow_live or not _begin():
         return False
@@ -148,7 +148,7 @@ def _issues(co, faces, mask, src_co, src_tris) -> int:
 def _job(box, origin, plan, project, src_co, src_tris):
     """Generator, stepped by the timer: each patch redone in the background (or taken from the cache), then put in and
     measured in the background too."""
-    from .segment_goals import in_thread
+    from .segment_goals import in_step
 
     co, faces = origin["co"], origin["faces"]
     builds, timings, failed = [], [], []
@@ -157,14 +157,14 @@ def _job(box, origin, plan, project, src_co, src_tris):
         made = fe["cache"].get(key)
         if made is None:
             t = time.perf_counter()
-            done = yield from in_thread(lambda ids=ids, items=items: F.redo(co, faces, ids, items, project))
+            done = yield from in_step(lambda ids=ids, items=items: F.redo(co, faces, ids, items, project))
             if "out" not in done:
                 failed.append(done.get("error", "no result"))
                 continue
             made = fe["cache"][key] = done["out"]
             timings.append(time.perf_counter() - t)
         builds.append((ids, made))
-    done = yield from in_thread(lambda: _finish(origin, builds, failed, sum(timings) if timings else None, src_co, src_tris))
+    done = yield from in_step(lambda: _finish(origin, builds, failed, sum(timings) if timings else None, src_co, src_tris))
     if "out" not in done:
         box["error"] = f"Flow Editor failed: {done.get('error')}"
         return

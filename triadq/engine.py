@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 from __future__ import annotations
 
@@ -606,7 +606,7 @@ def _estimate_field(
     transport = np.exp(4j * (side_angle[face_a, corner_a] - side_angle[face_b, corner_b]))
     degree = 1.0 + np.bincount(face_a, minlength=face_count) + np.bincount(face_b, minlength=face_count)
 
-    # ponytail: fixed-count Jacobi diffusion; switch to a sparse linear solve if
+    # Limitation: fixed-count Jacobi diffusion; switch to a sparse linear solve if
     # very large scans need the field converged across hundreds of rings.
     steps = 24 * max(0, int(smooth_iters))
     for _ in range(steps):

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Segment view: the whole Auto Segments result with every part in its own colour.
 
@@ -267,9 +267,9 @@ def _faces_for(job, method: str, co, polys, kinds):
     return (yield from job._build(co, polys, kinds, method, len(polys) // 2))
 
 
-def _threaded(work):
-    """Generator: `work()` on a worker thread, yielding so Blender stays responsive. Returns its result."""
-    return (yield from tasks.run(work, "CurioMeshCheck"))
+def _step(work):
+    """Generator: `work()` after one yield, so the stage on screen is current. Returns its result."""
+    return (yield from tasks.run(work))
 
 
 class PartJob:
@@ -307,7 +307,7 @@ class PartJob:
         self._stopped = True
         self.busy = False
         try:
-            self._search.close()  # a stopped search never resumes, and its thread wait ends here
+            self._search.close()  # a stopped search never resumes
         except ValueError:  # stopped from inside its own step
             pass
 
@@ -337,17 +337,8 @@ class PartJob:
         return f"{r['faces']:,} faces | Camera: {r['loss']:.1f}% of the view differs" + (f" | {self.warnings[0]}" if self.warnings else "")
 
     def _pictures_of(self, points, faces, center, half, pixels):
-        """On a worker thread: one set of a big part's pictures took up to 0.4 s, which Blender felt as a stall."""
-
-        def run():
-            work = autoretopo.pictures(points, faces, center, half, pixels)
-            while True:
-                try:
-                    next(work)
-                except StopIteration as done:
-                    return done.value
-
-        return (yield from _threaded(run))
+        """Generator: the pictures a few rows of rays per slice (one set of a big part's took up to 0.4 s)."""
+        return (yield from autoretopo.pictures(points, faces, center, half, pixels))
 
     def _change(self, piece: int, points, faces):
         """Generator: percent of the part's view that differs from the original part."""
@@ -420,7 +411,7 @@ class PartJob:
         count = len(faces)
         output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
         self.stage = "Looking for problem spots"
-        found = yield from _threaded(lambda: checks.defects(np.asarray(co), faces, job.co, job.faces))
+        found = yield from _step(lambda: checks.defects(np.asarray(co), faces, job.co, job.faces))
         output["issue_spots"], output["issues"] = issues.analyse(np.asarray(co), faces, {k: getattr(found, k) for k in checks.Defects.KINDS}, piece, {"source_faces": len(job.faces)})
         self.output = output  # issues are in before the panel can see the new output
         self.output_id += 1

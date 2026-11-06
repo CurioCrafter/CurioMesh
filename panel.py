@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
-"""The CurioMesh sidebar: every panel and popover of the main tab and the Pro tab (bench/uidesign/DESIGN.md).
+"""The CurioMesh sidebar: every panel and popover of the main tab and the Pro tab.
 
 Main tab, top to bottom: CurioMesh (pick, What is it for?, Start, verdict), Adjust, Fix, Finish. Each sub-panel shows
 only when it can do something. Everything else is one click away in a popover, or in the CurioMesh Pro tab.
@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 from . import guided as G
-from . import flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
+from . import flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, parallel, profiles, segment_goals, segments, symmetry
 from . import verdict as V
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
@@ -435,6 +435,8 @@ def draw_options(layout, context, gs) -> None:
     col.enabled = G.progress_info("AUTO") is None
     col.label(text="Tidiness", **icons.kw("tidy", "MESH_GRID"))
     col.row(align=True).prop(gs, "auto_style", expand=True)
+    if gs.auto_style == "ROWS" and not parallel.allowed():
+        overlay.wrap_label(col, "Even Rows needs Background Blender Processes, in the add-on preferences", icon="INFO", width=WIDTH, limit=3)
     col.row(align=True).prop(gs, "cleanup", expand=True)
     factor = hardware.style_factor(gs.auto_style, gs.auto_method)
     if factor > 1:
@@ -918,7 +920,11 @@ def draw_computer(layout, gs) -> None:
     sub.prop(gs, "auto_effort")
     if machine is not None and gs.auto_effort == "AUTO":
         sub.label(text=f"Auto picked {hardware.settings_for(gs.auto_effort, machine).name}", icon="BLANK1")
-    sub.prop(gs, "auto_parallel", toggle=True, icon="MOD_ARRAY")
+    cores = sub.column()
+    cores.enabled = parallel.allowed()
+    cores.prop(gs, "auto_parallel", toggle=True, icon="MOD_ARRAY")
+    if not cores.enabled:
+        overlay.wrap_label(sub, "Use Several Cores needs Background Blender Processes, in the add-on preferences", icon="INFO", width=WIDTH, limit=3)
     sub.operator("curiomesh.guided_check_pc", icon="FILE_REFRESH")
     row = sub.row(align=True)
     row.operator("curiomesh.guided_export_job", text="Export Job", icon="EXPORT")

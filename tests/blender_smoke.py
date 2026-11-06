@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 from __future__ import annotations
 
@@ -590,7 +590,7 @@ def run_projection_rollback_case():
             result = bridge.run_curiomesh(
                 source,
                 bridge.RemeshConfig(
-                    engine="TRIAD_Q_LITE",
+                    engine="PAIR_CLOSURE",
                     target_faces=24,
                     triad_force_quads=True,
                     shrinkwrap_project=True,
@@ -1066,19 +1066,16 @@ def run_ui_prefs_case(module):
     if any(abs(a - b) > 1e-5 for a, b in zip(region.SEAM_COLOR, overlay.pref_color(overlay.get_prefs(), "region_seam_color"))):
         raise AssertionError("ui prefs: region seam colour default mismatch")
 
-    # HUD default applies once per scene and only ever turns the HUD off.
-    scene = bpy.context.scene
-    if "curiomesh_hud_init" in scene.keys():
-        del scene["curiomesh_hud_init"]
-    settings.hud_enabled = True
+    # A scene that never used the HUD button follows the preference; one that did keeps its choice. Nothing else is written.
+    if "hud_enabled" in settings.keys():
+        del settings["hud_enabled"]
     prefs.hud_default = False
-    overlay.apply_hud_default(scene)
     if settings.hud_enabled:
         raise AssertionError("ui prefs: hud_default False did not switch the HUD off")
     settings.hud_enabled = True
-    overlay.apply_hud_default(scene)
+    prefs.hud_default = False
     if not settings.hud_enabled:
-        raise AssertionError("ui prefs: hud default applied twice")
+        raise AssertionError("ui prefs: the scene's own HUD choice was not kept")
     prefs.hud_default = True
 
     # Every panel draws, in several states, with no unknown icon / property / operator.
@@ -1093,7 +1090,7 @@ def run_ui_prefs_case(module):
         reset_scene()
         sphere = make_uv_sphere("CurioSmoke_DrawSphere", segments=12, rings=6)
         reset_selection(sphere)
-        for engine in ("ATLAS_Q", "TRIAD_Q_LITE", "QUADRIFLOW"):
+        for engine in ("ATLAS_Q", "PAIR_CLOSURE", "QUADRIFLOW"):
             settings.engine = engine
             settings.heatmap_enabled = True
             settings.live_enabled = False
@@ -2089,7 +2086,7 @@ def main():
         "triad_cube_new",
         triad_cube,
         {
-            "engine": "TRIAD_Q_LITE",
+            "engine": "PAIR_CLOSURE",
             "target_faces": 24,
             "quality": "BALANCED",
             "output_mode": "NEW",
@@ -2169,7 +2166,7 @@ def main():
         "triad_grid_proxy",
         triad_grid,
         {
-            "engine": "TRIAD_Q_LITE",
+            "engine": "PAIR_CLOSURE",
             "target_faces": 196,
             "quality": "DRAFT",
             "output_mode": "NEW",

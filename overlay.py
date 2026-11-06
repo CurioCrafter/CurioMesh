@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Viewport HUD dashboard and triangle/pole heatmap (gpu + blf draw handlers)."""
 
@@ -48,6 +48,7 @@ PREF_DEFAULTS = {
     "show_guided": True,
     "pro_mode": False,
     "flow_editor": False,
+    "allow_helpers": False,
     "hud_default": True,
     "hud_corner": "BOTTOM_LEFT",
     "hud_offset_x": 70,
@@ -74,7 +75,6 @@ _prefs_override = None  # tests may point this at any object with the PREF_DEFAU
 
 _draw_handles: list = []
 _stats_cache: dict[str, "_CacheEntry"] = {}
-_geometry_hooks: list = []
 LAST_DRAW_ERROR = ""
 
 
@@ -142,7 +142,7 @@ def _cache_key(obj: bpy.types.Object) -> tuple:
     mesh = obj.data
     co = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
     mesh.vertices.foreach_get("co", co)
-    # ponytail: a topology edit that keeps every count and corner (an edge spun in place) keeps the old stats until the next real change
+    # Limitation: a topology edit that keeps every count and corner (an edge spun in place) keeps the old stats until the next real change
     return (mesh.as_pointer(), len(mesh.vertices), len(mesh.polygons), len(mesh.loops), float(co.sum(dtype=np.float64)))
 
 
@@ -170,25 +170,6 @@ def invalidate(name: str | None = None) -> None:
         _stats_cache.clear()
     else:
         _stats_cache.pop(name, None)
-
-
-def add_geometry_hook(fn) -> None:
-    if fn not in _geometry_hooks:
-        _geometry_hooks.append(fn)
-
-
-def remove_geometry_hook(fn) -> None:
-    if fn in _geometry_hooks:
-        _geometry_hooks.remove(fn)
-
-
-def _draw_watch() -> None:
-    """Runs on every viewport redraw (an edit redraws it): each hook checks cheaply whether its mesh changed."""
-    for hook in tuple(_geometry_hooks):
-        try:
-            hook()
-        except Exception:
-            pass
 
 
 def get_prefs():
@@ -235,18 +216,6 @@ def wrap_label(layout, text: str, icon: str = "NONE", width: int = 38, limit: in
     lines = textwrap.wrap(str(text), width=width) or [""]
     for i, line in enumerate(lines[:limit]):
         layout.label(text=line if i < limit - 1 or len(lines) <= limit else line[: width - 3] + "...", icon=icon if i == 0 else "BLANK1")
-
-
-def apply_hud_default(scene=None) -> None:
-    """Give each scene's HUD toggle the preferred default once (new scenes and files that never had it)."""
-    scenes = [scene] if scene is not None else list(bpy.data.scenes)
-    for sc in scenes:
-        settings = getattr(sc, "curiomesh_settings", None)
-        if settings is None or sc.get("curiomesh_hud_init"):
-            continue
-        sc["curiomesh_hud_init"] = True
-        if not get_prefs().hud_default:  # the property default is already on
-            settings.hud_enabled = False
 
 
 def tag_redraw() -> None:
@@ -672,44 +641,19 @@ class CURIOMESH_OT_toggle_heatmap(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def _init_hud_default():
-    try:
-        apply_hud_default()
-    except Exception:
-        pass
-    return None
-
-
-@bpy.app.handlers.persistent
-def _on_load_post(*_args):
-    bpy.app.timers.register(_init_hud_default, first_interval=0.2)
-
-
 CLASSES = (CURIOMESH_OT_toggle_heatmap,)
 
 
 def register() -> None:
     unregister()
-    import bpy.app.handlers as handlers
-
-    handlers.load_post.append(_on_load_post)
-    bpy.app.timers.register(_init_hud_default, first_interval=0.2)
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_heatmap, (), "WINDOW", "POST_VIEW"))
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_hud, (), "WINDOW", "POST_PIXEL"))
-    _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_watch, (), "WINDOW", "POST_PIXEL"))
 
 
 def unregister() -> None:
-    import bpy.app.handlers as handlers
-
-    if _on_load_post in handlers.load_post:
-        handlers.load_post.remove(_on_load_post)
-    if bpy.app.timers.is_registered(_init_hud_default):
-        bpy.app.timers.unregister(_init_hud_default)
     while _draw_handles:
         try:
             bpy.types.SpaceView3D.draw_handler_remove(_draw_handles.pop(), "WINDOW")
         except Exception:
             pass
     _stats_cache.clear()
-    _geometry_hooks.clear()

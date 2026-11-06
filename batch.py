@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Batch remesh: run the normal pipeline on every selected mesh and write one report."""
 
@@ -9,7 +9,6 @@ from dataclasses import asdict
 import datetime
 import json
 from pathlib import Path
-import tempfile
 import time
 
 import bpy
@@ -66,7 +65,8 @@ def report_row(name: str, result, elapsed_ms: float, error: str = "") -> dict:
 
 
 def report_path() -> Path:
-    base = Path(bpy.data.filepath).parent if bpy.data.filepath else Path(tempfile.gettempdir())
+    """A new file in the add-on's own user folder (Blender's extension user path), never next to the .blend."""
+    base = Path(bpy.utils.extension_path_user(__package__, path="reports", create=True))
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     return base / f"curiomesh_batch_{stamp}.json"
 
@@ -124,7 +124,7 @@ class BatchRunner:
             "objects": self.rows,
         }
         try:
-            with open(path, "x", encoding="utf-8") as handle:  # a new file only: never follow a name planted in a shared temp folder
+            with open(path, "x", encoding="utf-8") as handle:  # a new file only: never overwrite an older report
                 handle.write(json.dumps(payload, indent=2))
             self.settings.batch_report_path = str(path)
         except OSError:

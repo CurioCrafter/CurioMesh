@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 """Group faces into texture sets, or into pieces under a game engine's triangle limit.
 
 Both keep whole parts together where they can: a part is only cut, along its longest side, when it alone is too big.

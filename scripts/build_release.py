@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 from __future__ import annotations
 
@@ -63,6 +63,8 @@ def _validated_metadata(manifest_source: str, init_source: str, *, origin: str) 
         raise ValueError(f"{origin}: manifest type must be 'add-on'")
     if not isinstance(version, str) or not version:
         raise ValueError(f"{origin}: manifest version must be a non-empty string")
+    if not re.search(r"(?m)^bl_info\s*=", init_source):  # the listing build has no bl_info: the manifest alone holds the version
+        return package_id, version
     bl_info_version = _bl_info_version(init_source, origin=f"{origin}/__init__.py")
     if bl_info_version != version:
         raise ValueError(
@@ -181,7 +183,11 @@ BANNED_CODE = (
     (r"depsgraph_update", "depsgraph handlers"),
     (r"nvidia-smi|sysctl|shutil\.which|os\.system|os\.popen|shell\s*=\s*True", "outside programs"),
     (r"subprocess\.(run|call|check_call|check_output|getoutput|getstatusoutput)\b", "outside programs"),
-    (r"\b(Turbo|turbo|TURBO)\b|\bLite\b", "names of the GitHub-only native core or an old edition"),
+    (r"\b(Turbo|turbo|TURBO)\b|(?i:\blite\b|_lite\b)", "names of the GitHub-only native core or an old edition"),
+    (r"RAYON_", "a setting for the native core's thread pool"),
+    (r"refresh_devices\(", "changes to Cycles' preferences"),
+    (r"PYTHONPATH|--python-use-system-env", "import path set from outside"),
+    (r"(?m)^if __name__ == .__main__.:", "test or debug entry points"),
     (r"urllib\.request|http\.client|\bsocket\.|\brequests\.(get|post)\b", "network use"),
     (r"Star on GitHub|star helps", "promotional prompts"),
     (r"(?i)soft ?wrap|quad ?remesher|retopo ?flow|hard ?ops|box ?cutter|zremesher", "names of other add-ons"),
@@ -214,7 +220,12 @@ def listing_overrides(root: Path) -> dict[str, bytes]:
     readme = (root / "docs" / "LISTING_README.md").read_text(encoding="utf-8")  # only what this build has
     sources = (root / "docs" / "PATTERN_SOURCES.md").read_text(encoding="utf-8")
     sources = "".join(line for line in sources.splitlines(True) if "CC-BY" not in line)
+    init = (root / "__init__.py").read_text(encoding="utf-8")
+    init, found = re.subn(r"(?ms)^bl_info = \{\n.*?^\}\n\n", "", init, count=1)  # extensions use the manifest; bl_info is ignored
+    if not found:
+        raise ValueError("bl_info block not found in __init__.py")
     return {
+        "__init__.py": init.encode("utf-8"),
         "blender_manifest.toml": manifest.encode("utf-8"),
         "README.md": readme.encode("utf-8"),
         "THIRD_PARTY_NOTICES.md": LISTING_NOTICES.encode("utf-8"),
@@ -350,6 +361,8 @@ def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
             note = f"{folder}/LICENSE.txt" if folder else "LICENSE.txt"
             if note not in entries or "CC0" not in archive.read(note).decode("utf-8", "ignore"):
                 problems.append(f"{folder or '.'}: images without a CC0 note ({note})")
+        if re.search(r"(?m)^bl_info\s*=", archive.read("__init__.py").decode("utf-8")):
+            problems.append("__init__.py: bl_info (the manifest replaces it)")
     tagline = manifest.get("tagline", "")
     if len(tagline) > 64 or tagline.endswith((".", "!", "?")):
         problems.append(f"manifest tagline: at most 64 characters, no ending punctuation: {tagline!r}")

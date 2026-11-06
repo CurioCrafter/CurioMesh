@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Run in a separate background Blender (`main`): QuadriFlow on each piece of a job folder.
 
@@ -51,7 +51,7 @@ def main(argv: list[str]) -> None:
         path = os.path.join(folder, f"in_{k}.npz")
         if not os.path.exists(path):
             continue
-        d = np.load(path)
+        d = np.load(path, allow_pickle=False)
         flat, polys, at = d["flat"].tolist(), [], 0
         for size in d["lens"].tolist():
             polys.append(tuple(flat[at : at + size]))

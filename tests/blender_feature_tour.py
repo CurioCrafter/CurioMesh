@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 """End-to-end feature tour of CurioMesh in background Blender: every feature, one small check each.
 
 blender -b --factory-startup --python tests/blender_feature_tour.py -- [options]
@@ -1942,8 +1942,7 @@ def _():
     for use in [i[0] for i in profiles.PROFILE_ITEMS]:
         g.auto_profile = use
         draw_sweep(f"use {use}")
-    for flag in ("ui_more_open", "ui_pc_open", "ui_lod_open", "ui_teach_open", "ui_tweak_open"):
-        setattr(g, flag, True)
+    g.ui_setup_open = True
     draw_sweep("all fold-outs open")
     bpy.ops.object.mode_set(mode="EDIT")
     draw_sweep("Edit Mode")

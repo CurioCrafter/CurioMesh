@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Local repair of faces that pass through each other, without touching the rest of the part.
 
@@ -367,7 +367,7 @@ def fix_crossings(points, faces, mats, piece, pairs, known: Known, near, tris_on
     """Repair the new crossings among `pairs`. `near(piece, points)` gives (closest, normal) on that source piece.
 
     Returns (points, faces, mats, piece, numbers). A filled spot may add faces, up to `growth` of them. Plain work with
-    no Blender data, so it can run on a worker thread.
+    no Blender data.
     """
     work = _Work(points, faces, mats, piece, known, near, tris_only)
     most_added = int(growth * len(work.faces))

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Guided Retopo: importance points steer a live, adaptive quad preview you can partly redo by hand.
 
@@ -28,7 +28,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, flowedit, hard_surface, hardware, jobpack, ladder, multires, organize, profiles, teach
+from . import autoretopo, blockout, flowedit, hard_surface, hardware, jobpack, ladder, multires, organize, parallel, profiles, teach
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -350,11 +350,6 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     detail_pick: bpy.props.EnumProperty(name="Detail", description="How close to your mesh the result stays. More detail keeps more faces", items=DETAIL_PICK_ITEMS, get=_detail_get, set=_detail_set, update=_redraw_update)
     cleanup: bpy.props.EnumProperty(name="Cleanup", description="How much tidying runs after the search. More is tidier and takes longer", items=CLEANUP_ITEMS, get=_cleanup_get, set=_cleanup_set, update=_redraw_update)
     ui_setup_open: bpy.props.BoolProperty(name="Settings", description="The settings the result was made with, to change them and start again", default=False)
-    # which fold-outs of the Auto Segments panel are open (Blender 4.1+ draws them as native panels)
-    ui_more_open: bpy.props.BoolProperty(name="More Options", description="Guides, paint, clean-up and output options", default=False)
-    ui_pc_open: bpy.props.BoolProperty(name="This Computer", description="What this computer can do, how hard to work, and sending the job to another computer", default=False)
-    ui_lod_open: bpy.props.BoolProperty(name="LOD Set", description="Make three levels of detail in one go", default=False)
-    ui_teach_open: bpy.props.BoolProperty(name="Show It How", description="Fix a spot by hand and CurioMesh remembers the fix for next time", default=False)
     auto_detail: bpy.props.FloatProperty(name="Detail", description="How close to your mesh the result must look, as the share of the view that may change. Lower keeps more faces; higher gives a rougher, lighter mesh", default=6.0, min=0.1, max=80.0, soft_max=50.0, precision=1, subtype="PERCENTAGE", update=_custom_update)
     auto_effort: bpy.props.EnumProperty(name="Effort", description="How hard to work this computer. Light keeps Blender smooth while it works; Full finishes soonest; Auto picks from your cores and free memory", items=hardware.EFFORT_ITEMS, default="AUTO", update=_redraw_update)
     auto_style: bpy.props.EnumProperty(name="Style", description="How the quads are laid out. Fewest Faces follows the shape; Even Rows makes tidy rows of square quads but changes the look a little more", items=STYLE_ITEMS, default="DETAIL", update=_redraw_update)
@@ -421,7 +416,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Repeated parts become linked copies that cost no extra geometry; the copies share UVs. Off makes one merged mesh", default=False)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where Apply writes the result: a new object, or into your own object (Undo brings yours back)", items=APPLY_ITEMS, default="NEW")
     auto_rough: bpy.props.BoolProperty(name="Rough As Texture", description="For rough scans (rock, ground): judges bumps on average. Far fewer faces; bumps smaller than a few pixels are lost", default=False)
-    auto_parallel: bpy.props.BoolProperty(name="Use Several Cores", description="Works on several parts at once in background copies of Blender. Faster on big meshes; uses more memory", default=True)
+    auto_parallel: bpy.props.BoolProperty(name="Use Several Cores", description="Works on several parts at once in background copies of Blender. Faster on big meshes; uses more memory. Needs Background Blender Processes on in the add-on preferences", default=True)
     auto_drop_hidden: bpy.props.BoolProperty(name="Leave Out Hidden Pieces", description="Leaves out loose pieces that no camera outside the model can see. The result says how many were left out", default=False)
     auto_baked: bpy.props.BoolProperty(name="Judge After Baking (Experimental)", description="Experimental, Low Poly on scans you will bake: judges the look after baking, so far fewer faces remain. Can leave thin slivers; check the result", default=False)
     auto_chords: bpy.props.BoolProperty(name="Redraw Messy Quads", description="Redraws messy patches as plain grids of quads. Much tidier loops; adds a minute or two, and can stall on models of many loose pieces", default=False)
@@ -435,7 +430,6 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bake_size: bpy.props.EnumProperty(name="Bake Size", description="Width and height of the baked textures. Bigger is sharper and slower", items=BAKE_SIZES, default="2048")
     bake_sets: bpy.props.IntProperty(name="Texture Sets", description="Normal + Color: bakes onto this many sets of maps, each its own material, so a big model keeps detail", default=1, min=1, max=16)
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Classic Guided: how many passes settle the new quads onto your surface. More follows it closer, slower", default=2, min=0, max=30)
-    ui_tweak_open: bpy.props.BoolProperty(name="Tweak", description="Sliders that change how the quads are laid out", default=False)
     tweak_rows: bpy.props.FloatProperty(name="Rows on Round Areas", description="How readily round, smooth areas become rows of quads that follow their curve. Right finds more of them and adds faces. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     tweak_flat: bpy.props.FloatProperty(name="Flat Area Size", description="How big quads inside flat areas may get. Left makes them smaller and more even; right fewer and longer. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     tweak_poles: bpy.props.BoolProperty(name="Avoid Poles", description="Turns edges so rows of quads keep going past poles (points where 3 or 5+ edges meet). Off: about a fifth more poles, a touch more detail", default=True, update=_redraw_update)
@@ -1763,7 +1757,7 @@ def loose_pieces(src) -> int:
 
 
 def _start_segments(context, gs, src, target: int | None = None) -> bool:
-    """Start the search, to land on `target` faces if given. It runs in slices from _collect_work's timer; only the pairing goes to a thread."""
+    """Start the search, to land on `target` faces if given. It runs in slices from a timer on the main thread."""
     if gs.auto_profile in profiles.BLOCKOUT_USES:
         return _start_blockout(gs, src)
     target = auto_target(gs, len(src["faces"])) if target is None else target
@@ -1829,7 +1823,7 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
     saved = None if quiet else hardware.checkpoint_dir(co, len(faces))
     resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
-    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs), hard=hard_surface.job_flags(gs))
+    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, helpers=parallel.allowed(), redo_rough=gs.auto_redo_rough, tweak=tweaks(gs), hard=hard_surface.job_flags(gs))
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
@@ -3272,7 +3266,7 @@ class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
         target = auto_target(gs, len(src["faces"]))
         co, faces, mat, mirror, lines, paint, _note = _solve_inputs(gs, src, _guide_lines(context, gs, src), _painted(obj, gs, src))
         jobpack.export_job(
-            folder, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, "FULL", Path(__file__).resolve().parent,
+            folder, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, "FULL",
             mirror=mirror, lines=lines, drop=None if paint is None else density_drop(paint, gs.density_strength), source=(len(src["faces"]), len(src["co"])),
         )
         state["message"] = f"Job written to {folder}. Copy the folder to the other computer and follow README.txt in it"
@@ -3728,28 +3722,19 @@ def progress_info(kind: str | None = None):
 
 
 def fold(layout, data, prop: str, text: str):
-    """A fold-out section: a native panel on Blender 4.1+, a disclosure toggle before. Returns the body, or None when closed."""
-    if hasattr(layout, "panel_prop"):
-        header, body = layout.panel_prop(data, prop)
-        header.label(text=text)
-        return body
-    is_open = getattr(data, prop)
-    layout.prop(data, prop, text=text, icon="DOWNARROW_HLT" if is_open else "RIGHTARROW", emboss=False)
-    return layout.column() if is_open else None
+    """A fold-out section (a native layout panel). Returns the body, or None when closed."""
+    header, body = layout.panel_prop(data, prop)
+    header.label(text=text)
+    return body
 
 
 def draw_progress(layout, fraction: float, text: str) -> None:
-    """A real progress bar on Blender 4.0 and later, a text bar before that."""
+    """A progress bar, with a longer stage name in full under it."""
     fraction = min(max(float(fraction), 0.0), 1.0)
-    if hasattr(layout, "progress"):
-        short = len(text) <= 30  # a bar can't wrap: a longer stage goes in full on the lines under it, not cut to "Laying rows of q..."
-        layout.progress(factor=fraction, type="BAR", text=text if short else f"{fraction * 100:.0f}%")
-        if not short:
-            overlay.wrap_label(layout, text, width=36, limit=3)
-    else:
-        filled = int(round(fraction * 20))
-        layout.label(text=f"[{'#' * filled}{'-' * (20 - filled)}] {fraction * 100:.0f}%")
-        overlay.wrap_label(layout, text, width=36, limit=2)
+    short = len(text) <= 30  # a bar can't wrap: a longer stage goes in full on the lines under it, not cut to "Laying rows of q..."
+    layout.progress(factor=fraction, type="BAR", text=text if short else f"{fraction * 100:.0f}%")
+    if not short:
+        overlay.wrap_label(layout, text, width=36, limit=3)
 
 
 # --------------------------------------------------------------------------- panel
@@ -3832,12 +3817,14 @@ REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
 
 def problem_url() -> str:
     """New-issue link with Blender, OS and CurioMesh versions already filled in."""
-    import importlib
     import platform
-    from urllib.parse import urlencode
+    import tomllib
+    from urllib.parse import urlencode  # only builds the link's query string; nothing is sent from Blender
 
-    info = getattr(importlib.import_module(__package__), "bl_info", None) or {}  # kept equal to the manifest's version
-    version = ".".join(str(v) for v in info.get("version", ())) or "?"
+    try:
+        version = tomllib.loads((Path(__file__).parent / "blender_manifest.toml").read_text(encoding="utf-8")).get("version", "?")
+    except (OSError, ValueError):
+        version = "?"
     body = (
         f"CurioMesh {version}, Blender {bpy.app.version_string}, {platform.system()} {platform.release()}\n\n"
         "What I did:\n\nWhat happened:\n\nWhat I expected:\n"
@@ -3903,7 +3890,6 @@ _draw_handles: list = []
 
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
-    segments.seglive.add_handlers()  # Blender drops the add-on's other handlers when a file loads
     stop_work()
     ladder.cancel()
     segments.reset()

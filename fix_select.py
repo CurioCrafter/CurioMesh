@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 """Fix Selection: in Edit Mode, find the bad faces inside a rough selection and fix only those, several ways.
 
 Works on any mesh (a result you applied, or one made elsewhere). A Source mesh, when set, says which way is out and

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Live preview: debounced TRIAD-Q (PairClosure) re-run into one reusable preview object."""
 
@@ -17,6 +17,7 @@ from .operators import config_from_owner
 
 LIVE_FACE_CAP = 8_000
 DEBOUNCE_SECONDS = 0.4
+WATCH_SECONDS = 0.5  # while Live is on, how often the source is compared with what its preview was made from
 
 state = {"source": "", "sig": None, "message": "", "faces": 0, "ms": 0.0}
 
@@ -71,24 +72,29 @@ def on_live_toggled(settings, context) -> None:
         _pick_source(context)
         state["sig"] = None
         schedule(0.05)
+        if not bpy.app.timers.is_registered(_watch):
+            bpy.app.timers.register(_watch, first_interval=WATCH_SECONDS)
     else:
-        if bpy.app.timers.is_registered(_tick):
-            bpy.app.timers.unregister(_tick)
+        for timer in (_tick, _watch):
+            if bpy.app.timers.is_registered(timer):
+                bpy.app.timers.unregister(timer)
         remove_preview()
         state["message"] = ""
     overlay.tag_redraw()
 
 
-def _on_geometry() -> None:
-    """From the viewport's redraw: the live source was edited since its preview was made."""
-    settings = bpy.context.scene.curiomesh_settings
-    if not settings.live_enabled or not state["source"] or state["sig"] is None:
-        return
-    obj = bpy.data.objects.get(state["source"])
-    if obj is None or obj.type != "MESH" or obj.mode != "OBJECT":
-        return
-    if _signature(obj) != state["sig"]:
-        schedule()
+def _watch():
+    """Timer, only while Live is on: a source edited since its preview was made gets a new one. Ends when Live is off."""
+    try:
+        if not bpy.context.scene.curiomesh_settings.live_enabled:
+            return None
+        obj = bpy.data.objects.get(state["source"]) if state["source"] else None
+        if state["sig"] is not None and obj is not None and obj.type == "MESH" and obj.mode == "OBJECT" and len(obj.data.polygons) <= LIVE_FACE_CAP:
+            if _signature(obj) != state["sig"] and not bpy.app.timers.is_registered(_tick):
+                schedule()
+    except (AttributeError, ReferenceError):
+        return None
+    return WATCH_SECONDS
 
 
 def run_preview(context) -> bool:
@@ -109,7 +115,7 @@ def run_preview(context) -> bool:
 
     config = replace(
         config_from_owner(settings),
-        engine="TRIAD_Q_LITE",
+        engine="PAIR_CLOSURE",
         output_mode="NEW",
         texture_mode="NONE",
         bake_fallback=False,
@@ -161,14 +167,10 @@ def _tick():
     return None
 
 
-def register() -> None:
-    overlay.add_geometry_hook(_on_geometry)
-
-
 def unregister() -> None:
-    if bpy.app.timers.is_registered(_tick):
-        bpy.app.timers.unregister(_tick)
-    overlay.remove_geometry_hook(_on_geometry)
+    for timer in (_tick, _watch):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
     try:
         remove_preview()
     except Exception:

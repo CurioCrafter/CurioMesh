@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Quad Size and Organization: two sliders over a ladder of finished results.
 
@@ -21,9 +21,8 @@ from itertools import chain
 import bpy
 import numpy as np
 
-from . import autoretopo, organize, overlay, segments
+from . import autoretopo, organize, overlay, parallel, segments
 from .triadq import ladder as L
-from .triadq import tasks
 from .triadq import parts as P
 
 MOST_FACES = 400_000  # faces of your mesh: past this each rung is a long search, so there is no ladder
@@ -48,7 +47,7 @@ lad = {
     "failed": [],
     "meshes": {},  # what the sliders picked -> its preview mesh, so moving back and forth only swaps meshes
     "want": None,  # what the sliders ask for; while dragging a blend, the nearer Style stands in for it
-    "blend": None,  # (wanted, thread, box) while a blend is spliced off the main thread
+    "blend": None,  # (wanted, box) of a blend made when the slider settled, until the next timer call shows it
     "settings": None,  # the panel settings the search ran with (`_settings`): each rung reads them again
 }
 drag = {"pending": False, "shown_at": 0.0, "moved": -1e9, "settled": True}
@@ -94,8 +93,8 @@ def start(context) -> bool:
         return False
     here = (job.style, round(job.detail, 3))
     slow = (job.report or {}).get("seconds", 0.0) > SLOW
-    plan = L.plan(here[1], here[0], rows=len(job.faces) <= ROWS_MOST and not slow)
-    if slow:  # ponytail: a fixed cut; helpers for the ladder would make all sizes affordable, at the cost of more Blenders running
+    plan = L.plan(here[1], here[0], rows=len(job.faces) <= ROWS_MOST and not slow and parallel.allowed())
+    if slow:  # Limitation: a fixed cut; helpers for the ladder would make all sizes affordable, at the cost of more Blenders running
         plan = [(s, d) for s, d in plan if here[1] / 2.6 <= d <= here[1] * 2.6]
     gs = context.scene.curiomesh_guided
     lad.update(key=base["key"], base=here, rungs={here: job}, plan=plan, shown=(here, here, ()), settings=_settings(gs))
@@ -144,7 +143,6 @@ def work(seconds: float) -> None:
                 cancel()
                 return
             lad["job"] = guided.make_job(bpy.context, gs, src, guided.state["auto_inputs"], detail, style, quiet=True)
-            lad["job"].threaded = True
             continue
         job.step(min(SLICE, max(ends - time.perf_counter(), 0.005)))
         if job.busy:
@@ -326,7 +324,7 @@ def _put(context, picked, out) -> None:
 
 def preview(context) -> bool:
     """Put what the sliders ask for on screen at once: a finished size is a mesh swap. A blend of two Styles shows the
-    nearer of the two meanwhile; `settle` splices the real blend on a worker thread once the slider rests."""
+    nearer of the two meanwhile; `settle` splices the real blend once the slider rests."""
     if not active():
         return False
     picked = choice(context.scene.curiomesh_guided)
@@ -344,21 +342,18 @@ def preview(context) -> bool:
 
 
 def settle(context) -> None:
-    """The slider rests: splice a blend if one was asked for (on a thread), then find the segments of the result on
+    """The slider rests: splice a blend if one was asked for, then find the segments of the result on
     screen and look at a blend, whose numbers are not known yet."""
     want = lad.get("want")
     if not active():
         return
     if want is not None and want != lad["shown"] and want[2]:
         box = {}
-
-        def work():
-            try:
-                box["out"] = compose(*want)
-            except Exception as exc:  # a thread has nobody above it to report to
-                box["error"] = exc
-
-        lad["blend"] = (want, tasks.start(work, "CurioMeshBlend"), box)
+        try:
+            box["out"] = compose(*want)
+        except Exception as exc:  # shown as no blend: the rungs on either side stay usable
+            box["error"] = exc
+        lad["blend"] = (want, box)
         return
     _finish(context)
 
@@ -379,10 +374,8 @@ def _finish(context) -> None:
 
 
 def _blend_done(context) -> bool:
-    """Put a blend spliced on its thread on screen. False while it is still being made."""
-    want, task, box = lad["blend"]
-    if not task.done():
-        return False
+    """Put the blend made by `settle` on screen."""
+    want, box = lad["blend"]
     lad["blend"] = None
     if "out" in box and active() and lad.get("want") == want:
         _put(context, want, box["out"])
@@ -394,8 +387,7 @@ def show(context) -> bool:
     """`preview` and `settle` at once, for scripts: waits for a blend."""
     preview(context)
     settle(context)
-    while lad.get("blend"):
-        lad["blend"][1].join()
+    if lad.get("blend"):
         _blend_done(context)
     return True
 
@@ -406,7 +398,7 @@ def pump(context):
     now = time.perf_counter()
     if lad.get("blend") and (drag["pending"] or not _blend_done(context)):
         if drag["pending"]:
-            lad["blend"] = None  # moved again: that blend is not wanted any more (its thread ends by itself)
+            lad["blend"] = None  # moved again: that blend is not wanted any more
         else:
             return THROTTLE / 2
     if drag["pending"] and now - drag["shown_at"] >= THROTTLE:

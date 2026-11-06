@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Special parts: wires and stacks of fins as sweeps, cloth as rows of long quads, and copies of one piece recognised so it's only worked out once.
 

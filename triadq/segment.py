@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 """Surface segments: split a connected mesh into parts a person would name, and join remade parts back on their seams.
 
@@ -41,18 +41,7 @@ from .patch import (
 from .topology import parity_path_quad_closure
 from .types import MeshData
 
-try:  # the scorer and the grids are features of their own
-    from . import patterns
-except ImportError:
-    patterns = None
-try:
-    from . import smoothgrid
-except ImportError:
-    smoothgrid = None
-try:
-    from . import fieldmesh
-except ImportError:
-    fieldmesh = None
+from . import fieldmesh, patterns, smoothgrid
 
 CELLS = 44  # patches across a loose piece's longest side: coarse enough to see the shape and not the scan noise
 MIN_FACES = 200  # a loose piece with fewer faces stays one segment
@@ -968,7 +957,7 @@ def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edge
 def topology_score(points, faces) -> float | None:
     """0-100: how tidy the quads are against hand-made meshes. None with nothing to judge, or without the scorer."""
 
-    if patterns is None or not any(len(f) == 4 for f in faces):
+    if not any(len(f) == 4 for f in faces):
         return None
     try:
         return float(patterns.score(patterns.measure(points, faces))["score"])
@@ -1127,7 +1116,7 @@ def _sheet(co, faces, comp, edge, project, focus=None, creases=None):
     """
 
     loops, pinched = boundary_loops(faces, comp)
-    if smoothgrid is None or pinched or len(loops) != 1 or len(loops[0]) % 2 or len(loops[0]) < 8:
+    if pinched or len(loops) != 1 or len(loops[0]) % 2 or len(loops[0]) < 8:
         return None
     vertex_ids, tris, _source, _uv = _triangulate_component(faces, comp)
     points = co[vertex_ids]
@@ -1331,8 +1320,6 @@ def _fill_holes(co, faces, holes):
 def field_on_seams(points, polys, seams, target: float, project=None, lines=None, settle=None):
     """Rows from the field mesher, joined to the seams: its last row comes off and one row of quads ties what's left to the seam's own vertices. Returns (points, faces). Raises ValueError where it can't."""
 
-    if fieldmesh is None or smoothgrid is None:
-        raise ValueError("no field mesher")
     co, faces = fieldmesh.field_quads(np.asarray(points, dtype=np.float64), polys, max(target, fieldmesh.SMALLEST_TARGET), turn=FIELD_TURN, lines=lines)
     co = np.asarray(co, dtype=np.float64)
     faces = _drop_crowded(faces)

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 import os
 import sys
@@ -58,7 +58,7 @@ class WorkerCountTests(unittest.TestCase):
 class PoolTests(unittest.TestCase):
     def test_parts_come_back_out_of_order_failures_are_reported_and_close_kills_every_helper(self):
         code = Path(__file__).resolve().parents[1]
-        env = dict(os.environ, PYTHONPATH=str(code))  # how real helpers find the add-on too: no sys.path edits
+        env = dict(os.environ, PYTHONPATH=str(code))  # the stand-in is plain Python; real helpers enable the add-on instead
         pool = parallel.Pool([sys.executable, "-c", FAKE], 2, {"anything": 1}, env)
         try:
             todo, got = [0, 1, 2, 3, 4, 5, 6], {}
@@ -118,14 +118,14 @@ class PoolTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parallel._read(path)
 
-    def test_helper_command_runs_blender_with_the_addon_on_its_path(self):
+    def test_helper_command_enables_the_addon_by_its_package_name(self):
         command, env = parallel.helper_command("rows_worker.main", ["folder", "0", "3"], binary="blender")
-        code = Path(__file__).resolve().parents[1]
-        self.assertEqual(command[:5], ["blender", "--background", "--factory-startup", "--python-use-system-env", "--python-expr"])
-        self.assertIn(f"importlib.import_module('{code.name}.rows_worker').main(sys.argv)", command[5])
-        self.assertEqual(command[6:], ["--", "folder", "0", "3"])
-        self.assertEqual((env["PYTHONPATH"], env["PYTHONNOUSERSITE"]), (str(code.parent), "1"))
-        self.assertNotIn("PYTHONHOME", env)
+        self.assertEqual(command[:4], ["blender", "--background", "--factory-startup", "--python-expr"])
+        self.assertIn(f"addon_utils.enable({parallel.PACKAGE!r}, default_set=False)", command[4])
+        self.assertIn(f"importlib.import_module({parallel.PACKAGE + '.rows_worker'!r}).main(sys.argv)", command[4])
+        self.assertNotIn("sys.path", command[4])
+        self.assertEqual(command[5:], ["--", "folder", "0", "3"])
+        self.assertEqual(env, dict(os.environ))  # the child's environment is not changed
 
 
 class MergeTests(unittest.TestCase):

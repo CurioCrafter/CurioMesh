@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+# Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import chain
+from types import SimpleNamespace
 from typing import Iterable
 
 import numpy as np
-
-from . import tasks
 
 
 Face = tuple[int, ...]
@@ -127,14 +126,14 @@ def face_edges(face: Face) -> list[tuple[int, int]]:
 
 
 class Cancelled(Exception):
-    """Raised inside a worker when the caller no longer wants its result."""
+    """Raised inside a long step when the job that runs it was stopped."""
 
 
-_cancel = tasks.local()  # each worker has its own
+_cancel = SimpleNamespace()  # the current stopping check (see cancel_with)
 
 
 def cancel_with(check) -> None:
-    """Make `check_cancelled()` on this thread raise `Cancelled` once `check()` is true. None switches it off."""
+    """Make `check_cancelled()` raise `Cancelled` once `check()` is true. None switches it off."""
     _cancel.check = check
 
 
