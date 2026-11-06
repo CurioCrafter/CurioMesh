@@ -50,6 +50,7 @@ FLAT = 0.02  # of an edge: your original mesh under a panel must sit this close 
 PANEL_FACES = 2  # fewer faces than this is not a panel
 PULL = 0.02  # how much a shared corner also stays near where it was
 DRIFT = 1.0  # of an edge: no corner moves further than this in all
+JUMP = 0.25  # of an edge: a corner whose nearest point on your original jumps this much further than it was off it stays
 SQUASH = 0.5  # a face whose shortest edge ends up under this share of what it was and of an edge goes back ("squash")
 
 
@@ -407,7 +408,16 @@ def _place(base: Base, free, on_chain, moving, target, strength: float, held: li
     co[follow] = base.co[follow] + FOLLOW * push[follow] / count[follow, None]
     changed = moving | follow
     if changed.any():
-        co[changed] = yield from _project(base, co[changed])
+        ids = np.flatnonzero(changed)
+        raw = co[ids]
+        placed = yield from _project(base, raw)
+        own = yield from _project(base, base.co[ids])
+        # the nearest point on your original jumped much further than the corner was off it: it landed on the other
+        # side of a thin part or on a part next door, so the corner stays where it was
+        jump = np.linalg.norm(placed - raw, axis=1) > np.linalg.norm(own - base.co[ids], axis=1) + JUMP * base.edge
+        for v in ids[jump].tolist():
+            held.append((base.co[v].copy(), "thin part"))
+        co[ids] = np.where(jump[:, None], base.co[ids], placed)
     _keep_plane(base, co)
     return (yield from _guard(base, co, changed, held))
 
