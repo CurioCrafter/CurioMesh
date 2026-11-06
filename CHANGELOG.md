@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.8.1 - unreleased
+
+### Face loops
+- **Loop Flow shows face loops**: each strip of quads (walk across a quad to the one on its opposite side, and on) is
+  drawn as a line in its own colour through the quads it crosses, instead of the edge loops. Poles are still dots.
+- **Face Loops** in Adjust, under Tidy Up. **Pick a Strip**: point at the result and the strip under the mouse lights
+  up; click to select it. The line under the buttons gives its faces, whether it closes, how much it turns and how
+  even its width is. While picking, drag the selected strip to move it sideways, or drag a pole dot to move the pole
+  along the surface; the quads round it follow.
+- Tools for the selected strip, each one Ctrl+Z step: **Fix This** (picks the fix itself: straightens a wiggly strip,
+  evens out an uneven one, takes away a short dead end), **Slide** (move the mouse, click), **Straighten**, **Even
+  Width**, **Add Strip** (splits it down the middle; every face stays a quad) and **Remove Strip** (joins its two sides;
+  refused where a face next to it would stop being a quad). Only the strip and up to three quads each side move, along
+  the lines the quads already run on; hard edges, borders and the mirror seam stay put, the result stays on your mesh,
+  and a mirrored result gets the same change on the other side.
+- **Ring Round This**: press on the middle of an eye, mouth or hole and drag out to its edge; the quads there are
+  redone as closed rings round it (the Flow Editor's Ring).
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

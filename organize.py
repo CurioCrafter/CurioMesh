@@ -9,7 +9,8 @@ stacked evenly). Each strength is measured (Tidiness, Loop Quality, poles, how m
 Finder) and gets its own preview mesh, so dragging only swaps meshes. With a mirrored result one half is organized
 and mirrored again, so the seam stays exact. Most Detail Loss holds the slider back at the strongest one within it.
 
-Loop Flow draws the edge loops of the result in a colour each, and its poles as dots.
+Loop Flow draws the face loops (strips of quads, `triadq.strips`) of the result in a colour each, and its poles as dots.
+The strip picked with Face Loops is drawn by `faceloops`.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from .triadq.chords import PictureJudge
 
 STRENGTHS = (0.25, 0.5, 0.75, 1.0)  # worked out once; the slider shows the nearest one at or below it. 0.25: poles cleaned, 0.5: quads settled, 0.75 and 1: loops straightened half and fully
 GAP = 0.1  # seconds between looks at the worker thread
-LONG_LOOP = 4  # edges: shorter loops are not drawn in Loop Flow
 FACE_ARRAYS = ("mat", "piece", "parts", "new", "locked", "chart")  # per-face numbers of a result that organizing carries along
 SETTLE_PULL = "smooth"  # neighbours' middle; "settle" (rectangles and straight loops) measured the same view change with a few more slivers on five test models
 REDRAW = True  # redraw messy patches around poles as grids (False: only spin edges, faces stay as they are)
@@ -333,21 +333,20 @@ def loop_colours(labels: np.ndarray) -> np.ndarray:
     return np.asarray([(*colorsys.hsv_to_rgb(h, 0.75, 1.0), 1.0) for h in hue.tolist()], dtype=np.float32).reshape(-1, 4)
 
 
-def flow_lines(co, faces):
-    """(edge ends 2 per edge, colour per end, pole points, pole colours): long loops in a colour each, poles as dots
-    (blue: three edges, red: five or more)."""
+def flow_lines(co, faces, strips=None):
+    """(line ends 2 per quad crossed, colour per end, pole points, pole colours): each strip of quads drawn as a line
+    through the middles of the edges it crosses, a colour per strip; poles as dots (blue: three edges, red: five or more)."""
+    from .triadq import strips as S
+
     topo = patterns.Topology(co, faces)
     if not len(topo.quads):
         return np.zeros((0, 3)), np.zeros((0, 4)), np.zeros((0, 3)), np.zeros((0, 4))
-    labels = topo.loop_labels()
-    sizes = np.bincount(labels)[labels]
-    keep = np.flatnonzero(sizes >= LONG_LOOP)
-    ends = np.stack((topo.edge_a[keep], topo.edge_b[keep]), axis=1).reshape(-1)
-    colours = np.repeat(loop_colours(labels[keep]), 2, axis=0)
+    ends, labels = (strips or S.Strips(co, faces)).segments()
+    colours = np.repeat(loop_colours(labels), 2, axis=0)
     poles = np.flatnonzero(topo.poles)
     low = topo.code[poles] < 4
     pole_colours = np.where(low[:, None], np.float32((0.2, 0.5, 1.0, 1.0)), np.float32((1.0, 0.15, 0.1, 1.0)))
-    return topo.points[ends], colours, topo.points[poles], pole_colours
+    return ends, colours, topo.points[poles], pole_colours
 
 
 def _draw_flow() -> None:
@@ -363,7 +362,9 @@ def _draw_flow() -> None:
         matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
         key = (id(res), matrix)
         if org["flow"] is None or org["flow"][0] != key:
-            lines, colours, dots, dot_colours = flow_lines(res["co"], res["faces"])
+            from . import faceloops  # late: faceloops imports this module
+
+            lines, colours, dots, dot_colours = flow_lines(res["co"], res["faces"], faceloops.strips(res))
             shader = gpu.shader.from_builtin("FLAT_COLOR")
             org["flow"] = (key, batch_for_shader(shader, "LINES", {"pos": guided._world(preview.matrix_world, lines).astype(np.float32), "color": colours}), batch_for_shader(shader, "POINTS", {"pos": guided._world(preview.matrix_world, dots).astype(np.float32), "color": dot_colours}), res)
         shader = gpu.shader.from_builtin("FLAT_COLOR")
