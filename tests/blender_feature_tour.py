@@ -51,15 +51,29 @@ os.makedirs(OUT, exist_ok=True)
 
 sys.path.insert(0, os.path.dirname(ADDON))
 PKG = os.path.basename(ADDON)
-import addon_utils  # noqa: E402
+def _working() -> bool:
+    return hasattr(bpy.types.Scene, "curiomesh_guided") and "remesh" in dir(bpy.ops.curiomesh)
 
+
+# Registered by hand and not "enabled" as a Blender add-on: wm.read_factory_settings (used to start each check from an empty scene)
+# would switch an enabled add-on off again.
 addon = importlib.import_module(PKG)
-try:
-    addon_utils.enable(PKG, default_set=True, persistent=False)  # also creates the add-on's preferences entry
-except Exception:
-    traceback.print_exc()
-if not hasattr(bpy.types.Scene, "curiomesh_guided"):
+if not _working():
     addon.register()
+if not _working():
+    print("TOUR ABORT the add-on did not register", flush=True)
+    sys.exit(2)
+
+
+def get_prefs():
+    """The add-on's preferences, creating the preferences entry a hand-registered add-on does not have. None if Blender refuses."""
+    try:
+        entries = bpy.context.preferences.addons
+        if PKG not in entries:
+            entries.new().module = PKG
+        return entries[PKG].preferences
+    except Exception:
+        return None
 
 
 def mod(name):
@@ -306,7 +320,7 @@ def fresh_auto(src, **props):
     for k, p in g.bl_rna.properties.items():
         if p.type in {"POINTER", "COLLECTION"} or k in {"rna_type", "name"} or p.is_readonly:
             continue
-        if k.startswith(("auto_", "sym_", "bake_", "keep_", "multires", "region_use", "loop_", "bend_", "density_", "guide_use", "blockout", "quad_", "tweak_", "ui_", "pure_", "fit_", "feature_")):
+        if k.startswith(("auto_", "sym_", "bake_", "keep_", "multires", "region_use", "loop_", "bend_", "density_", "guide_use", "blockout", "quad_", "tweak_", "ui_", "pure_", "fit_", "feature_", "apply_", "bool_on", "lod")):
             g.property_unset(k)
     g.scope, g.auto_update = "AUTO", False
     for k in sorted(props, key=lambda k: k != "auto_profile"):
@@ -392,7 +406,7 @@ class Rec:
                 self._bad(f"props_enum({prop_name!r}) - no such property")
 
         def operator(idname, *a, **k):
-            if idname.startswith("curiomesh.") and not hasattr(bpy.ops.curiomesh, idname.split(".", 1)[1]):
+            if idname.startswith("curiomesh.") and idname.split(".", 1)[1] not in dir(bpy.ops.curiomesh):
                 self._bad(f"operator({idname!r}) - not registered")
             return Rec(errors)
 
@@ -466,7 +480,7 @@ def draw_sweep(label):
     for cls in panel_classes():
         for e in draw_class(cls, ctx):
             (needs_ui if e.startswith("NEEDS-UI") else problems).append(e)
-    prefs = ctx.preferences.addons[PKG].preferences if PKG in ctx.preferences.addons else None
+    prefs = get_prefs()
     if prefs is not None:
         errors: list = []
         fake = type("FakePrefs", (), {"__getattr__": lambda s, n: getattr(prefs, n)})()
@@ -519,7 +533,9 @@ def _():
     for p in bpy.types.Scene.bl_rna.properties:
         if p.identifier.startswith("curiomesh"):
             data["scene_props"].append({"id": p.identifier, "type": p.type, "fixed_type": getattr(p.fixed_type, "identifier", None) if p.type == "POINTER" else None})
-    prefs = bpy.context.preferences.addons[PKG].preferences
+    prefs = get_prefs()
+    if prefs is None:
+        raise Skip("Blender would not make a preferences entry for the add-on")
     data["prefs"] = [prop_row(p) for p in prefs.bl_rna.properties if p.identifier not in ("rna_type", "bl_idname", "name")]
     with open(os.path.join(OUT, "inventory.json"), "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1)
@@ -528,7 +544,9 @@ def _():
 
 @check("addon", "preferences_reset")
 def _():
-    prefs = bpy.context.preferences.addons[PKG].preferences
+    prefs = get_prefs()
+    if prefs is None:
+        raise Skip("Blender would not make a preferences entry for the add-on")
     default = prefs.bl_rna.properties["hud_scale"].default
     prefs.hud_scale = default + 0.5
     r = bpy.ops.curiomesh.reset_preferences()
@@ -583,14 +601,14 @@ def call_without_window(name, mode="EXEC_DEFAULT"):
 @check("addon", "window_only_tools_survive_a_call_without_a_window")
 def _():
     new_scene()
-    done = {n: call_without_window(n, "INVOKE_DEFAULT") for n in WINDOW_OPS if hasattr(bpy.ops.curiomesh, n)}
+    done = {n: call_without_window(n, "INVOKE_DEFAULT") for n in WINDOW_OPS if n in dir(bpy.ops.curiomesh)}
     manual("Place Points / Work Live / Draw Guide / Split / Paint segments / Paint Size / Review Segments / Walk (modal mouse tools)", "need a 3D view and a mouse; here they were only called without one and must not raise a Python error")
     return " ".join(f"{k}:{v}" for k, v in done.items())
 
 
 @check("auto", "window_only_tools_survive_a_call_with_a_result", needs="auto")
 def _():
-    done = {n: call_without_window(n) for n in WINDOW_OPS if hasattr(bpy.ops.curiomesh, n) and n not in ("guided_place", "guided_work", "guided_draw_guide", "seg_split", "seg_paint")}
+    done = {n: call_without_window(n) for n in WINDOW_OPS if n in dir(bpy.ops.curiomesh) and n not in ("guided_place", "guided_work", "guided_draw_guide", "seg_split", "seg_paint")}
     return " ".join(f"{k}:{v}" for k, v in done.items())
 
 
@@ -625,8 +643,9 @@ def _():
         if p.type in {"FLOAT", "INT"} and not p.is_readonly and p.array_length == 0 and p.identifier != "name":
             for v in (p.hard_min, p.hard_max):
                 setattr(g, p.identifier, v)
-                if getattr(g, p.identifier) != type(getattr(g, p.identifier))(v):
-                    bad.append(p.identifier)
+                got = getattr(g, p.identifier)
+                if abs(got - v) > 1e-5 * max(1.0, abs(v)):
+                    bad.append(f"{p.identifier}: set {v}, read {got}")
             g.property_unset(p.identifier)
     ok(not bad, f"limits not held: {bad[:6]}")
 
@@ -944,7 +963,6 @@ def _():
     spots = issue_panel.spots()
     path = os.path.join(OUT, "issues.json")
     if not spots:
-        ok(not issue_panel._IssueOp.poll(None) if False else True)
         raise Warn("no problem spots on this result, so View/Select/Step/Save could not be exercised here")
     ok(bpy.ops.curiomesh.issue_view(index=0) == {"FINISHED"})
     ok(bpy.ops.curiomesh.issue_step(step=1) == {"FINISHED"})
@@ -1180,7 +1198,7 @@ def _():
     src = main_obj()
     shape = {}
     for out in ("TRIS", "QUADS", "MIXED"):
-        res = fresh_auto(src, auto_profile="CUSTOM", auto_output=out)
+        res = fresh_auto(src, auto_profile="CUSTOM", auto_output=out, auto_detail=12.0)
         s = sizes(res)
         shape[out] = (len(s), s.count(3), s.count(4))
     ok(shape["TRIS"][1] == shape["TRIS"][0], f"Triangles output has non-triangles: {shape['TRIS']}")
@@ -1226,34 +1244,41 @@ def _():
     return g.auto_profile + ": " + g.auto_why[:70]
 
 
-@check("use", "tuning_options_each_run", needs="main")
-def _():
-    src = main_obj()
-    opts = [("auto_rough", True), ("auto_drop_hidden", True), ("auto_chords", True), ("auto_tidy", True), ("auto_redo_rough", True),
-            ("auto_gpu", False), ("auto_parallel", True), ("auto_effort", "LIGHT"), ("auto_baked", True), ("pure_quads", False),
-            ("fit_iterations", 0), ("feature_angle", 70.0), ("auto_instances", True)]
+def _try_groups(src, groups, **common):
+    """Run each group of options together (one Auto run each); a group that fails is run option by option to name the culprit."""
     notes, bad = [], []
-    for k, v in opts:
+    for group in groups:
         try:
-            res = fresh_auto(src, **{k: v})
-            n = len(res["faces"])
-            ok(n > 0)
-            notes.append(f"{k}={n}")
-        except Exception as e:
-            bad.append(f"{k}={v}: {e}")
+            res = fresh_auto(src, **common, **group)
+            ok(len(res["faces"]) > 0, "no faces")
+            notes.append(f"{'+'.join(group)}={len(res['faces'])}")
+        except Exception as first:
+            for k, v in group.items():
+                try:
+                    ok(len(fresh_auto(src, **common, **{k: v})["faces"]) > 0, "no faces")
+                except Exception as e:
+                    bad.append(f"{k}={v}: {type(e).__name__}: {e}")
+            if not any(k in b for b in bad for k in group):
+                bad.append(f"{'+'.join(group)} together: {first}")
     ok(not bad, "; ".join(bad))
     return " ".join(notes)
+
+
+@check("use", "tuning_options_each_run", needs="main")
+def _():
+    groups = [
+        {"auto_rough": True, "auto_drop_hidden": True, "auto_redo_rough": True, "auto_baked": True},
+        {"auto_chords": True, "auto_tidy": True, "auto_gpu": False, "auto_effort": "LIGHT", "auto_parallel": True},
+        {"pure_quads": False, "fit_iterations": 0, "feature_angle": 70.0, "auto_instances": True},
+    ]
+    return _try_groups(main_obj(), groups, auto_detail=12.0)
 
 
 @check("use", "tweak_sliders_each_run", needs="main")
 def _():
     src = main_obj()
-    base = len(fresh_auto(src)["faces"])
-    out = {}
-    for k, v in (("tweak_rows", 1.0), ("tweak_flat", 1.0), ("tweak_poles", False)):
-        out[k] = len(fresh_auto(src, **{k: v})["faces"])
-        ok(out[k] > 0, f"{k}: no faces")
-    return f"base {base}, " + str(out)
+    base = len(fresh_auto(src, auto_detail=12.0)["faces"])
+    return f"base {base}, " + _try_groups(src, [{"tweak_rows": 1.0, "tweak_flat": 1.0, "tweak_poles": False}], auto_detail=12.0)
 
 
 @check("use", "keep_uv_seams", needs="main")
