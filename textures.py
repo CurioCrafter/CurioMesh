@@ -5,9 +5,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import bmesh
 import bpy
 import numpy as np
 
+from .triadq import texsets
 from .triadq.uvs import is_see_through, uv_overlap
 
 BAKE_LAYER = "CurioMesh_Bake"
@@ -247,6 +249,79 @@ def bake_detail(
             if material is not None:
                 _connect_normal(material, normal, uv_layer)
     return images
+
+
+def bake_texture_sets(
+    source_obj: bpy.types.Object,
+    target_obj: bpy.types.Object,
+    *,
+    count: int,
+    labels,
+    resolution: int,
+    cage: float,
+) -> list[bpy.types.Image]:
+    """Bake Normal + Color onto `count` sets of maps, each set its own material and its own 0-1 UV square.
+
+    Whole parts (`labels`, per face, or None) go together where they fit, in sets of about equal area. Each set is cut
+    off into its own object, baked, and the sets are joined back into the target. Faces on either side of a set's border
+    no longer share corners, as on any UV seam.
+    """
+    mesh = target_obj.data
+    n = len(mesh.polygons)
+    area, centres = np.empty(n), np.empty(n * 3)
+    mesh.polygons.foreach_get("area", area)
+    mesh.polygons.foreach_get("center", centres)
+    sets = texsets.texture_sets(np.zeros(n, np.int32) if labels is None else labels, area, centres.reshape(-1, 3), count)
+    if sets.max() == 0:
+        return bake_detail(source_obj, target_obj, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
+    images, parts = [], []
+    try:
+        for k in range(int(sets.max()) + 1):
+            part = target_obj.copy()
+            part.data = mesh.copy()
+            part.name = part.data.name = f"{target_obj.name}_Set{k + 1}"
+            for collection in target_obj.users_collection:
+                collection.objects.link(part)
+            parts.append(part)
+            bm = bmesh.new()
+            bm.from_mesh(part.data)
+            bm.faces.ensure_lookup_table()
+            bmesh.ops.delete(bm, geom=[f for f in bm.faces if sets[f.index] != k], context="FACES")
+            bm.to_mesh(part.data)
+            bm.free()
+            images += bake_detail(source_obj, part, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
+        for part in parts:  # the joined mesh gets one, with the same triangles
+            for modifier in [m for m in part.modifiers if m.name == "CurioMesh Bake Triangles"]:
+                part.modifiers.remove(modifier)
+        # Into the target's own mesh, emptied first: whoever holds that mesh keeps holding the result.
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        bmesh.ops.delete(bm, geom=list(bm.verts), context="VERTS")
+        bm.to_mesh(mesh)
+        bm.free()
+        mesh.materials.clear()
+        while mesh.uv_layers:
+            mesh.uv_layers.remove(mesh.uv_layers[0])
+        with bpy.context.temp_override(active_object=target_obj, selected_editable_objects=[target_obj, *parts], object=target_obj):
+            bpy.ops.object.join()
+        parts = []  # joined away
+        if mesh.materials and mesh.materials[0] is None:  # the emptied target's own slot: no face uses it
+            slots = np.empty(len(mesh.polygons), np.int32)
+            mesh.polygons.foreach_get("material_index", slots)
+            mesh.materials.pop(index=0)
+            mesh.polygons.foreach_set("material_index", np.maximum(slots - 1, 0))
+        _keep_triangles(target_obj)
+        return images
+    except Exception:
+        for part in parts:
+            if part.name in bpy.data.objects:
+                data = part.data
+                bpy.data.objects.remove(part)
+                if data.users == 0:
+                    bpy.data.meshes.remove(data)
+        for image in images:
+            bpy.data.images.remove(image)
+        raise
 
 
 def assign_image_to_material(obj: bpy.types.Object, image: bpy.types.Image, label: str) -> None:

@@ -64,11 +64,36 @@ class SymmetryTests(unittest.TestCase):
         self.assertGreaterEqual(half[:, 0].min(), 0.0)
         self.assertEqual(len(source), len(half_faces))
         self.assertEqual(len(origin), len(half))
-        out, out_faces, _mat, snapped = symmetry.mirror_result(half, half_faces, None, 0, 0.0, 3.5)
+        out, out_faces, _mat, snapped, _kept = symmetry.mirror_result(half, half_faces, None, 0, 0.0, 3.5)
         self.assertGreater(snapped, 0)
         self.assertFalse(symmetry.border_vertices(out_faces, len(out)).any())  # no gap along the seam
         mirrored = out * np.array([-1.0, 1.0, 1.0])
         self.assertEqual({tuple(p) for p in out.tolist()}, {tuple(p) for p in mirrored.tolist()})  # exactly mirrored
+
+
+    def test_seam_is_clean_when_the_half_strays_over_the_plane(self):
+        co, faces = _cube()
+        half, half_faces, _source, _origin = symmetry.cut_half(co, faces, 0, 0.0)
+        half = half.copy()
+        inner = (half[:, 0] > 0.3) & (half[:, 0] < 0.7)
+        half[np.flatnonzero(inner)[:1], 0] = -0.05  # a solved vertex that crossed the plane
+        on = np.flatnonzero(half[:, 0] == 0.0)
+        a, b = next((f[k - 1], f[k]) for f in half_faces for k in range(len(f)) if f[k - 1] in on and f[k] in on)
+        half[a] = 0.99 * half[b] + 0.01 * half[a]  # a seam vertex almost on top of its neighbour: a sliver once welded
+        half[on, 0] += 0.003  # the border drifted a little off the plane
+        out, out_faces, _mat, _snapped, kept = symmetry.mirror_result(half, half_faces, None, 0, 0.0, 3.5, 1)
+        self.assertLess(len(kept), len(half_faces))  # the faces left without area by merging the two are gone
+        check = symmetry.seam_check(out, out_faces, 0, 0.0, 3.5)
+        self.assertGreater(check["seam_vertices"], 0)
+        for kind in ("open", "non_manifold", "across", "duplicate"):
+            self.assertEqual(check[kind], 0, kind)
+        mirrored = out * np.array([-1.0, 1.0, 1.0])
+        self.assertEqual({tuple(p) for p in out.tolist()}, {tuple(p) for p in mirrored.tolist()})
+
+    def test_seam_check_counts_an_open_seam(self):
+        co, faces = _cube()
+        half, half_faces, _source, _origin = symmetry.cut_half(co, faces, 0, 0.0)
+        self.assertGreater(symmetry.seam_check(half, half_faces, 0, 0.0, 3.5)["open"], 0)  # one half alone is open
 
 
 class GuideTests(unittest.TestCase):
@@ -99,12 +124,18 @@ class GuideTests(unittest.TestCase):
 
 class DensityTests(unittest.TestCase):
     def test_paint_lowers_the_decimate_weight_and_stays_small(self):
-        drop = density_drop(np.array([-1.0, 0.0, 0.5, 1.0, 9.0]), 1.0)
+        drop = density_drop(np.array([0.0, 0.5, 1.0, 9.0]), 1.0)
         self.assertEqual(drop[0], 0.0)  # no paint: collapsed freely
-        self.assertEqual(drop[1], 0.0)
         self.assertTrue(np.all(np.diff(drop) >= 0))
-        self.assertAlmostEqual(drop[3], 0.02)  # full red at strength 1 (Decimate treats 0.98 as four times the faces)
+        self.assertAlmostEqual(drop[2], 0.02)  # full red at strength 1 (Decimate treats 0.98 as four times the faces)
         self.assertLessEqual(density_drop(np.array([1.0]), 4.0)[0], 0.5)  # never as low as 0, which locks the vertex
+
+    def test_less_detail_collapses_first_and_more_detail_last(self):
+        drop = density_drop(np.array([-1.0, 0.0, 1.0, -3.0]), 1.0)
+        self.assertEqual(drop[0], 0.0)  # Less Detail: free
+        self.assertEqual(drop[3], 0.0)
+        self.assertAlmostEqual(drop[1], 0.02)  # unmarked holds on as More Detail alone would
+        self.assertAlmostEqual(drop[2], 0.04)
 
 
 if __name__ == "__main__":

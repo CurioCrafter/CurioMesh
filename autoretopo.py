@@ -15,6 +15,7 @@ which keeps Blender usable. Only the pairing, which is plain NumPy, goes to a wo
 from __future__ import annotations
 
 import atexit
+import dataclasses
 from itertools import chain
 import math
 import os
@@ -35,13 +36,13 @@ from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patt
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
-from .triadq.flatquad import _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
+from .triadq.flatquad import FlatQuadOptions, _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
 from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces, unfold
 from .triadq.quadreduce import quad_reducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normals, corner_table
 from .triadq.fieldmesh import MOST_TARGET, field_quads, is_clean
-from .triadq.smoothgrid import GridReport, crease_areas, grid_areas, smooth_areas
+from .triadq.smoothgrid import GridOptions, GridReport, crease_areas, grid_areas, smooth_areas
 from . import guides, hardware, loops, parallel, symmetry, turbo
 from .triadq.types import Cancelled, FlatFaces, MeshData
 from .triadq.uvs import simplify_borders
@@ -77,6 +78,8 @@ ROWS_START = 0.04  # Clean Rows: first try, as a share of the source's triangles
 ROWS_MOST = 0.8  # Clean Rows: most faces, as a share of the source's triangles
 ROWS_SECONDS = 30.0  # Clean Rows: QuadriFlow's time limit per piece, plus...
 ROWS_SECONDS_PER_QUAD = 0.01  # ...this much for each quad asked for
+EVEN_FLAT_UP_TO = 150_000  # faces before pairing: past this, flat areas keep the long triangles reduction left (Python, about 1 s per 10k)
+EVEN_FLAT = FlatQuadOptions(tolerance=0.0002, angle_deg=8.0, refine=True, min_faces=4, min_saving=-3.0)  # points added inside flat areas, so no long thin quads cross them
 FLAT_SNAP_SHARE = 0.015  # Balanced: a face whose new vertices would move less than this share of its size stays whole
 ROWS_TIME = 600.0  # Clean Rows: a denser layout is only asked for if it should finish within this many seconds
 ROWS_SECONDS_ESTIMATE = 0.003  # Clean Rows: rough QuadriFlow time per quad, measured on a 74,000 quad rock
@@ -104,6 +107,26 @@ CHORDS_SECONDS = 240.0  # time for redrawing and judging per run; plain collapse
 CHORDS_MESSY = 0.3  # a part is redrawn when more than this share of its corners are poles
 TURN_UP_TO = 150_000  # quads: edges are spun at poles up to here (plain Python, about 3 s per 15,000 quads)
 TURN_LOSS = 1.0  # points of view change spinning edges may add, staying within what Keep Detail counts as a fit
+TWEAK = {"rows": 0.5, "flat": 0.5, "poles": 1}  # the Tweak settings as they are by default: what the constants above give (poles: 1 on, 0 off)
+
+
+def grid_options(rows: float) -> GridOptions | None:
+    """Rows on Round Areas: 0 builds none, 0.5 the defaults, 1 finds round areas with half the curvature and lets them
+    add twice the faces."""
+    if rows <= 0.0:
+        return None
+    f = 2.0 ** (2.0 * min(rows, 1.0) - 1.0)
+    base = GridOptions()
+    return dataclasses.replace(base, min_total_deg=base.min_total_deg / f, min_size=base.min_size / f, max_added=base.max_added * f)
+
+
+def flat_options(flat: float) -> FlatQuadOptions | None:
+    """Flat Area Size: left adds more points inside flat areas (they grow from the edges more slowly, and regions with
+    less thin triangles get them), 0.5 is EVEN_FLAT, all the way right adds none."""
+    if flat >= 1.0:
+        return None
+    f = 2.0 ** (2.0 * max(flat, 0.0) - 1.0)
+    return dataclasses.replace(EVEN_FLAT, grading=EVEN_FLAT.grading * f * f, thin=EVEN_FLAT.thin * f)
 PART_PIXELS = 100  # a part showing fewer pixels than this over the six views can't be judged by itself
 REFINE_PIECES = 8
 REFINE_COVER = 0.8  # share of the faces the extra sizes need to cover
@@ -113,7 +136,7 @@ POLISH_LEVELS = (LOOSE, MIDDLE, STRICT)  # looser tidies more and moves the surf
 FIX_TRIES = 3  # repair tries on a part that got new problems: one size up each time, the last try the source's own faces
 MOST_REPAIRED = 30  # parts remade per try, worst first, so a model of thousands of parts still finishes
 REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots selected: remaking it costs minutes for a few faces
-UNTANGLE_SECONDS = 15.0  # time for turning folded faces back per run
+UNTANGLE_SECONDS = 60.0  # safety net only: turning folded faces back ends after its rounds (a big scan takes a few seconds)
 REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is selected on Apply (the crane spent 215 s for 71 spots)
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
 REDO_SECONDS = 60.0  # Redo Rough Spots: time per run; the spots not reached stay as they are
@@ -599,12 +622,12 @@ def _picture_sizes(sizes: np.ndarray, most_rays: int = MOST_RAYS, max_pixels: in
         most *= 0.85
 
 
-def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=None):
+def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=None, options: GridOptions | None = None):
     """The reduced mesh with its smooth round areas rebuilt as rows of quads, using BVH lookups on the source."""
 
     if labels is None:
-        domes = smooth_areas(co, faces)
-        labels = (domes, crease_areas(co, faces, domes >= 0))
+        domes = smooth_areas(co, faces, options=options)
+        labels = (domes, crease_areas(co, faces, domes >= 0, options))
     coarse = MeshData(coarse_points, coarse_faces, coarse_kinds)
     report = GridReport()
     if int(max(area.max(initial=-1) for area in labels)) < 0:
@@ -626,8 +649,8 @@ def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=No
 
     extent = float(np.ptp(co, axis=0).max())
     normals = _face_frames(co, faces)[0]
-    coarse, report = grid_areas(coarse, labels[0], nearest, extent=extent, normals=normals)
-    coarse, later = grid_areas(coarse, labels[1], nearest, project_for=project_for, extent=extent, normals=normals)
+    coarse, report = grid_areas(coarse, labels[0], nearest, options, extent=extent, normals=normals)
+    coarse, later = grid_areas(coarse, labels[1], nearest, options, project_for=project_for, extent=extent, normals=normals)
     report.built += later.built
     report.faces_in += later.faces_in
     report.quads_out += later.quads_out
@@ -659,11 +682,12 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False, tweak: dict | None = None):
         self.redo_rough = bool(redo_rough)  # Redo Rough Spots: regions round the spots still bad after the repairs are made again, finer
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
         self.redo_counts = {"regions": 0, "no better": 0, "kept": 0}  # what happened to the regions tried, for the bench
         self.parallel = bool(parallel)  # measure parts in helper processes when the job and the computer suit it (parallel.py)
+        self.threaded = False  # every slow Python step on a worker thread, however small the job (the size ladder runs while you work)
         self._pool = None
         self._copy_plan: dict | None = None  # with helpers: part -> (the part it copies, how to move onto it) or None, found ahead of time
         self._plan_reps: list = []
@@ -692,6 +716,8 @@ class AutoJob:
         self.materials = [str(int(m)) for m in materials]
         self.detail = float(detail)
         self.cache = {} if cache is None else cache  # what was measured on this very mesh before: starting again with another amount skips it
+        self.tweak = dict(TWEAK, **(tweak or {}))
+        self.seam_report = None  # with a mirror: the Issue Finder's counts along the seam of the final result
         self.mirror = mirror  # (axis, plane offset, size, faces of the whole mesh, side solved): co/faces are one half, the result is mirrored
         self.note = note
         self.guide_lines = guide_lines or []  # strokes laid on the surface; the quads are made to follow them
@@ -1129,20 +1155,26 @@ class AutoJob:
         seen = max([seen] + [looked[k][3] for k in order])
         if case is not None:
             self.part_cases[len(self.sizes)] = (case, order[0], len(order))
-        if triangles >= FINER_TRIANGLES and seen > 0.0 and self.drop is None and not self.chunks:  # painted vertices would not survive the first pass (a region's border is kept)
+        if triangles >= FINER_TRIANGLES and seen > 0.0 and not self.chunks:
+            painted = self.drop is not None  # Detail Markers: only the halfway sizes, which keep the weights; the held and stepped ones would lose them
             asked = self.detail / 100.0
             uppers = {next((k for k, level in enumerate(levels) if level.loss <= limit * seen), 0) for limit in (asked, PIECE_LIMIT * asked)} - {0}
             for upper in sorted(uppers):
-                # A size halfway across the jump, so a piece doesn't get twice the faces to clear a limit.
-                yield
-                faces = math.sqrt(levels[upper - 1].faces * levels[upper].faces)
-                reduced = yield from self._reduced(points, polys, kinds, faces / len(polys), keep=lock)
-                view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
-                sizes.append(reduced)
-                levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
-                spots.append(wrong_points(reference, view, center, half, pixels, pixel))
+                # A size halfway across the jump, so a piece doesn't get twice the faces to clear a limit. With markers,
+                # which skip the held and stepped sizes below, three across it and one across the next jump up.
+                between = [(upper - 1, upper, t) for t in ((0.25, 0.5, 0.75) if painted else (0.5,))]
+                if painted and upper + 1 < len(order):
+                    between.append((upper, upper + 1, 0.5))
+                for a, b, t in between:
+                    yield
+                    faces = levels[a].faces ** (1.0 - t) * levels[b].faces ** t
+                    reduced = yield from self._reduced(points, polys, kinds, faces / len(polys), self._piece_drop(ids), keep=lock)
+                    view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
+                    sizes.append(reduced)
+                    levels.append(Level(len(reduced[1]), self._counts(reference, view, pixel)[0] * area))
+                    spots.append(wrong_points(reference, view, center, half, pixels, pixel))
                 # Density where the camera saw it go wrong: hold those spots while the rest goes further, then let go.
-                for k in (upper - 1, upper, len(levels) - 1):
+                for k in () if painted else (upper - 1, upper, len(levels) - 1):
                     yield
                     keep = yield from self._off(lambda: hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0))
                     held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep if lock is None else keep | lock, one_off=True)
@@ -1154,7 +1186,7 @@ class AutoJob:
                     spots.append(spots[k])
             # Reduced a little at a time, Decimate forgets the errors it has built up and leaves a closer surface: 15-20% fewer
             # triangles on skin and rock, about even on plates. So these go in beside the other sizes, and the camera chooses.
-            reduced = sizes[len(order) - 1] if triangles < NATIVE_FROM else None  # the native reducer keeps its own sizes
+            reduced = sizes[len(order) - 1] if triangles < NATIVE_FROM and not painted else None  # the native reducer keeps its own sizes
             while reduced is not None and len(reduced[1]) * STEP >= 12.0:
                 yield
                 before = len(reduced[1])
@@ -1369,8 +1401,12 @@ class AutoJob:
             co, faces, kinds, parts = final
         if self.mirror is not None:
             axis, offset, size = self.mirror[:3]
-            co, faces, kinds, _snapped = symmetry.mirror_result(co, faces, kinds, axis, offset, size)
+            co, faces, kinds, _snapped, kept = symmetry.mirror_result(co, faces, kinds, axis, offset, size, self.mirror[4])
+            if final is not None:
+                self.seam_report = symmetry.seam_check(co, faces, axis, offset, size)
+                self.notes.append(symmetry.seam_words(self.seam_report))
             if final is None:
+                parts = np.asarray(parts)[kept]
                 parts = np.concatenate((parts, parts + int(parts.max(initial=-1)) + 1))
             else:
                 fa, fb = patch.face_adjacency(faces)
@@ -1563,10 +1599,14 @@ class AutoJob:
             coarse = MeshData(co, faces, kinds)
             # Rows of quads would ignore the strokes and the paint, and they are what Auto means.
             if method == "AUTO" and self.output_kind != "TRIS" and not self.guide_lines and not self.strips and self.drop is None and not self.chunks:
-                if self._labels is None:
-                    domes = smooth_areas(self.co, self.faces)
-                    self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0))
-                coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels)[0]
+                grid, flat = grid_options(self.tweak["rows"]), flat_options(self.tweak["flat"])
+                if grid is not None:
+                    if self._labels is None:
+                        domes = smooth_areas(self.co, self.faces, options=grid)
+                        self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0, grid))
+                    coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels, grid)[0]
+                if flat is not None and len(coarse.faces) <= EVEN_FLAT_UP_TO:
+                    coarse = flatten_regions(coarse, flat)[0]
             if self.style == "BALANCED" and method == "AUTO" and self.output_kind == "QUADS":  # quads split only where that gains shape
                 self._paired = self._balanced(coarse)
                 self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
@@ -1630,7 +1670,7 @@ class AutoJob:
 
     def _off(self, work):
         """Generator: `work()`, on a worker thread when this job is big enough for it to hold up Blender. Returns its result."""
-        if len(self.faces) < OFF_MAIN_FROM:
+        if len(self.faces) < OFF_MAIN_FROM and not self.threaded:
             return work()
         return (yield from self._background(work))
 
@@ -1642,7 +1682,7 @@ class AutoJob:
         """Generator: `pictures`, on a worker thread in a big job."""
         baked_from = self._bake_tree if self.baked else None
         drawn = turbo.gpu_drawn()
-        if len(self.faces) < OFF_MAIN_FROM:
+        if len(self.faces) < OFF_MAIN_FROM and not self.threaded:
             view = yield from pictures(points, polys, center, half, pixels, baked_from=baked_from)
         else:
             def run():
@@ -2652,7 +2692,7 @@ class AutoJob:
                 fit_loss, fit_shading, fit_soft = yield from self._look(fitted_points, out_faces, center, half, reference, reference_shaded, pixel)
                 if fit_loss <= max(self.detail, loss) and fit_shading is not None and (shading is None or fit_shading < shading):
                     worked, points, loss, shading, soft = fitted, fitted_points, fit_loss, fit_shading, fit_soft
-        if self.style == "DETAIL" and self.method == "AUTO" and self.output_kind != "TRIS" and not self.chords and not self.guide_lines and not self.strips and len(worked.faces) <= TURN_UP_TO:
+        if self.tweak["poles"] > 0 and self.style == "DETAIL" and self.method == "AUTO" and self.output_kind != "TRIS" and not self.chords and not self.guide_lines and not self.strips and len(worked.faces) <= TURN_UP_TO:
             # Rows of quads break wherever a corner has more or fewer than four. Spinning an edge moves no corner, so the shape stays.
             # Balanced splits every quad, which leaves few poles: spinning there gained under a point.
             self.stage = "Spinning edges at poles"

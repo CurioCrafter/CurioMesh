@@ -1,6 +1,143 @@
 # Changelog
 
-## 0.9.3 - unreleased
+## 0.9.7 - 2026-11-05
+
+### Auto Segments
+- **Fewer long thin quads on flat areas** (Keep Detail; Balanced uses the same step): before pairing, flat areas that reduction left as
+  long thin triangles get a few points inside, graded from small at their edges to large in the middle, so flat
+  plates get far fewer fans of thin spokes from bolts and corners. Their outline stays exactly where it was. On four
+  test models the face count stayed within 2%, thin quads on flat areas dropped by a third or more on two of them (the
+  other two barely changed), and the Issue Finder total went down or stayed level.
+
+### Symmetrize, Detail Markers and Tweak
+- **Symmetrize** (next to Mirror): mirrors even when the two sides differ, as on scans and sculpts. The result is built
+  on one side (Keep Side: Auto, + or -) and mirrored, so it is exactly symmetric. **Set Plane** puts the plane at an
+  offset you type instead of finding it. The panel says how far apart the sides were ("the sides differ by up to
+  38.8 mm") and, with a result, how clean the seam is.
+- **A cleaner mirror seam**: a vertex that strayed over the plane goes back, seam vertices closer than a tenth of an
+  edge are merged, and faces left without area or lying in the plane are dropped. The Issue Finder's seam counts on a
+  horse statue: 4 faces crossing the plane and 2 concave faces before, none after; no open, non-manifold or duplicate
+  seam edges on it or a bust, at every Quad Size.
+- **Detail Markers** (was Paint Density): paint **More** or **Less Detail** in Weight Paint, or add marker balls at the
+  3D cursor and scale them. They steer where the faces go at every Quad Size: on a bust, a ball on the mouth and one
+  on the hair doubled the faces per area in the mouth against the hair at all three sizes measured. With Mirror,
+  markers on either side count.
+- With markers, the search now also tries sizes in between its steps, so it lands closer to the Detail.
+- **Tweak** (a fold under the result): **Rows on Round Areas** (how readily round, smooth areas become rows of quads
+  that follow their curve), **Flat Area Size** (how big the quads inside flat areas may get) and **Avoid Poles** (spin
+  edges at poles, Keep Detail). Each reruns the search with Auto-Update; what was measured is kept, so it takes
+  seconds on a bust. On a sofa Rows on Round Areas gave 1,741 / 1,682 / 1,866 faces at 0 / 0.5 / 1; Avoid Poles off
+  left 22% more poles on a bust.
+
+### Know the cost before you press Start
+- **Cost tags** in the panel: Bake Detail, LOD Set, Clean Rows / Field Rows / QuadriFlow and Multires say "Slow" or
+  "Heavy" with the time they add on this computer, and whether they block Blender.
+- **A fuller time estimate** before Start: it now counts the style's slowdown and the bake ("plus about 1 minute of
+  baking that blocks Blender").
+- **Start, Make LOD Set and Auto ask first** when the job is rated large or expected to take over 10 minutes, and Apply
+  asks when its bake alone takes over 2 minutes. The dialog says the time here and the cheaper ways (Effort Light, Keep
+  Detail, a smaller bake, Export Job). "Don't ask again this session" is in it.
+- **A small-PC notice** in This Computer (4 cores or fewer, 8 GB or less, or no graphics card for Cycles).
+
+### Quad Size and Organization sliders
+- **Quad Size**, under the result: smaller quads to the left, bigger to the right. Each step is a whole result of the
+  search at another Detail, so it holds its own amount of change and puts the faces where the shape needs them. The
+  sizes are worked out in the background once the search is done, reusing what it measured, so most take seconds;
+  until they are ready the nearest finished one is shown, with a note.
+- **Organization**: fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the
+  right. In between, loose pieces change over one at a time, smallest first, and the whole object is looked at again.
+- Dragging either slider is a live preview: each size keeps its own preview mesh, so a step is a mesh swap (about
+  1 ms on a 17,000 face bust), at most ten times a second. The segments of the result are found once the slider
+  rests, and the sizes still being worked out wait while you drag.
+- A size that another one beats on both faces and change is skipped, so the face count only ever goes one way.
+- **Bigger Quads / Smaller Quads** for the selected parts only, the rest stays: a whole loose piece takes its faces
+  from the next size, a segment of a bigger piece is remade for Reduce at a lower or higher Detail and kept only if it
+  really has fewer (or more) faces.
+
+## 0.9.6 - 2026-11-05
+
+### Game engines
+- **Texture Sets** on the bake (1 to 16): Normal + Color onto several sets of maps, each its own material, with whole
+  parts kept together in sets of about equal area. Lit in Godot, three 1024 sets shade like one.
+- **More engines in Export for Game Engine:** Roblox (FBX unit scale, tangents, 20,000 triangles per mesh, 1024
+  textures), Web and glTF (.glb for three.js, Babylon.js, Bevy, Sketchfab), CryEngine and O3DE (DirectX normal maps),
+  and **Custom**: FBX, .glb or OBJ, OpenGL or DirectX normal maps, a triangle limit and a largest texture size.
+- **Auto-split:** a mesh over the engine's triangle limit is written as pieces under it, cut along texture sets and
+  parts. FBX and OBJ files now point at their PNG maps, so engines link the textures on import.
+
+### README
+- The star chart is drawn from GitHub's own star dates, as a quad mesh (`scripts/star_chart.py`).
+
+## 0.9.5 - 2026-11-05
+
+### Game engines
+- **Export for Game Engine** (File > Export > CurioMesh Game Asset, and a button after Apply): the selected meshes and
+  their baked maps for Unreal (FBX, PNG maps, normal map green flipped for DirectX), Unity (FBX turned and scaled for
+  Unity, PNG maps) or Godot (.glb with the textures inside). The bake's triangles are kept, and your images are not changed.
+- Baking is now tested in Unreal 5.7, Unity 6 and Godot 4.7, lit from 8 sides next to the source, not only by
+  re-importing in Blender. Imported with default settings, the exported files came closest to the source in all three. A hand-made export
+  lost out: Unreal needed Flip Green set by hand, a plain glTF export let Godot choose other triangles, and a plain FBX
+  export carried no textures.
+
+## 0.9.4 - 2026-11-04
+
+### Skills for AI agents
+- **Agent skills** in `skills/`: `curiomesh-retopo`, `curiomesh-fix-bad-faces`, `curiomesh-batch-and-lods` and
+  `curiomesh-blender-mcp`. An agent can retopologise a file headless, read a JSON report (faces, quads, view changed,
+  Issue Finder totals per part), fix bad faces in a measure-fix-measure loop that keeps a change only when it lowers the
+  bad-face count, make LOD sets and batch many files.
+- Two headless scripts, `curiomesh_run.py` (Auto Segments to a .glb/.fbx/.obj/.blend plus a report) and `curiomesh_fix.py`
+  (Fix Selection tools on any mesh, before and after counts per kind).
+- Install in Claude Code with `/plugin marketplace add CurioCrafter/CurioMesh` then `/plugin install curiomesh-skills@curiomesh`,
+  or unzip the new `curiomesh-<version>-agent-skills.zip` from a release into a skills folder. It is not in the
+  extensions.blender.org zip.
+
+### Blockout and Hulls
+- **Blockout** (a new Use): every loose part of your mesh becomes the low-poly solid that fits it best: an oriented
+  box, a cylinder (axis found from the part, capped with quads) or a ball (a quad sphere, stretched to an ellipsoid),
+  or a small convex hull when that matches clearly better. The camera picks, from the part's own six views. A big
+  part no single solid fits is cut at its creases by the segment finder and each segment gets its own solid. A part
+  that still looks wrong keeps a reduced copy of itself, so nothing comes out crushed; the result says which parts
+  did. All quads except the hulls. Each solid takes the material most of its part had.
+- **Hulls** (a new Use): every part becomes its own reduced convex hull, for a quick faceted low-poly look. Concave
+  parts are cut at their creases first.
+- **Primitive Sides** sets the sides of each cylinder and the detail of each ball (small parts get half), and the
+  size of the hulls. **Each Part Its Own Object** makes Apply write one object per loose part.
+- Apply, Undo, Bake Detail and Make LOD Set work as with the other Uses; in a LOD set each level halves the sides.
+
+### Segments you shape yourself
+- **Live segment size.** Segment Detail and the new **Largest Segment**, **Smallest Segment** and **Crease Strength**
+  sliders recolour the segments while you drag, with the segment count beside them. The colours come from the merge
+  tree the last find kept, so a change shows in milliseconds even on a big mesh; a moment after you stop, the
+  segments are found for real (borders settled on the creases) and kept. **Border Smoothness** sets how round the
+  borders are where no crease holds them; it shows when the segments are kept.
+- **Each mesh keeps its own segment settings.** They are stored on the object and saved with the .blend.
+- **Paint Size.** Paint the CM_SegmentSize vertex group in Weight Paint: red makes smaller segments there, blue
+  larger ones, green leaves it to the sliders. The colours follow each stroke.
+- **Edit segments by hand.** **Split in Two** cuts the selected segment along its own natural border, no line needed.
+  **Grow** and **Shrink** move a segment's border with a brush (Ctrl paints the other way). **Lock** keeps a segment
+  face for face when the size settings change; segments you merge, split, grow, shrink or paint are locked for you.
+  In Review Segments, M merges, K splits in two, L locks, G and S grow and shrink. **Undo Edit** (Ctrl+Z in
+  Review Segments) goes back through the last 20 hand edits, and the next Auto run uses the edited segments.
+- **A remade segment never loses its shape.** A Redo or Use remake whose camera check is much worse than the
+  segment had (or whose surface or size shrinks far below your mesh there) is refused: the segment keeps what it
+  had and the panel says so. Before, the check only asked for more faces, and a segment that had never been
+  measured (one you split, merged or painted) had no check at all, so a round tank could come back as a few flat
+  triangles.
+- **No segment finer than the result can hold.** Where the result's quads are bigger than a found segment (painted
+  very small, for example), the segment joins a neighbour instead of being marked on faces that are not it. Grow,
+  Shrink and Paint New mark the result through the faces of your mesh, so a segment covers the same surface on both.
+- **Locked segments stay locked when the size changes.** A small segment that is dropped no longer joins a locked
+  neighbour, which made the locked one bigger and lose its lock.
+- **Redo and Use remakes run to the end again.** A part redo stopped after its first step and sat at "Remaking..."
+  for good.
+
+### Fixes
+- Without the native core (blocked by the system, or the Python-only build) fitting to your mesh stopped with an
+  error. It now skips only its crossing test.
+- Report a Problem filled in "CurioMesh ?" in the Blender 4.2+ zips; it now reads the version.
+
+## 0.9.3 - 2026-11-04
 
 ### Finding what is still wrong
 - **Issue Finder** (an "Issues" box in step 4, Fix Parts, after an Auto run): every problem area in the result is
@@ -16,6 +153,21 @@
   choose) and, after a fix and a new run, say how many of its spots are fixed, still there or new, with the
   totals per kind.
 
+### Fixing bad faces yourself
+- **Keep Original Where Bad** (in the Issues box, and in step 5, Apply, when problem spots were found): every part
+  with a problem spot gets your original faces back, unchanged. The reduced version stays in that part's tries, so
+  Fix Parts switches it back with one click. After any part is redone or put back, the problem spots are looked for
+  again, so the Issues box always matches the result on screen.
+- **Fix Selection** (a new panel in Edit Mode, CurioMesh tab), for any mesh: select a rough area, or nothing for the
+  whole mesh. **Find Bad Faces** checks it (plus a few rings around it, set by Grow) and leaves only the bad faces
+  selected, with a count per kind. Then fix only those: **Clean Up** (duplicate and flat faces), **Flip Inward**
+  (only where that makes a face point out), **Untangle** (corners moved back onto your original), **Relax** (corners
+  smoothed, then put back on the original) or **Patch** (bad faces removed and the hole filled again from its edge).
+  **Fix All** runs them in turn and undoes any move that leaves more bad faces. Each is one Undo step and says how
+  many bad faces there were before and after. The original is the mesh Auto last worked on, or the one you pick.
+- After Apply, a small box links to the GitHub page and to a problem report with your Blender, CurioMesh and system
+  versions already filled in.
+
 ### Fewer bad faces
 - **Redo Rough Spots** (Auto settings, off by default: it adds up to a minute for a few percent fewer bad faces):
   after the final check, the spots it still flags get a small region each, grown a few rings of faces round the
@@ -27,6 +179,16 @@
 - **Copies land where they fit best.** A part that is almost symmetric across its own plane also fits turned the
   wrong way onto its mirror image, within the copy tolerance, and the first placement found was taken: such a copy
   sat a little off and some of its faces turned inward. Placements are now compared and the closest is kept.
+- **Fitting to your mesh no longer tangles the quads.** Each corner is pulled onto its own share of your mesh, so on
+  thin walls and in creases neighbouring corners were pulled different ways and the quads between them folded over
+  each other or passed through each other. Corners of a quad the fit folded, bent or pushed through another quad now
+  stay where they were. On big rough scans this leaves far fewer crossings for the final check to untangle.
+
+- **Turning folded faces back now finishes on big scans.** The step that moves the corners of inward and folded-over
+  faces back used to stop at a 15 second limit on very big rough scans, so many spots were never visited and two runs
+  could differ. Corners that share no face are now judged together, which makes the step 10 to 30 times faster (a
+  few seconds on a 200,000-face scan) with exactly the result the old step reached when it had the time. It always
+  does its full rounds, so the same model gives the same result; a 60 second limit stays as a safety net.
 
 ## 0.9.2 - 2026-11-03
 

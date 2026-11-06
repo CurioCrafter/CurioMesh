@@ -1,0 +1,14 @@
+{
+  "name": "curiomesh",
+  "description": "Skills that let an AI agent use CurioMesh, the free Blender auto-retopology add-on, on its own.",
+  "owner": { "name": "CurioCrafter", "url": "https://github.com/CurioCrafter/CurioMesh" },
+  "plugins": [
+    {
+      "name": "curiomesh-skills",
+      "source": "./",
+      "description": "Retopologise models, fix bad faces, make LODs and batch files with CurioMesh, headless or through Blender MCP.",
+      "category": "3d",
+      "tags": ["blender", "retopology", "3d", "game-assets"]
+    }
+  ]
+}

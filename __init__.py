@@ -6,7 +6,7 @@
 bl_info = {
     "name": "CurioMesh",
     "author": "CurioCrafter",
-    "version": (0, 9, 2),
+    "version": (0, 9, 7),
     "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
@@ -22,7 +22,7 @@ from .operators import (
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
-from . import batch, guided, live, overlay, region
+from . import batch, fix_select, game_export, guided, live, overlay, region
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
 D = overlay.PREF_DEFAULTS
@@ -271,10 +271,14 @@ def register():
     live.register()
     region.register()
     guided.register()
+    fix_select.register()
+    game_export.register()
     apply_category()
 
 
 def unregister():
+    game_export.unregister()
+    fix_select.unregister()
     guided.unregister()
     region.unregister()
     live.unregister()

@@ -32,10 +32,13 @@ PROFILES = {
     "SUBDIV": ("Subdivision", "All quads with flat panels kept as single large quads, so smoothing keeps the shape", 1.5, "FLAT", "QUADS"),
     "SCAN": ("Scan Cleanup", "Keeps more of the detail of a dirty scan (scans have few true flats, so no flat merging)", 2.0, "AUTO", "QUADS"),
     "SCULPT": ("Sculpt Base", "Even, smooth quads to sculpt on: smoothness over detail", 6.0, "PAIRING", "QUADS"),
+    "BLOCKOUT": ("Blockout", "Each loose part becomes the box, cylinder, ball or small hull that fits it best; a big part no single one fits is cut at its creases first. A part nothing fits keeps a reduced copy of itself", 25.0, "AUTO", "QUADS"),
+    "HULL": ("Hulls", "Each loose part becomes its own reduced convex hull: a quick faceted low-poly look. A concave part is cut at its creases first", 25.0, "AUTO", "MIXED"),
 }
 PROFILE_ITEMS = [(k, v[0], v[1]) for k, v in PROFILES.items()] + [("CUSTOM", "Custom", "Your own Detail, Method and Output")]
 
 
+BLOCKOUT_USES = {"BLOCKOUT", "HULL"}  # the uses that make solids per part (blockout.py) instead of reducing the mesh
 MULTIRES_USES = {"ANIMATION", "SUBDIV", "SCULPT"}  # the uses where a clean base matters more than its own shape
 MOST_FACES_PER_GB = 1_000_000  # of the top Multires level: its grids and the mesh shown take about this much memory
 FEWEST_CAGE, MOST_CAGE = 1500, 12000

@@ -339,6 +339,20 @@ def build_per_version(root: Path, output_dir: Path, native_dir: Path | None = No
     return built
 
 
+def build_skills(root: Path, output_dir: Path) -> Path:
+    """The Claude/agent skills as one zip: unzip it into ~/.claude/skills (or an agent's skills folder). Not part of any add-on zip."""
+    _package_id, version = release_metadata(root)
+    out = output_dir / f"curiomesh-{version}-agent-skills.zip"
+    files = sorted(p for p in (root / "skills").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
+    if not any(p.name == "SKILL.md" for p in files):
+        raise FileNotFoundError("skills/ holds no SKILL.md")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in files:
+            archive.write(path, path.relative_to(root / "skills").as_posix())
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build validated CurioMesh release archives.")
     parser.add_argument("--output", type=Path, default=None, help="Output directory (default: repository dist)")
@@ -365,6 +379,7 @@ def main() -> None:
     if native_dir and not os.environ.get("GITHUB_ACTIONS"):
         print("Test build: locally built binaries hold this computer's paths. Publish only zips from the release workflow.", file=sys.stderr)
     archives = list(build_archives(root, output, native_dir))
+    archives.append(build_skills(root, output))
     if args.per_version:
         archives += build_per_version(root, output, native_dir)
     for archive in archives:

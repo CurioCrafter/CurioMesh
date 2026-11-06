@@ -3,15 +3,29 @@
 **A free, open source Blender retopology add-on. It turns a dense sculpt, scan or high-poly game asset into a clean all-quad, low-poly mesh.**
 
 [![Download CurioMesh](https://img.shields.io/badge/Download-free%20add--on-2ea44f?style=for-the-badge&logo=blender&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
-[![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-24292f?style=for-the-badge&logo=github&logoColor=white)](https://github.com/CurioCrafter/CurioMesh/stargazers)
+[![Star on GitHub](https://img.shields.io/github/stars/CurioCrafter/CurioMesh?style=for-the-badge&logo=github&label=Star%20on%20GitHub&color=24292f)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 
 [![Latest release](https://img.shields.io/github/v/release/CurioCrafter/CurioMesh?label=release)](https://github.com/CurioCrafter/CurioMesh/releases/latest)
 [![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
-![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 15,881 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
+<p align="center"><img src="docs/images/choice.webp" alt="A marble bust retopologised by CurioMesh: a slider moves from Keep Detail (2,508 quads, fewest faces) through Balanced (3,920) to Clean Rows (14,147 quads in even rows), all keeping the same shape" width="800"></p>
 
-*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model): 79,042 faces to 15,881 quads, 5.6% of the view changed. Wire shown on both sides.*
+*The same 17,456-face sculpt at every setting, about 6% of the view changed: Keep Detail makes the fewest faces (2,508 quads), Clean Rows makes even rows (14,147 quads). You choose what matters more for the job.*
+
+<p align="center"><img src="docs/trailer/trailer.webp" alt="CurioMesh trailer: Clean Rows retopology of a bust and a scan, the three layout styles, a game asset with a baked normal map lit in Godot, and export to Unreal, Unity, Godot and Roblox" width="800"></p>
+
+![Three CurioMesh styles with wireframe: Clean Rows on a marble bust and on a concrete road barrier, and a low-poly game asset with a baked normal map](docs/images/hero_styles.jpg)
+
+*Clean Rows on a sculpt and on a scan (wireframe), and a 47,214-face sculpt reduced to 1,068 faces with a baked normal map, lit in Godot.*
+
+**Pick a style for the job:**
+
+- **Clean Rows** makes even quads in rows. Use it for sculpts, scans and anything an artist will edit, subdivide or animate.
+- **Balanced** keeps the shape with a tidier layout than Keep Detail, at a higher face count.
+- **Keep Detail** makes the fewest faces for the shape. Use it for hard-surface props and game assets where face count matters most. Its quads follow the shape, so on smooth surfaces they can look slanted. See the [compressor example](#examples-before-and-after-wire-on-both-sides).
+
+For game assets, turn on Bake Detail and export for Unreal, Unity, Godot or Roblox. More in [Choose a layout style](#choose-a-layout-style).
 
 CurioMesh is an automatic quad retopology add-on for Blender 3.6 to 5.2. Say what the mesh is for, press one button, and it reduces
 the model part by part. A camera check compares the result with your original from six sides and tells you how much of the view
@@ -30,12 +44,14 @@ model, a sculpt or a photogrammetry scan, and want to fix single parts instead o
 Auto picks the Use and settings from your mesh and free memory, says why, and starts. Or follow the numbered steps yourself:
 choose what it is for, **Start**, fix parts in **Review Segments**, then **Apply**. Nothing changes in your scene until Apply.
 
+**If CurioMesh saved you time, please [⭐ star it on GitHub](https://github.com/CurioCrafter/CurioMesh/stargazers).** It is free and made by one person, and stars are how other artists find it. Something broke? [Open an issue](https://github.com/CurioCrafter/CurioMesh/issues/new) (the add-on's **Report a Problem** button fills in your versions).
+
 **Honest limits:** quads can look slanted on smooth surfaces, fine ornaments go jagged at high reduction, it does not find edge
 loops for faces and joints on its own, and big scans take minutes, sometimes tens of minutes. See [Known limits](#known-limits).
 
 ## Contents
 
-[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Without Blender](#curiomesh-without-blender-the-standalone-app-preview) · [Install](#download-and-install-the-blender-retopology-add-on) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
+[Examples](#examples-before-and-after-wire-on-both-sides) · [Uses](#pick-what-it-is-for) · [Styles](#choose-a-layout-style) · [Quad Size](#quad-size-and-organization-drag-and-watch) · [Multires](#multires-detail-a-clean-cage-with-your-shape-in-the-levels) · [Review Segments](#review-segments-find-the-part-that-is-wrong-and-redo-only-that) · [Bake and UVs](#bake-detail-uvs-and-game-engines) · [Big scans](#big-scans-small-pcs-and-a-cloud-job) · [Without Blender](#curiomesh-without-blender-the-standalone-app-preview) · [Install](#download-and-install-the-blender-retopology-add-on) · [AI agents](#use-it-with-claude-and-other-ai-agents) · [FAQ](#frequently-asked-questions-about-free-blender-retopology) · [Limits](#known-limits) · [All features](#all-features)
 
 ## What it does
 
@@ -44,11 +60,16 @@ loops for faces and joints on its own, and big scans take minutes, sometimes ten
 | **Auto Segments and the Auto button** | Reduces the whole object to all quads, one loose part at a time, and checks every size from six sides. **Auto** picks the Use and settings for you. |
 | **Presets by use** | Low Poly, Game Asset, Animation, Subdivision, Scan Cleanup, Sculpt Base. |
 | **Three layout styles** | Keep Detail (fewest faces), Balanced, Clean Rows (even quads in rows). |
+| **Quad Size and Organization sliders** | After a run, drag from more quads to fewer, or from fewest faces to even rows, and the preview follows live. |
+| **Symmetrize and Detail Markers** | Mirror a scan or sculpt even when its sides differ a little. Mark where you want more or less detail. |
+| **Tweak** | Rows on Round Areas, Flat Area Size and Avoid Poles, to shape the layout the way you like it. |
 | **Reduce To** | Aim at a percentage of your faces or a face count, within about 10%. |
 | **Review Segments** | Every part in its own colour, numbers on hover, redo one part with another method, go back to any try. |
 | **Multires Detail** | A clean low cage at level 0, with the shape of your mesh back in the Multires levels above it. |
 | **Make LOD Set** | Three objects named `_LOD0`, `_LOD1` and `_LOD2`, at percents you choose. |
-| **Bake Detail** | Normal map, or normal map and colour, onto the new mesh. Your mesh is only read. |
+| **Bake Detail** | Normal map, or normal map and colour, onto the new mesh, in one or more Texture Sets. Your mesh is only read. |
+| **Export for Game Engine** | Unreal, Unity, Godot, Roblox, glTF or your own settings, with the right normal map format. Tested in Unreal, Unity and Godot. |
+| **Know the cost first** | The time on your PC before you press Start, Slow/Heavy tags on heavy options, and a question before long jobs. |
 
 More below: [all features](#all-features).
 
@@ -58,6 +79,10 @@ Every example below ran the real add-on on a free [Poly Haven](https://polyhaven
 Asset settings: Keep Detail, **Detail 6%**. Detail is how much of the view may look different from your mesh. You can
 download the same models and check the numbers. Each picture shows the original (left) and the result (right), the whole
 object on top and a close-up below.
+
+![Automatic retopology in Blender: wireframe of an air compressor before and after CurioMesh, 79,042 faces reduced to 15,881 all-quad faces, whole object and close-up](docs/images/old_military_compressor.jpg)
+
+*[Old military compressor](https://polyhaven.com/a/old_military_compressor) (free CC0 model), Keep Detail, fewest faces: 79,042 faces to 15,881 quads, 5.6% of the view changed. Wire shown on both sides.*
 
 ![Auto retopology of a chess set in Blender: 76,832 faces become 10,110 quads, wireframe before and after, whole object and close-up](docs/images/chess_set.jpg)
 
@@ -97,7 +122,7 @@ object on top and a close-up below.
 
 *View changed* is the share of the picture that differs from your original, seen from six sides. CurioMesh measures it
 itself. It is not a quality score, and it says nothing about how tidy the quads are. *Size* is the result as a share of the
-original's faces. Folded quads (a quad that is folded or flipped) are rare but not zero: the drill press has 1 of 16,809; the treasure chest has 1 of 10,423; the ship pinnace has 40 of 59,904. Numbers are from
+original's faces. Bad faces are not rare on hard-surface models. The Issue Finder (0.9.3 and later) counts faces turned inward, folded over or crossing: on the drill press 203 inward, 180 folded and 14 crossing among 16,809 faces. Models of many small parts have about 6 to 22 such faces per 1,000, smooth sculpts 0.1 to 0.8. They are shown in red and can be fixed with Fix Selection or Keep Original Where Bad. The other numbers are from
 commit `7f94ff8`, run on Blender 5.2.3 LTS.
 
 Rough rock and fine detail need the most faces to keep their look. Hard-surface models with big smooth areas gain the most.
@@ -163,6 +188,28 @@ Quads can follow the shape, or they can run in rows. Pick what comes first when 
 *Tidiness* is a number from 0 to 100 for how close the quads' layout is to hand-made meshes. Higher is tidier. Credits and limits are in
 [`docs/PATTERN_SOURCES.md`](docs/PATTERN_SOURCES.md). Read it next to View changed, because a tidy grid can still miss the surface.
 
+## Quad Size and Organization: drag and watch
+
+After a run, two sliders sit under the result. Dragging either one is a live preview: the mesh on screen changes at once and Blender stays
+usable (1 to 4 ms per step on the bust and the compressor).
+
+- **Quad Size**: smaller quads to the left, bigger to the right. Each step is a full result of the search at another Detail, so it keeps
+  the shape and puts its faces where the shape needs them. The other sizes are worked out in the background while you look; until one is
+  ready, the nearest finished size is shown.
+- **Organization**: fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the right. On models of many
+  loose pieces, the pieces change over one at a time, so the change is gradual.
+- **Bigger Quads / Smaller Quads** change only the parts you select in Review Segments.
+
+| Quad Size on the marble bust | Finest | | Auto | | Coarsest |
+|---|---:|---:|---:|---:|---:|
+| Faces | 6,077 | 3,733 | 2,515 | 983 | 492 |
+| View changed | 1.6% | 4.1% | 6.5% | 14.8% | 23.6% |
+
+![Quad Size and Organization sliders on a marble bust: 6,077, 2,515 and 492 quads, then Balanced at 5,995 and Clean Rows at 14,147](docs/images/quad_size_strip.jpg)
+
+The sizes take a while to work out on big models (minutes per size on an 80,000-face model). Moving a slider after a per-part edit puts
+back a whole size, so that edit is lost.
+
 ## Reduce To a number of faces
 
 Set **Aim** to Reduce To and give a percentage of your faces or a face count. The result lands within about 10% of it unless the parts
@@ -189,19 +236,24 @@ and after, how much of the view it changed, and its method. Click a part (Shift+
 it, and press Redo. Only that part is remade, while Blender stays usable. Its seam stays where it was, so it joins its neighbours with
 no gap. **Next** and **Previous** jump to the parts that changed the most. Every try is kept, so you can go back to any earlier one at once.
 
-Big loose pieces are also split along necks and creases, so a bust can become head, torso and plinth. You can merge, split with a
-drawn line, paint or rename segments. Part kinds (tube, flat plate, rough scan) are a rough guess from the shape, and the guess can be wrong.
+Big loose pieces are also split along necks and creases, so a bust can become head, torso and plinth. How they split is up to you,
+per mesh: **Segment Detail**, **Largest** and **Smallest Segment**, **Crease Strength** and **Border Smoothness** recolour the segments
+live while you drag, and **Paint Size** lets you paint red where you want smaller segments and blue where you want larger ones. By hand
+you can merge, split with a drawn line or in two along the segment's own border, grow or shrink a segment with a brush, paint a new one,
+rename and lock them. Edited segments are locked, so later size changes keep them, and the next run uses them. Part kinds (tube, flat plate, rough scan) are a rough guess from the shape, and the guess can be wrong.
 The [CHANGELOG](CHANGELOG.md) has the full list.
 
-## Draw edge loops, mirror, guide curves, paint density
+## Draw edge loops, mirror, guide curves, detail markers
 
 - **Draw Edge Loops.** Draw a closed loop around an eye or the mouth, or an open line. Each becomes a strip of regular quads with the
   poles pushed outside it. **Deformation Lines** across an elbow, knee or mouth corner become three or more evenly spaced loops. Move or redraw
   a curve and the result updates. In our test, a ring across a bent neck cut collapsed quads there from 6.2% to 4.0%. A broad bend saw no
   difference, so it helps tight joints and little else.
 - **Mirror** (Auto, X, Y or Z). Solves one half and mirrors it, so both sides match and the seam is exact. Auto uses the plane only when 90% of the surface matches.
+- **Symmetrize** (next to Mirror). Mirrors even when the sides differ, as on scans and sculpts: the result is built on one side (**Keep Side**) and mirrored, and **Set Plane** puts the plane where you type. The panel says how far apart the sides were ("the sides differ by up to 38.8 mm") and checks the seam: on a horse statue, 4 faces crossing the plane before, none after, and no open or doubled seam edges at any Quad Size.
 - **Guide Curves.** Draw strokes on the mesh, or add curves, Grease Pencil drawings or edge-only meshes. The quads follow them.
-- **Paint Density.** Paint a vertex group red where you want more quads. It works best with Reduce To.
+- **Detail Markers.** **Paint More** or **Paint Less** in Weight Paint, or add **marker balls** at the 3D cursor and scale them. The faces go where you said at every Quad Size: on the bust, a More ball on the mouth and a Less ball on the hair doubled the faces per area in the mouth against the hair. With Mirror, a marker on either side counts.
+- **Tweak** (a fold under the result). **Rows on Round Areas** (how readily round, smooth areas become rows of quads), **Flat Area Size** (how big the quads inside flat areas may get) and **Avoid Poles** (Keep Detail). Each reruns the search with Auto-Update and takes seconds on a bust.
 - **Show it how.** Fix a spot by hand, press **Remember This Fix**, and CurioMesh can find the same quad pattern in later results. It is stored on your PC.
 
 ## Redo inside shapes (Live Boolean)
@@ -216,12 +268,38 @@ A redo is refused when it would make more faces than it replaces, and the panel 
 - **Make LOD Set** makes three new objects named `_LOD0`, `_LOD1` and `_LOD2` for game engines, each a Reduce To of your mesh at percents you choose (50, 25 and 12.5% by default). Only the first runs the full search.
 - **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces.
 - Apply marks edges sharper than 60 degrees as hard, and the result takes its shading from the nearest source points, so flat sides stay flat.
-- Baking was tested through FBX and glTF export and re-import in Blender. It has not been tested in a game engine yet.
+- **Texture Sets** (next to Bake Size, with Normal + Color): bake onto 1 to 16 sets of maps, each its own material, so a big model keeps its detail. Whole parts go together, in sets of about equal area. Faces on a set's border are split, as on any UV seam.
+- **Export for Game Engine** (File > Export > CurioMesh Game Asset, or the button after Apply) writes the selected meshes and their maps for the engine you pick. It keeps the bake's triangles, and your objects and images in Blender are not changed.
+
+  | Pick | Writes | Normal map | Limits | Tested here |
+  |---|---|---|---|---|
+  | Unreal | FBX + PNG | green flipped (DirectX) | | Unreal 5.7 |
+  | Unity | FBX turned and scaled for Unity + PNG | as baked (OpenGL) | | Unity 6 |
+  | Godot | .glb, textures inside | as baked | | Godot 4.7 |
+  | Roblox | FBX at FBX unit scale, with tangents + PNG | as baked | 20,000 triangles per mesh, 1024 textures | no, from Roblox's docs |
+  | Web and glTF (three.js, Babylon.js, Bevy, Sketchfab) | .glb | as baked (glTF is green up) | | no |
+  | CryEngine, O3DE | FBX + PNG | green flipped | | no |
+  | Custom | FBX, .glb or OBJ | your pick | your triangle limit and texture size | |
+
+  A mesh over the triangle limit is written as several pieces under it, cut along texture sets first and then along parts, so each piece uses one set of maps.
+- **Tested in Unreal 5.7, Unity 6 and Godot 4.7** under a light circling the model from 8 sides. The test used a 47,214-face sculpt reduced to 1,068 faces with a 1024 bake, compared with the original by how far the shading differs (lower is closer):
+
+  | Engine, front view | No normal map | Exported normal map | Normal map in the wrong format |
+  |---|---|---|---|
+  | Godot 4.7 (.glb) | 0.83 | **0.37** | 1.01 |
+  | Unreal 5.7 (FBX + PNG) | 0.180 | **0.157** | 0.177 |
+  | Unity 6 (FBX + PNG) | 0.232 | **0.095** | 0.267 |
+
+  Imported with default settings, the exported files gave the closest result in all three engines.
+- A plain FBX export sends no textures, because a bake lives only inside the .blend until saved, and a plain glTF export lets the engine choose its own triangles. Use Export for Game Engine, or save the images and tick Apply Modifiers.
 - Baking blocks Blender until it finishes and reads the surface nearest to each texel, so parts that touch can bleed into each other. Only the normal map and base colour are baked, not roughness or metal.
 
 ## Big scans, small PCs, and a cloud job
 
-The **This computer** box reads your cores, free memory and graphics card and says in words how big the job is for this PC.
+The **This computer** box reads your cores, free memory and graphics card and says in words how big the job is for this PC, and says so
+plainly when the PC is on the small side. Before Start, the panel gives the time on this PC, including any bake ("about 3 to 12 minutes,
+plus about 70 seconds of baking that blocks Blender"). Heavy options carry a **Slow** or **Heavy** tag with the time they add. Before a
+long job, Start, Make LOD Set and Apply ask first and list cheaper ways (Effort Light, Keep Detail, a smaller bake, Export Job).
 **Effort** (Auto, Light, Normal, Full) trades speed for a usable Blender. Pieces too big for the effort are cut into regions with their borders kept
 exactly. Each region appears when it is done, and finished regions are saved so a stopped job resumes.
 
@@ -245,7 +323,10 @@ surfaces by their average direction instead of every pixel, so far fewer faces a
 | **Redraw Messy Quads** | Parts with many irregular vertices are redrawn as pole-free grids. On for Animation and Subdivision, and left off on models of many loose parts. |
 | **Segments inside one mesh** | Splits a connected model along necks and creases (head, torso, plinth). Merge, split, paint, rename. |
 | **Draw Edge Loops and Deformation Lines** | Loops round eyes and mouths, lines across joints. The quads follow. |
-| **Mirror, Guide Curves, Paint Density** | Symmetric results, strokes the quads follow, and more faces where you paint. |
+| **Mirror, Symmetrize, Guide Curves, Detail Markers** | Symmetric results with a checked seam, strokes the quads follow, and more or fewer faces where you mark. |
+| **Quad Size, Organization, Bigger/Smaller Quads** | Live sliders for quad size and for fewest faces to even rows, and per-part size changes. |
+| **Tweak** | Rows on Round Areas, Flat Area Size, Avoid Poles. |
+| **Texture Sets, Export for Game Engine** | Bake big models onto several sets of maps; write FBX, .glb or OBJ for your engine with meshes split under its triangle limit. |
 | **Show it how** | Fix a spot by hand once, and CurioMesh finds the same pattern in later results. |
 | **Redo inside shapes (Live Boolean)** | Union, Subtract or Intersect boxes and spheres, and only what is inside is redone, live. |
 | **UV and shading care** | Keep UV Seams, hard edges past 60 degrees, shading read from your source. |
@@ -318,6 +399,34 @@ by the release workflow from the tag, and each comes with `SHA256SUMS.txt` so yo
 The last full test on every Blender version from 3.6 to 5.2 was for 0.8.0. The checks for this version ran on 3.6 LTS, 4.2 LTS and 5.2 LTS, and most of the work on Auto Segments
 was done on 5.2. The viewport overlays draw with Blender's GPU module. If a build cannot draw them, the rest of the add-on keeps working.
 
+## Use it with Claude and other AI agents
+
+The `skills/` folder holds skills (the open Agent Skills format: one folder with a `SKILL.md`) that teach an AI agent to run CurioMesh on its own, with no
+Blender window, and to fix what comes out. The agent reads the skill, runs Blender in the background, reads a JSON report (faces, quads, how much the view
+changed, bad faces per part) and retries with other settings.
+
+| Skill | What the agent can do with it |
+| --- | --- |
+| `curiomesh-retopo` | Turn a file (.obj .fbx .glb .blend) into a clean quad mesh, pick the Use and Detail, check the report, retry. |
+| `curiomesh-fix-bad-faces` | Find inward, folded, crossing and flat faces, fix them (Clean Up, Flip Inward, Untangle, Relax, Patch), measure again, and never keep a change that makes it worse. |
+| `curiomesh-batch-and-lods` | Many files in a row, `_LOD0` to `_LOD2` sets, normal-map baking. |
+| `curiomesh-blender-mcp` | Drive CurioMesh in a Blender that is already open, through the Blender MCP server. |
+
+Install, in Claude Code:
+
+```
+/plugin marketplace add CurioCrafter/CurioMesh
+/plugin install curiomesh-skills@curiomesh
+```
+
+Any other agent (or Claude Code without plugins): download `curiomesh-<version>-agent-skills.zip` from the [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest)
+and unzip it into your skills folder, or copy all four `skills/curiomesh-*` folders there yourself (`~/.claude/skills/` for Claude Code). The skills share one set of
+scripts, so keep the four folders together. You still need CurioMesh installed in Blender (above), and Blender 3.6 to 5.2.
+
+Then ask, for example: *"Retopologise `crate.fbx` for a game with CurioMesh, about 3,000 faces, and fix any bad faces."*
+
+The scripts also work by hand: `blender -b --factory-startup --python skills/curiomesh-retopo/scripts/curiomesh_run.py -- model.obj --use GAME --detail 6 --out model_low.glb --report report.json`.
+
 ## Frequently asked questions about free Blender retopology
 
 **Is there a free automatic retopology add-on for Blender?**
@@ -327,7 +436,7 @@ Yes. CurioMesh is free and open source (GPL-3.0-or-later), works in Blender 3.6 
 Install CurioMesh, select the scan, open the CurioMesh tab, choose Auto Segments, pick the Scan Cleanup Use, and press Start. Check the result in Review Segments, redo any part that looks wrong, then press Apply. For scans over a million faces, set Effort to Light or use Export Job.
 
 **How do I make a low poly game asset from a high poly mesh?**
-Pick the Game Asset or Low Poly Use and press Start. Turn on Bake Detail with Normal + Color to carry the surface detail over as a normal map. Triangulate before you export to your engine.
+Pick the Game Asset or Low Poly Use and press Start. Turn on Bake Detail with Normal + Color to carry the surface detail over as a normal map. After Apply, press Export for Game Engine and pick Unreal, Unity or Godot: it writes the mesh and its maps in the form that engine reads.
 
 **Can I get all quads from an automatic quad remesh?**
 Yes. Output defaults to Quads, and the summary reports leftover triangles, which are normally zero. Quads can still be slanted on smooth surfaces with Keep Detail. Balanced and Clean Rows give tidier layouts for more faces.
@@ -369,7 +478,8 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-in
 - **Folded slivers on some small thin parts.** A quad can come out bent about 90 degrees round an edge of a thin part. They are named in the summary and selected on Apply, so you can fix them by hand.
 - **Judge After Baking is experimental.** On big flat areas of a scan it can leave long thin slivers, which bake badly, and its score misses them. It is off by default.
 - **Redraw Messy Quads costs time.** On some models it roughly doubles the tidiness score for 7 to 50% more faces and 2 to 5 times the time, and it is left off on models of more than 40 loose pieces.
-- Mirror, Guide Curves and Paint Density work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
+- **Sliders and markers.** Bigger Quads on one area of a one-piece mesh can be refused when it would lose the shape. Less Detail markers are weaker than More Detail at high face counts. Changing Symmetrize or Tweak after a run stops the background sizes until the next Start.
+- Mirror, Guide Curves and Detail Markers work in Auto Segments only. Guide strokes on a Grease Pencil object need Blender 4.3 or later.
 
 ## Community
 
@@ -390,7 +500,7 @@ python scripts\build_release.py
 
 If CurioMesh saved you time, a [star on GitHub](https://github.com/CurioCrafter/CurioMesh/stargazers) helps other Blender artists find a free retopology tool.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=CurioCrafter/CurioMesh&type=Date)](https://star-history.com/#CurioCrafter/CurioMesh&Date)
+[![Stars over time](docs/stars.svg)](https://github.com/CurioCrafter/CurioMesh/stargazers)
 
 ## Credits
 

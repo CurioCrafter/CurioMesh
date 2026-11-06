@@ -179,5 +179,44 @@ class JobFolderTests(unittest.TestCase):
                 jobpack.load_result(out / "result.npz", 2, 4)
 
 
+class CostTests(unittest.TestCase):
+    def test_bake_time_grows_with_pixels_maps_and_sets_and_shrinks_with_cores(self):
+        base = hardware.bake_seconds(1024, "NORMAL", 1, SMALL)
+        self.assertEqual(hardware.bake_seconds(1024, "OFF", 1, SMALL), 0.0)
+        self.assertGreater(hardware.bake_seconds(2048, "NORMAL", 1, SMALL), 3.0 * base)  # four times the pixels, less the fixed part
+        self.assertGreater(hardware.bake_seconds(1024, "NORMAL_COLOR", 1, SMALL), base)
+        self.assertGreater(hardware.bake_seconds(1024, "NORMAL_COLOR", 4, SMALL), 3.0 * hardware.bake_seconds(1024, "NORMAL_COLOR", 1, SMALL))
+        self.assertLess(hardware.bake_seconds(1024, "NORMAL", 1, BIG), base)
+        self.assertEqual(hardware.bake_seconds(1024, "NORMAL", 3, SMALL), base)  # sets only apply to Normal + Color
+
+    def test_style_and_tags_and_the_sentence(self):
+        self.assertEqual(hardware.style_factor("DETAIL"), 1.0)
+        self.assertGreater(hardware.style_factor("ROWS"), 1.0)
+        self.assertGreater(hardware.style_factor("DETAIL", "QUADRIFLOW"), 1.0)
+        self.assertEqual(hardware.cost_tag(5), ("", False))
+        self.assertEqual(hardware.cost_tag(60), ("Slow: about 60 seconds", False))
+        self.assertEqual(hardware.cost_tag(400, 3)[1], True)
+        self.assertEqual(hardware.with_bake("About 3 minutes", 5), "About 3 minutes")
+        self.assertIn("plus about 2 minutes of baking that blocks Blender", hardware.with_bake("x", 120))
+
+    def test_asking_first(self):
+        self.assertFalse(hardware.needs_confirm("OK", 100, 100))
+        self.assertTrue(hardware.needs_confirm("LARGE", 100))
+        self.assertTrue(hardware.needs_confirm("OK", 400, 300))
+        self.assertTrue(hardware.needs_confirm("OK", 1, 130, applying=True))
+        self.assertFalse(hardware.needs_confirm("TOO_BIG", 1, 100, applying=True))  # Apply only cares about its bake
+        ways = hardware.cheaper_ways("ROWS", "NORMAL_COLOR", 4096, "NORMAL")
+        self.assertEqual(len(ways), 4)
+        self.assertTrue(ways[-1].startswith("Export Job"))
+        self.assertEqual(len(hardware.cheaper_ways("DETAIL", "OFF", 512, "LIGHT")), 1)
+
+    def test_weak_pc_notice(self):
+        self.assertIn("4 cores", hardware.weak_pc(dict(SMALL, cycles=["x (CUDA)"])))
+        self.assertIn("no graphics card", hardware.weak_pc(SMALL))
+        self.assertIn("processor", hardware.weak_pc(dict(BIG)))  # plenty of power but no card: bakes use the processor
+        self.assertEqual(hardware.weak_pc(dict(BIG, gpu="RTX")), "")
+        self.assertEqual(hardware.weak_pc(None), "")
+
+
 if __name__ == "__main__":
     unittest.main()

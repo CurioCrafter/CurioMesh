@@ -14,6 +14,7 @@ the Method setting and this view agree on the names. Everything here works on `g
 
 from __future__ import annotations
 
+import threading
 import time
 
 import bpy
@@ -22,13 +23,15 @@ from mathutils import Vector
 from mathutils.kdtree import KDTree
 
 from . import autoretopo, overlay
+from .triadq import checks, issues
 from .triadq import parts as P
 from .triadq import segment as S
 
 from .profiles import METHOD_ITEMS
 
 METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
-METHOD_NAMES.update(KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
+ORIGINAL = "ORIGINAL"  # a try that is your own faces, untouched
+METHOD_NAMES.update(ORIGINAL="Original", KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
 KIND_ITEMS = [(k, P.KIND_WORDS[k], "") for k in P.KINDS]
 MAX_TRIES = 6  # results kept per part
 LIST_ROWS = 300  # parts shown in the worst-first list
@@ -56,6 +59,9 @@ seg = {
     "tree": None,  # the merge tree, kept so Segment Detail is instant
     "tree_job": None,
     "painted": None,
+    "live": None,  # per result face: the live preview's segment while you change the size, until the find keeps it
+    "live_count": None,
+    "res_src": None,  # (result faces, per result face the nearest face of your mesh)
 }
 
 
@@ -66,7 +72,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None)
+    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
 
 
 def ready() -> bool:
@@ -240,6 +246,8 @@ def info_lines(piece: int) -> list[str]:
         f"Looks {alike(r['change'])}" if r["change"] is not None else "Look not measured",
         f"Method: {method_name(r['method'])}",
     ]
+    if r.get("locked"):
+        lines.append("Locked: size changes keep it")
     if r.get("topology") is not None:
         lines.insert(3, f"Tidiness {r['topology']:.0f}/100" + (" (ranks this Animation part)" if by_topology(r) else ""))
     return lines
@@ -258,6 +266,26 @@ def _faces_for(job, method: str, co, polys, kinds):
     """Generator: (points, faces, materials) for one reduced part by `method`. Returns None when it fails."""
     job._stopped = False  # the search itself was stopped when this redo took over
     return (yield from job._build(co, polys, kinds, method, len(polys) // 2))
+
+
+def _threaded(work):
+    """Generator: `work()` on a worker thread, yielding so Blender stays responsive. Returns its result."""
+    out, failed = [], []
+
+    def run():
+        try:
+            out.append(work())
+        except BaseException as exc:  # raised again on the main thread
+            failed.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True, name="CurioMeshCheck")
+    thread.start()
+    while thread.is_alive():
+        thread.join(0.02)
+        yield
+    if failed:
+        raise failed[0]
+    return out[0]
 
 
 class PartJob:
@@ -325,7 +353,17 @@ class PartJob:
         return f"{r['faces']:,} faces | Camera: {r['loss']:.1f}% of the view differs" + (f" | {self.warnings[0]}" if self.warnings else "")
 
     def _pictures_of(self, points, faces, center, half, pixels):
-        return (yield from autoretopo.pictures(points, faces, center, half, pixels))
+        """On a worker thread: one set of a big part's pictures took up to 0.4 s, which Blender felt as a stall."""
+
+        def run():
+            work = autoretopo.pictures(points, faces, center, half, pixels)
+            while True:
+                try:
+                    next(work)
+                except StopIteration as done:
+                    return done.value
+
+        return (yield from _threaded(run))
 
     def _change(self, piece: int, points, faces):
         """Generator: percent of the part's view that differs from the original part."""
@@ -382,6 +420,11 @@ class PartJob:
             if made is None:
                 continue
             change = yield from self._change(p, made[0], made[1])
+            had = current["change"] if current["change"] is not None else (yield from self._change(p, current["build"][0], current["build"][1]))
+            src_points, src_polys, _kinds = job._piece_arrays(record.get("source", job.pieces[p]))
+            if not S.view_kept(had, change, segment_goals.WORSE_TIMES, segment_goals.WORSE_BY) or not S.shape_kept(src_points, src_polys, made[0], made[1]):
+                self.warnings = [f"{name_of(p)}: {method_name(self.method)} would lose its shape ({change:.0f}% of its view changes, it had {had:.0f}%), so it stays as it was"]
+                continue
             builds[p] = made
             self.new_tries[p] = {"method": self.method, "after": len(made[1]), "change": change, "build": (made[0], made[1], kinds_back(made[2], self.base.get("charts")))}
         self.progress = (len(self.pieces), len(self.pieces))
@@ -391,7 +434,11 @@ class PartJob:
             co, faces, mat, piece = splice(co, faces, mat, piece, {p: self.new_tries[p]["build"] for p in builds})
         loss = yield from self._whole_loss(co, faces)
         count = len(faces)
-        self.output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
+        output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
+        self.stage = "Looking for problem spots"
+        found = yield from _threaded(lambda: checks.defects(np.asarray(co), faces, job.co, job.faces))
+        output["issue_spots"], output["issues"] = issues.analyse(np.asarray(co), faces, {k: getattr(found, k) for k in checks.Defects.KINDS}, piece, {"source_faces": len(job.faces)})
+        self.output = output  # issues are in before the panel can see the new output
         self.output_id += 1
         before = self.base["report"]
         self.report = dict(before, shading=None, shading_soft=None, topology=None, faces=count, quads=sum(1 for f in faces if len(f) == 4), tris=sum(1 for f in faces if len(f) == 3), loss=loss, seconds=time.perf_counter() - self.started)
@@ -453,22 +500,33 @@ def start_redo(context, pieces, method: str) -> bool:
 
 def use_try(context, piece: int, index: int) -> bool:
     """Go back to a result you tried: shown at once, then the whole view is checked again in the background."""
+    return use_tries(context, {piece: index})
+
+
+def use_tries(context, wanted: dict) -> bool:
+    """`use_try` for several parts at once ({piece: try index}): one splice, one preview, one check."""
     guided = _g()
     base = guided.state["auto_base"]
-    record = seg["parts"][piece]
-    if base is None or not 0 <= index < len(record["tries"]) or index == record["cur"]:
+    if base is None:
         return False
-    chosen = record["tries"][index]
+    wanted = {p: i for p, i in wanted.items() if 0 <= i < len(seg["parts"][p]["tries"]) and i != seg["parts"][p]["cur"]}
+    if not wanted:
+        return False
     out = base["out"]
-    if record["tries"][record["cur"]]["build"] is None:
-        record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
-    co, faces, mat, face_piece = splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], {piece: chosen["build"]})
+    builds = {}
+    methods = getattr(base["job"], "methods", None)
+    for piece, index in wanted.items():
+        record = seg["parts"][piece]
+        if record["tries"][record["cur"]]["build"] is None:
+            record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
+        chosen = record["tries"][index]
+        builds[piece] = chosen["build"]
+        record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"], topology=chosen.get("topology"))
+        if methods is not None and chosen["method"] != ORIGINAL:
+            methods[piece] = chosen["method"]
+    co, faces, mat, face_piece = splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], builds)
     count = len(faces)
     new = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": mat, "parts": face_piece, "piece": face_piece}
-    record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"], topology=chosen.get("topology"))
-    methods = getattr(base["job"], "methods", None)
-    if methods is not None:
-        methods[piece] = chosen["method"]
     guided.stop_work()
     base.update(out=new, id=time.perf_counter_ns())
     base.pop("area", None)
@@ -477,12 +535,65 @@ def use_try(context, piece: int, index: int) -> bool:
     guided._build_preview(context, guided.state_source(), new, uvs=False)
     guided.state["draw_key"] = None
     refresh_list()
-    runner = PartJob(context, [], chosen["method"])  # no part to remake: only the whole-object check
+    runner = PartJob(context, [], base["job"].method if base["job"] is not None else "AUTO")  # no part to remake: only the whole-object check
     guided.state["work"] = {"key": base.get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     if not bpy.app.timers.is_registered(guided._auto_slice):
         bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
     overlay.tag_redraw()
     return True
+
+
+def bad_parts() -> list[int]:
+    """Parts holding a problem spot the checks found (inward, folded, crossing...), worst spot's part first."""
+    res = _g().state["res"]
+    if res is None or not seg["parts"]:
+        return []
+    found = []
+    for spot in res.get("issue_spots") or []:
+        p = int(spot.get("part", -1))
+        if 0 <= p < len(seg["parts"]) and p not in found and seg["parts"][p]["method"] != ORIGINAL:
+            found.append(p)
+    return found
+
+
+def keep_original(context, pieces) -> int:
+    """Put your own faces back on these parts, as one more try each (so the reduced result stays one click away). Returns how many changed."""
+    base = _g().state["auto_base"]
+    if base is None or base["job"] is None or mirrored():
+        return 0
+    job, wanted = base["job"], {}
+    for p in pieces:
+        record = seg["parts"][p]
+        index = next((i for i, t in enumerate(record["tries"]) if t["method"] == ORIGINAL), None)
+        if index is None:
+            points, polys, mats = job._piece_arrays(record["source"])
+            faces = [tuple(int(v) for v in polys.flat[a:b]) for a, b in zip(polys.indptr[:-1].tolist(), polys.indptr[1:].tolist())]
+            mats = np.asarray(mats).astype(np.asarray(base["out"]["mat"]).dtype)
+            record["tries"].append({"method": ORIGINAL, "after": len(faces), "change": 0.0, "build": (points, faces, mats)})
+            index = len(record["tries"]) - 1
+        wanted[p] = index
+    return len(wanted) if use_tries(context, wanted) else 0
+
+
+class CURIOMESH_OT_keep_original_bad(bpy.types.Operator):
+    bl_idname = "curiomesh.keep_original_bad"
+    bl_label = "Keep Original Where Bad"
+    bl_description = ("Every part with a problem spot (inward, folded or crossing faces) gets your original faces back, unchanged. "
+                      "The reduced version stays in that part's tries, so Fix Parts can switch it back")
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        ensure()
+        return ready() and not mirrored() and _g().progress_info() is None and bool(bad_parts())
+
+    def execute(self, context):
+        changed = keep_original(context, bad_parts())
+        if not changed:
+            self.report({"WARNING"}, "No part could be put back")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Original faces kept on {changed} part{'s' if changed != 1 else ''}")
+        return {"FINISHED"}
 
 
 # --------------------------------------------------------------------------- drawing
@@ -493,8 +604,11 @@ def _palette(count: int) -> np.ndarray:
     return 0.45 + 0.45 * np.cos(2.0 * np.pi * (hue[:, None] + np.array([0.0, 0.33, 0.67])))
 
 
-def part_colours(gs, count: int):
-    """RGBA per part for the current overlay switches, or None when nothing should be tinted. The part under the mouse has its own small batch: redoing this one on every hover would stall a big mesh."""
+def part_colours(gs, count: int, showing: bool = False):
+    """RGBA per part for the current overlay switches, or None when nothing should be tinted. The part under the mouse has its own small batch: redoing this one on every hover would stall a big mesh.
+    A live preview (`showing`) is always tinted, in plain colours: its segments have no numbers or selection yet."""
+    if showing:
+        return np.concatenate((_palette(count), np.full((count, 1), 0.6)), axis=1).astype(np.float32)
     selected = seg["sel"]
     if not (gs.seg_colors or gs.seg_heat or selected):
         return None
@@ -547,19 +661,23 @@ def _draw_view() -> None:
         piece = seg["piece"]
         if piece is None or len(piece) != len(res["faces"]):
             return
+        live = seg.get("live")
+        showing = live is not None and len(live) == len(res["faces"])
+        if showing:
+            piece = live
         import gpu
         from gpu_extras.batch import batch_for_shader
 
         matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
         seg["held"] = (res, piece)  # kept alive so the ids below can't come back on a new result
-        colour_key = (id(res), id(piece), matrix, gs.seg_colors, gs.seg_heat, frozenset(seg["sel"]), round(gs.auto_detail, 2))
+        colour_key = (id(res), id(piece), matrix, gs.seg_colors, gs.seg_heat, frozenset(seg["sel"]), round(gs.auto_detail, 2), showing)
         flat = gpu.shader.from_builtin("FLAT_COLOR")
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_mask_set(False)
         gpu.state.depth_test_set("LESS_EQUAL")
         if seg["batch_key"] != colour_key:
             seg["batch"] = None
-            colours = part_colours(gs, len(seg["parts"]))
+            colours = part_colours(gs, seg["live_count"] if showing else len(seg["parts"]), showing)
             if colours is not None:
                 _id, corners, owners = _triangles(guided, res, piece)
                 world = guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32)
@@ -578,7 +696,8 @@ def _draw_view() -> None:
                 flat.bind()
                 seg["bad"].draw(flat)
             issue_panel.draw_overlay(guided, preview, res, flat, batch_for_shader)
-        segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
+        if not showing:  # outlines and hover belong to the kept segments
+            segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
         if gs.seg_compare == "OVER":
             lines_key = (source.name, len(source.data.edges), tuple(round(x, 5) for row in source.matrix_world for x in row))
             if seg["lines_key"] != lines_key:
@@ -842,7 +961,7 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
             return
         r = seg["parts"][item.piece]
         row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
-        row.label(text=name_of(item.piece), icon="CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
+        row.label(text=name_of(item.piece), icon="LOCKED" if r.get("locked") else "CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
         row = row.split(factor=0.42, align=True)  # "92%" is short; the face count needs the room ("1,65...")
         # the number the list is sorted by: the look, or Tidiness for an Animation part (a 98% look ranked low read as a mistake)
         row.label(text=f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
@@ -886,17 +1005,19 @@ def draw_parts(layout, context, gs) -> None:
 
 # --------------------------------------------------------------------------- registration
 
-from . import issue_panel, segment_goals  # noqa: E402  (segment_goals builds on PartJob above)
+from . import issue_panel, seglive, segment_goals  # noqa: E402  (segment_goals builds on PartJob above)
 
-PRE_CLASSES = (CURIOMESH_PG_segpart,)
+PRE_CLASSES = (CURIOMESH_PG_segpart, *seglive.PRE_CLASSES)
 CLASSES = (
     CURIOMESH_UL_segparts,
     CURIOMESH_OT_seg_select,
     CURIOMESH_OT_seg_redo,
     CURIOMESH_OT_seg_try,
     CURIOMESH_OT_seg_frame,
+    CURIOMESH_OT_keep_original_bad,
     *segment_goals.CLASSES,
     *issue_panel.CLASSES,
+    *seglive.CLASSES,
 )
 _handles: list = []
 
@@ -904,6 +1025,7 @@ _handles: list = []
 def register() -> None:
     _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_view, (), "WINDOW", "POST_VIEW"))
     _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_text, (), "WINDOW", "POST_PIXEL"))
+    seglive.register()
 
 
 def unregister() -> None:
@@ -912,5 +1034,6 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_handles.pop(), "WINDOW")
         except Exception:
             pass
+    seglive.unregister()
     reset()
     issue_panel.ui.update(res=None, cur=-1, diff=None, batch=None, batch_key=None)  # its GPU batches go with the draw handler
