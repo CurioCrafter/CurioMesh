@@ -29,7 +29,7 @@ def _install_qem() -> None:
 
 # main-only: uv begin score
 def _install_score() -> None:
-    uvscore.set_fast(probe=turbo.uvscore_probe)
+    uvscore.set_fast(probe=turbo.uvscore_probe, check=turbo.uvscore_check, names=turbo.uvscore_names)
 # main-only: uv end score
 
 # main-only: uv begin sight

@@ -975,8 +975,83 @@ fn uvscore_probe() -> usize {
     uvscore::probe()
 }
 
+/// The card names of `uvscore_check`'s numbers, in order.
+#[pyfunction]
+fn uvscore_names() -> Vec<String> {
+    uvscore::NAMES.iter().map(|s| s.to_string()).collect()
+}
+
+fn uvscore_mesh<'a>(points: &'a [f64], indptr: &'a [i64], flat: &'a [i64], uv: &'a [f64], material: &'a [i64], name: &str) -> PyResult<uvscore::Mesh<'a>> {
+    check_faces(indptr, flat)?;
+    let n = points.len() / 3;
+    let faces = indptr.len() - 1;
+    if points.len() % 3 != 0 || flat.iter().any(|&v| v < 0 || v as usize >= n) || points.iter().any(|x| !x.is_finite()) || uv.len() != 2 * flat.len() || !(material.is_empty() || material.len() == faces) {
+        return Err(PyValueError::new_err(format!("{name} arrays are invalid")));
+    }
+    Ok(uvscore::Mesh { points, faces: topo::Faces { indptr, flat }, uv, material })
+}
+
+/// UV Check numbers (`uvscore::check`): the result mesh and, when `src_points` is not empty, the source it came from.
+/// Every empty array means "not given". Returns (numbers in the order of `uvscore_names`, straddling faces, flipped faces).
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn uvscore_check<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    uv: PyReadonlyArray1<'py, f64>,
+    material: PyReadonlyArray1<'py, i64>,
+    src_points: PyReadonlyArray1<'py, f64>,
+    src_indptr: PyReadonlyArray1<'py, i64>,
+    src_flat: PyReadonlyArray1<'py, i64>,
+    src_uv: PyReadonlyArray1<'py, f64>,
+    src_material: PyReadonlyArray1<'py, i64>,
+    src_region: PyReadonlyArray1<'py, i64>,
+    seen_face: PyReadonlyArray1<'py, f64>,
+    seen_edge_px: PyReadonlyArray1<'py, f64>,
+    allow_overlap: PyReadonlyArray1<'py, bool>,
+    col: PyReadonlyArray1<'py, i64>,
+    row: PyReadonlyArray1<'py, i64>,
+    on_chart: PyReadonlyArray1<'py, bool>,
+    density: PyReadonlyArray1<'py, f64>,
+    faces_off: i64,
+    split: PyReadonlyArray1<'py, bool>,
+    texture_px: f64,
+    stop: &StopFlag,
+) -> PyResult<(F64Array<'py>, Bound<'py, PyArray1<bool>>, Bound<'py, PyArray1<bool>>)> {
+    let res = uvscore_mesh(slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&uv, "uv")?, slice(&material, "material")?, "result")?;
+    let nf = res.faces.count();
+    let src_given = !slice(&src_points, "src_points")?.is_empty();
+    let src = if src_given {
+        Some(uvscore_mesh(slice(&src_points, "src_points")?, slice(&src_indptr, "src_indptr")?, slice(&src_flat, "src_flat")?, slice(&src_uv, "src_uv")?, slice(&src_material, "src_material")?, "source")?)
+    } else {
+        None
+    };
+    let (seen_face, seen_edge_px, density) = (slice(&seen_face, "seen_face")?, slice(&seen_edge_px, "seen_edge_px")?, slice(&density, "density")?);
+    let (col, row) = (slice(&col, "col")?, slice(&row, "row")?);
+    let flags = |a: &PyReadonlyArray1<'py, bool>, name: &str| -> PyResult<Vec<u8>> {
+        let v = slice(a, name)?;
+        if !(v.is_empty() || v.len() == nf) {
+            return Err(PyValueError::new_err(format!("{name} needs one value per result face")));
+        }
+        Ok(v.iter().map(|&b| u8::from(b)).collect())
+    };
+    let (allow, on, split) = (flags(&allow_overlap, "allow_overlap")?, flags(&on_chart, "on_chart")?, flags(&split, "split")?);
+    if !(seen_face.is_empty() || seen_face.len() == nf) || !(density.is_empty() || density.len() == nf) {
+        return Err(PyValueError::new_err("seen_face and density need one value per result face"));
+    }
+    let ex = uvscore::Extras { src_region: slice(&src_region, "src_region")?, seen_face, seen_edge_px, allow_overlap: &allow, col, row, on_chart: &on, density, faces_off, split: &split };
+    let out = py.detach(|| uvscore::check(&res, src.as_ref(), &ex, texture_px, &stop.0));
+    let out = out.ok_or_else(|| pyo3::exceptions::PyInterruptedError::new_err("stopped"))?;
+    let flags = |v: Vec<u8>| v.into_iter().map(|x| x != 0).collect::<Vec<bool>>().into_pyarray(py);
+    Ok((out.numbers.into_pyarray(py), flags(out.straddle), flags(out.flipped)))
+}
+
 fn register_uvscore(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvscore_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(uvscore_names, m)?)?;
+    m.add_function(wrap_pyfunction!(uvscore_check, m)?)?;
     Ok(())
 }
 // main-only: uv end score

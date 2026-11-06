@@ -936,6 +936,37 @@ def uvscore_probe() -> "int | None":
     """1 when the compiled `uvscore` kernel is there and its compile probe passes; None for "use NumPy"."""
 
     return _uv_probe("uvscore_probe")
+
+
+def uvscore_names() -> "list | None":
+    """The card names of the numbers `uvscore_check` returns, in order; None for "use NumPy"."""
+
+    module = native()
+    if module is None or not hasattr(module, "uvscore_names"):
+        return None
+    return list(module.uvscore_names())
+
+
+def uvscore_check(points, indptr, flat, uv, material=(), src_points=(), src_indptr=(), src_flat=(), src_uv=(), src_material=(),
+                  src_region=(), seen_face=(), seen_edge_px=(), allow_overlap=(), col=(), row=(), on_chart=(), density=(),
+                  faces_off: int = 0, split=(), texture_px: float = 1024.0) -> "UvJob | None":
+    """UV Check numbers as a worker-thread job (never blocks): `result()` = (numbers, straddling faces, flipped faces).
+
+    Every empty array means "not given" (no source: no straddle, drift or seam fit). None: use the NumPy twin."""
+
+    def f(a):
+        return np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
+
+    def i(a):
+        return np.ascontiguousarray(np.asarray(a, dtype=np.int64).ravel())
+
+    def b(a):
+        return np.ascontiguousarray(np.asarray(a, dtype=bool).ravel())
+
+    return uv_job("uvscore_check", f(points), i(indptr), i(flat), f(uv), i(material),
+                  f(src_points), i(src_indptr), i(src_flat), f(src_uv), i(src_material), i(src_region),
+                  f(seen_face), f(seen_edge_px), b(allow_overlap), i(col), i(row), b(on_chart), f(density),
+                  int(faces_off), b(split), float(texture_px), name="CurioMeshUVScore")
 # main-only: uv end score
 
 # main-only: uv begin sight
