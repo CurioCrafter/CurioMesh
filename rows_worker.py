@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
-"""Run by a separate background Blender: QuadriFlow on each piece of a job folder.
+"""Run in a separate background Blender (`main`): QuadriFlow on each piece of a job folder.
 
 QuadriFlow can't be interrupted and blocks the Blender that runs it, so Clean Rows gives it another Blender, which keeps
 the user's responsive and can be killed if a piece takes too long. Reads in_<k>.npz, writes out_<k>.npz. A piece that
@@ -9,7 +9,6 @@ QuadriFlow refuses gets an out file with no faces.
 """
 
 import os
-import sys
 
 import bpy
 import numpy as np
@@ -45,8 +44,9 @@ def _solve(points, polys, target):
         bpy.data.meshes.remove(data)
 
 
-def main():
-    folder, first, last = sys.argv[sys.argv.index("--") + 1 :]
+def main(argv: list[str]) -> None:
+    """Started by `parallel.helper_command("rows_worker.main", [folder, first, last])`."""
+    folder, first, last = argv[argv.index("--") + 1 :]
     for k in range(int(first), int(last)):
         path = os.path.join(folder, f"in_{k}.npz")
         if not os.path.exists(path):
@@ -64,5 +64,3 @@ def main():
             np.savez(temporary, co=result[0], lens=np.asarray([len(f) for f in result[1]], dtype=np.int64), flat=np.asarray([v for f in result[1] for v in f], dtype=np.int64))
         os.replace(temporary, os.path.join(folder, f"out_{k}.npz"))
 
-
-main()
