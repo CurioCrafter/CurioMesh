@@ -21,7 +21,7 @@ from itertools import chain
 import bpy
 import numpy as np
 
-from . import autoretopo, organize, overlay, segments
+from . import autoretopo, history, organize, overlay, segments, tidylive
 from .triadq import ladder as L
 from .triadq import tasks
 from .triadq import parts as P
@@ -169,8 +169,8 @@ def _tick():
         cancel()
         return None
     work_ = _g().state["work"]
-    if (work_ is not None and work_["runner"].busy) or time.perf_counter() - drag["moved"] < QUIET:
-        return WAIT  # yours first, and nothing while a slider moves
+    if (work_ is not None and work_["runner"].busy) or time.perf_counter() - drag["moved"] < QUIET or tidylive.busy():
+        return WAIT  # yours first, and nothing while a slider moves or a tool preview is open
     work(SLICE)
     return GAP if lad["job"] is not None or lad["plan"] else None
 
@@ -371,6 +371,9 @@ def settle(context) -> None:
 def _finish(context) -> None:
     guided = _g()
     a, _b, moved = lad["shown"]
+    words = f"{len(guided.state['res']['faces']):,} faces, {STYLE_WORDS.get(a[0], a[0])}" if guided.state["res"] is not None else ""
+    for kind in ("size", "rows"):
+        history.settled(kind, words)  # the slider's step now holds the result it asked for
     if segments.seg.get("tree") is not None:
         segments.seg["tree_job"] = lad["rungs"][a]  # every rung is of the same mesh: the segment tree holds
     if moved or not segments.mirrored():  # finding the segments makes the parts table
@@ -425,6 +428,16 @@ def pump(context):
 
 def _drag_tick():
     return pump(bpy.context)
+
+
+def on_size(self, context) -> None:
+    history.note(context, "size", "Quad Size")  # Blender pushes the undo step when the slider lets go
+    on_slider(self, context)
+
+
+def on_rows(self, context) -> None:
+    history.note(context, "rows", "Rows")
+    on_slider(self, context)
 
 
 def on_slider(self, context) -> None:
