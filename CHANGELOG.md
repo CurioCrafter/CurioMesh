@@ -2,6 +2,34 @@
 
 ## 0.9.8 - unreleased
 
+### Hard surface
+- **Hard Surface** use (under More Uses): Game Asset at Detail 5% with the two hard-surface rebuilds on and every hard
+  edge marked Sharp and Creased on Apply. The two rebuilds are also switches in Options; they are off in every other use.
+- **Clean Panels**: a part made of flat faces (box, plank, plate, bracket, bevel strip) is also offered laid out by
+  panels: each convex flat area one grid along its own edges (a rectangle an a x b grid, a round cap a grid with four
+  corner poles, never a fan), a flat area round one hole a ring of quads round it, other flat areas cut and split so
+  they stay all quads. Every panel border stays an exact edge loop and both sides of it agree, so it is watertight. A
+  chamfer strip comes out as one row. The camera keeps a layout only where the view holds; it counts as half its faces
+  when weighed against a reduced size.
+- **Even Cylinders**: a turned part is also read by the longest path through the tree of its rings, which holds where
+  the old ring walk wandered (on the hydrant 16 parts that were 8 to 20% off now fit within about 1%), and a scanned
+  tube is read wall by wall so its inside stays hollow. A visibly round part (radius at least 5% of the model) never
+  drops below about 16 sides: the scanned concrete pipe that became a 12-sided prism now keeps 192 faces and 3.9% view
+  change instead of 111 faces and 5.6%.
+- **Round parts at least 16 sides** in every use: a turned part whose radius is a tenth of its size or more is no
+  longer swept with 8 or 12 steps, and a hollow profile is never simplified until its walls fold onto each other.
+- **Faces lying on each other count as a problem**: the result line says "New problems: 22 faces lying on each other"
+  instead of "No new problems".
+- **Hard Edges** on Apply (Options): Leave, **Mark Sharp + Crease** (no extra faces, a Subdivision Surface keeps the
+  edge), or **Holding Edges**: a loop on both sides of every hard edge at a % of the next face or in millimetres
+  (Blender's bevel, two segments, square profile, so the shape does not move).
+- Measured (Game Asset, Keep Detail 6%, rebuilds off -> on, same branch): overhead crane Issue Finder total 5,612 ->
+  5,392, inward+folded+crossing 481 -> 425, slivers on flat parts 1,084 -> 1,014, Tidiness 40 -> 42; fire hydrant
+  inward+folded+crossing 234 -> 145 but poles 872 -> 1,430; old compressor worse (inward+folded+crossing 208 -> 287,
+  slivers on flat parts 506 -> 682); treasure chest a little worse; drill press, barrier and four Megascans scans
+  (column, stool, barrel, pipe joint) unchanged: the camera turned the rebuilds down. 0 to 25% more time. That is why
+  the rebuilds are opt-in.
+
 ### A tidier panel
 - **One path, in order.** The CurioMesh panel now shows only what the step you are on needs: pick a mesh, **What is
   it for?**, **Start**, then **Adjust**, **Fix** and **Finish**, each appearing when it can do something. Before a

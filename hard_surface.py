@@ -49,39 +49,47 @@ def finish(mesh, gs, unit_scale: float = 1.0) -> int:
     """Hard Edges on a written mesh. Returns how many hard edges were treated."""
     if gs.hs_edges == "NONE":
         return 0
+    limit = math.radians(gs.hs_angle)
     bm = bmesh.new()
     try:
         bm.from_mesh(mesh)
-        limit = math.radians(gs.hs_angle)
-        hard = [e for e in bm.edges if e.is_manifold and e.calc_face_angle(0.0) > limit]
-        if not hard:
-            return 0
-        if gs.hs_edges == "MARK":
-            crease = bm.edges.layers.float.get("crease_edge") or bm.edges.layers.float.new("crease_edge")
-            for e in hard:
-                e.smooth = False
-                e[crease] = 1.0
-        else:
+        bm.edges.ensure_lookup_table()
+        ids = [e.index for e in bm.edges if e.is_manifold and e.calc_face_angle(0.0) > limit]
+        if ids and gs.hs_edges == "HOLD":
             if gs.hs_hold_unit == "PERCENT":
                 offset, kind = gs.hs_hold_percent, "PERCENT"
             else:
                 offset, kind = gs.hs_hold_mm / 1000.0 / max(unit_scale, 1e-9), "OFFSET"
+            hard = [bm.edges[i] for i in ids]
             verts = list({v for e in hard for v in e.verts})
             # Two segments with a square profile: the middle row stays on the old edge, so the shape keeps its corners.
             made = bmesh.ops.bevel(bm, geom=hard + verts, offset=offset, offset_type=kind, segments=2, profile=1.0, affect="EDGES", clamp_overlap=True, loop_slide=True)
             for f in made.get("faces", ()):
                 f.smooth = True
-        bm.to_mesh(mesh)
+            bm.to_mesh(mesh)
     finally:
         bm.free()
-    if gs.hs_edges == "HOLD":
+    if not ids:
+        return 0
+    if gs.hs_edges == "MARK":  # straight on the mesh's own edge attributes
+        sharp = mesh.attributes.get("sharp_edge") or mesh.attributes.new("sharp_edge", "BOOLEAN", "EDGE")
+        crease = mesh.attributes.get("crease_edge") or mesh.attributes.new("crease_edge", "FLOAT", "EDGE")
+        flags = [False] * len(mesh.edges)
+        values = [0.0] * len(mesh.edges)
+        sharp.data.foreach_get("value", flags)
+        crease.data.foreach_get("value", values)
+        for i in ids:
+            flags[i], values[i] = True, 1.0
+        sharp.data.foreach_set("value", flags)
+        crease.data.foreach_set("value", values)
+    else:
         custom = mesh.attributes.get("custom_normal")  # custom normals no longer match the new faces
         if custom is not None:
             mesh.attributes.remove(custom)
         elif getattr(mesh, "has_custom_normals", False) and hasattr(mesh, "free_normals_split"):
             mesh.free_normals_split()
     mesh.update()
-    return len(hard)
+    return len(ids)
 
 
 def draw(layout, gs) -> None:
