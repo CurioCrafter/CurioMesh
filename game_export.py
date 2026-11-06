@@ -136,11 +136,11 @@ class CURIOMESH_OT_export_game(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".fbx"
     filter_glob: bpy.props.StringProperty(default="*.fbx;*.glb;*.obj", options={"HIDDEN"})
-    engine: bpy.props.EnumProperty(name="Engine", items=[(k, e.label, e.words) for k, e in ENGINES.items()], default="UNREAL")
-    form: bpy.props.EnumProperty(name="File", items=FORMS, default="FBX")
-    normals: bpy.props.EnumProperty(name="Normal Map", items=NORMALS, default="OPENGL")
+    engine: bpy.props.EnumProperty(name="Engine", description="Which game engine the files are for. It sets the file type, normal map kind, scale and size limits", items=[(k, e.label, e.words) for k, e in ENGINES.items()], default="UNREAL")
+    form: bpy.props.EnumProperty(name="File", description="The file type to write. Only used by Custom", items=FORMS, default="FBX")
+    normals: bpy.props.EnumProperty(name="Normal Map", description="Which way the normal map's green channel points: OpenGL (Blender, Unity, Godot) or DirectX (Unreal). Only used by Custom", items=NORMALS, default="OPENGL")
     tris: bpy.props.IntProperty(name="Most Triangles", description="Split meshes into pieces of at most this many triangles. 0 keeps them whole", default=0, min=0)
-    texture: bpy.props.EnumProperty(name="Largest Texture", items=SIZES, default="0")
+    texture: bpy.props.EnumProperty(name="Largest Texture", description="Shrinks textures so none is larger than this. Only used by Custom", items=SIZES, default="0")
 
     @classmethod
     def poll(cls, context):

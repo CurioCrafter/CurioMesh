@@ -46,6 +46,7 @@ PREF_DEFAULTS = {
     "show_debug": True,
     "show_regions": True,
     "show_guided": True,
+    "pro_mode": False,
     "hud_default": True,
     "hud_corner": "BOTTOM_LEFT",
     "hud_offset_x": 70,

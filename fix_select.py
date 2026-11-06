@@ -232,7 +232,7 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
     bl_label = "Fix"
     bl_description = "Fix only the bad faces in the selected area this way"
 
-    how: bpy.props.EnumProperty(items=[(k, v[1], v[2]) for k, v in FIXES.items()] + [("ALL", "Fix All", "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad")])
+    how: bpy.props.EnumProperty(name="Fix", description="Which fix to run on the bad faces", items=[(k, v[1], v[2]) for k, v in FIXES.items()] + [("ALL", "Fix All", "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad")])
 
     @classmethod
     def poll(cls, context):

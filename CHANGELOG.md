@@ -2,6 +2,57 @@
 
 ## 0.9.8 - unreleased
 
+### A tidier panel
+- **One path, in order.** The CurioMesh panel now shows only what the step you are on needs: pick a mesh, **What is
+  it for?**, **Start**, then **Adjust**, **Fix** and **Finish**, each appearing when it can do something. Before a
+  result the panel has about 20 controls (it had 40 with More Options open); with a result about 25 (it had 97).
+- **What is it for?** is eight picture tiles with CurioMesh's own coloured icons: Auto, Game, Low Poly, Animation,
+  Subdiv, Scan, Sculpt and Blockout (Hulls is under the small arrow). **Auto** lets Start pick the Use from your mesh
+  and says what it picked and why; it no longer resets Mirror.
+- **Detail** is one dropdown: Keep Most, Keep a Lot, Balanced, Lighter, Lightest, Custom %, Share of Faces or Exact
+  Face Count. Picking one keeps your Use instead of turning it into Custom.
+- **Two popovers** hold the rest of the setup: **Shape the flow...** (edge loops, flow lines, joint lines, detail
+  markers) and **Options...** (Rows, Cleanup, Multires, UV seams, Output).
+- **Cleanup: Quick / Normal / Thorough** replaces the three tidy switches (Normal turns on Redo Rough Spots, Thorough
+  also Redraw Messy Quads and Tidy Quads). The switches are still in the Pro tab one by one.
+- **A verdict** under the result, with a green, amber or red icon: "Good for game asset", "Check 2 spots" or
+  "5 spots with bad faces left", the numbers in grey under it, and the next thing to do. Tidiness gets a word
+  ("like a quick hand retopo"). The thresholds are first guesses, kept in one table (`verdict.py`).
+- **Adjust**: Quad Size, Rows (was Organization) and Tidy Up (was Organize) with words at both ends, five icon-only
+  view switches, and Fine-tune... for the three Tweak sliders and Most Detail Loss. It warns when the sliders would
+  replace parts you changed by hand.
+- **Fix** walks the bad spots one at a time: **Redo this spot** remakes the part under it with smaller quads, **Keep
+  original here** shows the faces it adds, asks first, and **Put reduced back** undoes it. Keep Original on all parts
+  also shows its cost and asks. The part list, a short part card, and the hand tools and part finder in two popovers.
+- **Finish**: one big Apply, New Object / Replace Mesh, the only Bake row (its size and texture sets behind the gear),
+  LOD set... and Discard. Export for game and the star / report buttons after Apply.
+- **CurioMesh Pro tab** (the Pro button in the panel header, or the preference): Engine (Style, Method, Output, the
+  cleanup switches, what is kept, Multires, Tweak), This Computer, Inside Shapes, Show It How, Issue Reports, Classic
+  Guided (Whole Mesh, Points Only, Work Areas), Classic Remesh and Regions. A file saved with a Classic Guided mode
+  says so in the main panel, with a button to open it in Pro.
+- **Plain tooltips** on every setting and button: what it does, then when to use it or what it costs, in two short
+  sentences. "Segment" is "part" everywhere you read it.
+- Every operator name and saved setting is unchanged, so scripts, agent skills and older .blend files keep working.
+  New: `curiomesh.pick_use`, `curiomesh.issue_redo`, `curiomesh.issue_keep_original`, `curiomesh.issue_put_back`.
+
+### Organize
+- **Organize** (a slider under the result, next to Quad Size and Organization): about the same faces, laid out tidier.
+  Moving it the first time works out four strengths in the background (a few seconds on a bust, under ten on a
+  15,000-face machine); after that dragging only swaps meshes. 0.25 redraws the messy patches around poles as plain
+  grids and spins edges to walk the poles left together; higher strengths then let the quads settle into even rows,
+  held on your mesh, with hard edges, borders and the mirror seam kept where they are. A mirrored result is organized
+  on one half and mirrored again, so the seam stays exact.
+- **A meter** under the slider: "Tidiness 38 -> 56, view changed 6.2% -> 7.6%, poles 1,077 -> 722, faces 2,607 ->
+  2,410". The Issue Finder and the red bad-face overlay follow the strength on screen, and Apply writes it.
+- **Most Detail Loss**: Organize goes no further than this much more of the view changed than at 0 (it says where it
+  was held).
+- **Loop Flow**: draws the edge loops of the result in a colour each, and its poles as dots (blue: three edges, red:
+  five or more).
+- Measured at Organize 1 on five free test models: Tidiness up by 12 to 18 points on the bust, lion, horse (with
+  Symmetrize) and barrier and by 4 on the compressor; poles down by a third on the organic ones; 4 to 13% fewer faces;
+  the view changed by 0.8 to 1.4 points more; Issue Finder totals down on all five, though 7 to 80 bent quads appear
+  where there were almost none.
+
 ### Auto Segments
 - **Reduction no longer pushes a thin ring or flange through the part it sits on.** The native reducer now refuses a
   collapse that makes its new triangles pass through other triangles of the piece (more crossings than before the
