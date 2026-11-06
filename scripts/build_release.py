@@ -192,7 +192,10 @@ BANNED_CODE = (
     (r"Star on GitHub|star helps", "promotional prompts"),
     (r"Clean Rows|WreckQuad|\bbl_info\b|bench/", "old names and repository-only paths"),
     (r"(?i)\bpro\b", "a 'Pro' tab or tier"),
-    (r"tempfile\.mkdtemp\((?![^)]*dir=)", "job folders in system temp (use hardware.job_folder)"),
+    (r"tempfile\.mkdtemp\((?![^)]*dir=)|dir=None", "job folders in system temp (use hardware.job_folder)"),
+    (r"use_auto_smooth|free_normals_split|edge_creases|loop_data_types|auto_smooth_angle", "APIs that are gone before Blender 4.2 (dead code)"),
+    (r"LAST_DRAW_ERROR", "errors kept where nothing reads them"),
+    (r"(?i)\bnative (QEM|core|proxy|cap|work)", "wording that reads as the removed compiled core"),
     (r"(?i)soft ?wrap|quad ?remesher|retopo ?flow|hard ?ops|box ?cutter|zremesher", "names of other add-ons"),
     (r"(?<![\w.])(eval|exec)\(", "eval / exec"),
     (r"[\"'](bl_ext|user_default|blender_org|user_repository)\b", "hard-coded repository names"),
@@ -200,7 +203,7 @@ BANNED_CODE = (
     (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
     (r"__pycache__|\.pyc\b", "bytecode"),
 )
-BANNED_TEXT = ("Clean Rows", "WreckQuad", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
+BANNED_TEXT = ("bench/", "Clean Rows", "WreckQuad", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
 LISTING_NOTICES = """# Third-party notices (extensions.blender.org build)
 
 CurioMesh is GPL-3.0-or-later. This build is Python only and contains no compiled code.
@@ -211,6 +214,8 @@ CurioMesh is GPL-3.0-or-later. This build is Python only and contains no compile
   Meshes, MakeHuman base mesh, Keenan Crane's models). Sources are in `docs/PATTERN_SOURCES.md`.
 - `triadq/cases_table.json` holds camera-check results measured on Poly Haven models (CC0 1.0,
   https://polyhaven.com). No geometry from them is included.
+- Both files were made for CurioMesh and are dedicated to the public domain under CC0 1.0 Universal
+  (https://creativecommons.org/publicdomain/zero/1.0/). Each file also says so in its `license` key.
 """
 
 

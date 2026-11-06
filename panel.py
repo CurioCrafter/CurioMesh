@@ -548,7 +548,7 @@ def draw_adjust(layout, gs) -> None:
         _ends(col, "fewest faces", "even rows")
         note = ladder.status()
         if note:
-            overlay.wrap_label(layout, note, icon="TIME", width=WIDTH, limit=2)
+            overlay.wrap_label(layout, note, icon="TIME", width=WIDTH, limit=4)
     col = layout.column(align=True)
     col.label(text="Tidy Up", **icons.kw("tidy", "MESH_GRID"))
     col.prop(gs, "organize", text="", slider=True)
@@ -772,7 +772,6 @@ def draw_finish(layout, context, gs) -> None:
     if not done and G.state["applied"]:
         overlay.wrap_label(layout, f"Applied: {G.state['applied']}", icon="CHECKMARK", width=30, limit=4)
         layout.operator("curiomesh.export_game", text="Export for game...", **icons.kw("export", "EXPORT"))
-        G._draw_thanks(layout)
         return
     _help(layout, "finish")
     row = layout.row()

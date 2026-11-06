@@ -136,6 +136,8 @@ if __name__ == "__main__":
     cc0 = "--cc0" in sys.argv
     all_rows, sources = measure_all(sys.argv[1], cc0)
     database = build(all_rows, sources)
+    if cc0:
+        database["license"] = "Made for CurioMesh and dedicated to the public domain under CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/"
     target = os.path.join(ROOT, "triadq", "patterns_cc0.json" if cc0 else "patterns.json")
     with open(target, "w", encoding="utf-8") as stream:
         json.dump(database, stream, indent=0, sort_keys=True)

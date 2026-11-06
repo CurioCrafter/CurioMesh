@@ -121,11 +121,9 @@ class PoolTests(unittest.TestCase):
 
     def test_helper_command_enables_the_addon_by_its_package_name(self):
         command, env = parallel.helper_command("rows_worker.main", ["folder", "0", "3"], binary="blender")
-        self.assertEqual(command[:4], ["blender", "--background", "--factory-startup", "--python-expr"])
-        self.assertIn(f"addon_utils.enable({parallel.PACKAGE!r}, default_set=False)", command[4])
-        self.assertIn(f"importlib.import_module({parallel.PACKAGE + '.rows_worker'!r}).main(sys.argv)", command[4])
-        self.assertNotIn("sys.path", command[4])
-        self.assertEqual(command[5:], ["--", "folder", "0", "3"])
+        self.assertEqual(command[:4], ["blender", "--background", "--factory-startup", "--python"])
+        self.assertTrue(os.path.isfile(command[4]) and command[4].endswith("helper_entry.py"))  # a shipped script, no code string
+        self.assertEqual(command[5:], ["--", parallel.PACKAGE, "rows_worker", "main", "folder", "0", "3"])
         self.assertEqual(env, dict(os.environ))  # the child's environment is not changed
 
 

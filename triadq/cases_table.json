@@ -1,5 +1,6 @@
 {
-"about": "Camera results per kind of part. Rebuild with scripts/build_case_table.py. loss: low, typical and high share of the view changed.",
+"about": "Camera results per kind of part, rebuilt by a script in the CurioMesh source repository. loss: low, typical and high share of the view changed.",
+"license": "Made for CurioMesh and dedicated to the public domain under CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/",
 "models": [
 "free_Sofa_01",
 "free_chess_set",

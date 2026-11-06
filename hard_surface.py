@@ -86,8 +86,8 @@ def finish(mesh, gs, unit_scale: float = 1.0) -> int:
         custom = mesh.attributes.get("custom_normal")  # custom normals no longer match the new faces
         if custom is not None:
             mesh.attributes.remove(custom)
-        elif getattr(mesh, "has_custom_normals", False) and hasattr(mesh, "free_normals_split"):
-            mesh.free_normals_split()
+        elif mesh.has_custom_normals:  # where they are not an attribute, zero vectors reset them to automatic
+            mesh.normals_split_custom_set([(0.0, 0.0, 0.0)] * len(mesh.loops))
     mesh.update()
     return len(ids)
 

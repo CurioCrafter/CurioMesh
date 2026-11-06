@@ -714,8 +714,8 @@ def _draw_view() -> None:
         gpu.state.depth_mask_set(True)
         gpu.state.depth_test_set("NONE")
         gpu.state.blend_set("NONE")
-    except Exception as exc:
-        overlay.LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        overlay.draw_failed("segments._draw_view")
 
 
 def _draw_legend() -> None:
@@ -786,8 +786,8 @@ def _draw_text() -> None:
             blf.color(0, *((0.62, 0.65, 0.75, 1.0) if muted else (1.0, 1.0, 1.0, 1.0) if i else (1.0, 0.86, 0.45, 1.0)))
             blf.position(0, left, y - step - step * i, 0)
             blf.draw(0, line)
-    except Exception as exc:
-        overlay.LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        overlay.draw_failed("segments._draw_text")
 
 
 # --------------------------------------------------------------------------- operators

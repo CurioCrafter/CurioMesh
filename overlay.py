@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import traceback
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import bpy
@@ -74,7 +75,14 @@ _DEFAULT_PREFS = SimpleNamespace(**PREF_DEFAULTS)
 
 _draw_handles: list = []
 _stats_cache: dict[str, "_CacheEntry"] = {}
-LAST_DRAW_ERROR = ""
+_draw_errors: set[str] = set()
+
+
+def draw_failed(where: str) -> None:
+    """Called from a draw callback's except block: print the traceback once per callback, not on every redraw."""
+    if where not in _draw_errors:
+        _draw_errors.add(where)
+        traceback.print_exc()
 
 
 @dataclass
@@ -98,9 +106,8 @@ class MeshStats:
 class _CacheEntry:
     key: tuple
     stats: MeshStats
-    heat: object = None  # (tri_batch | None, point_batch | None) once uploaded
-    heat_built: bool = False
-    extra: dict = field(default_factory=dict)
+    heat_arrays: tuple | None = None  # (colours, arrays) built by the watch timer for the heatmap
+    heat: tuple | None = None  # (arrays, batches): the GPU batches the draw callback made from those arrays
 
 
 # --------------------------------------------------------------------------- stats
@@ -154,6 +161,12 @@ def _entry(obj: bpy.types.Object) -> _CacheEntry | None:
         entry = _CacheEntry(key, compute_stats(obj.data))
         _stats_cache[obj.name] = entry
     return entry
+
+
+def cached_stats(obj: bpy.types.Object | None) -> MeshStats | None:
+    """The stats the watch timer last measured for this object (draw callbacks read only this; they measure nothing)."""
+    entry = _stats_cache.get(obj.name) if obj is not None else None
+    return entry.stats if entry else None
 
 
 def get_stats(obj: bpy.types.Object | None) -> MeshStats | None:
@@ -320,20 +333,17 @@ def _ui_scale() -> float:
         return 1.0
 
 
-def _heat_batches(entry: _CacheEntry, obj: bpy.types.Object):
-    """(triangle batch, pole batch, big-pole batch); rebuilt when the preference colours change."""
+def _heat_batches(entry: _CacheEntry):
+    """(triangle batch, pole batch, big-pole batch), uploaded from the arrays the watch timer built."""
     import gpu
     from gpu_extras.batch import batch_for_shader
 
-    colors = heat_colors()
-    if entry.heat_built and entry.extra.get("heat_colors") == colors:
-        return entry.heat
-    entry.heat_built = True
-    entry.extra["heat_colors"] = colors
-    entry.heat = (None, None, None)
-    arrays = build_heat_arrays(obj, entry.stats, colors)
+    arrays = entry.heat_arrays[1] if entry.heat_arrays else None
+    if entry.heat is not None and entry.heat[0] is arrays:
+        return entry.heat[1]
+    entry.heat = (arrays, (None, None, None))
     if arrays is None:
-        return entry.heat
+        return entry.heat[1]
     tri_pos, tri_col, pt_pos, pt_col = arrays
     big = entry.stats.valence[pole_indices(entry.stats)] >= 5
     shader = gpu.shader.from_builtin("FLAT_COLOR")
@@ -345,8 +355,8 @@ def _heat_batches(entry: _CacheEntry, obj: bpy.types.Object):
         pos, col = np.ascontiguousarray(pt_pos[mask]), np.ascontiguousarray(pt_col[mask])
         return batch_for_shader(shader, "POINTS", {"pos": pos, "color": col})
 
-    entry.heat = (tri_batch, points(~big), points(big))
-    return entry.heat
+    entry.heat = (arrays, (tri_batch, points(~big), points(big)))
+    return entry.heat[1]
 
 
 def heatmap_targets(context, settings) -> list[bpy.types.Object]:
@@ -362,7 +372,6 @@ def heatmap_targets(context, settings) -> list[bpy.types.Object]:
 
 
 def _draw_heatmap() -> None:
-    global LAST_DRAW_ERROR
     try:
         import gpu
 
@@ -380,13 +389,10 @@ def _draw_heatmap() -> None:
         point_size = float(get_prefs().heat_point_size) * _ui_scale()
         try:
             for obj in targets:
-                # Cheap size check first: stats on a huge mesh cost seconds per draw.
-                if len(obj.data.polygons) > HEATMAP_MAX_FACES:
+                entry = _stats_cache.get(obj.name)
+                if entry is None or entry.heat_arrays is None:
                     continue
-                entry = _entry(obj)
-                if entry is None or entry.stats.faces > HEATMAP_MAX_FACES:
-                    continue
-                tri_batch, pt_batch, big_batch = _heat_batches(entry, obj)
+                tri_batch, pt_batch, big_batch = _heat_batches(entry)
                 gpu.matrix.push()
                 gpu.matrix.multiply_matrix(obj.matrix_world)
                 shader.bind()
@@ -402,8 +408,8 @@ def _draw_heatmap() -> None:
         finally:
             gpu.state.depth_mask_set(True)
             gpu.state.blend_set("NONE")
-    except Exception as exc:
-        LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        draw_failed("overlay._draw_heatmap")
 
 
 def _rounded_rect(x, y, w, h, r, seg=6):
@@ -483,9 +489,8 @@ def _sidebar_inset() -> float:
     return 0.0
 
 
-def hud_model(context) -> dict:
-    """Everything the HUD shows, as plain data (testable without a GPU)."""
-    settings = _settings()
+def hud_object(context):
+    """(object the HUD reports on, whether it is a result waiting for Apply)."""
     from . import guided  # late: guided imports this module
 
     obj = context.object
@@ -497,13 +502,20 @@ def hud_model(context) -> dict:
     showing_result = preview is not None and preview.type == "MESH" and obj is not None and obj in (guided.state_source(), preview)
     if showing_result:
         obj = preview
+    return obj, showing_result
+
+
+def hud_model(context) -> dict:
+    """Everything the HUD shows, as plain data (testable without a GPU). Reads the cached stats only."""
+    settings = _settings()
+    obj, showing_result = hud_object(context)
     model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": "", "original": False}
     if settings is not None:
         model["target"] = int(settings.target_faces)
         model["batch"] = settings.batch_status
     is_mesh = obj is not None and obj.type == "MESH"
     too_big = is_mesh and len(obj.data.polygons) > HEATMAP_MAX_FACES
-    stats = get_stats(obj) if is_mesh and not too_big else None
+    stats = cached_stats(obj) if is_mesh and not too_big else None
     if is_mesh:
         model["name"] = "Region preview" if obj.name == REGION_PREVIEW_NAME else "Result preview" if showing_result else obj.name
     if too_big:
@@ -540,7 +552,6 @@ def _text_right(xr, y, size, color, text):
 
 
 def _draw_hud() -> None:
-    global LAST_DRAW_ERROR
     try:
         import gpu
 
@@ -614,8 +625,8 @@ def _draw_hud() -> None:
             _text(left, top - 124 * s, 10 * s, label, model["info"][:46])
         _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + model["hint"][:44])
         gpu.state.blend_set("NONE")
-    except Exception as exc:
-        LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        draw_failed("overlay._draw_hud")
 
 
 # --------------------------------------------------------------------------- operators
@@ -630,6 +641,7 @@ class CURIOMESH_OT_toggle_heatmap(bpy.types.Operator):
     def execute(self, context):
         settings = context.scene.curiomesh_settings
         settings.heatmap_enabled = not settings.heatmap_enabled
+        ensure_watch()
         obj = context.object
         if settings.heatmap_enabled and obj is not None and obj.type == "MESH":
             stats = get_stats(obj)
@@ -639,12 +651,44 @@ class CURIOMESH_OT_toggle_heatmap(bpy.types.Operator):
 
 
 CLASSES = (CURIOMESH_OT_toggle_heatmap,)
+WATCH_SECONDS = 0.5
+
+
+def _watch():
+    """Timer: measures what the HUD and heatmap show, so their draw callbacks only draw. Ends when both (and Live) are off."""
+    settings = _settings()
+    if settings is None or not (settings.hud_enabled or settings.heatmap_enabled or settings.live_enabled):
+        return None
+    context = SimpleNamespace(scene=bpy.context.scene, object=bpy.context.view_layer.objects.active)
+    heat = heatmap_targets(context, settings)
+    shown = heat + [hud_object(context)[0]] if settings.hud_enabled else heat
+    colors = heat_colors()
+    changed = False
+    for obj in dict.fromkeys(o for o in shown if o is not None and o.type == "MESH"):
+        if len(obj.data.polygons) > HEATMAP_MAX_FACES:
+            continue
+        old = _stats_cache.get(obj.name)
+        entry = _entry(obj)
+        changed |= entry is not old
+        if obj in heat and (entry.heat_arrays is None or entry.heat_arrays[0] != colors):
+            entry.heat_arrays = (colors, build_heat_arrays(obj, entry.stats, colors))
+            changed = True
+    if changed:
+        tag_redraw()
+    return WATCH_SECONDS
+
+
+def ensure_watch(_self=None, _context=None) -> None:
+    """Start the watch timer (from the HUD, Heatmap and Live switches, register and file loads). Usable as an update callback."""
+    if not bpy.app.timers.is_registered(_watch):
+        bpy.app.timers.register(_watch, first_interval=0.0, persistent=True)
 
 
 def register() -> None:
     unregister()
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_heatmap, (), "WINDOW", "POST_VIEW"))
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_hud, (), "WINDOW", "POST_PIXEL"))
+    ensure_watch()
 
 
 def unregister() -> None:
@@ -653,4 +697,7 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_draw_handles.pop(), "WINDOW")
         except Exception:
             pass
+    if bpy.app.timers.is_registered(_watch):
+        bpy.app.timers.unregister(_watch)
     _stats_cache.clear()
+    _draw_errors.clear()

@@ -24,6 +24,7 @@ def _live_update(self, context):
 
 def _live_toggle_update(self, context):
     live.on_live_toggled(self, context)
+    overlay.ensure_watch()
 
 
 def _hud_get(self) -> bool:
@@ -33,6 +34,7 @@ def _hud_get(self) -> bool:
 
 def _hud_set(self, value) -> None:
     self["hud_enabled"] = bool(value)
+    overlay.ensure_watch()
 
 
 def _redraw_update(self, context):

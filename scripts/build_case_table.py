@@ -178,7 +178,7 @@ def main(args: list[str]) -> None:
     for path in args[2:]:
         with open(path, encoding="utf-8") as stream:
             rows += [json.loads(line) for line in stream if line.strip()]
-    table = {"about": "Camera results per kind of part. Rebuild with scripts/build_case_table.py. loss: low, typical and high share of the view changed.", "models": sorted({row["model"] for row in rows}), "cases": summarize(rows)}
+    table = {"about": "Camera results per kind of part, rebuilt by a script in the CurioMesh source repository. loss: low, typical and high share of the view changed.", "license": "Made for CurioMesh and dedicated to the public domain under CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/", "models": sorted({row["model"] for row in rows}), "cases": summarize(rows)}
     with open(args[1], "w", encoding="utf-8") as out:
         json.dump(table, out, indent=0)
 

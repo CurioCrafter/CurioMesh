@@ -319,7 +319,8 @@ class CURIOMESH_OT_issue_compare(_IssueOp, bpy.types.Operator, ImportHelper):
 
 
 def draw_reports(layout) -> None:
-    """Save the spot list and compare a later run with it (Advanced > Issue Reports)."""
+    """Save the spot list and compare a later run with it (Advanced > Issue Reports), and the link to report a problem."""
+    layout.operator("wm.url_open", text="Report a Problem (opens browser)", icon="ERROR").url = _g().problem_url()
     found = spots()
     res = _g().state["res"]
     if res is None or res.get("issues") is None:

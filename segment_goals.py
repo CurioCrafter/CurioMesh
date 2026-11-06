@@ -1356,8 +1356,8 @@ def _draw_stroke(op) -> None:
         gpu.state.line_width_set(2.0)
         batch_for_shader(shader, "LINE_STRIP", {"pos": [(float(x), float(y), 0.0) for x, y in op.stroke]}).draw(shader)
         gpu.state.line_width_set(1.0)
-    except Exception as exc:
-        overlay.LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        overlay.draw_failed("segment_goals._draw_stroke")
 
 
 class CURIOMESH_OT_seg_goal(bpy.types.Operator):

@@ -115,23 +115,20 @@ def allowed() -> bool:
 def helper_command(entry: str, args: list[str], binary: str | None = None) -> tuple[list[str], dict]:
     """(command, environment) for a background Blender that runs `<the add-on>.<entry>(sys.argv)` with `args` after "--".
 
-    `binary` is Blender itself (bpy.app.binary_path) and nothing else, started without a shell. The child enables the
-    add-on by its own package name (`bl_ext.<repo>.curiomesh`) with `addon_utils.enable`, the way Blender loads it, and
-    then imports the module; nothing edits Python's import path. If the add-on can't be enabled there, the child exits
-    and the job does that work itself.
+    `binary` is Blender itself (bpy.app.binary_path) and nothing else, started without a shell. It runs the shipped
+    script `helper_entry.py`, which enables the add-on by its own package name (`bl_ext.<repo>.curiomesh`) with
+    `addon_utils.enable`, the way Blender loads it, and then calls the function; no code string is built here and
+    nothing edits Python's import path. If the add-on can't be enabled there, the child exits and the job does that
+    work itself.
     """
     if binary is None:
         import bpy
 
         binary = bpy.app.binary_path
     module, _, function = entry.rpartition(".")
-    package = PACKAGE
-    code = (
-        "import addon_utils, importlib, sys; "
-        f"addon_utils.enable({package!r}, default_set=False); "
-        f"importlib.import_module({package + '.' + module!r}).{function}(sys.argv)"
-    )
-    return [binary, "--background", "--factory-startup", "--python-expr", code, "--", *args], dict(os.environ)
+    script = os.path.join(os.path.dirname(__file__), "helper_entry.py")
+    command = [binary, "--background", "--factory-startup", "--python", script, "--", PACKAGE, module, function, *args]
+    return command, dict(os.environ)
 
 
 class Pool:

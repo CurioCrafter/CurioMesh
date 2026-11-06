@@ -30,7 +30,7 @@ from mathutils.kdtree import KDTree
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
 from . import autoretopo, blockout, flowedit, hard_surface, hardware, jobpack, ladder, multires, organize, parallel, profiles, teach
-from .triadq import areas, detail, fit, patch, tasks
+from .triadq import areas, checks, detail, fit, patch, tasks
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
@@ -196,6 +196,17 @@ def _preset_update(self, context):
     overlay.tag_redraw()
 
 
+_preview_on: set[int] = set()  # scenes whose Guided Preview runs: runtime only, so nothing is saved into the .blend
+
+
+def _enabled_get(self) -> bool:
+    return self.id_data.as_pointer() in _preview_on
+
+
+def _enabled_set(self, value) -> None:
+    (_preview_on.add if value else _preview_on.discard)(self.id_data.as_pointer())
+
+
 def _enabled_update(self, context):
     if self.enabled:
         _start(context)
@@ -334,7 +345,7 @@ class CURIOMESH_PG_guided_guide(bpy.types.PropertyGroup):
 
 
 class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
-    enabled: bpy.props.BoolProperty(name="Guided Preview", description="Classic Guided: shows the point cage and keeps a live preview of the new quads beside your mesh", default=False, update=_enabled_update)
+    enabled: bpy.props.BoolProperty(name="Guided Preview", description="Classic Guided: shows the point cage and keeps a live preview of the new quads beside your mesh", get=_enabled_get, set=_enabled_set, update=_enabled_update)
     preset: bpy.props.EnumProperty(name="Mesh Type", description="Classic Guided: the starting quad size, point type and fill style for this kind of mesh", items=PRESET_ITEMS, default="CHARACTER", update=_preset_update)
     scope: bpy.props.EnumProperty(name="Remesh", description="Which tool rebuilds the mesh. Auto Segments is the main path; the other three are the older point tools in the Advanced tab", items=SCOPE_ITEMS, default="AUTO")
     strategy: bpy.props.EnumProperty(name="Fill Style", description="Pattern of the new quads in a region: Flow follows the surface, Grid is a regular grid", items=region.STRATEGY_ITEMS, default="FLOW")
@@ -1440,16 +1451,10 @@ def _mark_edges(mesh, edges, crease: bool, sharp: bool) -> None:
     index = {(min(a, b), max(a, b)): i for i, (a, b) in enumerate(pairs.reshape(-1, 2).tolist())}
     ids = [index[e] for e in edges if e in index]
     if crease:
-        layer = mesh.attributes.get("crease_edge")
-        if layer is None:
-            try:
-                layer = mesh.attributes.new("crease_edge", "FLOAT", "EDGE")
-            except (RuntimeError, TypeError):
-                layer = mesh.edge_creases.new() if hasattr(mesh, "edge_creases") else None
-        if layer is not None:
-            values = np.zeros(len(mesh.edges), dtype=np.float32)
-            values[ids] = 1.0
-            layer.data.foreach_set("value", values)
+        layer = mesh.attributes.get("crease_edge") or mesh.attributes.new("crease_edge", "FLOAT", "EDGE")
+        values = np.zeros(len(mesh.edges), dtype=np.float32)
+        values[ids] = 1.0
+        layer.data.foreach_set("value", values)
     if sharp:
         flags = np.zeros(len(mesh.edges), dtype=bool)
         flags[ids] = True
@@ -1471,12 +1476,9 @@ def _make_mesh(name, source, res, uvs=True):
 
 
 def _shade_by_angle(mesh) -> None:
-    """Smooth shading, hard edges past SMOOTH_DEG. Sharp edges work the same from Blender 3.6 to now, with no modifier."""
+    """Smooth shading, hard edges past SMOOTH_DEG, marked as sharp edges (no modifier needed)."""
     faces = len(mesh.polygons)
     mesh.polygons.foreach_set("use_smooth", np.ones(faces, dtype=bool))
-    if hasattr(mesh, "use_auto_smooth"):  # gone in 4.1. Before that, sharp edges only count with this on.
-        mesh.use_auto_smooth = True
-        mesh.auto_smooth_angle = math.pi
     edge_of_corner = np.empty(len(mesh.loops), dtype=np.int64)
     mesh.loops.foreach_get("edge_index", edge_of_corner)
     starts, sizes, normals = np.empty(faces, dtype=np.int64), np.empty(faces, dtype=np.int64), np.empty(faces * 3)
@@ -2374,8 +2376,8 @@ def _draw() -> None:
         gpu.state.depth_mask_set(True)
         gpu.state.depth_test_set("NONE")
         gpu.state.blend_set("NONE")
-    except Exception as exc:
-        overlay.LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        overlay.draw_failed("guided._draw")
 
 
 # --------------------------------------------------------------------------- operators
@@ -3284,6 +3286,7 @@ class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
         jobpack.export_job(
             folder, co, faces, mat, gs.auto_detail, target // 2 if mirror and target else target, "FULL",
             mirror=mirror, lines=lines, drop=None if paint is None else density_drop(paint, gs.density_strength), source=(len(src["faces"]), len(src["co"])),
+            helpers=parallel.allowed(),
         )
         state["message"] = f"Job written to {folder}. Copy the folder to the other computer and follow README.txt in it"
         self.report({"INFO"}, state["message"])
@@ -3849,11 +3852,6 @@ def problem_url() -> str:
     return f"{REPO_URL}/issues/new?" + urlencode({"title": "Problem: ", "body": body})
 
 
-def _draw_thanks(layout) -> None:
-    """Shown once a result is applied: a plain help link (extensions.blender.org: no promotional prompts)."""
-    layout.operator("wm.url_open", text="Report a Problem (opens browser)", icon="ERROR").url = problem_url()
-
-
 CLASSES = (
     CURIOMESH_PG_guided_point,
     CURIOMESH_PG_guided_shape,
@@ -3912,10 +3910,9 @@ def _on_load_post(*_args):
     segments.reset()
     flowedit.cancel()
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None, curve_sig=None, region=None, found=[])
-    for sc in bpy.data.scenes:
-        gs = getattr(sc, "curiomesh_guided", None)
-        if gs is not None and gs.enabled:
-            gs["enabled"] = False  # the timer is gone after a load; the user turns it on again
+    _preview_on.clear()  # its timer is gone after a load; the user turns it on again
+    checks.forget()
+    overlay.ensure_watch()  # the new file's scene may have the HUD or heatmap on
 
 
 def register() -> None:
@@ -3953,6 +3950,8 @@ def unregister() -> None:
     except Exception:
         pass
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, hover=None, message="")
+    _preview_on.clear()
+    checks.forget()
     for owner, name in ((bpy.types.Scene, "curiomesh_guided"), (bpy.types.Object, "curiomesh_points"), (bpy.types.Object, "curiomesh_point_index")):
         if hasattr(owner, name):
             delattr(owner, name)

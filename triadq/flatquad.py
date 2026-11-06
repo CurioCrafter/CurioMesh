@@ -745,7 +745,7 @@ def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[Me
 
     Each region is paired on its own and only its faces are kept, as arrays numbered like `mesh`. No pair crosses a seam,
     and nothing moves or splits here: closure then runs once on the whole result, so both sides of a seam agree by
-    construction. The regions never meet, so the result doesn't depend on the order or the number of threads.
+    construction. The regions never meet, so the result doesn't depend on the order they are done in.
     """
 
     faces = FlatFaces.of(mesh.faces)

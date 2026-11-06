@@ -30,7 +30,7 @@ def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: s
     previous_selection = list(bpy.context.selected_objects)
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
-    except Exception:
+    except (RuntimeError, ReferenceError):
         pass
 
     try:
@@ -47,7 +47,7 @@ def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: s
     finally:
         try:
             bpy.ops.object.mode_set(mode="OBJECT")
-        except Exception:
+        except (RuntimeError, ReferenceError):
             pass
         for selected in bpy.context.selected_objects:
             selected.select_set(False)
@@ -493,7 +493,7 @@ def bake_selected_to_active(
 
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
-    except Exception:
+    except (RuntimeError, ReferenceError):
         pass
 
     try:
@@ -544,7 +544,7 @@ def bake_selected_to_active(
             connect_baked_image(target_obj, image, label)
             try:
                 image.pack()
-            except Exception:
+            except (RuntimeError, ReferenceError):
                 pass
             baked.append(image)
     except Exception as bake_error:

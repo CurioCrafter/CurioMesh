@@ -431,7 +431,13 @@ class _Source:
         return self._crossed
 
 
-_source: tuple = ((), None)  # (which source, its `_Source`)
+_source: tuple = ((), None)  # (which source, its `_Source`); `forget` drops it
+
+
+def forget() -> None:
+    """Drop the kept source mesh and its BVH tree (file loads, add-on disable)."""
+    global _source
+    _source = ((), None)
 
 
 def _source_of(source_co, source_faces) -> _Source | None:

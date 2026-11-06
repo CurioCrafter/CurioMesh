@@ -404,7 +404,7 @@ def parts_changed_too_much(reference, view, pixel: float, labels: np.ndarray, li
 
 
 WAITING = "waiting"  # yielded while only helper Blenders are working: the timer slice ends early, without sleeping
-ROWS_NEEDS_HELPERS = "Even Rows runs Blender's QuadriFlow in a background Blender, so a QuadriFlow crash can't close yours. Turn on Background Blender Processes in the CurioMesh preferences to use it"
+ROWS_NEEDS_HELPERS = "Even Rows runs Blender's QuadriFlow on whole pieces, which takes a long time and can't be stopped, so it runs in a background Blender and yours stays usable. Turn on Background Blender Processes in the CurioMesh preferences to use it"
 KEEP_HERE = 0.5  # with helpers, a part of this share of the job's triangles or more is measured in the job itself
 PAIR_CHUNK_FACES = 200_000  # Light only: above 0, pairing works per region of this many faces: less memory on a huge mesh, and a few more triangles at the seams
 HUGE_FROM = 60_000  # a piece of this many triangles keeps no sizes of its own and is measured in the job itself
@@ -791,7 +791,10 @@ class AutoJob:
         """Run to the end in one call, for a script in background mode (an exported run_job.py, the tests). The panel never calls it."""
         ends = None if timeout is None else time.perf_counter() + timeout
         while self.busy and (ends is None or time.perf_counter() < ends):
+            began = time.perf_counter()
             self.step(1.0)
+            if self.busy and time.perf_counter() - began < 0.05:
+                time.sleep(0.05)  # only helper Blenders are working: don't spin a core (never in a timer, see step)
         return not self.busy
 
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
@@ -1142,7 +1145,8 @@ class AutoJob:
             machine = {"cores": os.cpu_count() or 1, "ram_gb": total, "free_gb": free}
             work = sum(t for t in triangles if t > KEEP_TRIANGLES)
             measured = sum(t > KEEP_TRIANGLES for t in triangles)
-            most = int(os.environ.get("CURIOMESH_HELPERS") or 0)  # timing tests: at most this many, whatever else the computer runs
+            most = os.environ.get("CURIOMESH_HELPERS", "").strip()  # a cap for timing tests: at most this many, whatever else the computer runs
+            most = int(most) if most.isdigit() else 0
             busy = 0.0 if most else hardware.busy_cores()
             return hardware.worker_count(machine, self.cfg.name, len(self.faces), max(len(ids) for ids in self.pieces), work, measured, busy, most), machine, work
 

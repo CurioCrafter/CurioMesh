@@ -63,7 +63,7 @@ print(f"Working at {settings.name}: {len(faces):,} faces", flush=True)
 runner = autoretopo.AutoJob(
     bpy.context, data["co"], faces, data["mat"], job["detail"], job["target_faces"], mirror=mirror, guide_lines=lines, project=project, drop=drop,
     settings=settings, checkpoint=hardware.checkpoint_dir(data["co"], len(faces), str(HERE)), keep_progress=True, parallel=True,
-    helpers=True,  # you started this script yourself, outside your working Blender: helper Blenders may run here
+    helpers=job.get("helpers", False),  # Background Blender Processes as it was set when the job was exported
 )
 while runner.busy:
     runner.wait(10.0)
@@ -116,7 +116,7 @@ def job_folder(directory, name: str) -> Path:
     return folder
 
 
-def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, mirror=None, lines=(), drop=None, source=None) -> Path:
+def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort: str, mirror=None, lines=(), drop=None, source=None, helpers: bool = False) -> Path:
     """Write the job folder. `co`/`faces`/`mat` are what the search runs on (the solved half when `mirror` is set).
 
     `mirror` is (axis, offset, size, faces of the whole mesh, side solved); `lines` the guide strokes already on that half;
@@ -132,6 +132,7 @@ def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort:
     source = source or (len(faces), len(co))
     settings = {"detail": float(detail), "target_faces": int(target_faces), "effort": effort, "faces": len(faces), "verts": len(co), "source_faces": int(source[0]), "source_verts": int(source[1])}
     settings["mirror"] = None if mirror is None else [int(mirror[0]), float(mirror[1]), float(mirror[2]), int(mirror[3]), int(mirror[4])]
+    settings["helpers"] = bool(helpers)
     (folder / "job.json").write_text(json.dumps(settings, indent=2))
     (folder / "run_job.py").write_text(RUN_JOB)
     (folder / "README.txt").write_text(README.format(faces=len(faces), name=folder.name, effort=effort))

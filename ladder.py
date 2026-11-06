@@ -430,7 +430,7 @@ def status() -> str:
         return ""
     doing = lad["doing"]
     words = f" ({STYLE_WORDS.get(doing[0], doing[0])}, {doing[1]:g}%)" if doing else ""
-    return f"Working out more sizes: {len(lad['rungs'])} ready, {left} to go{words}"
+    return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for a moment during each"
 
 
 def draw(layout, gs) -> None:

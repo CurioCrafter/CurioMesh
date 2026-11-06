@@ -534,8 +534,8 @@ def _draw() -> None:
         gpu.state.depth_mask_set(True)
         gpu.state.depth_test_set("NONE")
         gpu.state.blend_set("NONE")
-    except Exception as exc:
-        overlay.LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        overlay.draw_failed("region._draw")
 
 
 # --------------------------------------------------------------------------- properties

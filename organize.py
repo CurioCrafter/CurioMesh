@@ -375,8 +375,8 @@ def _draw_flow() -> None:
         gpu.state.line_width_set(1.0)
         gpu.state.point_size_set(1.0)
         gpu.state.depth_test_set("NONE")
-    except Exception as exc:
-        overlay.LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        overlay.draw_failed("organize._draw_flow")
 
 
 _handles: list = []

@@ -694,8 +694,8 @@ def _draw_strokes() -> None:
         shader.bind()
         fe["batch"].draw(shader)
         gpu.state.line_width_set(1.0)
-    except Exception as exc:
-        overlay.LAST_DRAW_ERROR = repr(exc)
+    except Exception:
+        overlay.draw_failed("flowedit._draw_strokes")
 
 
 _classes: list = []

@@ -152,7 +152,7 @@ class _ContextSnapshot:
         try:
             if self.active is not None and self.mode != "OBJECT":
                 bpy.ops.object.mode_set(mode="OBJECT")
-        except Exception:
+        except (RuntimeError, ReferenceError):
             pass
         return self
 
@@ -172,7 +172,7 @@ class _ContextSnapshot:
                 if self.mode != "OBJECT":
                     try:
                         bpy.ops.object.mode_set(mode=self.mode)
-                    except Exception:
+                    except (RuntimeError, ReferenceError):
                         pass
         except Exception:
             pass
@@ -199,7 +199,7 @@ def _link_object_like(source: bpy.types.Object, obj: bpy.types.Object) -> None:
 def _set_active_only(obj: bpy.types.Object) -> None:
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
-    except Exception:
+    except (RuntimeError, ReferenceError):
         pass
     for selected in bpy.context.selected_objects:
         selected.select_set(False)
@@ -215,7 +215,7 @@ def _remove_object(obj: bpy.types.Object | None, *, remove_mesh: bool = True) ->
     if remove_mesh and mesh is not None and mesh.users == 0:
         try:
             bpy.data.meshes.remove(mesh)
-        except Exception:
+        except (RuntimeError, ReferenceError):
             pass
 
 
@@ -334,7 +334,7 @@ def _cleanup_mesh(mesh: bpy.types.Mesh, config: RemeshConfig) -> None:
 
     try:
         mesh.validate(clean_customdata=False)
-    except Exception:
+    except (RuntimeError, ReferenceError):
         pass
     mesh.update(calc_edges=True)
 
@@ -350,11 +350,9 @@ def _auto_voxel_size(obj: bpy.types.Object, config: RemeshConfig) -> float:
 def _voxel_repair(obj: bpy.types.Object, config: RemeshConfig) -> bool:
     _set_active_only(obj)
     voxel_size = _auto_voxel_size(obj, config)
+    obj.data.remesh_voxel_size = voxel_size
+    obj.data.remesh_voxel_adaptivity = 0.0
     try:
-        if hasattr(obj.data, "remesh_voxel_size"):
-            obj.data.remesh_voxel_size = voxel_size
-        if hasattr(obj.data, "remesh_voxel_adaptivity"):
-            obj.data.remesh_voxel_adaptivity = 0.0
         bpy.ops.object.voxel_remesh()
         _log(config, f"Voxel repair succeeded at voxel_size={voxel_size:.5f}")
         return True
@@ -384,16 +382,8 @@ def _run_quadriflow(obj: bpy.types.Object, config: RemeshConfig) -> bool:
         # Blender 5.2 can crash reprojecting attributes (mesh_remesh_reproject_attributes); skip it when there's nothing to keep.
         kwargs["preserve_attributes"] = False
     try:
-        try:
-            result = bpy.ops.object.quadriflow_remesh(**kwargs)
-        except TypeError:
-            minimal = {
-                "mode": "FACES",
-                "target_faces": max(1, int(config.target_faces)),
-                "seed": max(0, int(config.seed)),
-            }
-            result = bpy.ops.object.quadriflow_remesh(**minimal)
-    except Exception as exc:
+        result = bpy.ops.object.quadriflow_remesh(**kwargs)
+    except RuntimeError as exc:
         traceback.print_exc()
         _solver_errors.append(f"QuadriFlow error: {exc}"[:200])
         return False
@@ -475,7 +465,7 @@ def _apply_meshdata_to_object(obj: bpy.types.Object, data: MeshData) -> None:
     try:
         if old_mesh.users == 0:
             bpy.data.meshes.remove(old_mesh)
-    except Exception:
+    except (RuntimeError, ReferenceError):
         pass
 
 
@@ -555,7 +545,7 @@ def _apply_decimate_proxy(
         modifier.delimit = {"SHARP", "SEAM", "MATERIAL"}
     try:
         bpy.ops.object.modifier_apply(modifier=modifier.name)
-        if config.debug_logs:  # read by the smoke tests only
+        if config.debug_logs:  # troubleshooting details, kept only with Debug Console Logs on
             obj["curiomesh_proxy_faces"] = int(len(obj.data.polygons))
         _log(config, f"Built QEM proxy: {current_faces} -> {len(obj.data.polygons)} faces")
         return True
@@ -563,7 +553,7 @@ def _apply_decimate_proxy(
         traceback.print_exc()
         try:
             obj.modifiers.remove(modifier)
-        except Exception:
+        except (RuntimeError, ReferenceError):
             pass
         return False
 
@@ -853,7 +843,7 @@ def _apply_shrinkwrap(target: bpy.types.Object, source: bpy.types.Object, config
         traceback.print_exc()
         try:
             target.modifiers.remove(modifier)
-        except Exception:
+        except (RuntimeError, ReferenceError):
             pass
     return False
 
@@ -1415,7 +1405,7 @@ def _transfer_material_indices_with_modifier(
         traceback.print_exc()
         try:
             target.modifiers.remove(modifier)
-        except Exception:
+        except (RuntimeError, ReferenceError):
             pass
         return False
 
@@ -1458,28 +1448,15 @@ def _transfer_uvs_with_modifier(source: bpy.types.Object, target: bpy.types.Obje
     modifier = target.modifiers.new("CurioMesh UV transfer", "DATA_TRANSFER")
     modifier.object = source
     modifier.use_loop_data = True
-    try:
-        modifier.data_types_loops = {"UV"}
-    except Exception:
-        modifier.loop_data_types = {"UV"}
-    for attr, value in (
-        ("loop_mapping", "NEAREST_FACE_INTERPOLATED"),
-        ("layers_uv_select_src", "ACTIVE"),
-        ("layers_uv_select_dst", "ACTIVE"),
-        ("mix_mode", "REPLACE"),
-    ):
-        try:
-            setattr(modifier, attr, value)
-        except Exception:
-            pass
-
+    modifier.data_types_loops = {"UV"}
+    modifier.loop_mapping = "NEAREST_FACE_INTERPOLATED"
+    modifier.layers_uv_select_src = "ACTIVE"
+    modifier.layers_uv_select_dst = "ACTIVE"
+    modifier.mix_mode = "REPLACE"
     try:
         bpy.ops.object.modifier_apply(modifier=modifier.name)
-    except Exception:
-        try:
-            target.modifiers.remove(modifier)
-        except Exception:
-            pass
+    except RuntimeError:
+        target.modifiers.remove(modifier)
         return False
     return uv_mapping_is_valid(target)
 
@@ -1595,7 +1572,7 @@ def _strip_source_modifiers(obj: bpy.types.Object) -> None:
     for modifier in list(obj.modifiers):
         try:
             obj.modifiers.remove(modifier)
-        except Exception:
+        except (RuntimeError, ReferenceError):
             pass
 
 
@@ -1626,7 +1603,7 @@ def _finalize_output(
         if old_source_mesh.users == 0:
             try:
                 bpy.data.meshes.remove(old_source_mesh)
-            except Exception:
+            except (RuntimeError, ReferenceError):
                 pass
         output_obj = source_obj
         work_obj = None
@@ -1648,7 +1625,7 @@ def _annotate_output(output_obj: bpy.types.Object, result: RemeshResult, debug: 
     output_obj["curiomesh_quad_ratio"] = round(result.diagnostics.quad_ratio, 4)
     output_obj["curiomesh_strategy"] = result.strategy
     # Only what the overlay reads; the rest of the numbers stay in the returned RemeshResult.
-    if debug:  # read by the smoke tests only
+    if debug:  # troubleshooting details, kept only with Debug Console Logs on
         output_obj["curiomesh_topology_status"] = result.topology_status
 
 
@@ -1739,7 +1716,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                         feature_angle_deg=config.triad_feature_angle,
                         max_sample_faces=config.analysis_sample_faces,
                     )
-                # Reuse the sole evaluated mesh as the native QEM work object.
+                # Reuse the sole evaluated mesh as the work object for Blender's Decimate (QEM).
                 # Candidate copies are created only after this object is below
                 # the reference cap, avoiding a second unreduced scan copy.
                 work_obj = source_snapshot
@@ -1764,7 +1741,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                 pass  # needs the exact source: a QEM proxy would hide the flat regions
             elif engine == "ATLAS_Q" and not pair_closure_only and not large_pair_first:
                 # Keep BMesh cleanup and Python adjacency off the full-resolution
-                # scan whenever Blender's native QEM proxy can reduce it first.
+                # scan whenever Blender's Decimate (QEM) can reduce it first.
                 _prepare_flow_proxy(work_obj, config)
             elif engine == "PAIR_CLOSURE" or large_pair_first:
                 # PairClosure is an exact closure, not a simplifier. Reduce to
@@ -1774,7 +1751,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
             elif source_exceeds_reference_cap:
                 # Direct QuadriFlow remains available for compatibility, but a
                 # scan-scale input still needs a bounded fidelity reference.
-                # Reusing its native QEM proxy avoids another full mesh copy.
+                # Reusing its Decimate (QEM) proxy avoids another full mesh copy.
                 _prepare_flow_proxy(work_obj, config)
             _cleanup_mesh(work_obj.data, config)
             fidelity_reference = _make_surface_reference(
@@ -1846,7 +1823,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     work_obj.hide_set(False)
                     if bounded_source_evidence is not None:
                         # The retry snapshot is full resolution again. Keep its
-                        # Python BMesh cleanup behind the same native QEM cap as
+                        # Python BMesh cleanup behind the same Decimate (QEM) cap as
                         # the first scan-scale attempt.
                         _prepare_flow_proxy(work_obj, config)
                 _cleanup_mesh(work_obj.data, config)
@@ -1960,7 +1937,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     candidates=[evaluation.to_dict() for evaluation in candidate_evaluations],
                 )
 
-            if config.debug_logs:  # read by the smoke tests only
+            if config.debug_logs:  # troubleshooting details, kept only with Debug Console Logs on
                 work_obj["curiomesh_projection_status"] = projection_status
 
             material_count = _copy_material_slots(source_surface, work_obj)

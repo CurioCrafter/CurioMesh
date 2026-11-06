@@ -3,7 +3,7 @@
 
 """What this computer can do, and how to cut a job down to fit it.
 
-`detect` reads the machine (cores, memory, graphics card, Cycles devices) and never fails: whatever it cannot read
+`detect` reads the machine (cores, memory and the graphics card Blender draws with) and never fails: whatever it cannot read
 is left out. `settings_for` turns an effort (Light, Normal, Full, or Auto) into the knobs `autoretopo.AutoJob` uses.
 `estimate` and `rate` turn face and part counts into a time, a memory figure and one plain sentence. `split_chunks`
 cuts a huge piece into compact regions, and the checkpoint helpers save finished parts so a stopped job can resume.
@@ -333,7 +333,9 @@ def cheaper_ways(style: str, bake: str, size: int, effort: str, lods: bool = Fal
 
 
 def weak_pc(machine: dict | None) -> str:
-    """One plain sentence when this computer is weak (4 cores or fewer, 8 GB or less, or no graphics card found), else an empty string."""
+    """One plain sentence when this computer is weak (4 cores or fewer, or 8 GB or less), else an empty string.
+
+    The graphics card is not part of it: bakes use the scene's Cycles device, and nothing else here uses the card."""
     if not machine:
         return ""
     small = []
@@ -341,13 +343,9 @@ def weak_pc(machine: dict | None) -> str:
         small.append(f"{machine['cores']} cores")
     if (machine.get("ram_gb") or 99) <= 8:
         small.append(f"{machine['ram_gb']:.0f} GB of memory")
-    card = bool(machine.get("gpu"))  # the card Blender draws with (gpu module)
-    if not small and card:
+    if not small:
         return ""
-    why = ", ".join(small) if small else "no graphics card found, so bakes run on the processor"
-    if small and not card:
-        why += ", no graphics card for baking"
-    return f"This PC is on the small side ({why}). Big meshes and bakes will be slow. Effort Light, a smaller bake, Keep Detail and Export Job (to another computer) all help."
+    return f"This PC is on the small side ({', '.join(small)}). Big meshes and bakes will be slow. Effort Light, a smaller bake, Keep Detail and Export Job (to another computer) all help."
 
 
 # --------------------------------------------------------------------------- chunks
@@ -456,16 +454,17 @@ STALE_JOB_S = 12 * 3600  # a job folder nothing has touched for this long was le
 
 def job_folder(prefix: str) -> Path:
     """A new folder for one job's working files, in the extension's user folder ("jobs"). Clears folders left there by
-    a Blender that quit mid-job. Outside Blender (unit tests) it is made in the system temp folder."""
+    a Blender that quit mid-job. Raises RuntimeError when that folder can't be made: nothing goes to system temp."""
     base = user_folder("jobs")
-    if base is not None:
-        # ponytail: age-based, since another Blender may be running a job here right now
-        for old in base.iterdir():
-            try:
-                if old.is_dir() and time.time() - old.stat().st_mtime > STALE_JOB_S:
-                    shutil.rmtree(old, ignore_errors=True)
-            except OSError:
-                pass
+    if base is None:
+        raise RuntimeError("CurioMesh can't make its folder in Blender's extension user folder for this job's files")
+    # ponytail: age-based, since another Blender may be running a job here right now
+    for old in base.iterdir():
+        try:
+            if old.is_dir() and time.time() - old.stat().st_mtime > STALE_JOB_S:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
     return Path(tempfile.mkdtemp(prefix=prefix, dir=base))
 
 
@@ -479,9 +478,9 @@ def checkpoint_dir(co: np.ndarray, face_count: int, root: str | None = None) -> 
             return None
     digest = hashlib.sha1(np.ascontiguousarray(co).tobytes() + str(face_count).encode()).hexdigest()[:16]
     folder = base / "curiomesh_resume"
-    if not (_private_dir(folder) and _private_dir(folder / digest)):
+    if not _private_dir(folder):
         return None  # no checkpoints rather than files in a place someone else could plant
-    return folder / digest
+    return folder / digest  # made by the first save_piece, so a job stopped before any part leaves no empty folder
 
 
 def piece_file(folder: Path, key: bytes) -> Path:
@@ -496,6 +495,8 @@ def save_piece(path: Path, detail: float, sizes: list, levels: list[tuple[int, f
         data[f"l{k}"] = np.fromiter((len(p) for p in polys), dtype=np.int32, count=len(polys))
         data[f"f{k}"] = np.fromiter((v for p in polys for v in p), dtype=np.int64)
         data[f"m{k}"] = np.asarray([int(m) for m in kinds], dtype=np.int32)
+    if not _private_dir(path.parent):  # a checkpoint folder is made here, on its first part
+        raise OSError(f"{path.parent} is not a private folder of this user")
     descriptor, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")  # a name nobody could have planted
     try:
         with os.fdopen(descriptor, "wb") as handle:

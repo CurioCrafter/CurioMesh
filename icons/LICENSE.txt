@@ -1,5 +1,5 @@
 CC0 1.0, drawn for CurioMesh.
 
-The PNG icons in this folder were drawn for CurioMesh by its own script (bench/uidesign/make_icons.py in the
-CurioMesh repository); no other artwork was used. To the extent possible under law, the authors have dedicated
+The PNG icons in this folder were drawn for CurioMesh by a script in the
+CurioMesh source repository; no other artwork was used. To the extent possible under law, the authors have dedicated
 them to the public domain under CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/

@@ -51,10 +51,19 @@ def main() -> int:
     for must in ("CURIOMESH_PT_guided", "CURIOMESH_PT_guided_apply"):
         if not hasattr(bpy.types, must):
             missing.append(must)
+    guided, overlay = sys.modules[module + ".guided"], sys.modules[module + ".overlay"]
+    guided._enabled_set(bpy.context.scene.curiomesh_guided, True)  # Guided Preview on (its flag only), as if Start had run
     addon_utils.disable(module, default_set=True)
     left = [c.__name__ for c in classes if getattr(c, "is_registered", False)]
+    if bpy.app.timers.is_registered(overlay._watch):
+        left.append("overlay._watch timer")
     print(f"UNREG left={left}")
-    ok = not missing and not orphan_children and not left
+    # Disable then enable in one session: the preview flag must not survive, or Start would skip starting its timer.
+    addon_utils.enable(module, default_set=True, handle_error=None)
+    stale = bpy.context.scene.curiomesh_guided.enabled or "enabled" in (bpy.context.scene.get("curiomesh_guided") or {})
+    print(f"REENABLE stale_preview_flag={stale}")
+    addon_utils.disable(module, default_set=True)
+    ok = not missing and not orphan_children and not left and not stale
     print("REGISTRATION PASS" if ok else "REGISTRATION FAIL")
     return 0 if ok else 1
 

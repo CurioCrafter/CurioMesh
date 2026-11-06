@@ -103,6 +103,8 @@ class SafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             folder = hardware.checkpoint_dir(np.zeros((3, 3)), 1, root)
             self.assertEqual(folder.parent.parent, Path(root))
+            self.assertFalse(folder.exists())  # made by the first saved part, so a stopped job leaves no empty folder
+            folder.mkdir()
             (folder / "x.tmp").write_bytes(b"planted")
             path = hardware.piece_file(folder, b"k")
             hardware.save_piece(path, 1.0, [(np.zeros((3, 3)), [(0, 1, 2)], ["0"])], [(1, 0.0)], 1.0)
@@ -206,8 +208,7 @@ class CostTests(unittest.TestCase):
 
     def test_weak_pc_notice(self):
         self.assertIn("4 cores", hardware.weak_pc(dict(SMALL, gpu="x")))
-        self.assertIn("no graphics card", hardware.weak_pc(SMALL))
-        self.assertIn("processor", hardware.weak_pc(dict(BIG)))  # plenty of power but no card: bakes use the processor
+        self.assertEqual(hardware.weak_pc(dict(BIG)), "")  # the card doesn't matter: bakes use the scene's Cycles device
         self.assertEqual(hardware.weak_pc(dict(BIG, gpu="RTX")), "")
         self.assertEqual(hardware.weak_pc(None), "")
 

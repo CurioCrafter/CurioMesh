@@ -93,7 +93,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     show_materials: bpy.props.BoolProperty(name="Materials & UVs", description="Show the materials and UVs panel", default=True)
     show_batch: bpy.props.BoolProperty(name="Batch", description="Show the batch remesh panel", default=True)
     show_diagnostics: bpy.props.BoolProperty(name="Diagnostics", description="Show the measurements panel", default=True)
-    show_debug: bpy.props.BoolProperty(name="Debug", description="Show the panel with extra switches for finding problems", default=True)
+    show_debug: bpy.props.BoolProperty(name="Debug", description="Show the panel with extra switches for finding problems", default=False)
     show_regions: bpy.props.BoolProperty(name="Regions", description="Show the Regions panel", default=True)
     show_guided: bpy.props.BoolProperty(name="Guided", description="Show the main CurioMesh panel", default=True)
     advanced_mode: bpy.props.BoolProperty(
@@ -109,7 +109,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
 
     allow_helpers: bpy.props.BoolProperty(
         name="Background Blender Processes",
-        description="Lets CurioMesh start background copies of this Blender (never any other program) for Use Several Cores and for Even Rows, which runs QuadriFlow there so a QuadriFlow crash can't close your Blender. They end with the job. Off: everything runs inside this Blender and Even Rows is not available",
+        description="Lets CurioMesh start background copies of this Blender (never any other program) for Use Several Cores and for Even Rows, which runs QuadriFlow on whole pieces there so this Blender stays usable and Stop works. They end with the job. Off: everything runs inside this Blender and Even Rows is not available",
         default=D["allow_helpers"],
     )
 
@@ -117,6 +117,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         name="HUD On in New Scenes",
         description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet",
         default=D["hud_default"],
+        update=overlay.ensure_watch,
     )
     hud_corner: bpy.props.EnumProperty(
         name="Corner",

@@ -37,18 +37,24 @@ This is the extensions.blender.org build. It contains Python code only.
   background copies of the same Blender, never any other program. They run only while a job runs and close when it
   ends. Two features use them:
   - **Use Several Cores** (Advanced tab) measures the parts of a big job in several of them at once.
-  - The **Even Rows** style runs Blender's own QuadriFlow in one, so a QuadriFlow crash on a hard mesh cannot close your
-    session. With background processes off, Even Rows is not available and the panel says so.
+  - The **Even Rows** style runs Blender's own QuadriFlow on whole pieces in one. QuadriFlow can't be interrupted and
+    takes long on a full-detail piece, so this keeps your Blender usable and lets **Stop** end it at once. With
+    background processes off, Even Rows is not available and the panel says so.
+  - The **QuadriFlow** method (and Classic Remesh with QuadriFlow) runs Blender's own QuadriFlow inside your Blender,
+    like Remesh > QuadriFlow does, on one reduced part at a time; Blender is busy while each part runs.
 - Blender stays usable while a job runs: the work is done in short steps from a timer. A few single steps (reducing
-  a part, pairing, the topology check) can still hold Blender for a few seconds; the wait cursor shows while they run,
-  and **Stop** takes effect after them. **Apply** is available once the job has finished, or after **Stop**.
+  a part, pairing, the topology check) can still hold Blender for up to about 3 seconds on a mid-size mesh; the wait
+  cursor shows while they run, and **Stop** takes effect after them. **Apply** is available once the job has finished,
+  or after **Stop**. After a result appears, more sizes for the Quad Size and Rows sliders are worked out the same way,
+  and the panel says so while it happens.
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
 - Remembered fixes and resume points are kept in the extension's user folder. A job's working files go in a folder
   there too (`jobs`) and are deleted when the job ends; folders left by a Blender that quit mid-job are cleared later.
 - Ideas credited: fitting each source point to its nearest vertex, shading read from the nearest source points, and
   the finite test cases come from ideas by cav3dw3ll3r (https://github.com/cav3dw3ll3r).
-- **Report a Problem** opens a GitHub issue in your web browser. The add-on itself never connects to the internet.
+- **Report a Problem** (Advanced tab, Issue Reports) opens GitHub's new-issue form in your web browser, with your
+  Blender and CurioMesh versions filled in. The add-on itself never connects to the internet.
 - Bundled data: `triadq/patterns.json` holds statistics measured on CC0 and public-domain meshes (see
   `docs/PATTERN_SOURCES.md`). `triadq/cases_table.json` holds camera-check results measured on CC0 Poly Haven models. The
   icons are CC0 (`icons/LICENSE.txt`).
