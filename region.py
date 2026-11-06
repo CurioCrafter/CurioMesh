@@ -699,7 +699,7 @@ class CURIOMESH_OT_region_add_cage(bpy.types.Operator):
     bl_description = "Add a box or lattice around your selection (or the 3D cursor). Move and scale it so it covers the part to redo"
     bl_options = {"REGISTER", "UNDO"}
 
-    kind: bpy.props.EnumProperty(items=[("BOX", "Box", ""), ("LATTICE", "Lattice", "")], default="BOX")
+    kind: bpy.props.EnumProperty(name="Cage", description="A box, or a 3 x 3 x 3 lattice you can reshape to fit the part to redo", items=[("BOX", "Box", "An Empty cube you can move and scale"), ("LATTICE", "Lattice", "A 3 x 3 x 3 lattice you can reshape")], default="BOX")
 
     def execute(self, context):
         settings = context.scene.curiomesh_region
@@ -802,8 +802,8 @@ class CURIOMESH_OT_fit_to_surface(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
-    iterations: bpy.props.IntProperty(name="Iterations", default=5, min=1, max=100)
-    strength: bpy.props.FloatProperty(name="Strength", default=0.5, min=0.0, max=1.0)
+    iterations: bpy.props.IntProperty(name="Iterations", description="How many times the points are smoothed and settled back on the surface. More follows it closer, slower", default=5, min=1, max=100)
+    strength: bpy.props.FloatProperty(name="Strength", description="How far each point moves toward its smoothed spot on every pass: 0 not at all, 1 all the way", default=0.5, min=0.0, max=1.0)
 
     def execute(self, context):
         obj = _active_mesh(context)
@@ -1020,13 +1020,14 @@ class CURIOMESH_PT_regions(bpy.types.Panel):
     bl_idname = "CURIOMESH_PT_regions"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh"
-    bl_order = 11  # below Guided and Classic Remesh
+    bl_category = "CurioMesh Pro"
+    bl_order = 11  # below Classic Remesh in the Pro tab
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
-        return bool(overlay.get_prefs().show_regions)
+        prefs = overlay.get_prefs()
+        return bool(prefs.show_regions) and bool(getattr(prefs, "pro_mode", False))
 
     def draw_header(self, context):
         self.layout.label(icon="SELECT_SUBTRACT")
@@ -1103,7 +1104,7 @@ class CURIOMESH_PT_regions_advanced(bpy.types.Panel):
     bl_idname = "CURIOMESH_PT_regions_advanced"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh"
+    bl_category = "CurioMesh Pro"
     bl_parent_id = "CURIOMESH_PT_regions"
     bl_options = {"DEFAULT_CLOSED"}
 

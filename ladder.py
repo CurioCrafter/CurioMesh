@@ -22,7 +22,7 @@ from itertools import chain
 import bpy
 import numpy as np
 
-from . import autoretopo, overlay, segments
+from . import autoretopo, organize, overlay, segments
 from .triadq import ladder as L
 from .triadq import parts as P
 
@@ -35,7 +35,7 @@ SETTLE = 0.4  # seconds after the last move: then the segments of the result are
 QUIET = 1.0  # the ladder's own work waits this long after a slider moved, so dragging never competes with it
 MOST_MESHES = 40  # preview meshes kept, one per size or blend shown
 GOAL_STEP = 0.15  # Bigger or Smaller Quads on a segment: this much of its Detail slider
-STYLE_WORDS = {"DETAIL": "Keep Detail", "BALANCED": "Balanced", "ROWS": "Clean Rows"}
+STYLE_WORDS = {"DETAIL": "Fewest Faces", "BALANCED": "Balanced", "ROWS": "Even Rows"}  # the names of guided.STYLE_ITEMS
 
 lad = {
     "key": None,  # the search these rungs belong to
@@ -62,6 +62,7 @@ def _g():
 
 def cancel() -> None:
     """Stop working out rungs and forget them (a new search, another mesh, or the add-on going away)."""
+    organize.cancel()
     if lad["job"] is not None:
         lad["job"].stop()
     for mesh in lad["meshes"].values():
@@ -93,7 +94,7 @@ def start(context) -> bool:
     gs = context.scene.curiomesh_guided
     lad.update(key=base["key"], base=here, rungs={here: job}, plan=plan, shown=(here, here, ()), settings=_settings(gs))
     _mesh_for((here, here, ()), compose(here, here, ()))
-    gs["quad_size"], gs["quad_order"] = 0.5, L.order_of(job.style)  # no update: the result on screen is this already
+    gs["quad_size"], gs["quad_order"], gs["organize"] = 0.5, L.order_of(job.style), 0.0  # no update: the result on screen is this already
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=WAIT)
     return True
@@ -302,6 +303,8 @@ def _put(context, picked, out) -> None:
     old = guided.state["auto_base"]
     report = dict(job.report, faces=len(out["faces"]), quads=sum(1 for f in out["faces"] if len(f) == 4), tris=sum(1 for f in out["faces"] if len(f) == 3))
     guided.stop_work()
+    organize.cancel()  # its strengths were of the result this one replaces
+    context.scene.curiomesh_guided["organize"] = 0.0
     kept = {k: segments.seg.get(k) for k in ("tree", "tree_job", "src")}  # what finding the segments again reuses
     segments.reset()  # the parts table is made once the slider rests, not on every step of a drag
     guided.state["auto_base"] = {"id": time.perf_counter_ns(), "sig": old["sig"], "key": lad["key"], "out": out, "charts": old.get("charts"), "report": report, "job": job, "summary": job.status()}
@@ -522,7 +525,7 @@ class CURIOMESH_OT_part_size(bpy.types.Operator):
     bl_description = "Bigger or smaller quads on the selected parts only; the rest stays as it is"
     bl_options = {"INTERNAL"}
 
-    bigger: bpy.props.BoolProperty(name="Bigger", default=True, options={"SKIP_SAVE"})
+    bigger: bpy.props.BoolProperty(name="Bigger", description="On: bigger quads on the selected parts (fewer faces). Off: smaller quads (more faces)", default=True, options={"SKIP_SAVE"})
 
     @classmethod
     def description(cls, context, properties):
