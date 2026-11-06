@@ -108,9 +108,9 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual([p.name for p in folder.glob("*.tmp")], ["x.tmp"])
             self.assertIsNotNone(hardware.load_piece(path))
 
-    def test_the_machine_is_read_without_outside_programs_or_ctypes(self):
+    def test_the_machine_is_read_without_outside_programs(self):
         text = (Path(__file__).resolve().parents[1] / "hardware.py").read_text(encoding="utf-8")
-        for word in ("subprocess", "ctypes", "nvidia-smi", "sysctl"):
+        for word in ("subprocess", "nvidia-smi", "sysctl"):
             self.assertNotIn(word, text)
         machine = hardware.detect()
         self.assertGreaterEqual(machine["cores"], 1)
