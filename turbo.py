@@ -1026,6 +1026,48 @@ def uvchart_probe() -> "int | None":
     """1 when the compiled `uvchart` kernel is there and its compile probe passes; None for "use NumPy"."""
 
     return _uv_probe("uvchart_probe")
+
+
+def uvchart_build(points, indptr, flat, part_label=None, forced=None, seen_edge_px=None, px_per_unit: float = 0.0, out_of_sight: bool = False,
+                  hidden_l: float = 0.0, build_stretch: float = 0.0) -> "UvJob | None":
+    """Build the Row Charts tree as a job (never blocks): `result()` = a `UvChartTree` (patches, segments, merges, level(x)).
+
+    part_label per face or None, forced vertex pairs or None, seen_edge_px per edge (uvsight order) or None.
+    hidden_l / build_stretch 0 = the kernel's defaults. None: use the NumPy twin.
+    """
+
+    empty_i, empty_f = np.zeros(0, np.int64), np.zeros(0, np.float64)
+    return uv_job("uvchart_build", _uv_f64(points), _uv_i64(indptr), _uv_i64(flat), empty_i if part_label is None else _uv_i64(part_label),
+                  empty_i if forced is None else _uv_i64(forced), empty_f if seen_edge_px is None else _uv_f64(seen_edge_px), float(px_per_unit),
+                  bool(out_of_sight), float(hidden_l), float(build_stretch), name="CurioMeshUVCharts")
+
+
+def uvchart_level(tree, x: float) -> "UvJob | None":
+    """Charts at Stretch allowed x percent as a job: `result()` = (chart per face, cut per edge, numbers)."""
+
+    return uv_job("uvchart_level", tree, float(x), name="CurioMeshUVLevel")
+
+
+def uvchart_uvs(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,
+                texture_px: float = 1024.0) -> "UvJob | None":
+    """New UVs of level x as a job: `result()` = (UVs per corner (2C,), chart per face, stats rows, stretch per face)."""
+
+    return uv_job("uvchart_uvs", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
+                  name="CurioMeshUVNew")
+
+
+def uvchart_cuts(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,
+                 texture_px: float = 1024.0) -> "UvJob | None":
+    """Keep going state from level x as a job: `result()` = a `UvChartCuts` (`state()`)."""
+
+    return uv_job("uvchart_cuts", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
+                  name="CurioMeshUVCuts")
+
+
+def uvchart_pass(tree, cuts) -> "UvJob | None":
+    """One Keep going pass as a job: `result()` = (kind 0/1 cut/2 close, accepted, score before, after, ms)."""
+
+    return uv_job("uvchart_pass", tree, cuts, name="CurioMeshUVPass")
 # main-only: uv end chart
 
 # main-only: uv begin pack

@@ -45,7 +45,8 @@ def _install_flat() -> None:
 
 # main-only: uv begin chart
 def _install_chart() -> None:
-    uvchart.set_fast(probe=turbo.uvchart_probe)
+    uvchart.set_fast(probe=turbo.uvchart_probe, build=turbo.uvchart_build, level=turbo.uvchart_level, uvs=turbo.uvchart_uvs,
+                     cuts=turbo.uvchart_cuts, keep_going=turbo.uvchart_pass)
 # main-only: uv end chart
 
 # main-only: uv begin pack
