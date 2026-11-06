@@ -35,6 +35,7 @@ core links. QuadWild, QuadriFlow and Instant Meshes source is not included.
 | `triadq/repair.py`, `triadq/checks.py`, `native/src/near.rs` | Finds and clears faces that cross | Our design; `triangles_cross` ported from Blender | Port credited in the file and in THIRD_PARTY_NOTICES |
 | `symmetry.py` | Finds a mirror plane, solves one half, mirrors it | Our design | |
 | `flowstroke.py`, `flowedit.py`, `guides.py`, `loops.py` | Drawn strokes, rings and edge loops the quads follow | Our design | |
+| `triadq/rings.py`, `faceloops.py` (Ring Round This) | Rebuilds the faces round an eye, a mouth or a hole as a filled rim, closed rings and one joining band | Published pieces: Coons 1967 patch for the rim's fill; the band's pairing is a cheapest path through a table, as in Fuchs, Kedem and Uselton 1977 (joining two outlines) | Rim reading (bulge over a fitted bowl), ring counts and corner-quad placement are our own |
 | `triadq/texsets.py` | Groups faces into texture sets or engine-sized pieces | Our design | Plain longest-axis cut |
 | `bridge.py`, `atlasq.py`, `rows_worker.py`, `multires.py`, `blockout.py` | Drive Blender's own QuadriFlow, Voxel Remesh, Decimate and Multires; Blockout fits simple solids | Our design around Blender operators | QuadriFlow is reached only through `bpy.ops.object.quadriflow_remesh` |
 | `icons/` | Panel icons | Drawn by our own script, CC0 | See `icons/LICENSE.txt` |
