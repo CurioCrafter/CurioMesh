@@ -244,6 +244,7 @@ for key in WANTED:
         print(f"INFO {name} layers: {sorted(layers)}", flush=True)
         if trial.toggles:
             ok("kept" in layers or not len(s.cand.kept), f"{name}: kept lines drawn")
+        del layers  # GPU batches freed now, not at Python exit after the GPU is gone (that crashes background Blender)
     except Exception as exc:
         print(f"INFO {name}: no GPU here, layers not built: {exc!r}", flush=True)
     print(f"INFO {name} numbers: {TL.numbers_text(s.cand, s.trial, s.cap)}", flush=True)
