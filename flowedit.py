@@ -5,14 +5,13 @@
 
 The strokes are ordinary curves in the guide list (saved with the .blend, used again by Start), marked with their kind
 (`flowstroke`: Flow, Ring or Edge). Draw recognises the kind itself; Draw Flow, Draw Ring and Draw Edge force one;
-Place Circle and the face shapes are clicked. After each change the faces around the strokes are worked out again on a
-worker thread from the result as it was before any stroke (strokes that did not change reuse their patch), and the main
-thread only swaps the preview mesh. With a mirrored result every stroke also works on the other side.
+Place Circle and the face shapes are clicked. After each change the faces around the strokes are worked out again in
+the background (the parts' redo runner, `segment_goals.in_thread`), from the result as it was before any stroke;
+strokes that did not change reuse their patch, and the timer only steps the job and swaps the preview mesh. With a mirrored result every stroke also works on the other side.
 """
 
 from __future__ import annotations
 
-import threading
 import time
 
 import bpy
@@ -43,6 +42,7 @@ fe = {
     "adjacency": None,
     "cache": {},  # (face ids, stroke signature) -> (points, faces)
     "box": None,
+    "job": None,  # the generator working out the latest strokes
     "sig": None,
     "last": None,  # (curve name, kind) of the last stroke drawn
     "meter": "",
@@ -58,9 +58,7 @@ def _g():
 
 
 def cancel() -> None:
-    if fe["box"] is not None:
-        fe["box"]["stop"] = True
-    fe.update(base=None, origin=None, shown=None, centres=None, adjacency=None, cache={}, box=None, sig=None, meter="", batch=None)
+    fe.update(job=None, base=None, origin=None, shown=None, centres=None, adjacency=None, cache={}, box=None, sig=None, meter="", batch=None)
 
 
 def _curves(gs):
@@ -118,8 +116,6 @@ def request(context) -> bool:
         return False
     items = strokes(context, gs)
     fe["sig"] = _sig(items)
-    if fe["box"] is not None:
-        fe["box"]["stop"] = True
     origin = fe["origin"]
     plan = F.areas(origin["co"], origin["faces"], items, fe["centres"], fe["adjacency"])
     guided = _g()
@@ -127,7 +123,7 @@ def request(context) -> bool:
     project = region._projector(guided._bvh(src))
     box = {"stop": False, "out": None, "meter": "", "error": None, "started": time.perf_counter()}
     fe["box"] = box
-    threading.Thread(target=_work, args=(box, origin, plan, project, src["co"], src["tris"]), daemon=True, name="CurioMeshFlow").start()
+    fe["job"] = _job(box, origin, plan, project, src["co"], src["tris"])  # a newer request drops the older job
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=GAP)
     return True
@@ -149,57 +145,57 @@ def _issues(co, faces, mask, src_co, src_tris) -> int:
     return int(sum(record["totals"].values()))
 
 
-def _work(box, origin, plan, project, src_co, src_tris) -> None:
-    """On a worker thread: each patch redone (or taken from the cache), put in, measured."""
-    try:
-        co, faces, mat = origin["co"], origin["faces"], np.asarray(origin["mat"])
-        builds, timings, failed = [], [], []
-        for ids, items in plan:
-            if box["stop"]:
-                return
-            key = (ids.tobytes(), _sig(items))
-            made = fe["cache"].get(key)
-            if made is None:
-                t = time.perf_counter()
-                try:
-                    made = F.redo(co, faces, ids, items, project)
-                except ValueError as exc:
-                    failed.append(str(exc)[:80])
-                    continue
-                timings.append(time.perf_counter() - t)
-                fe["cache"][key] = made
-            builds.append((ids, made))
-        if box["stop"]:
-            return
-        if builds:
-            new_co, new_faces, new_mat, new = F.splice(co, faces, mat, builds)
-            if S.open_edges(new_faces) > S.open_edges(faces):
-                box["error"] = "A redo did not close on its seam, so the result stays as it was"
-                return
-        else:
-            new_co, new_faces, new_mat, new = co, faces, mat, np.zeros(len(faces), dtype=bool)
-        out = dict(origin, co=new_co, faces=new_faces, mat=new_mat, new=new, locked=np.zeros(len(new_faces), dtype=bool))
-        for name in ("parts", "piece", "chart", "_seg"):
-            out.pop(name, None)
-        box["out"] = out
-        box["seconds"] = sum(timings)
-        if not builds:
-            box["meter"] = "Draw on the result: the quads around each stroke are redone" + (f". Could not redo: {failed[0]}" if failed else "")
-            return
-        old_ids = np.concatenate([ids for ids, _m in builds])
-        before = loopscore.loop_quality(*_local(co, faces, old_ids))
-        after = loopscore.loop_quality(*_local(new_co, new_faces, np.flatnonzero(new)))
-        was = np.zeros(len(faces), dtype=bool)
-        was[old_ids] = True
-        spots = (_issues(co, faces, was, src_co, src_tris), _issues(new_co, new_faces, new, src_co, src_tris))
-        text = f"Redone where you drew: faces {len(old_ids):,} -> {int(new.sum()):,}" + (f" in {box['seconds']:.1f} s" if timings else "")
-        text += f". {loopscore.meter(before, after)}. Issues there {spots[0]} -> {spots[1]}"
-        if failed:
-            text += f". Could not redo one area: {failed[0]}"
-        box["meter"] = text
-        box["numbers"] = {"before": before, "after": after, "issues": spots, "faces": (len(old_ids), int(new.sum())), "seconds": box["seconds"]}
-    except Exception as exc:  # a thread has nobody above it to report to
-        box["error"] = f"Flow Editor failed: {exc}"
+def _job(box, origin, plan, project, src_co, src_tris):
+    """Generator, stepped by the timer: each patch redone in the background (or taken from the cache), then put in and
+    measured in the background too."""
+    from .segment_goals import in_thread
+
+    co, faces = origin["co"], origin["faces"]
+    builds, timings, failed = [], [], []
+    for ids, items in plan:
+        key = (ids.tobytes(), _sig(items))
+        made = fe["cache"].get(key)
+        if made is None:
+            t = time.perf_counter()
+            done = yield from in_thread(lambda ids=ids, items=items: F.redo(co, faces, ids, items, project))
+            if "out" not in done:
+                failed.append(done.get("error", "no result"))
+                continue
+            made = fe["cache"][key] = done["out"]
+            timings.append(time.perf_counter() - t)
+        builds.append((ids, made))
+    done = yield from in_thread(lambda: _finish(origin, builds, failed, sum(timings) if timings else None, src_co, src_tris))
+    if "out" not in done:
+        box["error"] = f"Flow Editor failed: {done.get('error')}"
+        return
+    box.update(done["out"])
+
+
+def _finish(origin, builds, failed, seconds, src_co, src_tris) -> dict:
+    """The result with the patches put in, and what changed where they went."""
+    co, faces, mat = origin["co"], origin["faces"], np.asarray(origin["mat"])
+    if builds:
+        new_co, new_faces, new_mat, new = F.splice(co, faces, mat, builds)
+        if S.open_edges(new_faces) > S.open_edges(faces):
+            return {"error": "A redo did not close on its seam, so the result stays as it was"}
+    else:
+        new_co, new_faces, new_mat, new = co, faces, mat, np.zeros(len(faces), dtype=bool)
+    out = dict(origin, co=new_co, faces=new_faces, mat=new_mat, new=new, locked=np.zeros(len(new_faces), dtype=bool))
+    for name in ("parts", "piece", "chart", "_seg"):
+        out.pop(name, None)
+    if not builds:
+        return {"out": out, "seconds": 0.0, "meter": "Draw on the result: the quads around each stroke are redone" + (f". Could not redo: {failed[0]}" if failed else "")}
+    old_ids = np.concatenate([ids for ids, _m in builds])
+    before = loopscore.loop_quality(*_local(co, faces, old_ids))
+    after = loopscore.loop_quality(*_local(new_co, new_faces, np.flatnonzero(new)))
+    was = np.zeros(len(faces), dtype=bool)
+    was[old_ids] = True
+    spots = (_issues(co, faces, was, src_co, src_tris), _issues(new_co, new_faces, new, src_co, src_tris))
+    text = f"Redone where you drew: faces {len(old_ids):,} -> {int(new.sum()):,}" + (f" in {seconds:.1f} s" if seconds else "")
+    text += f". {loopscore.meter(before, after)}. Issues there {spots[0]} -> {spots[1]}"
+    if failed:
+        text += f". Could not redo one area: {failed[0]}"
+    return {"out": out, "seconds": seconds or 0.0, "meter": text, "numbers": {"before": before, "after": after, "issues": spots, "faces": (len(old_ids), int(new.sum())), "seconds": seconds or 0.0}}
 
 
 def _tick():
@@ -207,6 +203,14 @@ def _tick():
         return None
     context = bpy.context
     gs = getattr(context.scene, "curiomesh_guided", None)
+    job = fe.get("job")
+    if job is not None:
+        ends = time.perf_counter() + 0.02  # each step only looks at the background work
+        try:
+            while time.perf_counter() < ends:
+                next(job)
+        except StopIteration:
+            fe["job"] = None
     box = fe["box"]
     if box is not None and box["out"] is not None and box["out"] is not fe["shown"]:
         guided = _g()
@@ -378,8 +382,8 @@ KIND_ITEMS = [
 def _make_draw():
     base = _surface_base()
 
-    class CURIOMESH_OT_flow_draw(_FlowTool, base, bpy.types.Operator):
-        bl_idname = "curiomesh.flow_draw"
+    class CURIOMESH_OT_flow_edit(_FlowTool, base, bpy.types.Operator):
+        bl_idname = "curiomesh.flow_edit"
         bl_label = "Draw"
         bl_description = "Draw on your mesh with the left mouse button held. Each stroke reshapes the quads around it. F, R, E right after a stroke change it to Flow, Ring or Edge. Right click, Enter or Esc: done"
         HINT = "Flow Editor: hold left mouse and draw on the mesh  F/R/E: change the last stroke to Flow/Ring/Edge  Right click/Enter/Esc: done"
@@ -552,7 +556,7 @@ def _make_draw():
                 return {"PASS_THROUGH"}
             return {"RUNNING_MODAL"}
 
-    return [CURIOMESH_OT_flow_draw, CURIOMESH_OT_flow_erase, CURIOMESH_OT_flow_circle, CURIOMESH_OT_flow_shape]
+    return [CURIOMESH_OT_flow_edit, CURIOMESH_OT_flow_erase, CURIOMESH_OT_flow_circle, CURIOMESH_OT_flow_shape]
 
 
 def place_shape(context, source, shape: str, centre, normal, right) -> list:
@@ -631,18 +635,13 @@ class CURIOMESH_OT_flow_clear(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def draw(layout, gs) -> None:
-    """The Flow Editor box under the result."""
-    box = layout.box()
-    box.prop(gs, "flow_open", icon="TRIA_DOWN" if gs.flow_open else "TRIA_RIGHT", emboss=False)
-    if not gs.flow_open:
-        return
-    col = box.column(align=True)
-    col.operator("curiomesh.flow_draw", text="Draw", icon="GREASEPENCIL").kind = "AUTO"
+def draw_tools(layout, gs) -> None:
+    """The Flow Editor's tools, under the Draw on the mesh button (`panel.draw_shape_flow`)."""
+    col = layout.column(align=True)
     row = col.row(align=True)
-    row.operator("curiomesh.flow_draw", text="Flow").kind = "FLOW"
-    row.operator("curiomesh.flow_draw", text="Ring").kind = "RING"
-    row.operator("curiomesh.flow_draw", text="Edge").kind = "EDGE"
+    row.operator("curiomesh.flow_edit", text="Flow").kind = "FLOW"
+    row.operator("curiomesh.flow_edit", text="Ring").kind = "RING"
+    row.operator("curiomesh.flow_edit", text="Edge").kind = "EDGE"
     row = col.row(align=True)
     row.operator("curiomesh.flow_circle", icon="MESH_CIRCLE")
     row.operator("curiomesh.flow_erase", icon="TRASH")
@@ -664,7 +663,7 @@ def draw(layout, gs) -> None:
             if kind != last[1]:
                 row.operator("curiomesh.flow_change", text=F.NAMES[kind]).kind = kind
     if active() and fe["meter"]:
-        overlay.wrap_label(box, fe["meter"], icon="MESH_GRID", width=36, limit=5)
+        overlay.wrap_label(col, fe["meter"], icon="MESH_GRID", width=36, limit=5)
 
 
 # --------------------------------------------------------------------------- strokes in colour
@@ -674,7 +673,7 @@ def _draw_strokes() -> None:
     try:
         context = bpy.context
         gs = getattr(context.scene, "curiomesh_guided", None)
-        if gs is None or not gs.flow_open:
+        if gs is None:
             return
         curves = _curves(gs)
         if not curves:

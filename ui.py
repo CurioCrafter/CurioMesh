@@ -14,7 +14,7 @@ from .operators import (
     TEXTURE_ITEMS,
     TOPOLOGY_ITEMS,
 )
-from . import fix_select, guided, live, overlay, region
+from . import fix_select, guided, live, overlay, panel, region
 from .batch import CURIOMESH_PG_batch_item
 
 
@@ -201,9 +201,13 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
     bl_idname = "CURIOMESH_PT_panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh"
-    bl_order = 10  # below Guided, the main path
+    bl_category = "CurioMesh Pro"
+    bl_order = 10  # below the Pro panels of the main path
     bl_options = {"DEFAULT_CLOSED"}  # the one-pass remesher from before Auto Segments, kept whole
+
+    @classmethod
+    def poll(cls, context):
+        return bool(getattr(_prefs(), "pro_mode", False))
 
     def draw_header(self, context: bpy.types.Context):
         self.layout.label(icon="MOD_REMESH")
@@ -306,7 +310,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
 class _SubPanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh"
+    bl_category = "CurioMesh Pro"
     bl_parent_id = "CURIOMESH_PT_panel"
     bl_options = {"DEFAULT_CLOSED"}
     pref_key = ""
@@ -595,7 +599,7 @@ class CURIOMESH_PT_diagnostics_all(bpy.types.Panel):
     bl_idname = "CURIOMESH_PT_diagnostics_all"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CurioMesh"
+    bl_category = "CurioMesh Pro"
     bl_parent_id = "CURIOMESH_PT_diagnostics"
     bl_options = {"DEFAULT_CLOSED"}
 
@@ -641,16 +645,25 @@ PANEL_CLASSES = (
 )
 
 
+def pro_panel_classes() -> list:
+    """The panels of the Pro tab: the Pro sections of the main path, Classic Remesh and its folds, Regions."""
+    return [cls for cls in (*panel.PRO_PANELS, *PANEL_CLASSES, *region.PANEL_CLASSES) if issubclass(cls, bpy.types.Panel)]
+
+
 def panel_classes() -> list:
-    """Every CurioMesh sidebar panel in display order (Classic Remesh and its folds, then Regions)."""
-    return [cls for cls in (*PANEL_CLASSES, *region.PANEL_CLASSES, *guided.PANEL_CLASSES, fix_select.CURIOMESH_PT_fix) if issubclass(cls, bpy.types.Panel)]
+    """Every CurioMesh sidebar panel, parents before their sub-panels: the main tab, then the Pro tab."""
+    return [*panel.MAIN_PANELS, fix_select.CURIOMESH_PT_fix, *pro_panel_classes()]
+
+
+def tab_of(cls, name: str) -> str:
+    return f"{name} Pro" if cls in pro_panel_classes() else name
 
 
 def apply_category(name: str | None = None) -> str:
-    """Move every CurioMesh panel to the sidebar tab `name` (default: the preference)."""
+    """Move the CurioMesh panels to the sidebar tab `name` (default: the preference), and the Pro ones to `name Pro`."""
     name = (name if name is not None else _prefs().panel_tab or "").strip() or overlay.PREF_DEFAULTS["panel_tab"]
     panels = panel_classes()
-    if all(cls.bl_category == name for cls in panels):
+    if all(cls.bl_category == tab_of(cls, name) for cls in panels):
         return name
     for cls in reversed(panels):
         try:
@@ -658,6 +671,6 @@ def apply_category(name: str | None = None) -> str:
         except RuntimeError:
             pass
     for cls in panels:
-        cls.bl_category = name
+        cls.bl_category = tab_of(cls, name)
         bpy.utils.register_class(cls)
     return name

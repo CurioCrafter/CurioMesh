@@ -93,6 +93,8 @@ def source_files(root: Path) -> list[Path]:
     files.append(root / "triadq" / "patterns.json")
     files.append(root / "triadq" / "cases_table.json")
     files.extend(sorted(path for path in (root / "docs").rglob("*.md") if path.is_file()))
+    files.extend(sorted((root / "icons").glob("*.png")))  # the panel's own icons (icons.py), CC0
+    files.append(root / "icons" / "LICENSE.txt")
     missing = [str(path) for path in files if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"Release inputs missing: {missing}")

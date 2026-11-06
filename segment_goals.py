@@ -134,7 +134,7 @@ def _record(job, label: int, ids: np.ndarray, count: int, saved=None) -> dict:
     saved = saved or {}
     pick = lambda key, default: saved[key][label] if label < len(saved.get(key, ())) else default  # noqa: E731
     return {
-        "id": label, "name": pick("names", f"Segment {label + 1}"), "kind": P.classify(points, polys), "before": len(ids), "after": count,
+        "id": label, "name": pick("names", f"Part {label + 1}"), "kind": P.classify(points, polys), "before": len(ids), "after": count,
         "change": change, "topology": None, "method": "AUTO", "goal": pick("goals", "REDUCE"), "goal_detail": pick("details", 0.5), "multires": pick("multires", True),
         "loose": loose, "whole": whole, "source": ids, "choice": pick("methods", "AUTO"), "locked": bool(pick("locked", False)),
         "tries": [{"method": "AUTO", "after": count, "change": change, "topology": None, "detail": None, "build": None}], "cur": 0,
@@ -302,7 +302,7 @@ def _kept_records(count: int, carry: dict, records: list) -> dict:
     saved = {key: [] for key in ("names", "goals", "details", "methods", "multires", "locked")}
     for k in range(count):
         old = records[carry[k]] if k in carry and carry[k] < len(records) else None
-        saved["names"].append(old["name"] if old else f"Segment {k + 1}")
+        saved["names"].append(old["name"] if old else f"Part {k + 1}")
         saved["goals"].append(old["goal"] if old else "REDUCE")
         saved["details"].append(old["goal_detail"] if old else 0.5)
         saved["methods"].append(old.get("choice", "AUTO") if old else "AUTO")
@@ -493,6 +493,24 @@ def start_find(context, fresh: bool = False) -> bool:
 # --------------------------------------------------------------------------- remaking a segment for its Use
 
 
+def in_thread(call):
+    """Generator: run `call` on a thread, yielding while it works. Returns {"out": result} or {"error": text}."""
+    box = {}
+
+    def work():
+        try:
+            box["out"] = call()
+        except Exception as exc:  # a thread has nobody above it to report to
+            box["error"] = str(exc)[:100]
+
+    thread = threading.Thread(target=work, daemon=True, name="CurioMeshSegment")
+    thread.start()
+    while thread.is_alive():
+        thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
+        yield
+    return box
+
+
 class GoalJob(view.PartJob):
     """Remake the chosen segments for their Use, one at a time, then look at the whole object again."""
 
@@ -503,19 +521,7 @@ class GoalJob(view.PartJob):
 
     def _in_thread(self, call):
         """Generator: run `call` on a thread. Returns its result, or None after noting what went wrong."""
-        box = {}
-
-        def work():
-            try:
-                box["out"] = call()
-            except Exception as exc:  # a thread has nobody above it to report to
-                box["error"] = str(exc)[:100]
-
-        thread = threading.Thread(target=work, daemon=True, name="CurioMeshSegment")
-        thread.start()
-        while thread.is_alive():
-            thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
-            yield
+        box = yield from in_thread(call)
         if "out" not in box and box.get("error") != "cancelled":
             self.warnings = [box.get("error", "no result")]
         return box.get("out")
@@ -1029,7 +1035,7 @@ class _SegmentOp:
 class CURIOMESH_OT_seg_merge(_SegmentOp, bpy.types.Operator):
     bl_idname = "curiomesh.seg_merge"
     bl_label = "Merge"
-    bl_description = "Make the selected segments one (Shift+click two in Review Segments, then M). The merged segment is locked, so size changes keep it"
+    bl_description = "Makes the selected parts one (Shift+click two while reviewing, then M). The merged part is locked, so size changes keep it"
     bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
@@ -1043,7 +1049,7 @@ class CURIOMESH_OT_seg_merge(_SegmentOp, bpy.types.Operator):
 class CURIOMESH_OT_seg_halve(_SegmentOp, bpy.types.Operator):
     bl_idname = "curiomesh.seg_halve"
     bl_label = "Split in Two"
-    bl_description = "Split the selected segment in two along its own natural border, the one the finder would cut next. Both halves are locked"
+    bl_description = "Splits the selected part in two along its most natural border. Both halves are locked"
     bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
@@ -1057,7 +1063,7 @@ class CURIOMESH_OT_seg_halve(_SegmentOp, bpy.types.Operator):
 class CURIOMESH_OT_seg_undo(_SegmentOp, bpy.types.Operator):
     bl_idname = "curiomesh.seg_undo"
     bl_label = "Undo Edit"
-    bl_description = "Put the segments back as they were before the last merge, split, grow, shrink or paint (Ctrl+Z in Review Segments)"
+    bl_description = "Puts the parts back as they were before the last merge, split, grow, shrink or paint (Ctrl+Z while reviewing)"
 
     @classmethod
     def poll(cls, context):
@@ -1070,7 +1076,7 @@ class CURIOMESH_OT_seg_undo(_SegmentOp, bpy.types.Operator):
 class CURIOMESH_OT_seg_lock(bpy.types.Operator):
     bl_idname = "curiomesh.seg_lock"
     bl_label = "Lock"
-    bl_description = "Lock the selected segments: changing the size settings keeps them face for face. Segments you merge, split or paint are locked for you. Click again to unlock"
+    bl_description = "Locks the selected parts, so size changes keep them face for face. Parts you merge, split or paint are locked for you"
     bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
@@ -1085,11 +1091,11 @@ class CURIOMESH_OT_seg_lock(bpy.types.Operator):
 
 class CURIOMESH_OT_seg_rename(bpy.types.Operator):
     bl_idname = "curiomesh.seg_rename"
-    bl_label = "Rename Segment"
-    bl_description = "Give the selected segment a name of your own"
+    bl_label = "Rename Part"
+    bl_description = "Gives the selected part a name of your own"
     bl_options = {"INTERNAL", "UNDO"}
 
-    name: bpy.props.StringProperty(name="Name", default="")
+    name: bpy.props.StringProperty(name="Name", description="The new name of the part", default="")
 
     @classmethod
     def poll(cls, context):
@@ -1108,8 +1114,8 @@ class CURIOMESH_OT_seg_rename(bpy.types.Operator):
 
 class CURIOMESH_OT_seg_from_shapes(_SegmentOp, bpy.types.Operator):
     bl_idname = "curiomesh.seg_from_shapes"
-    bl_label = "Make a Segment"
-    bl_description = "The faces inside the shapes in the list become a new segment. Union, Subtract and Intersect combine them"
+    bl_label = "Make a Part"
+    bl_description = "The faces inside the shapes in the list become a new part. Union, Subtract and Intersect combine the shapes"
 
     @classmethod
     def poll(cls, context):
@@ -1164,7 +1170,7 @@ def _hit_object(context, region_, event):
 class CURIOMESH_OT_seg_split(bpy.types.Operator):
     bl_idname = "curiomesh.seg_split"
     bl_label = "Split"
-    bl_description = "Draw a line across a segment to cut it in two, on the side you see and through to the back. Both halves are locked. Esc cancels"
+    bl_description = "Draw a line across a part to cut it in two, through to the back. Both halves are locked; Esc cancels"
     bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
@@ -1226,7 +1232,7 @@ class CURIOMESH_OT_seg_split(bpy.types.Operator):
 class CURIOMESH_OT_seg_paint(bpy.types.Operator):
     bl_idname = "curiomesh.seg_paint"
     bl_label = "Paint"
-    bl_description = "Paint a new segment on the mesh with the left mouse button. [ and ] change the brush. Enter or right-click ends, Esc cancels"
+    bl_description = "Paint a new part on the mesh with the left mouse button. [ and ] change the brush; Enter ends, Esc cancels"
     bl_options = {"INTERNAL", "UNDO"}
 
     mode: bpy.props.EnumProperty(items=[
@@ -1366,7 +1372,7 @@ def _draw_stroke(op) -> None:
 class CURIOMESH_OT_seg_goal(bpy.types.Operator):
     bl_idname = "curiomesh.seg_goal"
     bl_label = "Redo"
-    bl_description = "Remake the selected parts for this Use, Method and Detail. Only they change, their seams stay where they are, and every result stays in the list of tries"
+    bl_description = "Remakes the selected parts for this Use; only they change and their borders stay. Every result stays in the part's tries"
     bl_options = {"INTERNAL"}
 
     @classmethod
@@ -1422,7 +1428,7 @@ def faces_without_detail(res):
 class CURIOMESH_OT_seg_multires(bpy.types.Operator):
     bl_idname = "curiomesh.seg_multires"
     bl_label = "Multires Detail"
-    bl_description = "On Apply, the selected segments follow your mesh in the Multires levels. Off, they keep the shape of their own quads at every level"
+    bl_description = "On Apply, the selected parts follow your mesh in the Multires levels. Off, they keep their own shape at every level"
     bl_options = {"INTERNAL"}
 
     @classmethod
@@ -1438,14 +1444,18 @@ class CURIOMESH_OT_seg_multires(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def draw_tools(layout, gs) -> None:
-    """The size settings of this mesh and the hand tools, for the top of the Parts panel."""
+def draw_finder(layout) -> None:
+    """How the mesh is cut into parts (the Finder popover of Fix)."""
     source = _g().state_source()
     if view.seg["src"] is None or source is None:
+        layout.label(text="Parts are not ready yet", icon="INFO")
         return
-    box = layout.box()
-    view.seglive.draw(box, source)
-    col = box.column(align=True)
+    view.seglive.draw(layout, source)
+
+
+def draw_edit(layout) -> None:
+    """The hand tools for parts: merge, split, lock, grow, shrink, paint, rename, undo (the Edit Parts popover of Fix)."""
+    col = layout.column(align=True)
     row = col.row(align=True)  # two by two: four buttons in one row were cut to "Ren..." in a narrow sidebar
     row.operator("curiomesh.seg_merge", icon="AUTOMERGE_ON")
     row.operator("curiomesh.seg_split", icon="SCULPTMODE_HLT")
@@ -1538,7 +1548,7 @@ class CURIOMESH_OT_seg_walk(bpy.types.Operator):
     bl_description = "Go to the next or previous part, worst first, and move the view to it"
     bl_options = {"INTERNAL"}
 
-    step: bpy.props.IntProperty(default=1)
+    step: bpy.props.IntProperty(name="Step", description="1 goes to the next part, -1 to the one before", default=1)
 
     @classmethod
     def poll(cls, context):
@@ -1565,8 +1575,8 @@ HOVER_GAP = 1.0 / 30.0  # seconds between looks under the mouse, stretched when 
 
 class CURIOMESH_OT_seg_review(bpy.types.Operator):
     bl_idname = "curiomesh.seg_review"
-    bl_label = "Review Segments"
-    bl_description = "Go through the parts: hover to see one, click for its numbers and options, arrows walk them worst first. Esc leaves and keeps everything"
+    bl_label = "Review Parts"
+    bl_description = "Walks the parts in the viewport: hover to see one, click for its options, arrow keys go worst first. Esc leaves and keeps everything"
     bl_options = {"INTERNAL"}
 
     @classmethod

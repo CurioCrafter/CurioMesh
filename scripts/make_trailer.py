@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parent.parent
 IMG = ROOT / "docs" / "images"
 OUT = ROOT / "docs" / "trailer"
-SHEET = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT.parent / "bench" / "engine" / "godot_export" / "sheet_user.png"
+SHEET = Path(sys.argv[1]) if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else ROOT.parent / "bench" / "engine" / "godot_export" / "sheet_user.png"
 # small copy kept in the repo so the script re-runs without the bench folder
 SHEET_COPY = OUT / "game_asset_sheet.jpg"
 
@@ -140,6 +140,30 @@ def size_frames():
     return [(size_frame(k), 1600) for k in range(len(SIZES))]
 
 
+def picture(path, title_text, sub):
+    """A finished picture (release screenshot) fitted under a title."""
+    im, d = canvas()
+    center(d, title_text, 22, 40, ACC, True)
+    center(d, sub, 76, 22, DIM)
+    pic = Image.open(path).convert("RGB")
+    pic.thumbnail((W - 80, H - 140), Image.LANCZOS)
+    im.paste(pic, ((W - pic.width) // 2, 120 + (H - 140 - pic.height) // 2))
+    return im
+
+
+def features():
+    im, d = canvas()
+    center(d, "Shape it your way", 40, 48, ACC, True)
+    rows = ["Symmetrize: mirror scans and sculpts, with a checked seam",
+            "Detail Markers: more or less detail exactly where you mark",
+            "Tweak: Rows on Round Areas, Flat Area Size, Avoid Poles",
+            "Know the cost first: time on your PC before you press Start",
+            "Fix Selection and Keep Original Where Bad for any spot"]
+    for i, t in enumerate(rows):
+        center(d, t, 170 + i * 80, 30, TXT)
+    return im
+
+
 # ---------- trailer scenes ----------
 def title():
     im, d = canvas()
@@ -213,7 +237,11 @@ def build_trailer():
               (size_frames(), None),
               (before_after(IMG / "barrier_rows.jpg", "Clean Rows: a photo scan", "60,928 faces to 2,486 quads"), 3.0),
               (choose(), 3.5),
+              (features(), 4.0),
+              (picture(IMG / "releases" / "v093_issue_finder.jpg", "Find what is still wrong", "The Issue Finder lists every problem spot, worst first"), 3.5),
+              (picture(IMG / "releases" / "v094_blockout_chest.jpg", "Blockout and Hulls", "Every part as the simple solid that fits it"), 3.5),
               (game_asset(), 4.5),
+              (picture(IMG / "texture_sets_godot.jpg", "Texture Sets for big models", "Three sets of maps shade like one, lit in Godot"), 3.0),
               (export(), 2.5),
               (endcard(), 3.5)]
     frames, durs = [], []
@@ -233,6 +261,28 @@ def build_trailer():
     out = OUT / "trailer.webp"
     frames[0].save(out, save_all=True, append_images=frames[1:], duration=durs, loop=0, quality=72, method=6, kmax=1)
     print(out, round(out.stat().st_size / 1e6, 2), "MB,", round(sum(durs) / 1000, 1), "s")
+    if len(sys.argv) > 1 and sys.argv[-1] == "--mp4":
+        make_mp4(frames, durs)
+
+
+def make_mp4(frames, durs):
+    """docs/trailer/trailer.mp4 at 1920x1080 for video sites and the Blender listing. Needs ffmpeg on PATH."""
+    import shutil
+    import subprocess
+    import tempfile
+    tmp = Path(tempfile.mkdtemp())
+    lines = []
+    for i, (f, ms) in enumerate(zip(frames, durs)):
+        f.save(tmp / f"{i:04d}.png")
+        lines += [f"file '{i:04d}.png'", f"duration {ms / 1000:.3f}"]
+    lines.append(f"file '{len(frames) - 1:04d}.png'")
+    (tmp / "list.txt").write_text("\n".join(lines))
+    out = OUT / "trailer.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-threads", "1", "-f", "concat", "-safe", "0", "-i", str(tmp / "list.txt"),
+                    "-vf", "scale=1920:1080:flags=lanczos,fps=30,format=yuv420p", "-c:v", "libx264", "-preset", "slow", "-crf", "20",
+                    "-movflags", "+faststart", str(out)], check=True, cwd=tmp)
+    shutil.rmtree(tmp, ignore_errors=True)
+    print(out, round(out.stat().st_size / 1e6, 2), "MB")
 
 
 # ---------- the face picture: original, fewest faces, even rows, and the bar between ----------
