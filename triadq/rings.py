@@ -57,9 +57,16 @@ def _vertex_faces(faces, count: int) -> list[list[int]]:
 def _region(faces, mask: np.ndarray, adjacency, vertex_faces) -> tuple[np.ndarray, list[int]]:
     """`mask` grown into a disk with one even border loop: holes filled, pinched vertices and odd counts mended."""
     mask = mask.copy()
+    fa, fb = adjacency
+
+    def beside(mask):  # the unmasked parts that share an edge with the patch, largest (the outside) first
+        near = np.zeros(len(mask), dtype=bool)
+        near[fa[mask[fb]]] = True
+        near[fb[mask[fa]]] = True
+        return [part for part in mask_components(faces, ~mask, adjacency) if near[part].any()]
+
     for _ in range(12):
-        rest = mask_components(faces, ~mask, adjacency)
-        for hole in rest[1:]:  # everything but the outside
+        for hole in beside(mask)[1:]:  # everything but the outside; a separate piece (a stand, a loose part) is no hole
             mask[hole] = True
         loops, pinched = boundary_loops(faces, np.flatnonzero(mask))
         if pinched:
@@ -76,7 +83,7 @@ def _region(faces, mask: np.ndarray, adjacency, vertex_faces) -> tuple[np.ndarra
             trial = mask.copy()
             trial[f] = not trial[f]
             got, pin = boundary_loops(faces, np.flatnonzero(trial))
-            if not pin and len(got) == 1 and len(got[0]) % 2 == 0 and len(mask_components(faces, ~trial, adjacency)) == 1:
+            if not pin and len(got) == 1 and len(got[0]) % 2 == 0 and len(beside(trial)) == 1:
                 return trial, got[0]
         raise ValueError("its border has an odd number of edges")
     raise ValueError("the faces round it touch themselves")

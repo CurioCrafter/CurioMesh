@@ -63,6 +63,14 @@ class RingsTest(unittest.TestCase):
         self.assertTrue(all(tuple(np.round(co[list(f)], 9).ravel()) in kept for f in far))
         self.assertTrue(np.allclose(out["co"][:, 2].max(), co[:, 2].max(), atol=0.2))
 
+    def test_a_separate_piece_stays(self):  # a stand or loose part is no hole to fill
+        co, faces = self.sheet()
+        base = len(co)
+        co = np.vstack((co, [(0, 0, -5), (1, 0, -5), (1, 1, -5), (0, 1, -5)]))
+        faces = list(faces) + [(base, base + 1, base + 2, base + 3)]
+        out = RG.build(co, faces, (12, 12, 0.8), (0, 0, 1), (1, 0, 0), 2.0, 1.2)
+        self.assertEqual(int((out["co"][:, 2] < -4).sum()), 4)
+
     def test_watertight_on_a_ball_and_every_point_projected(self):
         co, faces = ball(10)
         sphere = lambda p: p / np.linalg.norm(p, axis=1, keepdims=True)  # noqa: E731
