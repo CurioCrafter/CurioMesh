@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.8 - unreleased
+## 0.9.8 - 2026-11-06
 
 ### Hard surface
 - **Hard Surface** use (under More Uses): Game Asset at Detail 5% with the two hard-surface rebuilds on and every hard
@@ -101,6 +101,19 @@
   the guide list, saved with the .blend and used by Start too; with a mirrored result they work on both sides.
 - Not yet measured inside Blender: on the bust outside Blender, a ring round the forehead redid 268 faces into 417 in
   1.6 s with five closed loops round it, and a flow line redid 79 faces in 0.5 s, both with clean seams.
+
+### Fixes
+- **The Apply button was missing in 0.9.0 to 0.9.7** for everyone who kept the default sidebar tab: the "5. Apply" panel
+  was never registered. The new Finish section has it, and a new test (`tests/blender_registration.py`) checks that every
+  panel and button CurioMesh defines is registered and gone again after disabling.
+- **A crash in Blender 5.2** (inside Blender's attribute carry-over after QuadriFlow) is avoided: CurioMesh only asks
+  for it when the mesh has colours or vertex groups to keep.
+- **From the Blender Extensions review:** background work runs through one task runner; helper Blenders get the add-on
+  folder from their own environment instead of a `sys.path` change; no saved data uses pickle; the computer's graphics
+  card is read from Blender instead of running `nvidia-smi`; the depsgraph handlers are gone (the overlay and paint
+  watch check cheaply when they draw or only while painting); saved fixes and resume points live in the extension's own
+  user folder. "TRIAD-Q Lite" is now just "TRIAD-Q". The GitHub zips keep the native core and its speed.
+- A feature tour for testing in Blender (`tests/blender_feature_tour.py`), with an inventory of every button.
 
 ## 0.9.7 - 2026-11-05
 

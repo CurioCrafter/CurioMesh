@@ -61,7 +61,9 @@ loops for faces and joints on its own, and big scans take minutes, sometimes ten
 | **Auto Segments and the Auto button** | Reduces the whole object to all quads, one loose part at a time, and checks every size from six sides. **Auto** picks the Use and settings for you. |
 | **Presets by use** | Low Poly, Game Asset, Animation, Subdivision, Scan Cleanup, Sculpt Base. |
 | **Three layout styles** | Keep Detail (fewest faces), Balanced, Clean Rows (even quads in rows). |
-| **Quad Size and Organization sliders** | After a run, drag from more quads to fewer, or from fewest faces to even rows, and the preview follows live. |
+| **A tidy panel, in order** | Pick a mesh, choose what it is for from picture tiles, Start, then Adjust, Fix and Finish. A coloured verdict says whether the result is ready. Everything else is in the CurioMesh Pro tab. |
+| **Quad Size, Rows and Tidy Up sliders** | After a run, drag from more quads to fewer, from fewest faces to even rows, and from as found to tidiest, and the preview follows live. |
+| **Hard Surface (early)** | A use for machine parts: flat areas rebuilt as clean panels, round parts as even cylinders, and hard edges marked or held with extra loops on Apply. |
 | **Symmetrize and Detail Markers** | Mirror a scan or sculpt even when its sides differ a little. Mark where you want more or less detail. |
 | **Tweak** | Rows on Round Areas, Flat Area Size and Avoid Poles, to shape the layout the way you like it. |
 | **Reduce To** | Aim at a percentage of your faces or a face count, within about 10%. |
@@ -189,16 +191,19 @@ Quads can follow the shape, or they can run in rows. Pick what comes first when 
 *Tidiness* is a number from 0 to 100 for how close the quads' layout is to hand-made meshes. Higher is tidier. Credits and limits are in
 [`docs/PATTERN_SOURCES.md`](docs/PATTERN_SOURCES.md). Read it next to View changed, because a tidy grid can still miss the surface.
 
-## Quad Size and Organization: drag and watch
+## Quad Size, Rows and Tidy Up: drag and watch
 
-After a run, two sliders sit under the result. Dragging either one is a live preview: the mesh on screen changes at once and Blender stays
+After a run, three sliders sit under the result. Dragging either one is a live preview: the mesh on screen changes at once and Blender stays
 usable (1 to 4 ms per step on the bust and the compressor).
 
 - **Quad Size**: smaller quads to the left, bigger to the right. Each step is a full result of the search at another Detail, so it keeps
   the shape and puts its faces where the shape needs them. The other sizes are worked out in the background while you look; until one is
   ready, the nearest finished size is shown.
-- **Organization**: fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the right. On models of many
+- **Rows** (called Organization before 0.9.8): fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the right. On models of many
   loose pieces, the pieces change over one at a time, so the change is gradual.
+- **Tidy Up**: about the same faces, laid out tidier: messy spots round poles redrawn as grids, then the quads settled into straighter,
+  more even rows. A line under it shows Tidiness, Loop Quality, poles and how much more of the view changed. **Loop Flow** draws each
+  edge loop in its own colour.
 - **Bigger Quads / Smaller Quads** change only the parts you select in Review Segments.
 
 | Quad Size on the marble bust | Finest | | Auto | | Coarsest |
@@ -206,7 +211,7 @@ usable (1 to 4 ms per step on the bust and the compressor).
 | Faces | 6,077 | 3,733 | 2,515 | 983 | 492 |
 | View changed | 1.6% | 4.1% | 6.5% | 14.8% | 23.6% |
 
-![Quad Size and Organization sliders on a marble bust: 6,077, 2,515 and 492 quads, then Balanced at 5,995 and Clean Rows at 14,147](docs/images/quad_size_strip.jpg)
+![Quad Size and Rows sliders on a marble bust: 6,077, 2,515 and 492 quads, then Balanced at 5,995 and Clean Rows at 14,147](docs/images/quad_size_strip.jpg)
 
 The sizes take a while to work out on big models (minutes per size on an 80,000-face model). Moving a slider after a per-part edit puts
 back a whole size, so that edit is lost.
@@ -325,7 +330,7 @@ surfaces by their average direction instead of every pixel, so far fewer faces a
 | **Segments inside one mesh** | Splits a connected model along necks and creases (head, torso, plinth). Merge, split, paint, rename. |
 | **Draw Edge Loops and Deformation Lines** | Loops round eyes and mouths, lines across joints. The quads follow. |
 | **Mirror, Symmetrize, Guide Curves, Detail Markers** | Symmetric results with a checked seam, strokes the quads follow, and more or fewer faces where you mark. |
-| **Quad Size, Organization, Bigger/Smaller Quads** | Live sliders for quad size and for fewest faces to even rows, and per-part size changes. |
+| **Quad Size, Rows, Tidy Up, Bigger/Smaller Quads** | Live sliders for quad size, for fewest faces to even rows and for tidier layouts, and per-part size changes. |
 | **Tweak** | Rows on Round Areas, Flat Area Size, Avoid Poles. |
 | **Texture Sets, Export for Game Engine** | Bake big models onto several sets of maps; write FBX, .glb or OBJ for your engine with meshes split under its triangle limit. |
 | **Show it how** | Fix a spot by hand once, and CurioMesh finds the same pattern in later results. |
@@ -342,7 +347,7 @@ surfaces by their average direction instead of every pixel, so far fewer faces a
 | **Guided points and Work Live** | Click where detail matters, and retopo area by area in the background. [More.](docs/OLDER_FEATURES.md) |
 | **Classic Remesh** | The older whole-mesh remesher (Atlas-Q, Fill Loop, Fit to Surface), folded away under the Guided panel. [More.](docs/ATLAS_Q_REFERENCE.md) |
 | **HUD and heatmap** | Quad percentage, leftover triangles and poles, shown in the viewport. |
-| **Native Turbo core** | Rust code on all cores for the slow steps, with a Python fallback. |
+| **Native core** | Rust code on all cores for the slow steps, with a Python fallback. |
 
 </details>
 
@@ -372,7 +377,7 @@ To install:
 4. Select a mesh and open `3D View > N-panel > CurioMesh`.
 
 The version on extensions.blender.org is Python-only (the site allows no compiled code), so it is slower on big meshes, and its tidiness score uses CC0
-reference meshes only. The GitHub zips include the fast native Turbo core. `python scripts/build_release.py --blender-listing` builds that zip. Releases are built
+reference meshes only. The GitHub zips include the fast native core. `python scripts/build_release.py --blender-listing` builds that zip. Releases are built
 by the release workflow from the tag, and each comes with `SHA256SUMS.txt` so you can check your download.
 
 The last full test on every Blender version from 3.6 to 5.2 was for 0.8.0. The checks for this version ran on 3.6 LTS, 4.2 LTS and 5.2 LTS, and most of the work on Auto Segments
@@ -452,7 +457,7 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Download and install](#download-and-in
 - **Selected Faces Only** for Draw Edge Loops does not close its seam yet and is switched off. Use Redo Inside Shapes.
 - **Live Boolean** refuses a redo that would make more faces than it replaces. On a mesh already reduced hard, that can be most redos.
 - **No global patch layout.** CurioMesh has none, and it does not promise exact loops round eyes, mouths or joints without your help. An optional script, `scripts/flowtool.py`, can use QuadWild if you install it separately. It is not in the panel, it covers organic parts only, and it is untested on Linux and macOS.
-- **Native core builds.** The release workflow builds the Turbo core for Windows, Linux and macOS (Intel and Apple Silicon). The Intel Mac build is compiled but not run in CI, and the developers tried only Windows by hand. Without the core, CurioMesh falls back to Python code, which is much slower on big meshes.
+- **Native core builds.** The release workflow builds the native core for Windows, Linux and macOS (Intel and Apple Silicon). The Intel Mac build is compiled but not run in CI, and the developers tried only Windows by hand. Without the core, CurioMesh falls back to Python code, which is much slower on big meshes.
 - **Little GPU compute.** Only the camera pictures of meshes over 150,000 triangles run on the graphics card (NVIDIA, AMD, Intel or Apple, no CUDA). That is 1.1 to 3 times faster for that step, about 1 to 2% for a whole run. Everything else runs on the processor, and a graphics card does not speed it up.
 - **Folded slivers on some small thin parts.** A quad can come out bent about 90 degrees round an edge of a thin part. They are named in the summary and selected on Apply, so you can fix them by hand.
 - **Judge After Baking is experimental.** On big flat areas of a scan it can leave long thin slivers, which bake badly, and its score misses them. It is off by default.
