@@ -19,7 +19,7 @@ plane; a corner shared by two or three panels goes to the point closest to all o
 was (a 3x3 least-squares solve), so shared borders become exact lines and corners exact points.
 
 Both hold the edge of the scope, open borders and the mirror plane, never move a corner further than `DRIFT` of an
-edge (a red X "drift" instead), and put back the corners of any face that would turn past `organize.WORST_TURN`.
+edge (a red X "drift" instead), and put back the corners of any face that would turn past TURN_DEG.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import time
 
 import numpy as np
 
-from .organize import SHARP_DEG, WORST_TURN
+from .organize import SHARP_DEG
 from .trial import Base, Candidate, Trial
 
 NO_HARD_EDGES = "No hard edges in this area."
@@ -50,6 +50,8 @@ FLAT = 0.02  # of an edge: your original mesh under a panel must sit this close 
 PANEL_FACES = 2  # fewer faces than this is not a panel
 PULL = 0.02  # how much a shared corner also stays near where it was
 DRIFT = 1.0  # of an edge: no corner moves further than this in all
+TURN_DEG = 25.0  # a face these tools turn further than this goes back: they true up, they never re-angle a face
+TURN = math.cos(math.radians(TURN_DEG))
 JUMP = 0.25  # of an edge: a corner whose nearest point on your original jumps this much further than it was off it stays
 SQUASH = 0.5  # a face whose shortest edge ends up under this share of what it was and of an edge goes back ("squash")
 
@@ -181,7 +183,7 @@ def _keep_plane(base: Base, co: np.ndarray) -> None:
 
 def _guard(base: Base, co: np.ndarray, moved: np.ndarray, held: list):
     """Drift, turn and squash guards: a corner moved more than DRIFT of an edge goes back ("drift"); the corners of a
-    face whose normal turned past WORST_TURN ("turn") or whose shortest edge was squashed under SQUASH ("squash") go
+    face whose normal turned past TURN_DEG ("turn") or whose shortest edge was squashed under SQUASH ("squash") go
     back. A generator: it yields between face sizes and rounds, and returns the guarded corners."""
     far = np.linalg.norm(co - base.co, axis=1) > DRIFT * base.edge
     for v in np.flatnonzero(far & moved).tolist():
@@ -193,7 +195,7 @@ def _guard(base: Base, co: np.ndarray, moved: np.ndarray, held: list):
             idx = idx[moved[idx].any(axis=1)]
             if not len(idx):
                 continue
-            turned = (_normals_of(co, idx) * _normals_of(base.co, idx)).sum(axis=1) < WORST_TURN
+            turned = (_normals_of(co, idx) * _normals_of(base.co, idx)).sum(axis=1) < TURN
             short = _shortest(co, idx)
             squashed = (short < SQUASH * _shortest(base.co, idx)) & (short < SQUASH * base.edge)
             bad = (turned | squashed) & np.any(np.abs(co[idx] - base.co[idx]) > 0.0, axis=(1, 2))
