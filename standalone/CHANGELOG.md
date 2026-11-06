@@ -30,6 +30,16 @@
   change: the edge of the fixed area keeps its corners, so nothing outside moves and no cracks open. Results stay all
   quads, and a fix that would add bad faces is refused with the reason. The numbers, verdict and spot list update.
 - **`curiomesh fix SOURCE RESULT --spot N --redo|--keep-original -o OUT`** does the same on the command line.
+- **Edge loops you draw**, the add-on's guided loops: draw strokes on the model (app: Draw loops under Edge loops,
+  drag on the model, right-drag to turn; Undo and Clear) or give them with `--strokes FILE.json` (a list of
+  polylines; settings files take them as `strokes`), and the result gets an edge loop along each. The reduced
+  triangles near a stroke are split small, the cheapest chain of edges hugging it is pulled onto it, and no quad is
+  paired across it. The line under the result says how closely the loops follow ("Loops followed: mean 0.1%, worst
+  0.5% of the model's size"). A stroke off the model or too short is left out with a note. With strokes, rows of quads
+  are not offered and evening out and Tidy Up are kept only if the loops stay put. A loop round a marble bust's neck
+  (Game Asset): 7,551 quads, 4.85% view change, 0 bad faces, followed mean 0.11%, worst 0.52% (without the stroke
+  7,038 quads, 4.82%, and its edges lie mean 0.23%, worst 0.83% from the line); at 1,000 faces, mean 0.25%, worst
+  0.88% against 0.50% and 1.83%.
 
 ## 0.3.0
 

@@ -48,6 +48,9 @@ Settings (later ones win, so --use game-asset --detail 4 is Game Asset with deta
   --tidy T          Tidy Up, 0 to 1 (default 0): fewer poles at about the same faces, by redrawing the patches round
                     them as plain grids. 0.5 is one round, 1 two rounds and spinning edges after. Kept only if the view
                     changes at most 1 point more
+  --strokes FILE    guided edge loops: a JSON list of polylines on the model ([[[x, y, z], ...], ...], in the model's
+                    own coordinates). The result gets an edge loop along each one; a stroke off the model or too short
+                    is left out with a note. Rows of quads are left out, and later steps are kept only if they keep the loops
   --pixels N        camera picture size per side (default 192)
   --cpu             make the camera pictures on the processor, not the graphics card
 Writing (for game engines):
@@ -104,6 +107,7 @@ fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
             "--not-baked" => s.baked = false,
             "--tidy" => s.tidy = number(value("--tidy")?, "--tidy")?.clamp(0.0, 1.0),
             "--rows" => s.rows = true,
+            "--strokes" => s.strokes = settings::load_strokes(&PathBuf::from(value("--strokes")?))?,
             "--mirror" => s.mirror = Mirror::parse(&value("--mirror")?)?,
             "--use" => *s = settings::preset(&value("--use")?)?,
             "--settings" => *s = Settings::load(&PathBuf::from(value("--settings")?))?,
@@ -289,9 +293,13 @@ fn single(mut a: Args) -> Result<ExitCode, String> {
     if check.faces as f64 >= 0.9 * source.faces() as f64 {
         println!("Note: this kept nearly every face. A rough surface (a scan) needs most of its faces to change this little; --baked (if you will bake a normal map), --use low-poly, a higher --detail or --reduce-to reduce it.");
     }
+    if let Some(f) = done.follow {
+        println!("{}", curiomesh::strokes::follow_text(f));
+    }
     print_check(&check);
     let s = &a.settings;
-    write_report(&a.report, json!({"source_faces": source.faces(), "faces": check.faces, "loss": done.loss, "detail": s.detail, "asked": s.reduce_to, "looks": done.looks, "seconds": done.seconds, "settings": s.to_json(), "check": check.to_json(200)}))?;
+    let follow = done.follow.map(|f| json!({"strokes": s.strokes.len(), "mean": f.0, "worst": f.1, "left_out": done.stroke_notes}));
+    write_report(&a.report, json!({"source_faces": source.faces(), "faces": check.faces, "loss": done.loss, "detail": s.detail, "asked": s.reduce_to, "looks": done.looks, "seconds": done.seconds, "settings": s.to_json(), "check": check.to_json(200), "follow": follow}))?;
     Ok(ExitCode::SUCCESS)
 }
 

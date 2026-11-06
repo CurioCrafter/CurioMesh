@@ -60,6 +60,29 @@ such as "Tidy Up: poles 2,521 -> 909, view changed 4.8% -> 5.4%". It works best 
 two thirds of its poles), less on machines with many hard edges. The grids are usually a little coarser than the
 patches they replace, so the result also has 5 to 20% fewer faces.
 
+### Edge loops you draw
+
+Where an edge loop must run, draw it: round an eye or the mouth, round the neck, along a joint, across a panel. In the
+app, click **Draw loops** under Edge loops and drag on the model; each stroke shows as a line on its surface. Right-drag
+turns the view while drawing (drag on the divider to move it), **Undo** takes the last stroke away and **Clear** all of
+them. Retopologize then gives the result an edge loop along every stroke, with quads on both sides of it, and the line
+under the result says how closely it followed, such as "Loops followed: mean 0.2%, worst 0.9% of the model's size": how
+far, along each stroke, the nearest edge of the result is, on average and at the worst point.
+
+On the command line, `--strokes FILE.json` reads the strokes: a list of polylines, each a list of `[x, y, z]` points in
+the model's own coordinates. A stroke whose ends meet is closed into a full loop.
+
+```json
+[[[0.05, -0.04, 0.28], [0.03, 0.05, 0.28], [-0.06, 0.04, 0.28], [-0.07, -0.08, 0.28], [0.05, -0.04, 0.28]]]
+```
+
+How it works: each stroke is laid on the surface; at every face count tried, the reduced triangles near it are split
+until they are small, the cheapest chain of their edges that hugs the stroke is found and its corners are pulled onto
+it, and no quad is paired across that chain. A stroke, or the part of it, more than 2% of the model's size away from
+the surface is left out, as is one shorter than 2% of the size; the result says so. Rows of quads are not offered
+when there are strokes (they rebuild a part from scratch), and evening out and Tidy Up are kept only if the loops stay
+where they were. With mirroring, strokes on the other half are mirrored onto the half that is solved.
+
 ## Use the command line
 
 `curiomesh` does the same work in scripts and asset pipelines. `curiomesh --help` lists everything.
@@ -110,6 +133,7 @@ With `-o` each size worth keeping is saved, so you can pick by eye.
 | `--mirror auto`, `x`, `y` or `z` | Solve one half, mirror it and close the seam, so both sides are the same. `auto` mirrors only when the model is symmetric (90% of it matches its mirror); naming an axis needs 70%. |
 | `--no-rows` | Keep every part as reduced; don't try even rows of quads on smooth parts. |
 | `--tidy T` | Tidy Up, 0 to 1 (default 0): fewer poles. 0.5 is one round, 1 is two rounds and spun edges. See below. |
+| `--strokes FILE.json` | Edge loops along these strokes (see Edge loops you draw). A settings file can hold them too, as `strokes`. |
 | `--pixels N` | Camera picture size per side. Default 192. |
 | `--cpu` | Draw the camera pictures on the processor instead of the graphics card. |
 | `--report FILE.json` | Write the numbers and the issue spots as JSON. |
@@ -230,7 +254,7 @@ results here have 5-9% more faces.
 
 ## Known limits
 
-- The Blender add-on still does more: part-by-part sizing, guided edge loops, new UVs (unwrapping), repair, Redo
+- The Blender add-on still does more: part-by-part sizing, rows of loops beside a drawn loop, new UVs (unwrapping), repair, Redo
   Rough Spots and Tidy Up. The standalone keeps the source's UVs and bakes normal and colour maps, but can't unwrap a
   model that has none, and writes no FBX.
 - A rough scan judged as it is can keep nearly all its faces at a small limit: the camera sees every bump turn. If you

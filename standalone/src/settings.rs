@@ -51,11 +51,12 @@ pub struct Settings {
     pub bake_normal: bool,
     pub bake_color: bool,
     pub bake_size: usize,
+    pub strokes: Vec<Vec<[f64; 3]>>, // guided edge loops: polylines on the model, in its own coordinates
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, baked: false, tidy: 0.0, mirror: Mirror::Off, export: Target::default(), keep_uvs: false, bake_normal: false, bake_color: false, bake_size: 2048 }
+        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, baked: false, tidy: 0.0, mirror: Mirror::Off, export: Target::default(), keep_uvs: false, bake_normal: false, bake_color: false, bake_size: 2048, strokes: vec![] }
     }
 }
 
@@ -134,11 +135,20 @@ pub fn save_preset(name: &str, settings: &Settings) -> Result<PathBuf, String> {
 
 impl Settings {
     pub fn retopo(&self) -> retopo::Settings {
-        retopo::Settings { detail: self.detail, reduce_to: self.reduce_to, pixels: self.pixels, gpu: self.gpu, rows: self.rows, baked: self.baked, tidy: self.tidy }
+        retopo::Settings { detail: self.detail, reduce_to: self.reduce_to, pixels: self.pixels, gpu: self.gpu, rows: self.rows, baked: self.baked, tidy: self.tidy, strokes: self.strokes.clone() }
+    }
+
+    /// The settings for the mesh `work_on` gave: with a mirror, the strokes moved onto the half that is solved.
+    pub fn retopo_on(&self, work: &Work) -> retopo::Settings {
+        let mut out = self.retopo();
+        if let Some(plane) = &work.plane {
+            out.strokes = crate::strokes::to_side(&out.strokes, plane.axis, plane.offset);
+        }
+        out
     }
 
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut out = json!({
             "curiomesh_settings": 1,
             "detail": self.detail,
             "reduce_to": self.reduce_to,
@@ -152,7 +162,11 @@ impl Settings {
             "keep_uvs": self.keep_uvs,
             "bake": self.bake_words(),
             "bake_size": self.bake_size,
-        })
+        });
+        if !self.strokes.is_empty() {
+            out["strokes"] = json!(self.strokes);
+        }
+        out
     }
 
     /// Does the result get UVs?
@@ -214,6 +228,7 @@ impl Settings {
                     self.set_bake(&words.ok_or("settings: bake must be a list such as [\"normal\", \"color\"]")?)?;
                 }
                 "bake_size" => self.bake_size = (number(k, v)? as usize).clamp(16, 16384),
+                "strokes" => self.strokes = strokes_from(v)?,
                 other => return Err(format!("settings: unknown key {other}")),
             }
         }
@@ -221,14 +236,35 @@ impl Settings {
     }
 
     pub fn load(path: &Path) -> Result<Settings, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let value: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let value = read_json(path)?;
         Settings::from_json(&value).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         std::fs::write(path, serde_json::to_string_pretty(&self.to_json()).unwrap()).map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+fn read_json(path: &Path) -> Result<Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Strokes from JSON: a list of polylines, each a list of [x, y, z] points (or an object holding one under "strokes").
+pub fn strokes_from(v: &Value) -> Result<Vec<Vec<[f64; 3]>>, String> {
+    const WHAT: &str = "strokes must be a list of polylines, each a list of [x, y, z] points";
+    let v = v.get("strokes").unwrap_or(v);
+    v.as_array().ok_or(WHAT)?.iter().map(|line| {
+        line.as_array().ok_or(WHAT)?.iter().map(|p| match p.as_array().map(|a| a.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>()) {
+            Some(Some(c)) if c.len() == 3 && c.iter().all(|x| x.is_finite()) => Ok([c[0], c[1], c[2]]),
+            _ => Err(WHAT.to_string()),
+        }).collect()
+    }).collect()
+}
+
+/// Strokes from a JSON file (see `strokes_from`).
+pub fn load_strokes(path: &Path) -> Result<Vec<Vec<[f64; 3]>>, String> {
+    strokes_from(&read_json(path)?).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// The mesh the search works on: the source, or one half of it when mirroring.
@@ -295,7 +331,7 @@ pub fn write(source: &Mesh, mesh: &Mesh, path: &Path, settings: &Settings, log: 
 pub fn run(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> Result<retopo::Outcome, String> {
     let started = std::time::Instant::now();
     let work = work_on(source, settings, &mut log);
-    let mut half = settings.retopo();
+    let mut half = settings.retopo_on(&work);
     if work.plane.is_some() {
         half.reduce_to = half.reduce_to.map(|n| (n / 2).max(12));
     }

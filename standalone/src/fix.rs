@@ -590,7 +590,7 @@ fn keep_original_shape(source: &Mesh, result: &Mesh, spot: &[usize]) -> Result<F
     }).collect();
     let (_, nearest) = near::nearest_faces(&result_tree, &middles, &stop);
     let tri_material: Vec<i64> = nearest.iter().map(|h| result.material[h.1 as usize]).collect();
-    let (fa, fb, cands, scores) = retopo::candidates(&points, &region_tris, &tri_material);
+    let (fa, fb, cands, scores) = retopo::candidates(&points, &region_tris, &tri_material, &Default::default());
     let graph = pairing::allowed(tri_material.len(), &fa, &fb, &scores, None);
     let paired = pairing::pair(&graph, &cands, 0, &near::Watch::now()).ok_or("pairing was stopped")?;
     let mut faces: Vec<Vec<i64>> = paired.quads.chunks_exact(4).map(|q| q.to_vec()).collect();

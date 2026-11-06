@@ -85,6 +85,7 @@ impl Choices {
             bake_normal: self.bake_normal,
             bake_color: self.bake_color,
             bake_size: self.bake_size,
+            strokes: vec![], // the Model screen adds the strokes drawn on its model
         }
     }
 }
