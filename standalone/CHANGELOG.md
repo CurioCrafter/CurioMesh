@@ -1,6 +1,6 @@
 # CurioMesh Standalone changelog
 
-## 0.4.0 (in progress)
+## 0.4.0
 
 - **Lands closer to the limit.** The add-on stops searching once a result changes 90% of the detail asked, to keep
   Blender responsive; without Blender a look takes well under a second, so the search now lands within 2% of it.

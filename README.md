@@ -530,6 +530,8 @@ result gets the same verdict as the panel here ("Good for game asset", "Check 2 
 - **Download:** the zip for your system from the [standalone releases](https://github.com/CurioCrafter/CurioMesh/releases?q=standalone).
   Unpack it and start `curiomesh-gui`.
 - **Batch:** a folder at a time, with a results table you can export as CSV.
+- **Also without Blender:** keep the model's UVs and bake normal and colour maps, draw the edge loops it must
+  follow, Tidy Up the poles, fix one spot at a time, and judge scans as they will look once baked.
 - **Opens** OBJ, glTF, GLB and PLY. **Saves** OBJ, or GLB for Unreal, Unity, Godot, Roblox and glTF.
 - **Command line for pipelines:** `curiomesh batch models/ -o done/`, and `curiomesh measure model.glb any_retopo.obj
   --max-loss 6 --max-bad 0` to stop a build on a broken asset from any tool.
