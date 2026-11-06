@@ -26,7 +26,7 @@ import bpy
 import numpy as np
 from mathutils.bvhtree import BVHTree
 
-from . import autoretopo, overlay, segments, symmetry, turbo
+from . import autoretopo, history, overlay, segments, symmetry, turbo
 from . import guides
 from .triadq import checks, issues, loopscore, patterns, tasks
 from .triadq import organize as O
@@ -171,15 +171,21 @@ def _choice(context, out) -> dict:
 
 
 def on_options(self, context) -> None:
-    """A switch changed: work the strengths out again (the slider keeps its place)."""
+    """A switch changed: work the strengths out again (the slider keeps its place). One step back with Ctrl+Z."""
     if not active() and self.organize <= 0.0:
         return
+    history.before(context)
     passes = org["passes"] if active() else []
     if active():  # back to the result as it was, so the new strengths start from it
         org["base"]["out"], org["base"]["report"] = org["origin"], dict(org["report"])
-    if start(context):
+    started = start(context)
+    if started:
         org["passes"] = passes  # earlier passes stay: only this one is worked out again
         org["shown"] = -1.0  # whatever is on screen is stale: the next `show` swaps the preview
+    # a step of its own, made in the update so Blender's undo push for the switch keeps its number; after an undo or
+    # redo `history.sync` shows the strength the slider asks for from these strengths
+    history.record(context, "Tidy Up switches")
+    if started:
         show(context, self)
 
 
@@ -355,11 +361,13 @@ def _keep_next(context, gs) -> bool:
             gs["organize"] = 0.0
             show(context, gs)
         org["note"] = f"Keep Tidying stopped after {count} pass{'es' if count != 1 else ''}: another pass made it no tidier" + (" within Most Detail Loss" if cap(gs) is not None else "")
+        history.record(context, "Tidy: Keep Tidying stopped", f"{count} pass{'es' if count != 1 else ''}", push=True)
         return False
     gs["organize"] = max(better)
     show(context, gs)
     start(context, again=True)
     gs["organize"] = 1.0  # the next pass shows each strength as it comes in
+    history.record(context, f"Tidy: Keep Tidying pass {len(org['passes'])}", meter_text(gs), push=True)  # each pass is one Ctrl+Z
     return True
 
 
@@ -435,11 +443,13 @@ def show(context, gs) -> bool:
     guided._build_preview(context, guided.state_source(), out, uvs=False, mesh=mesh)
     guided.state["draw_key"] = None
     org["shown"] = strength
+    history.settled("tidy", meter_text(gs) or f"strength {strength:g}")
     overlay.tag_redraw()
     return True
 
 
 def on_slider(self, context) -> None:
+    history.note(context, "tidy", "Tidy Up")  # Blender pushes the undo step when the slider lets go
     if not active() and self.organize > 0.0 and not start(context):
         return
     show(context, self)
@@ -581,7 +591,11 @@ class CURIOMESH_OT_tidy_again(bpy.types.Operator):
         return active() and ready() and org["shown"] > 0.0 and not org["keep"]
 
     def execute(self, context):
-        return {"FINISHED"} if tidy_again(context, _settings(context)) else {"CANCELLED"}
+        history.before(context)
+        if not tidy_again(context, _settings(context)):
+            return {"CANCELLED"}
+        history.record(context, "Tidy: Again", f"pass {len(org['passes']) + 1}", push=True)
+        return {"FINISHED"}
 
 
 class CURIOMESH_OT_tidy_keep(bpy.types.Operator):
@@ -595,6 +609,7 @@ class CURIOMESH_OT_tidy_keep(bpy.types.Operator):
         return _settings(context) is not None and not org["keep"] and (active() or _g().state.get("auto_base") is not None)
 
     def execute(self, context):
+        history.before(context)
         if not keep_tidying(context, _settings(context)):
             self.report({"WARNING"}, "Tidy Up needs a result from Start")
             return {"CANCELLED"}
@@ -631,7 +646,11 @@ class CURIOMESH_OT_tidy_back(bpy.types.Operator):
 
     def execute(self, context):
         org["keep"] = False
-        return {"FINISHED"} if undo_pass(context, _settings(context)) else {"CANCELLED"}
+        history.before(context)
+        if not undo_pass(context, _settings(context)):
+            return {"CANCELLED"}
+        history.record(context, "Tidy: Undo Pass", f"back to pass {len(org['passes']) + 1}", push=True)  # Ctrl+Z brings the pass back
+        return {"FINISHED"}
 
 
 CLASSES = (CURIOMESH_OT_tidy_again, CURIOMESH_OT_tidy_keep, CURIOMESH_OT_tidy_stop, CURIOMESH_OT_tidy_back)

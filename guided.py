@@ -29,7 +29,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, flowedit, hard_surface, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
+from . import autoretopo, blockout, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -399,8 +399,8 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redoes the result inside the shapes, live; everything outside stays as it is. Move or resize a shape and the quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
-    quad_size: bpy.props.FloatProperty(name="Quad Size", description="Left: smaller quads that keep more detail. Right: bigger quads and fewer faces. Each stop is a full result, worked out in the background", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
-    quad_order: bpy.props.FloatProperty(name="Rows", description="Left: fewest faces, quads follow the shape. Right: even rows of square quads, with more faces and a little softer detail", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
+    quad_size: bpy.props.FloatProperty(name="Quad Size", description="Left: smaller quads that keep more detail. Right: bigger quads and fewer faces. Each stop is a full result, worked out in the background", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_size)
+    quad_order: bpy.props.FloatProperty(name="Rows", description="Left: fewest faces, quads follow the shape. Right: even rows of square quads, with more faces and a little softer detail", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_rows)
     organize: bpy.props.FloatProperty(name="Tidy Up", description="How strong one tidying pass is: fewer poles and straighter rows, for a little detail. Again and Keep Tidying run more passes on top of this one", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
     organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Stops Tidy Up, over all its passes, before the look changes by more than the amount next to it. Off: passes go on while they still make the mesh tidier", default=False, update=organize.on_cap)
     organize_cap: bpy.props.FloatProperty(name="Most Detail Loss", description="How much more of the look Tidy Up may change, in percent, on top of the result before the first pass. You can type more than the slider shows", default=1.0, min=0.1, soft_max=20.0, max=100.0, precision=1, subtype="NONE", update=organize.on_cap)
@@ -2013,12 +2013,14 @@ def _collect_work(context) -> None:
         state["message"] = runner.warnings[0] if runner.warnings else runner.status()
         base = state["auto_base"]
         if not runner.busy and runner.report is not None and runner.output is not None and (base is None or base["job"] is not runner):
+            history.before(context)  # what was on screen before this result stays one Ctrl+Z away
             state["auto_base"] = {"id": time.perf_counter_ns(), "sig": work["key"][0], "key": work["key"], "out": _real_materials(runner.output, work.get("charts")), "charts": work.get("charts"), "report": runner.report, "job": runner, "summary": state["message"]}
             if state["lod"] is not None:
                 _lod_finished(context, source, runner.report)
                 overlay.tag_redraw()
                 return
             if isinstance(runner, blockout.BlockoutJob):  # solids: no hand fixes to put back, no segments to find on them
+                history.record(context, "New result", f"{len(runner.output['faces']):,} faces", push=True)
                 overlay.tag_redraw()
                 return
             segments.ensure()
@@ -2028,6 +2030,7 @@ def _collect_work(context) -> None:
             segments.ensure()
             segments.segment_goals.start_find(context)
             ladder.start(context)
+            history.record(context, "New result", f"{len(state['res']['faces']):,} faces" if state["res"] is not None else "", push=True)
         elif not runner.busy and runner.report is None and state["lod"] is not None:  # the search failed: nothing more to come
             state["lod"] = None
         overlay.tag_redraw()

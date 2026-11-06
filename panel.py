@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 from . import guided as G
-from . import flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
+from . import flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry, tidylive, tidytools
 from . import verdict as V
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
@@ -528,6 +528,10 @@ def part_edits() -> int:
 
 def draw_adjust(layout, gs) -> None:
     _help(layout, "adjust")
+    if tidylive.busy():  # the sliders would change the result under the open preview
+        layout.label(text="Finish or cancel the open tool first.", icon="INFO")
+        layout = layout.column()
+        layout.enabled = False
     edits = part_edits() if segments.ready() else 0
     if edits and ladder.active():
         overlay.wrap_label(layout, f"Quad Size and Rows replace your {edits} part edit{'s' if edits != 1 else ''}", icon="ERROR", width=WIDTH, limit=2)
@@ -1163,7 +1167,7 @@ class CURIOMESH_PT_guided_advanced(_Pro, bpy.types.Panel):
 
 # --------------------------------------------------------------------------- registration
 
-MAIN_PANELS = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_adjust, CURIOMESH_PT_guided_parts, CURIOMESH_PT_guided_apply)
+MAIN_PANELS = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_adjust, *tidytools.PANELS, CURIOMESH_PT_guided_parts, CURIOMESH_PT_guided_apply)
 PRO_PANELS = (
     CURIOMESH_PT_pro_engine,
     CURIOMESH_PT_pro_computer,
