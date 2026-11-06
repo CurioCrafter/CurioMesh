@@ -123,25 +123,48 @@ def square_pull(co: np.ndarray, quads: np.ndarray) -> tuple[np.ndarray, np.ndarr
     return (goal - p).reshape(-1, 3), quads.reshape(-1)
 
 
+def _edge_faces(faces: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(edges (e, 2), first face, second face) of every edge two faces share."""
+    if not faces:
+        empty = np.zeros(0, dtype=np.int64)
+        return np.zeros((0, 2), dtype=np.int64), empty, empty
+    size = np.fromiter((len(f) for f in faces), dtype=np.int64, count=len(faces))
+    a = np.fromiter((v for f in faces for v in f), dtype=np.int64, count=int(size.sum()))
+    owner = np.repeat(np.arange(len(faces)), size)
+    nxt = np.arange(len(a)) + 1
+    nxt[np.cumsum(size) - 1] = np.cumsum(size) - size  # the last corner of a face wraps to its first
+    b = a[nxt]
+    lo, hi = np.minimum(a, b), np.maximum(a, b)
+    key = lo * (int(a.max()) + 1) + hi
+    order = np.argsort(key, kind="stable")
+    key, owner = key[order], owner[order]
+    starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+    count = np.diff(np.r_[starts, len(key)])
+    two = starts[count == 2]
+    return np.stack((lo[order][two], hi[order][two]), axis=1), owner[two], owner[two + 1]
+
+
+def _face_normals(co: np.ndarray, faces: list) -> np.ndarray:
+    """Unit normals of the faces (Newell's normal, any corner count)."""
+    out = np.zeros((len(faces), 3))
+    by_size: dict = {}
+    for i, f in enumerate(faces):
+        by_size.setdefault(len(f), []).append(i)
+    for ids in by_size.values():
+        q = co[np.asarray([faces[i] for i in ids], dtype=np.int64)]
+        out[ids] = np.cross(q, np.roll(q, -1, axis=1)).sum(axis=1)
+    return _unit(out)
+
+
 def outline_edges(co: np.ndarray, faces: list, views: int = 2) -> np.ndarray:
     """Edges on the outline (one face toward the camera, the other away) seen along at least `views` of the camera's
     lines of sight (a side and its opposite are one line of sight)."""
     from .views import SIDES
 
-    users: dict = {}
-    for i, f in enumerate(faces):
-        for k in range(len(f)):
-            a, b = f[k - 1], f[k]
-            users.setdefault((a, b) if a < b else (b, a), []).append(i)
-    pairs = [(e, u) for e, u in users.items() if len(u) == 2]
-    if not pairs:
-        return np.zeros((0, 2), dtype=np.int64)
-    normal = np.zeros((len(faces), 3))
-    for i, f in enumerate(faces):
-        q = co[list(f)]
-        normal[i] = np.cross(q, np.roll(q, -1, axis=0)).sum(axis=0)
-    edges = np.asarray([e for e, _u in pairs], dtype=np.int64)
-    f0, f1 = np.asarray([u[0] for _e, u in pairs]), np.asarray([u[1] for _e, u in pairs])
+    edges, f0, f1 = _edge_faces(faces)
+    if not len(edges):
+        return edges
+    normal = _face_normals(co, faces)
     look = np.asarray(SIDES, dtype=np.float64)
     # a flip seen from one side is also seen from the opposite side: count each line of sight once
     first = look[np.arange(len(look)), np.argmax(look != 0.0, axis=1)]
@@ -152,30 +175,16 @@ def outline_edges(co: np.ndarray, faces: list, views: int = 2) -> np.ndarray:
 
 def hard_edges(co: np.ndarray, faces: list, sharp_deg: float = SHARP_DEG) -> np.ndarray:
     """Edges whose two faces fold more than `sharp_deg` (the rule `organize.pinned` holds corners by)."""
-    users: dict = {}
-    for i, f in enumerate(faces):
-        for k in range(len(f)):
-            a, b = f[k - 1], f[k]
-            users.setdefault((a, b) if a < b else (b, a), []).append(i)
-    normal = np.zeros((len(faces), 3))
-    for i, f in enumerate(faces):
-        q = co[list(f)]
-        normal[i] = _unit(np.cross(q, np.roll(q, -1, axis=0)).sum(axis=0))
-    limit = np.cos(np.radians(sharp_deg))
-    out = [e for e, u in users.items() if len(u) == 2 and float(normal[u[0]] @ normal[u[1]]) < limit]
-    return np.asarray(out, dtype=np.int64).reshape(-1, 2)
+    edges, f0, f1 = _edge_faces(faces)
+    normal = _face_normals(co, faces)
+    return edges[(normal[f0] * normal[f1]).sum(axis=1) < np.cos(np.radians(sharp_deg))]
 
 
 def label_edges(faces: list, label) -> np.ndarray:
     """Edges between two faces with different labels (UV islands, parts)."""
     label = np.asarray(label)
-    users: dict = {}
-    for i, f in enumerate(faces):
-        for k in range(len(f)):
-            a, b = f[k - 1], f[k]
-            users.setdefault((a, b) if a < b else (b, a), []).append(i)
-    out = [e for e, u in users.items() if len(u) == 2 and label[u[0]] != label[u[1]]]
-    return np.asarray(out, dtype=np.int64).reshape(-1, 2)
+    edges, f0, f1 = _edge_faces(faces)
+    return edges[label[f0] != label[f1]]
 
 
 def kept_lines(base: Base, kinds: dict) -> np.ndarray:
