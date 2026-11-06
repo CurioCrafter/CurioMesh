@@ -1,5 +1,14 @@
 # CurioMesh Standalone changelog
 
+## 0.4.0
+
+- **Fix one spot without redoing the model.** Pick a spot in the list and choose **Redo this spot** (smaller quads
+  that follow the original more closely) or **Keep original here** (the original's own faces back there, as quads;
+  it shows the faces it adds and asks first). **Put back** undoes the last fix. Only the spot and a ring round it
+  change: the edge of the fixed area keeps its corners, so nothing outside moves and no cracks open. Results stay all
+  quads, and a fix that would add bad faces is refused with the reason. The numbers, verdict and spot list update.
+- **`curiomesh fix SOURCE RESULT --spot N --redo|--keep-original -o OUT`** does the same on the command line.
+
 ## 0.3.0
 
 The first full release (0.1 and 0.2 were previews).

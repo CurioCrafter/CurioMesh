@@ -165,7 +165,7 @@ fn min_scaled_jacobian(p: &[V3; 4]) -> f64 {
 /// `engine._pair_candidates` + `_pair_scores` with the default weights: (face_a, face_b, quads 4 per row, scores).
 /// ponytail: the cross-field term aligns quad sides with face_a's longest edge, not the add-on's smoothed cross field
 /// (`engine._estimate_field`); port that when quad rows on curved parts need to line up better.
-fn candidates(points: &[f64], tris: &[i64], material: &[i64]) -> (Vec<i64>, Vec<i64>, Vec<i64>, Vec<f64>) {
+pub(crate) fn candidates(points: &[f64], tris: &[i64], material: &[i64]) -> (Vec<i64>, Vec<i64>, Vec<i64>, Vec<f64>) {
     let (w_normal, w_field, w_material, w_aspect, w_diagonal) = (2.2, 0.90, 0.15, 0.90, 0.35);
     let p = |v: i64| [points[v as usize * 3], points[v as usize * 3 + 1], points[v as usize * 3 + 2]];
     let nf = tris.len() / 3;

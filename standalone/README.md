@@ -33,7 +33,12 @@ Download the zip for your system from the
    Drag anywhere else to turn the model, scroll to zoom, double-click to frame it again.
 5. **Check the spots.** The list shows places worth a look, worst first: slivers, faces at poles and bent quads.
    Click one to fly to it and see its faces in red.
-6. **Save OBJ.** Save issue report writes the same list as JSON.
+6. **Fix a spot** (optional). With a spot picked, **Redo this spot** remakes the faces round it with smaller quads
+   that follow the original more closely. **Keep original here** puts the original's own faces back round it, as
+   quads; it first lights up the faces it would add and says how many, and is applied with Apply. **Put back** undoes
+   the last fix. Only that spot changes: everything outside it stays exactly as it was, with no cracks at the edge.
+   A fix that would add bad faces isn't made, and says why. The numbers, verdict and spot list update after each fix.
+7. **Save OBJ.** Save issue report writes the same list as JSON.
 
 ## How much may the view change?
 
@@ -155,6 +160,17 @@ Pieces are separate objects in one file. No textures or UVs are written: the sta
 or by hand. It prints the view change, the bad faces and the worst spots. With `--max-loss` or `--max-bad` it exits
 with code 1 when the result is over the limit, so a build can stop on a broken asset.
 
+### Fix one spot: `fix`
+
+`curiomesh fix SOURCE RESULT --spot N --redo -o OUT` remakes spot N (numbered as `measure` lists them) with smaller
+quads on the source; `--keep-original` instead puts the source's own faces back there. The rest of RESULT is left as
+it is. It prints the faces there before and after, the bad faces and the view change before and after. A fix that
+would add bad faces, or can't be made (a spot along a broken edge, or where the source is tangled), is refused with
+the reason, nothing is written and it exits with code 1.
+
+Redo this spot helps where quads cut across the shape or bend; it keeps slivers and poles (smaller copies of them).
+Keep original brings back the detail and costs more faces.
+
 ## How it compares
 
 All measured with `curiomesh measure` on three free models from the CurioMesh test set, at about the same face
@@ -179,6 +195,8 @@ results here have 5-9% more faces.
   "Kept nearly every face"; Low Poly, a higher limit or a face count reduce it.
 - Quad flow on organic models is less even than a field-aligned remesher's.
 - Large models draw thinned out in the viewport; the saved result is complete.
+- Fixing a spot is refused where the spot's edge runs along a broken edge, and Keep original where the source
+  under it is tangled or has fewer borders than the spot.
 
 ## Licence
 

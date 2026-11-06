@@ -3,7 +3,7 @@
 //! `curiomesh`: CurioMesh's automatic quad retopology and its quality check, without Blender.
 
 use curiomesh::settings::{self, Mirror, Settings};
-use curiomesh::{batch, export, io, issues, ladder, retopo};
+use curiomesh::{batch, export, fix, io, issues, ladder, retopo};
 use serde_json::json;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,6 +22,10 @@ Commands:
   curiomesh measure SOURCE RESULT [--max-loss PERCENT] [--max-bad FACES] [--report FILE.json] [--cpu]
                                                compare RESULT (from CurioMesh or any other tool) with SOURCE: view change,
                                                bad faces, issue spots. Over a limit, it exits with code 1 (for pipelines).
+  curiomesh fix SOURCE RESULT --spot N --redo|--keep-original -o OUT
+                                               fix spot N (numbered as measure lists them) and nothing else: --redo
+                                               remakes it with smaller quads on the source, --keep-original puts the
+                                               source's own faces back there. Refused if it would add bad faces.
   curiomesh preset list                        the built-in and saved presets
   curiomesh preset show NAME                   a preset's settings as JSON (a file --settings reads)
   curiomesh preset save NAME [settings]        save the settings given as a preset of your own
@@ -61,10 +65,12 @@ struct Args {
     jobs: usize,
     max_loss: Option<f64>,
     max_bad: Option<usize>,
+    spot: Option<usize>,
+    keep_original: Option<bool>,
 }
 
 fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
-    let mut a = Args { files: vec![], out: None, settings: Settings::default(), report: None, jobs: 1, max_loss: None, max_bad: None };
+    let mut a = Args { files: vec![], out: None, settings: Settings::default(), report: None, jobs: 1, max_loss: None, max_bad: None, spot: None, keep_original: None };
     while let Some(w) = words.next() {
         let mut value = |name: &str| words.next().ok_or(format!("{name} needs a value"));
         let number = |s: String, name: &str| s.parse::<f64>().map_err(|_| format!("{name}: not a number: {s}"));
@@ -77,6 +83,9 @@ fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
             "--pixels" => s.pixels = (number(value("--pixels")?, "--pixels")? as usize).clamp(16, 2048),
             "--max-loss" => a.max_loss = Some(number(value("--max-loss")?, "--max-loss")?),
             "--max-bad" => a.max_bad = Some(number(value("--max-bad")?, "--max-bad")? as usize),
+            "--spot" => a.spot = Some(number(value("--spot")?, "--spot")? as usize),
+            "--redo" => a.keep_original = Some(false),
+            "--keep-original" => a.keep_original = Some(true),
             "--jobs" => a.jobs = (number(value("--jobs")?, "--jobs")? as usize).max(1),
             "--cpu" => s.gpu = false,
             "--no-rows" => s.rows = false,
@@ -136,6 +145,33 @@ fn measure(a: &Args) -> Result<ExitCode, String> {
         println!("FAIL: over the limit");
     }
     Ok(if over { ExitCode::from(1) } else { ExitCode::SUCCESS })
+}
+
+fn fix_spot(a: &Args) -> Result<ExitCode, String> {
+    let [_, source_path, result_path] = a.files.as_slice() else { return Err("fix needs SOURCE and RESULT".into()) };
+    let keep = a.keep_original.ok_or("fix needs --redo or --keep-original")?;
+    let out = a.out.clone().ok_or("fix needs -o OUT")?;
+    let mut target = a.settings.export.clone();
+    target.format = export::Format::parse(out.extension().and_then(|e| e.to_str()).unwrap_or("")).map_err(|_| format!("{}: OUT must end in .obj or .glb", out.display()))?;
+    let (source, result) = (load(source_path)?, load(result_path)?);
+    let check = issues::check(&result);
+    let n = a.spot.ok_or("fix needs --spot N")?;
+    let spot = check.spots.get(n.wrapping_sub(1)).ok_or(format!("--spot {n}: the result has {} spots (see curiomesh measure)", check.spots.len()))?;
+    let done = if keep { fix::keep_original(&source, &result, &spot.faces) } else { fix::redo_spot(&source, &result, &spot.faces) };
+    let done = match done {
+        Ok(done) => done,
+        Err(e) => {
+            println!("Not fixed: {e}. The result is unchanged.");
+            return Ok(ExitCode::from(1));
+        }
+    };
+    let (was, now) = (retopo::measure(&source, &result, a.settings.pixels, a.settings.gpu), retopo::measure(&source, &done.mesh, a.settings.pixels, a.settings.gpu));
+    export::write(&done.mesh, &out, &target)?;
+    println!("Spot {n}: {} faces there -> {}; the whole result {} -> {} faces", done.faces_before, done.faces_after, result.faces(), done.mesh.faces());
+    println!("Bad faces: {} -> {}", done.bad_before, done.bad_after);
+    println!("View change: {was:.2}% -> {now:.2}%");
+    println!("Saved {}", out.display());
+    Ok(ExitCode::SUCCESS)
 }
 
 fn preset(a: &Args) -> Result<ExitCode, String> {
@@ -248,6 +284,7 @@ fn run(a: Args) -> Result<ExitCode, String> {
         Some("preset") | Some("presets") => preset(&a),
         Some("batch") => batch_run(&a),
         Some("sizes") => sizes(&a),
+        Some("fix") => fix_spot(&a),
         _ => single(a),
     }
 }
