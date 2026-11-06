@@ -50,6 +50,7 @@ FLAT = 0.02  # of an edge: your original mesh under a panel must sit this close 
 PANEL_FACES = 2  # fewer faces than this is not a panel
 PULL = 0.02  # how much a shared corner also stays near where it was
 DRIFT = 1.0  # of an edge: no corner moves further than this in all
+SQUASH = 0.5  # a face whose shortest edge ends up under this share of what it was and of an edge goes back ("squash")
 
 
 # --------------------------------------------------------------------------- shared
@@ -141,8 +142,9 @@ def _keep_plane(base: Base, co: np.ndarray) -> None:
 
 
 def _guard(base: Base, co: np.ndarray, moved: np.ndarray, held: list) -> np.ndarray:
-    """Drift and turn guards: a corner moved more than DRIFT of an edge goes back ("drift"); the corners of a
-    face whose normal turned past WORST_TURN go back ("turn")."""
+    """Drift, turn and squash guards: a corner moved more than DRIFT of an edge goes back ("drift"); the corners of a
+    face whose normal turned past WORST_TURN ("turn") or whose shortest edge was squashed under SQUASH ("squash") go
+    back."""
     far = np.linalg.norm(co - base.co, axis=1) > DRIFT * base.edge
     for v in np.flatnonzero(far & moved).tolist():
         held.append((base.co[v].copy(), "drift"))
@@ -152,17 +154,30 @@ def _guard(base: Base, co: np.ndarray, moved: np.ndarray, held: list) -> np.ndar
         return co
     sub = [base.faces[i] for i in touched]
     start = face_normals(base.co, sub)
+    short0 = _shortest(base.co, sub)
     for _round in range(4):
         now = face_normals(co, sub)
-        bad = (now * start).sum(axis=1) < WORST_TURN
+        turned = (now * start).sum(axis=1) < WORST_TURN
+        short = _shortest(co, sub)
+        squashed = (short < SQUASH * short0) & (short < SQUASH * base.edge)
+        bad = turned | squashed
         if not bad.any():
             break
         for k in np.flatnonzero(bad).tolist():
             f = list(sub[k])
             if not np.allclose(co[f], base.co[f]):
-                held.append((base.co[f].mean(axis=0), "turn"))
+                held.append((base.co[f].mean(axis=0), "turn" if turned[k] else "squash"))
             co[f] = base.co[f]
     return co
+
+
+def _shortest(co, faces) -> np.ndarray:
+    """Shortest edge of each face."""
+    out = np.full(len(faces), np.inf)
+    for i, f in enumerate(faces):
+        p = co[list(f)]
+        out[i] = float(np.linalg.norm(p - np.roll(p, -1, axis=0), axis=1).min())
+    return out
 
 
 def _fit_plane(points: np.ndarray):
@@ -282,6 +297,66 @@ def _even(points: np.ndarray, closed: bool) -> np.ndarray:
     return out
 
 
+def _even_between(points: np.ndarray, fixed: np.ndarray, closed: bool) -> np.ndarray:
+    """`_even` on each run of corners between two fixed ones, so a held corner in the middle of a chain never gets
+    its neighbours bunched up against it."""
+    stops = np.flatnonzero(fixed).tolist()
+    if not stops:
+        return _even(points, closed)
+    out = points.copy()
+    n = len(points)
+    if closed:
+        order = [(stops[0] + k) % n for k in range(n + 1)]  # once round, back to the first stop
+        cuts = [k for k, v in enumerate(order) if fixed[v]]
+    else:
+        order = list(range(n))
+        cuts = sorted(set([0, n - 1] + stops))
+    for a, b in zip(cuts, cuts[1:]):
+        if b - a > 1:
+            ids = order[a : b + 1]
+            out[ids] = _even(points[ids], False)
+    return out
+
+
+def _off_crease(co: np.ndarray, job) -> float:
+    """Summed distance of a trued chain's corners from their creases."""
+    idx, lines, has, _straight = job
+    total = 0.0
+    for k, v in enumerate(idx.tolist()):
+        if has[k]:
+            p, d = lines[k]
+            off = co[v] - p
+            total += float(np.linalg.norm(off - (off @ d) * d))
+    return total
+
+
+def _wave(co: np.ndarray, jobs) -> float:
+    """Mean distance of the trued chains' corners from their creases."""
+    count = sum(int(job[2].sum()) for job in jobs)
+    return sum(_off_crease(co, job) for job in jobs) / count if count else 0.0
+
+
+def _place(base: Base, users: dict, free, on_chain, moving, target, strength: float, held: list):
+    """Generator: the chain corners `strength` of the way to `target`, the corners beside them following along their
+    rungs, all put on your original mesh and guarded; returns the new corners."""
+    co = base.co.copy()
+    co[moving] = base.co[moving] + strength * (target[moving] - base.co[moving])
+    push = np.zeros_like(co)
+    count = np.zeros(len(co))
+    for a, b in users:
+        for x, y in ((a, b), (b, a)):
+            if moving[x] and not on_chain[y] and free[y]:
+                push[y] += co[x] - base.co[x]
+                count[y] += 1
+    follow = count > 0
+    co[follow] = base.co[follow] + FOLLOW * push[follow] / count[follow, None]
+    changed = moving | follow
+    if changed.any():
+        co[changed] = yield from _project(base, co[changed])
+    _keep_plane(base, co)
+    return _guard(base, co, changed, held)
+
+
 def _taubin(points: np.ndarray, closed: bool, fixed: np.ndarray) -> np.ndarray:
     lam, mu, rounds = TAUBIN
     x = points.copy()
@@ -321,10 +396,7 @@ class TrueUpEdges(Trial):
         target = base.co.copy()
         on_chain = np.zeros(len(co), dtype=bool)
         held: list = []
-        trued = straight = 0
-        waves_before: list = []  # per trued chain: largest distance off its crease, of its length
-        waves_after: list = []
-        trued_jobs = []
+        trued_jobs = []  # (corners, crease line per corner, has a crease, laid straight)
         jobs = []  # (corners, closed, crease line per corner, chain length)
         for ci, (path, closed) in enumerate(chains):
             idx = np.asarray(path, dtype=np.int64)
@@ -387,58 +459,45 @@ class TrueUpEdges(Trial):
                 if (~missing & inner).any():  # a crease along part of it only
                     held.append((pts[len(pts) // 2].copy(), "no crease under it"))
                 continue
-            waves_before.append(float(np.linalg.norm(crease - pts, axis=1)[~missing].max(initial=0.0)) / length)
             fixed = fixed | missing
             # straight: one principal-axis line through every crease point
             centre = crease.mean(axis=0)
             _u, _s, vt = np.linalg.svd(crease - centre, full_matrices=False)
             axis = vt[0]
             off = crease - centre - np.outer((crease - centre) @ axis, axis)
+            is_straight = False
             if not closed and float(np.linalg.norm(off, axis=1).max()) < STRAIGHT * length:
                 new = centre + np.outer((pts - centre) @ axis, axis)
                 new[fixed] = pts[fixed]
-                new = _even(new, False)
-                straight += 1
+                new = _even_between(new, fixed, False)
+                is_straight = True
             else:
                 new = _taubin(crease, closed, fixed)
                 for k, line in enumerate(lines):
                     if line is not None and not fixed[k]:
                         new[k] = _on_line(new[k], line)
-                new = _even(new, closed)
+                new = _even_between(new, fixed, closed)
             new[fixed] = pts[fixed]
             target[idx] = new
-            trued += 1
-            trued_jobs.append((idx, lines, length, ~missing))
+            trued_jobs.append((idx, lines, ~missing, is_straight))
             if due():
                 yield 0.6 + 0.2 * (ci + 1) / max(len(jobs), 1)
         moving = on_chain & free & np.any(np.abs(target - base.co) > 0.0, axis=1)
-        co[moving] = base.co[moving] + strength * (target[moving] - base.co[moving])
-        # the corners beside a chain follow along their rungs
-        push = np.zeros_like(co)
-        count = np.zeros(len(co))
-        for (a, b), _fs in users.items():
-            for x, y in ((a, b), (b, a)):
-                if moving[x] and not on_chain[y] and free[y]:
-                    push[y] += co[x] - base.co[x]
-                    count[y] += 1
-        follow = count > 0
-        co[follow] = base.co[follow] + FOLLOW * push[follow] / count[follow, None]
-        changed = moving | follow
-        if changed.any():
-            placed = yield from _project(base, co[changed])
-            co[changed] = placed
-        _keep_plane(base, co)
-        co = _guard(base, co, changed, held)
-        for idx, lines, length, has in trued_jobs:
-            worst = 0.0
-            for k, v in enumerate(idx.tolist()):
-                if has[k]:
-                    p, d = lines[k]
-                    off = co[v] - p
-                    worst = max(worst, float(np.linalg.norm(off - (off @ d) * d)) / length)
-            waves_after.append(worst)
-        wave_before = float(np.mean(waves_before)) if waves_before else 0.0
-        wave_after = float(np.mean(waves_after)) if waves_after else 0.0
+        # a chain that does not end up nearer its creases (the source pulled it back, a guard held it) is left as it
+        # was, and the rest placed again without it, so the tool never makes an edge worse
+        early = held
+        for _round in range(2):
+            held = list(early)
+            co = yield from _place(base, users, free, on_chain, moving, target, strength, held)
+            worse = [job for job in trued_jobs if _off_crease(co, job) >= _off_crease(base.co, job) - 1e-9 * base.edge]
+            if not worse:
+                break
+            for job in worse:
+                moving[job[0]] = False
+            trued_jobs = [job for job in trued_jobs if not any(job is w for w in worse)]
+        trued, straight = len(trued_jobs), sum(1 for job in trued_jobs if job[3])
+        wave_before = _wave(base.co, trued_jobs) / base.edge
+        wave_after = _wave(co, trued_jobs) / base.edge
         kept = np.concatenate([np.stack((base.co[i[:-1]], base.co[i[1:]]), axis=1) for i, _c, _l, _n in jobs if len(i) > 1] or [np.zeros((0, 2, 3))])
         cand = Candidate(co, strength=strength, exact=True, held=held)
         cand.lines = kept
@@ -447,7 +506,7 @@ class TrueUpEdges(Trial):
             return cand
         cand.note = f"{trued} edge{'s' if trued != 1 else ''} trued, {straight} straight"
         cand.numbers["edges"] = (cand.note, 0)
-        cand.numbers["wave"] = (f"wave {100 * wave_before:.1f}% -> {100 * wave_after:.1f}%", 1 if wave_after < wave_before - 1e-4 else 0)
+        cand.numbers["wave"] = (f"off crease {100 * wave_before:.1f}% -> {100 * wave_after:.1f}% of an edge", 1 if wave_after < wave_before - 1e-4 else 0)
         return cand
 
 

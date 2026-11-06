@@ -59,7 +59,7 @@ class TrueUpEdgesTest(unittest.TestCase):
         self.assertTrue(np.allclose(np.diff(cand.co[crease, 0]), 1.0, atol=1e-6))  # evenly spaced
         self.assertTrue(np.allclose(cand.co[[crease[0], crease[-1]]], points[[crease[0], crease[-1]]]))  # ends stay
         self.assertIn("1 edge trued, 1 straight", cand.note)
-        self.assertTrue(cand.numbers["wave"][0].endswith("-> 0.0%"))
+        self.assertIn("-> 0.0%", cand.numbers["wave"][0])
         on = _fold_surface(cand.co)
         self.assertTrue(np.allclose(on, cand.co, atol=1e-9))  # every corner on the original
 
