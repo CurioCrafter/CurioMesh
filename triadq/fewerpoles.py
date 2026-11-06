@@ -27,6 +27,7 @@ Works on a `chords.ChordReducer`, so it shares its faces, locks and judge. Plain
 from __future__ import annotations
 
 import math
+from itertools import count
 
 from .chords import TRADE
 from .quadreduce import MOST_TURNED, _dot, _normal, _quality
@@ -37,7 +38,7 @@ MOST_MOVE = 0.75  # a corner may move this share of its mean edge length from wh
 WALK = 6  # spins in one pair walk
 WALK_TRIES = 40  # spins tried in all from one pole before giving up
 MOST_DEBT = 0  # how far the pole energy may rise part way through a walk
-ROUNDS = 6
+ROUNDS = 0  # 0: rounds go on until one finds nothing (each one that finds something takes pole energy away, so it ends)
 
 
 class _Edit:
@@ -317,7 +318,7 @@ class PoleCleaner:
         """Take poles away until a round finds nothing. Returns the pole energy taken away."""
 
         r = self.r
-        for _ in range(rounds):
+        for _ in range(rounds) if rounds else count():
             gained = 0
             poles = [v for v in range(len(r.users)) if r.users[v] and len(r.users[v]) != 4 and not r.border[v]]
             for depth in (1, walk):

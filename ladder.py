@@ -515,7 +515,7 @@ def part_sizes(context, pieces, bigger: bool) -> tuple[int, list[str]]:
             record["rung"] = rung
             wanted[p] = index
         elif not segments.mirrored():
-            record.update(goal="REDUCE", goal_detail=min(max(record["goal_detail"] + (-GOAL_STEP if bigger else GOAL_STEP), 0.0), 1.0))
+            record.update(goal="REDUCE", goal_detail=record["goal_detail"] + (-GOAL_STEP if bigger else GOAL_STEP))  # no end: each press is one more step
             todo.append(p)
     changed = 0
     if wanted and segments.use_tries(context, wanted):

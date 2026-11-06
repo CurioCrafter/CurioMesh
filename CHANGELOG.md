@@ -52,6 +52,32 @@
   inner corners along its own edges until every piece is convex, and each piece becomes one clean grid, as by hand.
   An L-shaped plate is now 14 quads at the fewest (3 per side) instead of 28, a U-shaped one 22 instead of 40.
 
+### Run tools again
+- **Tidy Up is no longer one pass.** **Again** (next to the slider) tidies the result on screen once more, starting from
+  where the last pass left it, at the same strength; drag the slider to pick this pass's strength. **Keep Tidying**
+  runs pass after pass, showing each with the meter, while a pass still gives fewer poles or more Tidiness or Loop
+  Quality without making any of them worse, and stops by itself when one gains nothing (**Stop** ends it any time).
+  **Undo Pass** steps back one pass at a time. The meter counts from the result before the first pass, and so does
+  Most Detail Loss: all passes together stay within it. Changing a Tidy Up switch redoes only the pass on screen.
+  Measured on the marble bust (Keep Detail 6%, 2,731 faces, Tidiness 39, Loop Quality 15, 1,100 poles, view 6.4%):
+  Tidy Up 1 gave 67 / 31 / 499 poles / 7.9%; Tidy Again three times 69 / 33 / 462 / 8.2%; Keep Tidying two more
+  passes, 70 / 33 / 458 / 8.2%, then stopped by itself. Each later pass took 5 to 8 s.
+- **Fewer Poles keeps going while it pays**: its pole walks and grid redraws run round after round until a round takes
+  nothing away (they stopped after 6 and 2 rounds), and its clean-and-settle cycles go on past the first 3 while each
+  still takes poles away.
+- **Redo Rough Spots** runs more rounds while each one still cuts the bad faces (it stopped after 2).
+- **Time Limits** (Normal, Longer, No Limit) under Cleanup sets how long Start may spend on repairs, Redraw Messy Quads
+  and Redo Rough Spots. When a step stops at its limit, the result line says so and that Longer or No Limit keeps
+  going. No Limit also runs Redraw Messy Quads on models of more than 40 loose pieces.
+- **Bigger / Smaller Quads on a part have no end**: each press is one more step (they stopped at about 0.4x and 2.5x of
+  the part's first size). The Redo Detail slider can be typed past its ends.
+- **Every try of a part is kept** (the oldest was thrown away after 6).
+- **Classic Guided** no longer refuses more than 60,000 quads: Update makes them anyway.
+- **Hard maxes became slider ends you can type past**: Most Detail Loss (20%, now up to 100%), point and Detail
+  Marker Strength, Loops, Surface Fit Passes, Iterations, Texture Sets, Primitive Sides, Holding Edges distance,
+  Attempts, Grow and Suggestions. Hard Edge Angle goes to 180 degrees in both places (it was 150 in one, 170 in the
+  other).
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

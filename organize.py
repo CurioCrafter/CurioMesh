@@ -10,6 +10,11 @@ Even Sizes, Square Corners, Selection Only) pick which of those steps run and wh
 Finder) and gets its own preview mesh, so dragging only swaps meshes. With a mirrored result one half is organized
 and mirrored again, so the seam stays exact. Most Detail Loss holds the slider back at the strongest one within it.
 
+Nothing stops at one pass. Tidy Again takes what is on screen as the new start and works out the strengths again from
+there; Keep Tidying does that pass after pass, showing each, while a pass still makes the mesh tidier (`O.gained`) within
+Most Detail Loss (counted from the result before the first pass), and stops by itself when one gains nothing. Each pass
+is one step back for Undo Pass.
+
 Loop Flow draws the edge loops of the result in a colour each, and its poles as dots.
 """
 
@@ -44,6 +49,10 @@ org = {
     "shown": 0.0,
     "flow": None,  # (id of the result, line batch data, pole points)
     "seg_piece": None,  # the segment of each face at strength 0 (the parts table's colours)
+    "passes": [],  # earlier passes, oldest first: {"origin", "report", "seg_piece", "levels", "shown"}
+    "keep": False,  # Keep Tidying is running
+    "note": "",  # why Keep Tidying stopped
+    "spent": [],  # preview meshes of earlier passes, removed once nothing shows them
 }
 
 
@@ -57,18 +66,45 @@ def active() -> bool:
     return org["base"] is not None and _g().state["auto_base"] is org["base"]
 
 
-def cancel() -> None:
-    """Forget the strengths (a new result, another mesh, or the add-on going away)."""
+def _drop_work() -> None:
+    """Stop the worker and let go of this pass's preview meshes (the one on screen stays until something replaces it)."""
     if org["box"] is not None:
         org["box"]["stop"] = True
-    for mesh in org["meshes"].values():
+    left = []
+    for mesh in list(org["meshes"].values()) + org["spent"]:
         try:
+            if mesh is None:
+                continue
             mesh.use_fake_user = False
             if mesh.users == 0:
                 bpy.data.meshes.remove(mesh)
+            else:
+                left.append(mesh)
         except ReferenceError:
             pass
-    org.update(base=None, origin=None, report=None, levels={}, box=None, meshes={}, shown=0.0, flow=None, seg_piece=None)
+    org.update(box=None, meshes={}, spent=left)
+
+
+def cancel() -> None:
+    """Forget the strengths and every pass (a new result, another mesh, or the add-on going away)."""
+    _drop_work()
+    org.update(base=None, origin=None, report=None, levels={}, shown=0.0, flow=None, seg_piece=None, passes=[], keep=False, note="")
+
+
+def _first() -> dict | None:
+    """Strength 0 of the first pass: the result before any Tidy Up. The meter and Most Detail Loss count from it."""
+    return org["passes"][0]["levels"].get(0.0) if org["passes"] else org["levels"].get(0.0)
+
+
+def _first_view():
+    first = _first()
+    return None if first is None else first.get("view")
+
+
+def ready() -> bool:
+    """Every strength of this pass is worked out (or its work ended)."""
+    box = org["box"]
+    return active() and (box is None or box["error"] is not None or box["stop"] or len(org["levels"]) > len(STRENGTHS))
 
 
 def _nearest(tree, points: np.ndarray) -> np.ndarray:
@@ -85,14 +121,22 @@ def _drain(work):
             return done.value
 
 
-def start(context) -> bool:
-    """Start working out the strengths of the result on screen. False when it has none (no search, Blockout, Reduce To)."""
+def start(context, again: bool = False) -> bool:
+    """Start working out the strengths of the result on screen. False when it has none (no search, Blockout, Reduce To).
+    `again`: a new pass that starts from what is on screen now; the pass before it is kept for Undo Pass."""
     guided = _g()
     base = guided.state["auto_base"]
     job = base and base["job"]
     if not isinstance(job, autoretopo.AutoJob) or job.output_kind == "TRIS":
         return False
-    cancel()
+    if again and active():
+        shown = org["shown"]
+        # ponytail: only strength 0 and the picked strength are kept per pass, so Undo Pass shows the picked one
+        org["passes"].append({"origin": org["origin"], "report": org["report"], "seg_piece": org["seg_piece"], "shown": shown, "levels": {s: r for s, r in org["levels"].items() if s in (0.0, shown)}})
+        _drop_work()
+        org["levels"], org["shown"] = {}, 0.0
+    else:
+        cancel()
     out = base["out"]
     tree = turbo.face_tree(job.co, job.faces) or BVHTree.FromPolygons(job.co.tolist(), [list(f) for f in job.faces], all_triangles=False, epsilon=0.0)
     box = {"stop": False, "levels": {}, "stage": "Getting ready", "error": None}
@@ -130,9 +174,11 @@ def on_options(self, context) -> None:
     """A switch changed: work the strengths out again (the slider keeps its place)."""
     if not active() and self.organize <= 0.0:
         return
+    passes = org["passes"] if active() else []
     if active():  # back to the result as it was, so the new strengths start from it
         org["base"]["out"], org["base"]["report"] = org["origin"], dict(org["report"])
     if start(context):
+        org["passes"] = passes  # earlier passes stay: only this one is worked out again
         org["shown"] = -1.0  # whatever is on screen is stale: the next `show` swaps the preview
         show(context, self)
 
@@ -290,8 +336,69 @@ def _tick():
     gs = getattr(context.scene, "curiomesh_guided", None)
     if gs is not None:
         show(context, gs)
-    done = box["error"] is not None or len(org["levels"]) > len(STRENGTHS)
+    done = box["error"] is not None or box["stop"] or len(org["levels"]) > len(STRENGTHS)
+    if done and org["keep"]:
+        if box["error"] is None and not box["stop"] and gs is not None and _keep_next(context, gs):
+            return GAP
+        org["keep"] = False
     return None if done else GAP
+
+
+def _keep_next(context, gs) -> bool:
+    """Keep Tidying, once this pass is ready: show its strongest strength that made the mesh tidier within Most Detail
+    Loss and start the next pass from it. False when none did: the pass is dropped and the last good result stays."""
+    zero = org["levels"][0.0]
+    better = [s for s, row in org["levels"].items() if s > 0.0 and O.gained(zero, row) and O.pick(org["levels"], s, cap(gs), _first_view()) == s]
+    if not better:
+        count = len(org["passes"])
+        if not undo_pass(context, gs):  # the first pass gained nothing: the result as found stays
+            gs["organize"] = 0.0
+            show(context, gs)
+        org["note"] = f"Keep Tidying stopped after {count} pass{'es' if count != 1 else ''}: another pass made it no tidier" + (" within Most Detail Loss" if cap(gs) is not None else "")
+        return False
+    gs["organize"] = max(better)
+    show(context, gs)
+    start(context, again=True)
+    gs["organize"] = 1.0  # the next pass shows each strength as it comes in
+    return True
+
+
+def undo_pass(context, gs) -> bool:
+    """Back to the pass before, with the strength it had picked on screen. False when this is the first pass."""
+    if not active() or not org["passes"]:
+        return False
+    _drop_work()
+    back = org["passes"].pop()
+    org.update(origin=back["origin"], report=back["report"], seg_piece=back["seg_piece"], levels=back["levels"], shown=-1.0, keep=False, note="")
+    gs["organize"] = back["shown"]
+    show(context, gs)
+    return True
+
+
+def keep_tidying(context, gs) -> bool:
+    """Start Keep Tidying: from the first pass if there is none yet, else from the pass on screen once it is ready."""
+    org["note"] = ""
+    if not active():
+        if not start(context):
+            return False
+        gs["organize"] = 1.0
+    org["keep"] = True
+    if ready() and not _keep_next(context, gs):
+        org["keep"] = False
+        return True
+    if not bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.register(_tick, first_interval=GAP)
+    return True
+
+
+def tidy_again(context, gs) -> bool:
+    """One more pass from what is on screen, at the same slider strength."""
+    wanted = gs.organize or 1.0
+    org["note"] = ""
+    if not start(context, again=True):
+        return False
+    gs["organize"] = wanted
+    return True
 
 
 def cap(gs):
@@ -302,7 +409,7 @@ def show(context, gs) -> bool:
     """Put the strength the slider asks for on screen (the nearest ready one at or below it, within the cap)."""
     if not active():
         return False
-    strength = O.pick(org["levels"], gs.organize, cap(gs)) if 0.0 in org["levels"] else 0.0
+    strength = O.pick(org["levels"], gs.organize, cap(gs), _first_view()) if 0.0 in org["levels"] else 0.0
     if strength == org["shown"]:
         return False
     guided = _g()
@@ -345,18 +452,34 @@ def status() -> str:
     if box["error"]:
         return box["error"]
     left = len(STRENGTHS) + 1 - len(org["levels"])
-    return f"Working out Organize: {len(STRENGTHS) - min(left, len(STRENGTHS))} of {len(STRENGTHS)} ready ({box['stage']})" if left > 0 else ""
+    if left <= 0 or box["stop"]:
+        return ""
+    what = f"Keep Tidying, pass {len(org['passes']) + 1}" if org["keep"] else f"Working out Tidy Up pass {len(org['passes']) + 1}" if org["passes"] else "Working out Tidy Up"
+    return f"{what}: {len(STRENGTHS) - min(left, len(STRENGTHS))} of {len(STRENGTHS)} ready ({box['stage']})"
 
 
 def meter_text(gs) -> str:
-    zero, row = org["levels"].get(0.0), org["levels"].get(org["shown"])
+    zero, row = _first(), org["levels"].get(org["shown"])
     if zero is None or row is None:
-        return ""
+        return org["note"]
     text = O.meter(zero, row)
+    if org["passes"]:
+        text = f"Pass {len(org['passes']) + 1}: {text}"
     held = O.pick(org["levels"], gs.organize, None)
     if cap(gs) is not None and held > org["shown"]:
         text += f". Held at {org['shown']:g}: more would change the view by over {cap(gs):g}%"
-    return text
+    return text + (f". {org['note']}" if org["note"] else "")
+
+
+def draw_again(layout, gs) -> None:
+    """Again, Keep Tidying (or Stop) and Undo Pass, in one row under the slider."""
+    row = layout.row(align=True)
+    row.operator("curiomesh.tidy_again", text="Again", icon="FILE_REFRESH")
+    if org["keep"] and active():
+        row.operator("curiomesh.tidy_stop", text="Stop", icon="CANCEL")
+    else:
+        row.operator("curiomesh.tidy_keep", text="Keep Tidying", icon="PLAY")
+    row.operator("curiomesh.tidy_back", text="", icon="LOOP_BACK")
 
 
 def draw(layout, gs) -> None:
@@ -364,6 +487,7 @@ def draw(layout, gs) -> None:
     box = layout.box()
     col = box.column(align=True)
     col.prop(gs, "organize", slider=True)
+    draw_again(col, gs)
     row = col.row(align=True)
     row.prop(gs, "organize_cap_use", toggle=True)
     sub = row.row(align=True)
@@ -439,10 +563,84 @@ def _draw_flow() -> None:
         overlay.LAST_DRAW_ERROR = repr(exc)
 
 
+# --------------------------------------------------------------------------- Again, Keep Tidying, Stop, Undo Pass
+
+
+def _settings(context):
+    return getattr(context.scene, "curiomesh_guided", None)
+
+
+class CURIOMESH_OT_tidy_again(bpy.types.Operator):
+    bl_idname = "curiomesh.tidy_again"
+    bl_label = "Tidy Again"
+    bl_description = "Tidies the result on screen once more, starting from where the last pass left it. Drag the slider to pick how strong this pass is"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return active() and ready() and org["shown"] > 0.0 and not org["keep"]
+
+    def execute(self, context):
+        return {"FINISHED"} if tidy_again(context, _settings(context)) else {"CANCELLED"}
+
+
+class CURIOMESH_OT_tidy_keep(bpy.types.Operator):
+    bl_idname = "curiomesh.tidy_keep"
+    bl_label = "Keep Tidying"
+    bl_description = "Tidies pass after pass, showing each, while a pass still makes the mesh tidier within Most Detail Loss. It stops by itself when a pass gains nothing, and Stop ends it any time"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return _settings(context) is not None and not org["keep"] and (active() or _g().state.get("auto_base") is not None)
+
+    def execute(self, context):
+        if not keep_tidying(context, _settings(context)):
+            self.report({"WARNING"}, "Tidy Up needs a result from Start")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_tidy_stop(bpy.types.Operator):
+    bl_idname = "curiomesh.tidy_stop"
+    bl_label = "Stop Tidying"
+    bl_description = "Stops Keep Tidying. The passes done so far stay, and Undo Pass steps back through them"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return org["keep"]
+
+    def execute(self, context):
+        org["keep"] = False
+        if org["box"] is not None and not ready():
+            org["box"]["stop"] = True
+        overlay.tag_redraw()
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_tidy_back(bpy.types.Operator):
+    bl_idname = "curiomesh.tidy_back"
+    bl_label = "Undo Pass"
+    bl_description = "Goes back to the result before the last Tidy Again or Keep Tidying pass. Press it again to step further back"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return active() and bool(org["passes"])
+
+    def execute(self, context):
+        org["keep"] = False
+        return {"FINISHED"} if undo_pass(context, _settings(context)) else {"CANCELLED"}
+
+
+CLASSES = (CURIOMESH_OT_tidy_again, CURIOMESH_OT_tidy_keep, CURIOMESH_OT_tidy_stop, CURIOMESH_OT_tidy_back)
 _handles: list = []
 
 
 def register() -> None:
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
     _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_flow, (), "WINDOW", "POST_VIEW"))
 
 
@@ -455,4 +653,9 @@ def unregister() -> None:
     cancel()
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
+    for cls in reversed(CLASSES):
+        try:
+            bpy.utils.unregister_class(cls)
+        except RuntimeError:
+            pass
 

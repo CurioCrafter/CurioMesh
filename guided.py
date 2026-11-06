@@ -177,7 +177,7 @@ class CURIOMESH_PG_guided_point(bpy.types.PropertyGroup):
     normal: bpy.props.FloatVectorProperty(name="Normal", description="Surface direction at the point", size=3, default=(0.0, 0.0, 1.0))
     kind: bpy.props.EnumProperty(name="Type", description="What this point asks for", items=KIND_ITEMS, default="DETAIL", update=_on_point_edit)
     radius: bpy.props.FloatProperty(name="Radius", description="How far the point reaches (object-space units)", default=0.1, min=1e-4, soft_max=10.0, subtype="DISTANCE", update=_on_point_edit)
-    strength: bpy.props.FloatProperty(name="Strength", description="How strongly the point changes the quad size: 1 = about three times smaller (or bigger for Calm) at the centre", default=1.0, min=0.1, max=4.0, update=_on_point_edit)
+    strength: bpy.props.FloatProperty(name="Strength", description="How strongly the point changes the quad size: 1 = about three times smaller (or bigger for Calm) at the centre", default=1.0, min=0.1, soft_max=4.0, max=100.0, update=_on_point_edit)
     fill: bpy.props.EnumProperty(name="Fill Style", description="Pattern of the new quads in this area (Work Areas only)", items=region.STRATEGY_ITEMS, default="FLOW", update=_on_point_edit)
     auto: bpy.props.BoolProperty(name="Suggested", description="Placed by Auto-suggest (replaced when you suggest again)", default=False)
 
@@ -341,7 +341,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     base_faces: bpy.props.IntProperty(name="Base Quads", description="Roughly how many quads the whole mesh would get with no points. The points make some areas denser or coarser than this", default=3000, min=50, soft_max=60000)
     new_kind: bpy.props.EnumProperty(name="New Point Type", description="Type of the next point you place (keys 1-4 while placing)", items=KIND_ITEMS, default="DETAIL", update=_redraw_update)
     new_radius: bpy.props.FloatProperty(name="New Radius", description="Reach of the next point (scroll while placing). 0 picks a size from the mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
-    new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, max=4.0)
+    new_strength: bpy.props.FloatProperty(name="New Strength", description="Strength of the next point (Shift + scroll while placing)", default=1.0, min=0.1, soft_max=4.0, max=100.0)
     auto_update: bpy.props.BoolProperty(name="Auto-Update", description="Rebuild the preview shortly after you change a point or a setting", default=True)
     auto_profile: bpy.props.EnumProperty(name="Use", description="What you will do with the result. Each choice sets the Detail, layout and kind of faces for you", items=profiles.PROFILE_ITEMS, default="GAME", update=_profile_update)
     multires_on: bpy.props.BoolProperty(name="Multires Detail", description="Make a clean low-poly mesh and, on Apply, add a Multires modifier whose levels bring the detail back. Animate or export level 0; your mesh is only read", default=False, update=_multires_update)
@@ -372,7 +372,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_wire: bpy.props.BoolProperty(name="Wireframe", description="Shows the edges of the result", default=True, update=segments.on_view)
     seg_compare: bpy.props.EnumProperty(name="Original", description="Where your own mesh is shown: next to the result, or under it as a white wireframe", items=[("BESIDE", "Beside", "The result sits next to your mesh"), ("OVER", "Over", "The result sits on your mesh, which is drawn over it as a white wireframe")], default="BESIDE", update=segments.on_view)
     seg_goal: bpy.props.EnumProperty(name="Use", description="What the selected parts are for when you press Redo", items=segments.segment_goals.GOAL_ITEMS, default="ANIMATION")
-    seg_goal_detail: bpy.props.FloatProperty(name="Detail", description="How many faces the selected parts get when you press Redo. The middle keeps the quad size they have now", default=0.5, min=0.0, max=1.0, subtype="FACTOR")
+    seg_goal_detail: bpy.props.FloatProperty(name="Detail", description="How many faces the selected parts get when you press Redo. The middle keeps the quad size they have now", default=0.5, min=-4.0, max=5.0, soft_min=0.0, soft_max=1.0, subtype="FACTOR")
     seg_method: bpy.props.EnumProperty(name="Method", description="How the selected parts' quads are made when their Use is Reduce or Low Poly", items=segments.METHOD_ITEMS, default="AUTO")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
@@ -386,24 +386,24 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     guide_index: bpy.props.IntProperty(default=0)
     region_use: bpy.props.BoolProperty(name="Selected Faces Only", description="Redoes only the faces selected in Edit Mode and leaves the rest exactly as it is", default=False, update=_redraw_update)
     loop_use: bpy.props.BoolProperty(name="Edge Loops", description="Lines you draw (round an eye or the mouth) become real edge loops with even rows of quads beside them", default=False, update=_redraw_update)
-    loop_count: bpy.props.IntProperty(name="Loops", description="How many parallel loops each drawn line makes: the line itself plus one more on each side is 3", default=3, min=3, max=9, update=_redraw_update)
+    loop_count: bpy.props.IntProperty(name="Loops", description="How many parallel loops each drawn line makes: the line itself plus one more on each side is 3", default=3, min=3, soft_max=9, max=99, update=_redraw_update)
     bend_use: bpy.props.BoolProperty(name="Deformation Lines", description="Lines drawn across a joint (elbow, knee, mouth corner) become evenly spaced loops, so the mesh bends without pinching", default=False, update=_redraw_update)
-    bend_loops: bpy.props.IntProperty(name="Loops", description="How many parallel loops each joint line makes. 3 is the least that bends well; use more across a big joint", default=3, min=3, max=9, update=_redraw_update)
+    bend_loops: bpy.props.IntProperty(name="Loops", description="How many parallel loops each joint line makes. 3 is the least that bends well; use more across a big joint", default=3, min=3, soft_max=9, max=99, update=_redraw_update)
     loop_gap: bpy.props.FloatProperty(name="Loop Gap", description="The distance between two loops of a drawn line, in object units. 0 picks about one quad", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE", update=_redraw_update)
     bend_crease: bpy.props.BoolProperty(name="Crease", description="On Apply, marks the middle loop of each joint line with an edge crease, for Subdivision Surface", default=False)
     bend_sharp: bpy.props.BoolProperty(name="Sharp", description="On Apply, marks the middle loop of each joint line as sharp edges", default=False)
     density_use: bpy.props.BoolProperty(name="Detail Markers", description="Keeps more faces where you marked More Detail and fewer where you marked Less Detail. Paint the marks or place marker balls", default=False, update=_redraw_update)
     density_group: bpy.props.StringProperty(name="Group", description="The vertex group of the mesh that holds the More Detail paint", default="CM_Density")
     less_group: bpy.props.StringProperty(name="Less Group", description="The vertex group of the mesh that holds the Less Detail paint", default="CM_LessDetail")
-    density_strength: bpy.props.FloatProperty(name="Strength", description="How strongly the marks move faces. 1 keeps about four times as many faces under More Detail as under Less Detail", default=1.0, min=0.25, max=4.0)
+    density_strength: bpy.props.FloatProperty(name="Strength", description="How strongly the marks move faces. 1 keeps about four times as many faces under More Detail as under Less Detail", default=1.0, min=0.25, soft_max=4.0, max=100.0)
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redoes the result inside the shapes, live; everything outside stays as it is. Move or resize a shape and the quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
     quad_size: bpy.props.FloatProperty(name="Quad Size", description="Left: smaller quads that keep more detail. Right: bigger quads and fewer faces. Each stop is a full result, worked out in the background", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
     quad_order: bpy.props.FloatProperty(name="Rows", description="Left: fewest faces, quads follow the shape. Right: even rows of square quads, with more faces and a little softer detail", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
-    organize: bpy.props.FloatProperty(name="Tidy Up", description="Lays out about the same faces more tidily: fewer poles, straighter rows. Costs a little detail; the line below shows how much", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
-    organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Stops Tidy Up before the look changes by more than the amount next to it", default=False, update=organize.on_cap)
-    organize_cap: bpy.props.FloatProperty(name="Most Detail Loss", description="How much more of the look Tidy Up may change, in percent, on top of the result as it was", default=1.0, min=0.1, max=20.0, precision=1, subtype="NONE", update=organize.on_cap)
+    organize: bpy.props.FloatProperty(name="Tidy Up", description="How strong one tidying pass is: fewer poles and straighter rows, for a little detail. Again and Keep Tidying run more passes on top of this one", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
+    organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Stops Tidy Up, over all its passes, before the look changes by more than the amount next to it. Off: passes go on while they still make the mesh tidier", default=False, update=organize.on_cap)
+    organize_cap: bpy.props.FloatProperty(name="Most Detail Loss", description="How much more of the look Tidy Up may change, in percent, on top of the result before the first pass. You can type more than the slider shows", default=1.0, min=0.1, soft_max=20.0, max=100.0, precision=1, subtype="NONE", update=organize.on_cap)
     tidy_poles: bpy.props.BoolProperty(name="Fewer Poles", description="Walks pairs of poles together until they cancel, and redraws messy patches as plain grids. Takes away a few faces where pairs merge", default=True, update=organize.on_options)
     tidy_rows: bpy.props.BoolProperty(name="Straighter Rows", description="Straightens each edge loop along its own bend and stacks neighbouring loops evenly. Wiggles go, steady curves stay", default=True, update=organize.on_options)
     tidy_sizes: bpy.props.BoolProperty(name="Even Sizes", description="Moves each corner toward the middle of its neighbours, on your mesh. Quads of similar size sit next to each other", default=True, update=organize.on_options)
@@ -417,13 +417,19 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     hs_hold_unit: hard_surface.prop("hs_hold_unit")
     hs_hold_percent: hard_surface.prop("hs_hold_percent")
     hs_hold_mm: hard_surface.prop("hs_hold_mm")
+    time_limits: bpy.props.EnumProperty(
+        name="Time Limits",
+        description="How long Start may spend on repairs, redrawing messy quads and rough spots before it moves on. Longer and No Limit can take much longer, but keep improving the mesh",
+        items=(("NORMAL", "Normal", "The usual time for each step"), ("LONGER", "Longer", "Four times the usual time for each step"), ("NONE", "No Limit", "Each step runs until it stops finding anything to fix. Same model and settings give the same result every time")),
+        default="NORMAL",
+    )
     organize_flow: bpy.props.BoolProperty(name="Loop Flow", description="Draws each edge loop of the result in its own colour, and its poles (points where 3 or 5+ edges meet) as dots", default=False, update=_redraw_update)
     flow_live: bpy.props.BoolProperty(name="Live", description="Flow Editor: redo the quads around each stroke as soon as you draw, move or erase it. Off: strokes are only kept for the next Start", default=True)
     flow_size: bpy.props.FloatProperty(name="Shape Size", description="Flow Editor: how wide a clicked eye ring, mouth ring or nose-to-mouth shape is. 0 picks a size from your mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
     flow_pair: bpy.props.BoolProperty(name="Both Sides", description="Flow Editor: a clicked eye ring also goes on the other side, mirrored across the middle of your mesh (always on when the result is mirrored)", default=True)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads; the middle keeps the quad size; right makes smaller quads with more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Classic Guided: draws each point's reach and the outline of the area it covers", default=True, update=_redraw_update)
-    blockout_sides: bpy.props.IntProperty(name="Primitive Sides", description="How many sides each cylinder and ball has (small parts get half). More sides look rounder and cost faces", default=12, min=4, max=32, step=2)
+    blockout_sides: bpy.props.IntProperty(name="Primitive Sides", description="How many sides each cylinder and ball has (small parts get half). More sides look rounder and cost faces", default=12, min=4, soft_max=32, max=512, step=2)
     blockout_separate: bpy.props.BoolProperty(name="Each Part Its Own Object", description="On Apply, writes one object per loose part of your mesh instead of one merged mesh", default=False)
     auto_instances: bpy.props.BoolProperty(name="Keep Copies as Instances", description="Repeated parts become linked copies that cost no extra geometry; the copies share UVs. Off makes one merged mesh", default=False)
     apply_mode: bpy.props.EnumProperty(name="Result", description="Where Apply writes the result: a new object, or into your own object (Undo brings yours back)", items=APPLY_ITEMS, default="NEW")
@@ -440,15 +446,15 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     lod2_percent: bpy.props.FloatProperty(name="LOD2", description="Faces of the lightest LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[2], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
     bake_detail: bpy.props.EnumProperty(name="Bake Detail", description="On Apply, bakes your mesh's fine detail into textures on the result. Can take minutes", items=BAKE_ITEMS, default="OFF")
     bake_size: bpy.props.EnumProperty(name="Bake Size", description="Width and height of the baked textures. Bigger is sharper and slower", items=BAKE_SIZES, default="2048")
-    bake_sets: bpy.props.IntProperty(name="Texture Sets", description="Normal + Color: bakes onto this many sets of maps, each its own material, so a big model keeps detail", default=1, min=1, max=16)
-    fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Classic Guided: how many passes settle the new quads onto your surface. More follows it closer, slower", default=2, min=0, max=30)
+    bake_sets: bpy.props.IntProperty(name="Texture Sets", description="Normal + Color: bakes onto this many sets of maps, each its own material, so a big model keeps detail", default=1, min=1, soft_max=16, max=256)
+    fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Classic Guided: how many passes settle the new quads onto your surface. More follows it closer, slower", default=2, min=0, soft_max=30, max=1000)
     ui_tweak_open: bpy.props.BoolProperty(name="Tweak", description="Sliders that change how the quads are laid out", default=False)
     tweak_rows: bpy.props.FloatProperty(name="Rows on Round Areas", description="How readily round, smooth areas become rows of quads that follow their curve. Right finds more of them and adds faces. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     tweak_flat: bpy.props.FloatProperty(name="Flat Area Size", description="How big quads inside flat areas may get. Left makes them smaller and more even; right fewer and longer. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     tweak_poles: bpy.props.BoolProperty(name="Avoid Poles", description="Turns edges so rows of quads keep going past poles (points where 3 or 5+ edges meet). Off: about a fifth more poles, a touch more detail", default=True, update=_redraw_update)
-    feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Classic Guided: edges sharper than this angle count as hard edges and are kept", default=40.0, min=5.0, max=170.0)
+    feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Classic Guided: edges sharper than this angle count as hard edges and are kept", default=40.0, min=5.0, max=180.0)
     pure_quads: bpy.props.BoolProperty(name="All Quads", description="Classic Guided, Whole Mesh: makes every face a quad. Off is faster on big meshes and leaves a few triangles", default=True)
-    suggest_count: bpy.props.IntProperty(name="Suggestions", description="Classic Guided: how many points Auto-suggest places", default=8, min=1, max=40)
+    suggest_count: bpy.props.IntProperty(name="Suggestions", description="Classic Guided: how many points Auto-suggest places", default=8, min=1, soft_max=40, max=1000)
 
 
 # --------------------------------------------------------------------------- density maths
@@ -1802,7 +1808,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     codes = src["mat"] if charts is None else charts[0]
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
-    chords = gs.auto_chords and not baked and loose_pieces(src) <= CHORDS_MOST_PIECES
+    chords = gs.auto_chords and not baked and (gs.time_limits == "NONE" or loose_pieces(src) <= CHORDS_MOST_PIECES)
     key = (src["sig"], "AUTO", settings.name, round(gs.auto_detail, 3), target, gs.sym_axis, gs.sym_force, gs.sym_side, gs.sym_offset_use and round(gs.sym_offset, 6), tuple(tweaks(gs).values()), hash(b"".join(line.tobytes() for line in lines)), None if paint is None else (hash(paint.tobytes()), gs.density_strength), charts is None, gs.auto_tidy, gs.auto_redo_rough, chords, gs.auto_method, gs.auto_output, gs.auto_style, gs.auto_rough, gs.auto_drop_hidden, baked, gs.region_use and state["region"] is not None and hash(state["region"].tobytes()), hash(b"".join(line.tobytes() for found in drawn.values() for line in found)), gs.loop_count, gs.bend_loops, gs.loop_gap, tuple(hard_surface.job_flags(gs).values()))
     state["curve_sig"], state["curve_at"] = _curve_sig(gs), 0.0
     if state["work"] is not None and state["work"]["key"] == key:
@@ -1856,11 +1862,12 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
     saved = None if quiet else hardware.checkpoint_dir(co, len(faces))
     resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
     turbo.set_gpu(gs.auto_gpu)
+    autoretopo.set_time_limits(gs.time_limits)
     if not turbo.limit_threads(settings.threads) and settings.threads:
         note = (note + " | " if note else "") + "Turbo's thread limit applies after Blender restarts"
     job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, redo_rough=gs.auto_redo_rough, tweak=tweaks(gs), hard=hard_surface.job_flags(gs))
     if gs.auto_chords and not chords and not baked:
-        job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
+        job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it can take very long. Time Limits: No Limit runs it anyway"
     if resume:
         job.note = (job.note + " | " if job.note else "") + f"{resume} finished parts from an earlier run will be reused"
     return job
@@ -2103,8 +2110,8 @@ def run_update(context, force: bool = False) -> bool:
                 notes = warns[0] if warns else ""
         if res is None:
             qe = float(np.sum(src["tri_area"] / (L0 * multiplier(src["tri_cent"], pts)) ** 2))
-            if qe > HARD_QUAD_CAP:
-                state["message"] = f"Would make {int(qe):,} quads: lower Base Quads or the Detail strength"
+            if qe > HARD_QUAD_CAP and not force:
+                state["message"] = f"Would make {int(qe):,} quads: press Update to make them anyway (it can take a while)"
                 return False
             if not force and (qe > LIVE_QUAD_CAP or len(src["faces"]) > LIVE_SOURCE_FACES):
                 state["message"] = f"About {int(qe):,} quads: press Update"

@@ -553,7 +553,8 @@ def draw_adjust(layout, gs) -> None:
     col = layout.column(align=True)
     col.label(text="Tidy Up", **icons.kw("tidy", "MESH_GRID"))
     col.prop(gs, "organize", text="", slider=True)
-    _ends(col, "as found", "tidiest")
+    _ends(col, "as found", "full pass")
+    organize.draw_again(col, gs)
     grid = col.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
     for prop in ("tidy_poles", "tidy_rows", "tidy_sizes", "tidy_square"):
         grid.prop(gs, prop, toggle=True)
@@ -890,6 +891,7 @@ class CURIOMESH_PT_pro_engine(_Pro, bpy.types.Panel):
         col.prop(gs, "auto_redo_rough", toggle=True, icon="MOD_SMOOTH")
         col.prop(gs, "auto_chords", toggle=True, icon="MOD_REMESH")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
+        col.prop(gs, "time_limits", text="Time")
         col.label(text="What is kept")
         col.prop(gs, "keep_uvs", toggle=True, icon="UV")
         col.prop(gs, "auto_instances", toggle=True, icon="LINKED")

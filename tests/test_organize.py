@@ -103,6 +103,23 @@ class OrganizeTest(unittest.TestCase):
         self.assertEqual(text, "Tidiness 38 -> 71, view changed 6.2% -> 6.9%, poles 412 -> 240")
         self.assertTrue(O.meter({"tidy": 1, "poles": 2, "faces": 1000}, {"tidy": 2, "poles": 1, "faces": 950}).endswith("faces 1,000 -> 950"))
 
+    def test_repeated_passes_count_from_the_first(self):
+        # Tidy Again: this pass started at view 6, the result before any pass was at 5; a cap of 1.5 holds at 0.25.
+        levels = {0.0: {"view": 6.0}, 0.25: {"view": 6.4}, 0.5: {"view": 6.8}}
+        self.assertEqual(O.pick(levels, 1.0, cap=1.5, base=5.0), 0.25)
+        self.assertEqual(O.pick(levels, 1.0, cap=1.5), 0.5)
+        start = {"tidy": 50, "poles": 100, "loops": {"quality": 40}}
+        self.assertTrue(O.gained(start, {"tidy": 50, "poles": 99, "loops": {"quality": 40}}))
+        self.assertTrue(O.gained(start, {"tidy": 51, "poles": 100, "loops": {"quality": 40.2}}))
+        self.assertFalse(O.gained(start, {"tidy": 50.2, "poles": 100, "loops": {"quality": 40.3}}))  # too little
+        self.assertFalse(O.gained(start, {"tidy": 55, "poles": 101, "loops": {"quality": 45}}))  # a pole more
+
+    def test_fewer_poles_keeps_going_while_it_pays(self):
+        co, faces = ball(6, jitter=0.15)
+        keys = [0] * len(faces)
+        new_co, new_faces, _keys, _held = O.fewer_poles(co, faces, keys, project=onto_ball)
+        self.assertLessEqual(O.poles(new_co, new_faces), O.poles(co, faces))
+
 
 if __name__ == "__main__":
     unittest.main()

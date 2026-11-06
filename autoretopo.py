@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import atexit
 import dataclasses
-from itertools import chain
+from itertools import chain, count as counting
 import math
 import os
 import shutil
@@ -141,7 +141,7 @@ UNTANGLE_SECONDS = 60.0  # safety net only: turning folded faces back ends after
 REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is selected on Apply (the crane spent 215 s for 71 spots)
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
 REDO_SECONDS = 60.0  # Redo Rough Spots: time per run; the spots not reached stay as they are
-REDO_ROUNDS = 2  # the second round goes back to spots still rough, in a region one ring wider
+REDO_ROUNDS = 2  # rounds that always run; after them a round runs only while the round before cut the bad faces (each one ring wider)
 REDO_SPOTS = 200  # spots looked at per round, worst first
 REDO_RINGS = 2  # faces round a spot taken into its region, in rings of neighbours
 REDO_MOST_FACES = 600  # a region never gets bigger than this
@@ -150,6 +150,23 @@ if os.environ.get("CURIOMESH_NO_TIME_LIMITS", "").strip().lower() in {"1", "true
     # The limits above end work by the clock, so a slower or busier computer stops at another point and the result differs a little.
     # Set this to run to the end instead: the same model and settings then give the same result every time.
     FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = REDO_SECONDS = float("inf")
+TIME_NAMES = ("FIELD_SECONDS", "CHORDS_SECONDS", "UNTANGLE_SECONDS", "REPAIR_SECONDS", "REDO_SECONDS")
+TIME_BASE = {name: globals()[name] for name in TIME_NAMES}
+TIME_SCALES = {"NORMAL": 1.0, "LONGER": 4.0, "NONE": float("inf")}  # the panel's Time Limits
+_time_kind = "NORMAL"
+
+
+def set_time_limits(kind: str) -> None:
+    """The panel's Time Limits: each time budget above times 1, 4 or without end. Only a change is applied, so a script
+    that set a budget itself keeps it while the panel stays on Normal."""
+    global _time_kind
+    if kind == _time_kind or kind not in TIME_SCALES:
+        return
+    _time_kind = kind
+    for name, seconds in TIME_BASE.items():
+        globals()[name] = seconds * TIME_SCALES[kind]
+
+
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 STEP = 0.8  # each size made in steps is this share of the size before it
@@ -2121,7 +2138,7 @@ class AutoJob:
             self.notes.append(f"Redo Rough Spots redid {spots} spot{'s' if spots != 1 else ''}: {max(bad_before - int(self.bad.sum()), 0):,} bad face(s) fewer")
         self.timings["check and repair"] = self.timings.get("check and repair", 0.0) + time.perf_counter() - began
         if left and time.perf_counter() > self._repair_until:
-            self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
+            self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply. Time Limits: Longer or No Limit keeps going")
         check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left), int(found.overlap.sum())), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
         return points, faces, mats, view, check
 
@@ -2135,9 +2152,12 @@ class AutoJob:
         began = time.perf_counter()
         until = began + REDO_SECONDS
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
-        redone, bad_before = 0, None
-        for round_index in range(REDO_ROUNDS):
-            if self._stopped or time.perf_counter() > until:
+        redone, bad_before, last_bad = 0, None, None
+        for round_index in counting():  # on while a round still cuts the bad faces
+            if self._stopped:
+                break
+            if time.perf_counter() > until:
+                self.notes.append(f"Redo Rough Spots stopped at its {REDO_SECONDS:.0f} s limit. Time Limits: Longer or No Limit keeps going")
                 break
             self.stage = f"Redoing rough spots, round {round_index + 1}"
             yield
@@ -2145,8 +2165,9 @@ class AutoJob:
             bad = found.any()
             if bad_before is None:
                 bad_before = int(bad.sum())
-            if not bad.any():
+            if not bad.any() or (round_index >= REDO_ROUNDS and last_bad is not None and int(bad.sum()) >= last_bad):
                 break
+            last_bad = int(bad.sum())
             spots = issues.find_spots(points, faces, {k: getattr(found, k) for k in checks.Defects.BROKEN}, piece, REDO_SPOTS)
             rings = REDO_RINGS + round_index
             moved, regions = yield from self._background(lambda: self._redo_spots(points, faces, piece, spots, rings, until))

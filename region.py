@@ -802,7 +802,7 @@ class CURIOMESH_OT_fit_to_surface(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
-    iterations: bpy.props.IntProperty(name="Iterations", description="How many times the points are smoothed and settled back on the surface. More follows it closer, slower", default=5, min=1, max=100)
+    iterations: bpy.props.IntProperty(name="Iterations", description="How many times the points are smoothed and settled back on the surface. More follows it closer, slower", default=5, min=1, soft_max=100, max=100000)
     strength: bpy.props.FloatProperty(name="Strength", description="How far each point moves toward its smoothed spot on every pass: 0 not at all, 1 all the way", default=0.5, min=0.0, max=1.0)
 
     def execute(self, context):

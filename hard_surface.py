@@ -114,8 +114,8 @@ def prop(name: str):
         "hs_panels": lambda: bpy.props.BoolProperty(name="Clean Panels", description=tip, default=False),
         "hs_cylinders": lambda: bpy.props.BoolProperty(name="Even Cylinders", description=tip, default=False),
         "hs_edges": lambda: bpy.props.EnumProperty(name="Hard Edges", description=tip, items=EDGE_ITEMS, default="NONE"),
-        "hs_angle": lambda: bpy.props.FloatProperty(name="Hard Edge Angle", description=tip, default=40.0, min=5.0, max=150.0, precision=0),
+        "hs_angle": lambda: bpy.props.FloatProperty(name="Hard Edge Angle", description=tip, default=40.0, min=5.0, max=180.0, precision=0),
         "hs_hold_unit": lambda: bpy.props.EnumProperty(name="Distance In", description=tip, items=HOLD_UNITS, default="PERCENT"),
         "hs_hold_percent": lambda: bpy.props.FloatProperty(name="Distance", description=tip, default=10.0, min=1.0, max=45.0, subtype="PERCENTAGE", precision=0),
-        "hs_hold_mm": lambda: bpy.props.FloatProperty(name="Distance", description=tip, default=2.0, min=0.01, max=1000.0, precision=2),
+        "hs_hold_mm": lambda: bpy.props.FloatProperty(name="Distance", description=tip, default=2.0, min=0.01, soft_max=1000.0, max=1e6, precision=2),
     }[name]()

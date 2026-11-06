@@ -32,7 +32,7 @@ METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
 ORIGINAL = "ORIGINAL"  # a try that is your own faces, untouched
 METHOD_NAMES.update(ORIGINAL="Original", KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
 KIND_ITEMS = [(k, P.KIND_WORDS[k], "") for k in P.KINDS]
-MAX_TRIES = 6  # results kept per part
+MAX_TRIES = 0  # results kept per part; 0 keeps every one, so nothing you made is thrown away
 LIST_ROWS = 300  # parts shown in the worst-first list
 SAMPLES = 200  # vertices of each source piece used to say which piece a result part came from
 
@@ -449,7 +449,7 @@ def commit(runner: PartJob) -> None:
             same = len(record["tries"]) - 1
         else:
             record["tries"][same] = new
-        if len(record["tries"]) > MAX_TRIES:
+        if MAX_TRIES and len(record["tries"]) > MAX_TRIES:
             drop = next(i for i in range(len(record["tries"])) if i != same)
             record["tries"].pop(drop)
             same -= drop < same

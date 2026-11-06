@@ -44,8 +44,9 @@ FOLD_COS = float(np.cos(np.radians(40.0)))  # a quad folding more than this alon
 MOST_MOVE = 0.25  # of a vertex's mean edge length, per step
 MOST_DRIFT = 0.5  # of a vertex's mean edge length, in all: settling evens quads out where they are, it doesn't move them away
 STRAIGHT_STEPS = 40  # steps of the loop straightening that follows the settle (its own drift budget, as above)
-CYCLES = 3  # rounds of pole cleaning in `fewer_poles`, with a short settle between them
+CYCLES = 3  # rounds of pole cleaning in `fewer_poles` that always run; more follow while a round still takes poles away
 CYCLE_STEPS = 20  # settle steps between two rounds
+MIN_GAIN = 0.5  # points of Tidiness or Loop Quality a pass must add for Keep Tidying to go on (or one pole fewer)
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -328,7 +329,7 @@ def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: 
         reducer.locked[v] = True  # not `freeze`: that stops the whole connected part
     if redraw:  # without the judge: its check of a new grid skips the fold test, and the redrawn grids came out bent
         reducer.judge = None
-        reducer.redraw_all(rounds=2)
+        reducer.redraw_all(rounds=len(reducer.users))  # until a round takes nothing away; it stops itself sooner
         reducer.judge = judge
     reducer.turn_poles(depth=depth)
     if pairs:
@@ -343,16 +344,21 @@ def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: 
 
 
 def fewer_poles(co, faces, keys, stay=None, judge=None, project=None, plane=None, cycles: int = CYCLES, redraw: bool = True):
-    """`clean_poles` a few times with a short settle in between: once the quads are even, more patches fit a grid and
-    more pole pairs can walk. Same arguments and result as `clean_poles`; `project` and `plane` as in `settle`."""
+    """`clean_poles` again and again with a short settle in between: once the quads are even, more patches fit a grid and
+    more pole pairs can walk. At least `cycles` rounds, then on while a round still takes poles away. Same arguments and
+    result as `clean_poles`; `project` and `plane` as in `settle`."""
     co = np.asarray(co, dtype=np.float64)
     stay = np.zeros(len(co), dtype=bool) if stay is None else np.asarray(stay, dtype=bool)
-    for k in range(cycles):
+    before, k = poles(co, faces), 0
+    while True:
         co, faces, keys, stay = clean_poles(co, faces, keys, stay, judge, redraw=redraw)
-        if k < cycles - 1:
-            stay = stay | pinned(co, faces, plane=plane)
-            co = settle(co, faces, project, stay, plane, method="smooth", steps=CYCLE_STEPS)[-1][1]
-    return co, faces, keys, stay
+        k += 1
+        now = poles(co, faces)
+        if k >= cycles and now >= before:
+            return co, faces, keys, stay
+        before = now
+        stay = stay | pinned(co, faces, plane=plane)
+        co = settle(co, faces, project, stay, plane, method="smooth", steps=CYCLE_STEPS)[-1][1]
 
 
 def poles(co, faces) -> int:
@@ -386,12 +392,26 @@ def meter(before: dict, after: dict) -> str:
     return f"Tidiness {before['tidy']:.0f} -> {after['tidy']:.0f}{view}, poles {before['poles']:,} -> {after['poles']:,}{faces}{loops}"
 
 
-def pick(levels: dict, wanted: float, cap: float | None = None):
+def pick(levels: dict, wanted: float, cap: float | None = None, base: float | None = None):
     """The ready strength to show for the slider at `wanted`: the nearest at or below it whose view change stays within
-    `cap` points of strength 0 (None: no cap). Strength 0 is always ready."""
-    base = levels.get(0.0, {}).get("view")
+    `cap` points of `base` (default: strength 0's; with Tidy Again, the result before the first pass). None: no cap.
+    Strength 0 is always ready."""
+    if base is None:
+        base = levels.get(0.0, {}).get("view")
     fine = [s for s, row in levels.items() if s <= wanted + 1e-9 and (cap is None or base is None or row.get("view") is None or row["view"] <= base + cap + 1e-9)]
     return max(fine, default=0.0)
 
 
-__all__ = ["clean_poles", "fewer_poles", "half_of", "meter", "pick", "pinned", "poles", "settle"]
+def gained(before: dict, after: dict, least: float = MIN_GAIN) -> bool:
+    """Whether a pass made the mesh tidier: fewer poles, or Tidiness or Loop Quality up by `least` points, and none of the
+    three worse. Keep Tidying stops when no strength of a pass does this."""
+    ups = [before["poles"] - after["poles"], after["tidy"] - before["tidy"]]
+    margins = [1, least]
+    a, b = (before.get("loops") or {}).get("quality"), (after.get("loops") or {}).get("quality")
+    if a is not None and b is not None:
+        ups.append(b - a)
+        margins.append(least)
+    return any(u >= m for u, m in zip(ups, margins)) and all(u > -m for u, m in zip(ups, margins))
+
+
+__all__ = ["clean_poles", "fewer_poles", "gained", "half_of", "meter", "pick", "pinned", "poles", "settle"]

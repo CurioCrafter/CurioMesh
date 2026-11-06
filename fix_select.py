@@ -277,7 +277,7 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
 
 class CURIOMESH_PG_fix(bpy.types.PropertyGroup):
     source: bpy.props.PointerProperty(name="Source", type=bpy.types.Object, description="Your original mesh: says which way is out and gives the surface moved corners go back on", poll=lambda self, obj: obj.type == "MESH")
-    grow: bpy.props.IntProperty(name="Grow", default=1, min=0, max=20, description="Rings of faces around a rough selection that are checked too")
+    grow: bpy.props.IntProperty(name="Grow", default=1, min=0, soft_max=20, max=10000, description="Rings of faces around a rough selection that are checked too")
     last: bpy.props.StringProperty()
 
 
