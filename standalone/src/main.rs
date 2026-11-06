@@ -233,6 +233,9 @@ fn single(mut a: Args) -> Result<ExitCode, String> {
     let check = issues::check(&done.mesh);
     let split = if pieces > 1 { format!(" as {pieces} pieces") } else { String::new() };
     println!("{} faces ({} quads, {} triangles), {:.2}% of the view changed, {} looks, {:.1} s -> {}{split}", check.faces, check.quads, check.tris, done.loss, done.looks, done.seconds, out.display());
+    if check.faces as f64 >= 0.9 * source.faces() as f64 {
+        println!("Note: this kept nearly every face. A rough surface (a scan) needs most of its faces to change this little; --use low-poly, a higher --detail or --reduce-to reduce it.");
+    }
     print_check(&check);
     let s = &a.settings;
     write_report(&a.report, json!({"source_faces": source.faces(), "faces": check.faces, "loss": done.loss, "detail": s.detail, "asked": s.reduce_to, "looks": done.looks, "seconds": done.seconds, "settings": s.to_json(), "check": check.to_json(200)}))?;

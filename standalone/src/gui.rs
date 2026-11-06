@@ -784,8 +784,12 @@ impl App {
         let asked = (!self.prefs.choices.aim_for_count).then_some(limit);
         let bad_spots = finished.check.spots.iter().filter(|s| s.kinds[0] + s.kinds[1] > 0).count();
         let (level, title) = verdict(if self.prefs.choices.preset == CUSTOM { "" } else { use_name }, faces, loss, asked, bad, bad_spots);
+        // A rough scan can need nearly every face to stay within the limit: say so instead of calling it good.
+        let nearly_all = level == Level::Good && kept_nearly_all(faces, source_faces);
+        let (level, title) = if nearly_all { (Level::Check, "Kept nearly every face".to_string()) } else { (level, title) };
         let (status, color, next) = match level {
             Level::Good => ("status_good", GREEN, "Save it, or drag the line across the model to compare first."),
+            Level::Check if nearly_all => ("status_check", AMBER, KEPT_NEARLY_ALL),
             Level::Check => ("status_check", AMBER, "Click a spot below to look at it before you save."),
             Level::Bad => ("status_bad", RED, "Look at the spots below, or try Scan Cleanup or more faces."),
         };
@@ -803,7 +807,9 @@ impl App {
         });
         ui.add_space(4.0);
         ui.label(RichText::new(format!("{} {}", thousands(faces), if quads == faces { "quads" } else { "faces" })).size(28.0).strong());
-        ui.label(RichText::new(format!("from {} faces, {:.0}× fewer", thousands(source_faces), source_faces as f64 / faces.max(1) as f64)).color(MUTED));
+        let ratio = source_faces as f64 / faces.max(1) as f64;
+        let fewer = if ratio >= 2.0 { format!(", {ratio:.0}× fewer") } else if ratio > 1.05 { format!(", {ratio:.1}× fewer") } else { String::new() };
+        ui.label(RichText::new(format!("from {} faces{fewer}", thousands(source_faces))).color(MUTED));
         ui.add_space(6.0);
         egui::Grid::new("numbers").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
             ui.label(RichText::new("View change").color(MUTED));
@@ -987,6 +993,14 @@ fn verdict(use_name: &str, faces: usize, loss: f64, asked: Option<f64>, bad: usi
     } else {
         (Level::Good, format!("Good for {}", use_name.to_lowercase()))
     }
+}
+
+/// A result with this share of the source's faces or more reduced nothing worth having.
+const NEARLY_ALL: f64 = 0.9;
+const KEPT_NEARLY_ALL: &str = "Its rough surface needs most of its faces to change this little. Low Poly, a higher limit or a face count reduce it.";
+
+fn kept_nearly_all(faces: usize, source_faces: usize) -> bool {
+    faces as f64 >= NEARLY_ALL * source_faces as f64
 }
 
 fn plural(kind: &str, n: usize) -> String {
