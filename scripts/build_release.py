@@ -191,7 +191,9 @@ BANNED_CODE = (
     (r"urllib\.request|http\.client|\bsocket\.|\brequests\.(get|post)\b", "network use"),
     (r"Star on GitHub|star helps", "promotional prompts"),
     (r"Clean Rows|WreckQuad|\bbl_info\b|bench/", "old names and repository-only paths"),
-    (r"(?i)\bpro\b", "a 'Pro' tab or tier"),
+    (r"(?i)\bpro\b|\bpro_|_pro\b", "a 'Pro' tab or tier"),
+    (r"(?i)ponytail", "internal tags"),
+    (r"CURIOMESH_[A-Z_]+[\"']", "environment switches for tests"),
     (r"tempfile\.mkdtemp\((?![^)]*dir=)|dir=None", "job folders in system temp (use hardware.job_folder)"),
     (r"use_auto_smooth|free_normals_split|edge_creases|loop_data_types|auto_smooth_angle", "APIs that are gone before Blender 4.2 (dead code)"),
     (r"LAST_DRAW_ERROR", "errors kept where nothing reads them"),
@@ -344,8 +346,12 @@ def verify_archive(path: Path, *, prefix: str, series: str | None = None, listin
         raise ValueError(f"Archive filename must be {expected_name!r}, got {path.name!r}")
 
 
+CALLED_BY_BLENDER = {"poll", "execute", "invoke", "modal", "draw", "draw_header", "draw_item", "description", "cancel", "check", "filter_items", "register", "unregister"}
+
+
 def unused_names(sources: dict[str, str]) -> list[str]:
-    """Top-level functions, classes and constants whose name appears only once in all the code: nothing uses them."""
+    """Top-level functions, classes and constants, and methods, whose name appears only once in all the code: nothing
+    uses them. Methods Blender calls itself are not counted."""
     counts: dict[str, int] = {}
     for text in sources.values():
         for word in re.findall(r"\w+", text):
@@ -360,6 +366,10 @@ def unused_names(sources: dict[str, str]) -> list[str]:
             else:
                 continue
             found += [f"{name}:{node.lineno}: {n} is never used" for n in names if counts.get(n, 0) <= 1 and not n.startswith("__") and n not in ("register", "unregister")]
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and counts.get(item.name, 0) <= 1 and not item.name.startswith("__") and item.name not in CALLED_BY_BLENDER:
+                        found.append(f"{name}:{item.lineno}: method {node.name}.{item.name} is never used")
     return found
 
 

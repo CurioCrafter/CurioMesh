@@ -43,18 +43,25 @@ This is the extensions.blender.org build. It contains Python code only.
   - The **QuadriFlow** method (and Classic Remesh with QuadriFlow) runs Blender's own QuadriFlow inside your Blender,
     like Remesh > QuadriFlow does, on one reduced part at a time; Blender is busy while each part runs.
 - Blender stays usable while a job runs: the work is done in short steps from a timer. A few single steps (reducing
-  a part, pairing, the topology check) can still hold Blender for up to about 3 seconds on a mid-size mesh; the wait
+  a part, pairing, the topology check) can still hold Blender for up to about 3.5 seconds on a mid-size mesh; the wait
   cursor shows while they run, and **Stop** takes effect after them. **Apply** is available once the job has finished,
   or after **Stop**. After a result appears, more sizes for the Quad Size and Rows sliders are worked out the same way,
-  and the panel says so while it happens.
+  and the panel says so while it happens; single steps there can hold Blender for a few seconds (up to about 6).
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
 - Remembered fixes and resume points are kept in the extension's user folder. A job's working files go in a folder
   there too (`jobs`) and are deleted when the job ends; folders left by a Blender that quit mid-job are cleared later.
+  Resume points of a stopped job are kept for 3 days; **Clear Saved Progress** in the add-on preferences deletes them.
+- Segments you edit by hand (merge, split, paint, rename, lock, a Use) are saved on your object, as a face attribute
+  `curiomesh_segment` and a custom property `curiomesh_segments`, so the next run and a saved .blend keep them. Finding
+  segments alone writes nothing on your object. Delete both to forget them.
+- The viewport HUD is off by default: turn it on with **HUD On in New Scenes** in the preferences (or the HUD button on
+  the Advanced tab). Its timer runs only while the HUD, the heatmap or Live is on.
 - Ideas credited: fitting each source point to its nearest vertex, shading read from the nearest source points, and
   the finite test cases come from ideas by cav3dw3ll3r (https://github.com/cav3dw3ll3r).
 - **Report a Problem** (Advanced tab, Issue Reports) opens GitHub's new-issue form in your web browser, with your
-  Blender and CurioMesh versions filled in. The add-on itself never connects to the internet.
+  Blender and CurioMesh versions filled in (nothing else about your computer). Filing it needs a GitHub account. The
+  add-on itself never connects to the internet.
 - Bundled data: `triadq/patterns.json` holds statistics measured on CC0 and public-domain meshes (see
   `docs/PATTERN_SOURCES.md`). `triadq/cases_table.json` holds camera-check results measured on CC0 Poly Haven models. The
   icons are CC0 (`icons/LICENSE.txt`).

@@ -78,23 +78,12 @@ def _memory() -> tuple[float | None, float | None]:
     return GUESS_RAM_GB, GUESS_RAM_GB * 0.5
 
 
-def _gpu() -> dict:
-    """The graphics card Blender draws with (its own gpu module). Empty outside Blender or in background mode."""
-    try:
-        import gpu
-
-        return {"gpu": gpu.platform.renderer_get().strip(), "gpu_vendor": gpu.platform.vendor_get().strip()}
-    except Exception:  # no bpy (tests), or no drawing context (background mode)
-        return {}
-
-
 def detect() -> dict:
     """Read the computer. Never raises; unknown things are left out."""
     total, free = _memory()
     machine = {"os": {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, "Linux" if sys.platform.startswith("linux") else sys.platform), "cores": os.cpu_count() or 1, "ram_gb": total, "free_gb": free}
     if sys.platform == "win32":
         machine["ram_guessed"] = True
-    machine.update(_gpu())
     return machine
 
 
@@ -105,10 +94,6 @@ def describe(machine: dict) -> list[str]:
         lines.append(f"Memory: not read on Windows, assumed {machine['ram_gb']:.0f} GB")
     elif machine.get("ram_gb"):
         lines.append(f"Memory: {machine['ram_gb']:.0f} GB, {machine['free_gb']:.0f} GB free")
-    if machine.get("gpu"):
-        lines.append(f"Graphics: {machine['gpu']}")
-    else:
-        lines.append("Graphics: no supported card found")
     return lines
 
 
@@ -439,17 +424,38 @@ def _private_dir(folder: Path) -> bool:
         return False
 
 
-def user_folder(sub: str = "") -> Path | None:
+def user_folder(sub: str = "", create: bool = True) -> Path | None:
     """The extension's own folder for files it keeps (Blender's extension user folder), None outside Blender."""
     try:
         import bpy
 
-        return Path(bpy.utils.extension_path_user(__package__ or "", path=sub, create=True))
+        return Path(bpy.utils.extension_path_user(__package__ or "", path=sub, create=create))
     except Exception:  # no bpy (tests), not loaded as an extension (a helper process), or the folder can't be made
         return None
 
 
 STALE_JOB_S = 12 * 3600  # a job folder nothing has touched for this long was left by a Blender that quit or crashed
+STALE_RESUME_S = 3 * 24 * 3600  # saved progress of a stopped job is kept this long, then cleared when the next job starts
+
+
+def _clear_old(base: Path | None, age: float) -> int:
+    """Delete the folders in `base` nothing has touched for `age` seconds (all of them for age 0). Returns the bytes freed."""
+    freed = 0
+    if base is None or not base.is_dir():
+        return 0
+    for old in base.iterdir():
+        try:
+            if old.is_dir() and not old.is_symlink() and time.time() - old.stat().st_mtime >= age:
+                freed += sum(f.stat().st_size for f in old.rglob("*") if f.is_file())
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
+    return freed
+
+
+def clear_saved_progress() -> int:
+    """The preferences' Clear Saved Progress button: deletes every resume point. Returns the bytes freed."""
+    return _clear_old(user_folder("curiomesh_resume", create=False), 0.0)
 
 
 def job_folder(prefix: str) -> Path:
@@ -458,28 +464,23 @@ def job_folder(prefix: str) -> Path:
     base = user_folder("jobs")
     if base is None:
         raise RuntimeError("CurioMesh can't make its folder in Blender's extension user folder for this job's files")
-    # ponytail: age-based, since another Blender may be running a job here right now
-    for old in base.iterdir():
-        try:
-            if old.is_dir() and time.time() - old.stat().st_mtime > STALE_JOB_S:
-                shutil.rmtree(old, ignore_errors=True)
-        except OSError:
-            pass
+    _clear_old(base, STALE_JOB_S)  # Age-based: another Blender may be running a job in this folder right now.
     return Path(tempfile.mkdtemp(prefix=prefix, dir=base))
 
 
 def checkpoint_dir(co: np.ndarray, face_count: int, root: str | None = None) -> Path | None:
     """The folder that holds the saved parts of the job on this very mesh: private to this user, or None if none is safe."""
     if root:
-        base = Path(root)
+        folder = Path(root) / "curiomesh_resume"
     else:
         base = user_folder()
         if base is None:
             return None
-    digest = hashlib.sha1(np.ascontiguousarray(co).tobytes() + str(face_count).encode()).hexdigest()[:16]
-    folder = base / "curiomesh_resume"
-    if not _private_dir(folder):
+        folder = base / "curiomesh_resume"
+        _clear_old(folder, STALE_RESUME_S)  # progress of jobs stopped days ago: kept no longer
+    if folder.exists() and (folder.is_symlink() or not folder.is_dir()):
         return None  # no checkpoints rather than files in a place someone else could plant
+    digest = hashlib.sha1(np.ascontiguousarray(co).tobytes() + str(face_count).encode()).hexdigest()[:16]
     return folder / digest  # made by the first save_piece, so a job stopped before any part leaves no empty folder
 
 
@@ -495,7 +496,7 @@ def save_piece(path: Path, detail: float, sizes: list, levels: list[tuple[int, f
         data[f"l{k}"] = np.fromiter((len(p) for p in polys), dtype=np.int32, count=len(polys))
         data[f"f{k}"] = np.fromiter((v for p in polys for v in p), dtype=np.int64)
         data[f"m{k}"] = np.asarray([int(m) for m in kinds], dtype=np.int32)
-    if not _private_dir(path.parent):  # a checkpoint folder is made here, on its first part
+    if not (_private_dir(path.parent.parent) and _private_dir(path.parent)):  # the checkpoint folders are made here, on the first part
         raise OSError(f"{path.parent} is not a private folder of this user")
     descriptor, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")  # a name nobody could have planted
     try:

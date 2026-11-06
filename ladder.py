@@ -71,7 +71,7 @@ def cancel() -> None:
                 bpy.data.meshes.remove(mesh)
         except ReferenceError:  # gone with a file load
             pass
-    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None)
+    lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None, source_check=None)
     drag.update(pending=False, settled=True)
 
 
@@ -98,6 +98,7 @@ def start(context) -> bool:
         plan = [(s, d) for s, d in plan if here[1] / 2.6 <= d <= here[1] * 2.6]
     gs = context.scene.curiomesh_guided
     lad.update(key=base["key"], base=here, rungs={here: job}, plan=plan, shown=(here, here, ()), settings=_settings(gs))
+    lad["source_check"] = (job, job._src_check, job._known, getattr(job, "_src_pieces", None)) if job._src_check is not None else None  # the same for every rung
     _mesh_for((here, here, ()), compose(here, here, ()))
     gs["quad_size"], gs["quad_order"], gs["organize"] = 0.5, L.order_of(job.style), 0.0  # no update: the result on screen is this already
     if not bpy.app.timers.is_registered(_tick):
@@ -143,6 +144,10 @@ def work(seconds: float) -> None:
                 cancel()
                 return
             lad["job"] = guided.make_job(bpy.context, gs, src, guided.state["auto_inputs"], detail, style, quiet=True)
+            lad["job"].repair_fills = False  # crossings are still pushed and collapsed away, but not filled: a fill can take seconds
+            shared = lad.get("source_check")
+            if shared is not None and len(lad["job"].faces) == len(shared[0].faces):  # the job checks the piece count before using it
+                lad["job"]._src_check, lad["job"]._known, lad["job"]._src_pieces = shared[1:]  # checking the source again would hold Blender for seconds
             continue
         job.step(min(SLICE, max(ends - time.perf_counter(), 0.005)))
         if job.busy:
@@ -430,7 +435,7 @@ def status() -> str:
         return ""
     doing = lad["doing"]
     words = f" ({STYLE_WORDS.get(doing[0], doing[0])}, {doing[1]:g}%)" if doing else ""
-    return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for a moment during each"
+    return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for a few seconds during each"
 
 
 def draw(layout, gs) -> None:

@@ -253,8 +253,8 @@ class _Work:
                 self.users[v].add(f)
         return False
 
-    def fix_spot(self, pairs: list[tuple[int, int]], most_added: int) -> None:
-        """Try the cheap things on one spot, then the fills. Stops as soon as it is clear."""
+    def fix_spot(self, pairs: list[tuple[int, int]], most_added: int):
+        """Generator, yielding before each try: the cheap things on one spot, then the fills. Stops as soon as it is clear."""
         pairs = [pair for pair in pairs if self.alive[pair[0]] and self.alive[pair[1]]]  # an earlier spot may have remade these
         if not pairs:
             return
@@ -274,11 +274,13 @@ class _Work:
         for side in sides:
             verts = verts_of(side)
             spots = np.asarray([self.near(int(self.piece[next(iter(self.users[v]))]), self.points[[v]])[0][0] for v in verts.tolist()])
+            yield  # one try per slice: a timer runs the repair in short steps
             if self.attempt_move(verts, spots, spot) and not live():
                 self.pushed += 1
                 return
         for rounds in SMOOTHS:
             verts = verts_of(spot)
+            yield  # one try per slice: a timer runs the repair in short steps
             if self.attempt_move(verts, self._evened(verts, rounds), spot) and not live():
                 self.pushed += 1
                 return
@@ -287,6 +289,7 @@ class _Work:
                 verts = verts_of(side)
                 normals = np.asarray([self.near(int(self.piece[next(iter(self.users[v]))]), self.points[[v]])[1][0] for v in verts.tolist()])
                 for sign in (-1.0, 1.0):
+                    yield  # one try per slice: a timer runs the repair in short steps
                     if self.attempt_move(verts, self.points[verts] + sign * share * size * normals, spot) and not live():
                         self.pushed += 1
                         return
@@ -295,10 +298,12 @@ class _Work:
                 one = np.asarray([v])
                 closest, normal = self.near(int(self.piece[next(iter(self.users[v]))]), self.points[one])
                 for target in [self._evened(one, 1), closest] + [self.points[one] + sign * share * size * normal for share in (*PUSHES, 1.0) for sign in (-1.0, 1.0)]:
+                    yield  # one try per slice: a timer runs the repair in short steps
                     if self.attempt_move(one, target, spot) and not live():
                         self.pushed += 1
                         return
         for f in sorted(spot, key=lambda f: -int(users[f]) if f < len(users) else 0):  # the worst first: one face fewer often clears a knot
+            yield  # one try per slice: a timer runs the repair in short steps
             if self.alive[f] and self.attempt_collapse(f, spot):
                 spot = {g for g in spot if self.alive[g]} | self.fresh
                 self.fresh = set()
@@ -312,6 +317,7 @@ class _Work:
                 ids = {f for f in spot if self.alive[f] and self.mats[f] == kind and self.piece[f] == part}
                 for sheet in self._sheets(self._ring(ids, rings, kind, part)):
                     self.fresh = set()
+                    yield  # one try per slice: a timer runs the repair in short steps
                     try:
                         done = self.attempt_fill(sheet, share, spot)
                     except (ValueError, np.linalg.LinAlgError):  # a fill can't always close a tangled seam: the spot stays as it was
@@ -363,8 +369,22 @@ def new_by_piece(known: Known, pairs, points, faces, piece) -> tuple[dict[int, i
     return counts, new
 
 
-def fix_crossings(points, faces, mats, piece, pairs, known: Known, near, tris_only: bool = False, growth: float = 0.03, stopped=lambda: False):
-    """Repair the new crossings among `pairs`. `near(piece, points)` gives (closest, normal) on that source piece.
+def untangle(*args, **kwargs):
+    """`untangle_steps` run to its end in one call."""
+    return _drain(untangle_steps(*args, **kwargs))
+
+
+def _drain(steps):
+    try:
+        while True:
+            next(steps)
+    except StopIteration as done:
+        return done.value
+
+
+def fix_crossings_steps(points, faces, mats, piece, pairs, known: Known, near, tris_only: bool = False, growth: float = 0.03, stopped=lambda: False):
+    """Generator: repair the new crossings among `pairs`, yielding after each spot so a timer can run it in short
+    slices. `near(piece, points)` gives (closest, normal) on that source piece.
 
     Returns (points, faces, mats, piece, numbers). A filled spot may add faces, up to `growth` of them. Plain work with
     no Blender data.
@@ -378,15 +398,15 @@ def fix_crossings(points, faces, mats, piece, pairs, known: Known, near, tris_on
         for spot in spots:
             if stopped():
                 break
-            work.fix_spot(spot, most_added)
+            yield from work.fix_spot(spot, most_added)
         todo = [p for spot in spots for p in work.new_pairs({f for pair in spot for f in pair if work.alive[f]})]
         if not todo or stopped():
             break
     return (*work.finished(), {"new": found, "pushed": work.pushed, "filled": work.filled, "added": work.added})
 
 
-def untangle(points, faces, piece, bad, near, rounds: int = ROUNDS, stopped=lambda: False):
-    """Move the corners of faces turned against the source or folded over a neighbour until they face out again.
+def untangle_steps(points, faces, piece, bad, near, rounds: int = ROUNDS, stopped=lambda: False):
+    """Generator, yielding after each group of corners: move the corners of faces turned against the source or folded over a neighbour until they face out again.
 
     `bad` marks those faces. Each of their corners tries the middle of its neighbours and its own nearest source point,
     both put on the source, and keeps the one that leaves fewer faces around it turned against the source or folded
@@ -421,6 +441,7 @@ def untangle(points, faces, piece, bad, near, rounds: int = ROUNDS, stopped=lamb
         group[v] = 1 + max((group[w] for f in users[v] for w in faces[f] if w in group), default=-1)
     batches = []
     for c in range(max(group.values()) + 1):
+        yield
         vs = [v for v in todo if group[v] == c]
         around, owner, fold_a, fold_b, ring_w, ring_o = [], [], [], [], [], []
         for i, v in enumerate(vs):
@@ -530,6 +551,7 @@ def untangle(points, faces, piece, bad, near, rounds: int = ROUNDS, stopped=lamb
                 fresh[b["faces"][took[b["owner"]]]] = False  # their middles moved
                 moved += int(took.sum())
                 changed = True
+            yield
         if not changed:
             break
     return points, moved

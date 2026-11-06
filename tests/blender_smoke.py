@@ -37,8 +37,9 @@ def finish_jobs(guided, limit: int = 50) -> None:
     """Run the job (and any job it starts next) to the end, then take in its result. Apply itself never waits."""
     for _ in range(limit):
         work = guided.state["work"]
-        if work is not None and work["runner"].busy:
-            work["runner"].wait()
+        runner = work["runner"] if work is not None else None
+        while runner is not None and runner.busy:  # the steps the panel's timer would run
+            runner.step(1.0)
         if guided.finish_work(bpy.context):
             return
 
@@ -1084,7 +1085,7 @@ def run_ui_prefs_case(module):
     prefs.hud_default = False
     if not settings.hud_enabled:
         raise AssertionError("ui prefs: the scene's own HUD choice was not kept")
-    prefs.hud_default = True
+    prefs.hud_default = False
 
     # Every panel draws, in several states, with no unknown icon / property / operator.
     states = []

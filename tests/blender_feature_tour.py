@@ -1974,7 +1974,7 @@ def ui_state(label):
     pnl = mod("panel")
     ctx = bpy.context
     polls, drawn, problems = {}, set(), []
-    for cls in (*pnl.MAIN_PANELS, *pnl.POPOVERS, *pnl.PRO_PANELS):
+    for cls in (*pnl.MAIN_PANELS, *pnl.POPOVERS, *pnl.ADVANCED_PANELS):
         short = cls.bl_idname.replace("CURIOMESH_PT_", "")
         try:
             polls[short] = bool(cls.poll(ctx)) if hasattr(cls, "poll") else True

@@ -4,8 +4,9 @@
 """Segments inside a connected mesh: find them, change them by hand, give each its own Use.
 
 Once the search is done, `FindJob` splits every big loose piece along its creases and necks, on your mesh and on the
-result. A segment can be merged, split with a drawn line, painted, cut out with a shape and renamed. All of that is saved
-on the object: a face attribute holds the segment of each face, a custom property the names and Uses.
+result. A segment can be merged, split with a drawn line, painted, cut out with a shape and renamed. Once you edit
+them by hand they are saved on the object: a face attribute holds the segment of each face, a custom property the names
+and Uses. Finding them alone writes nothing on your object.
 
 `GoalJob` remakes one segment for its Use and leaves the others alone. The seam is never moved: every remade part reuses
 the seam's vertices at exactly the same place, so `segments.splice` can weld them back together, and a redo that would
@@ -63,7 +64,8 @@ def _g():
 
 
 def save() -> None:
-    """Write the segments on the object, where they survive saving the .blend."""
+    """Write the segments on the object, where they survive saving the .blend. Only called from a hand edit you made
+    (merge, split, paint, rename, lock, Use, part size): finding the segments writes nothing on your object."""
     guided = _g()
     source, src = guided.state_source(), guided.state["src"]
     labels = view.seg.get("src")
@@ -73,9 +75,9 @@ def save() -> None:
     values = np.zeros(len(mesh.polygons), dtype=np.int32)
     values[src["keep"]] = labels
     attribute = mesh.attributes.get(ATTRIBUTE)
-    if attribute is None or attribute.domain != "FACE" or attribute.data_type != "INT":
-        if attribute is not None:
-            mesh.attributes.remove(attribute)
+    if attribute is not None and (attribute.domain != "FACE" or attribute.data_type != "INT"):
+        return  # an attribute of that name that isn't ours: never overwrite or remove it
+    if attribute is None:
         attribute = mesh.attributes.new(ATTRIBUTE, "INT", "FACE")
     attribute.data.foreach_set("value", values)
     source[SAVED] = json.dumps({
@@ -449,7 +451,6 @@ class FindJob(view.PartJob):
         self.output = out
         self.output_id += 1
         self.committed = True
-        save()
         records = view.seg["parts"]
         order = sorted(range(len(records)), key=lambda p: -records[p]["after"])[:MOST_MEASURED]
         for n, p in enumerate(order):
@@ -1684,14 +1685,16 @@ def draw_highlight(guided, preview, res, piece, flat, batch_for_shader) -> None:
 
     seg = view.seg
     hover, selected = seg["hover"], frozenset(seg["sel"])
-    outline = _outlines(res, piece)
-    key = (id(res), id(piece), hover, selected, tuple(round(x, 5) for row in preview.matrix_world for x in row), outline is not None)
-    if seg.get("high_key") != key:
+    if seg.get("high_key") is None:  # set to None elsewhere: built again
+        seg["high_key"] = time.perf_counter_ns()
+    key = (id(res), id(piece), hover, selected, tuple(round(x, 5) for row in preview.matrix_world for x in row), seg["high_key"])
+
+    def arrays():  # in overlay.drawn_arrays' timer, not in the draw
         fill, lines = None, None
+        outline = _outlines(res, piece)
         if hover is not None:
             _id, corners, owners = view._triangles(guided, res, piece)
-            world = guided._world(preview.matrix_world, res["co"][corners[owners == hover]]).astype(np.float32)
-            fill = batch_for_shader(flat, "TRIS", {"pos": world, "color": np.tile(np.float32((1.0, 1.0, 1.0, 0.22)), (len(world), 1))})
+            fill = guided._world(preview.matrix_world, res["co"][corners[owners == hover]]).astype(np.float32)
         if outline is not None and (hover is not None or selected):
             u, v, la, lb = outline
             lit = {*selected} | ({hover} if hover is not None else set())
@@ -1700,9 +1703,20 @@ def draw_highlight(guided, preview, res, piece, flat, batch_for_shader) -> None:
                 ends = np.stack((u[near], v[near]), axis=1).reshape(-1)
                 on_hover = (la[near] == hover) | (lb[near] == hover) if hover is not None else np.zeros(int(near.sum()), dtype=bool)
                 colour = np.where(np.repeat(on_hover, 2)[:, None], np.float32((1.0, 1.0, 1.0, 1.0)), np.float32((1.0, 0.6, 0.1, 1.0))).astype(np.float32)
-                lines = batch_for_shader(flat, "LINES", {"pos": guided._world(preview.matrix_world, res["co"][ends]).astype(np.float32), "color": colour})
-        seg["high"], seg["high_key"] = (fill, lines), key
-    fill, lines = seg["high"]
+                lines = (guided._world(preview.matrix_world, res["co"][ends]).astype(np.float32), colour)
+        return fill, lines
+
+    built = overlay.drawn_arrays("segments.highlight", key, arrays)
+    if built is None:
+        return
+    if seg.get("high_of") is not built:
+        fill, lines = built
+        seg["high"] = (
+            batch_for_shader(flat, "TRIS", {"pos": fill, "color": np.tile(np.float32((1.0, 1.0, 1.0, 0.22)), (len(fill), 1))}) if fill is not None else None,
+            batch_for_shader(flat, "LINES", {"pos": lines[0], "color": lines[1]}) if lines is not None else None,
+        )
+        seg["high_of"] = built
+    fill, lines = seg.get("high") or (None, None)
     flat.bind()
     if fill is not None:
         fill.draw(flat)

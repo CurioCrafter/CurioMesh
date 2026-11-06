@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
+import os
 import sys
 import tempfile
 import unittest
@@ -103,14 +104,25 @@ class SafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             folder = hardware.checkpoint_dir(np.zeros((3, 3)), 1, root)
             self.assertEqual(folder.parent.parent, Path(root))
-            self.assertFalse(folder.exists())  # made by the first saved part, so a stopped job leaves no empty folder
-            folder.mkdir()
+            self.assertFalse(folder.parent.exists())  # made by the first saved part, so a job leaves no empty folder
+            folder.mkdir(parents=True)
             (folder / "x.tmp").write_bytes(b"planted")
             path = hardware.piece_file(folder, b"k")
             hardware.save_piece(path, 1.0, [(np.zeros((3, 3)), [(0, 1, 2)], ["0"])], [(1, 0.0)], 1.0)
             self.assertEqual((folder / "x.tmp").read_bytes(), b"planted")
             self.assertEqual([p.name for p in folder.glob("*.tmp")], ["x.tmp"])
             self.assertIsNotNone(hardware.load_piece(path))
+
+    def test_old_saved_progress_is_cleared_and_new_is_kept(self):
+        with tempfile.TemporaryDirectory() as root:
+            old, new = Path(root) / "old", Path(root) / "new"
+            for folder in (old, new):
+                folder.mkdir()
+                (folder / "a.npz").write_bytes(b"12345")
+            os.utime(old, (0, 0))
+            self.assertEqual(hardware._clear_old(Path(root), hardware.STALE_RESUME_S), 5)
+            self.assertEqual(sorted(p.name for p in Path(root).iterdir()), ["new"])
+            self.assertEqual(hardware._clear_old(Path(root), 0.0), 5)
 
     def test_the_machine_is_read_without_outside_programs_or_ctypes(self):
         text = (Path(__file__).resolve().parents[1] / "hardware.py").read_text(encoding="utf-8")

@@ -658,7 +658,7 @@ PANEL_CLASSES = (
 
 def advanced_panel_classes() -> list:
     """The panels of the Advanced tab: the Advanced sections of the main path, Classic Remesh and its folds, Regions."""
-    return [cls for cls in (*panel.PRO_PANELS, *PANEL_CLASSES, *region.PANEL_CLASSES) if issubclass(cls, bpy.types.Panel)]
+    return [cls for cls in (*panel.ADVANCED_PANELS, *PANEL_CLASSES, *region.PANEL_CLASSES) if issubclass(cls, bpy.types.Panel)]
 
 
 def panel_classes() -> list:

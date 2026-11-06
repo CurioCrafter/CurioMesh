@@ -324,13 +324,6 @@ class PartJob:
             self.warnings = [f"Remaking the part failed: {exc}"]
             self.busy = False
 
-    def wait(self, timeout: float | None = None) -> bool:
-        """Run to the end in one call, for a script in background mode (an exported run_job.py, the tests). The panel never calls it."""
-        ends = None if timeout is None else time.perf_counter() + timeout
-        while self.busy and (ends is None or time.perf_counter() < ends):
-            self.step(1.0)
-        return not self.busy
-
     def status(self) -> str:
         if self.report is None:
             return self.warnings[0] if self.warnings else self.stage
@@ -673,23 +666,36 @@ def _draw_view() -> None:
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_mask_set(False)
         gpu.state.depth_test_set("LESS_EQUAL")
-        if seg["batch_key"] != colour_key:
-            seg["batch"] = None
-            colours = part_colours(gs, seg["live_count"] if showing else len(seg["parts"]), showing)
-            if colours is not None:
-                _id, corners, owners = _triangles(guided, res, piece)
-                world = guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32)
-                seg["batch"] = batch_for_shader(flat, "TRIS", {"pos": world, "color": colours[owners]})
-            seg["batch_key"] = colour_key
+        count = seg["live_count"] if showing else len(seg["parts"])
+
+        def colour_arrays():  # in overlay.drawn_arrays' timer, not in this draw
+            colours = part_colours(gs, count, showing)
+            if colours is None:
+                return ()
+            _id, corners, owners = _triangles(guided, res, piece)
+            return (guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32), colours[owners])
+
+        if seg["batch_key"] is None:  # set to None elsewhere: the colours are built again
+            seg["batch_key"] = time.perf_counter_ns()
+        arrays = overlay.drawn_arrays("segments.colours", (colour_key, seg["batch_key"]), colour_arrays)
+        if arrays is not None and seg.get("batch_of") is not arrays:
+            seg["batch"] = batch_for_shader(flat, "TRIS", {"pos": arrays[0], "color": arrays[1]}) if arrays else None
+            seg["batch_of"] = arrays
         if seg["batch"] is not None:
             flat.bind()
             seg["batch"].draw(flat)
         if gs.seg_bad:
-            bad_key = (id(res), matrix)
-            if seg.get("bad_key") != bad_key:
+
+            def bad_arrays():
                 corners = bad_corners(guided, res)
-                seg["bad"] = batch_for_shader(flat, "TRIS", {"pos": guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32), "color": np.tile(np.float32(BAD_COLOUR), (len(corners), 1))}) if len(corners) else None
-                seg["bad_key"] = bad_key
+                return guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32) if len(corners) else None
+
+            if seg.get("bad_key") is None:
+                seg["bad_key"] = time.perf_counter_ns()
+            bad = overlay.drawn_arrays("segments.bad", (id(res), matrix, seg["bad_key"]), bad_arrays)
+            if seg.get("bad_of") is not bad:
+                seg["bad"] = batch_for_shader(flat, "TRIS", {"pos": bad, "color": np.tile(np.float32(BAD_COLOUR), (len(bad), 1))}) if bad is not None else None
+                seg["bad_of"] = bad
             if seg.get("bad") is not None:
                 flat.bind()
                 seg["bad"].draw(flat)
@@ -698,19 +704,26 @@ def _draw_view() -> None:
             segment_goals.draw_highlight(guided, preview, res, piece, flat, batch_for_shader)
         if gs.seg_compare == "OVER":
             lines_key = (source.name, len(source.data.edges), tuple(round(x, 5) for row in source.matrix_world for x in row))
-            if seg["lines_key"] != lines_key:
+
+            def line_arrays():
                 edges = np.empty(len(source.data.edges) * 2, dtype=np.int64)
                 source.data.edges.foreach_get("vertices", edges)
                 verts = np.empty(len(source.data.vertices) * 3, dtype=np.float64)
                 source.data.vertices.foreach_get("co", verts)
-                shader = gpu.shader.from_builtin("UNIFORM_COLOR")
-                seg["lines"] = batch_for_shader(shader, "LINES", {"pos": guided._world(source.matrix_world, verts.reshape(-1, 3)[edges]).astype(np.float32)})
-                seg["lines_key"] = lines_key
+                return guided._world(source.matrix_world, verts.reshape(-1, 3)[edges]).astype(np.float32)
+
+            if seg.get("lines_key") is None:
+                seg["lines_key"] = time.perf_counter_ns()
+            ends = overlay.drawn_arrays("segments.lines", (lines_key, seg["lines_key"]), line_arrays)
             shader = gpu.shader.from_builtin("UNIFORM_COLOR")
-            shader.bind()
-            shader.uniform_float("color", (1.0, 1.0, 1.0, 0.45))
-            gpu.state.line_width_set(1.0)
-            seg["lines"].draw(shader)
+            if ends is not None and seg.get("lines_of") is not ends:
+                seg["lines"] = batch_for_shader(shader, "LINES", {"pos": ends})
+                seg["lines_of"] = ends
+            if seg.get("lines") is not None:
+                shader.bind()
+                shader.uniform_float("color", (1.0, 1.0, 1.0, 0.45))
+                gpu.state.line_width_set(1.0)
+                seg["lines"].draw(shader)
         gpu.state.depth_mask_set(True)
         gpu.state.depth_test_set("NONE")
         gpu.state.blend_set("NONE")

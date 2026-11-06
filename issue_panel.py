@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import bpy
 import numpy as np
@@ -345,21 +346,30 @@ def draw_overlay(guided, preview, res, flat, batch_for_shader) -> None:
     if not found or ui["res"] is not res:
         return
     matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
-    key = (id(res), matrix, ui["cur"])
-    if ui["batch_key"] != key:
-        ui["batch"] = []
+    if ui["batch_key"] is None:  # set to None elsewhere: built again
+        ui["batch_key"] = time.perf_counter_ns()
+    cur = ui["cur"]
+
+    def arrays():  # in overlay.drawn_arrays' timer, not in the draw
+        out = []
         tris = guided._fan(res["faces"]).reshape(-1, 3)
         owner = np.repeat(np.arange(len(res["faces"])), [len(f) - 2 for f in res["faces"]])
-        for colour, picked in ((SPOT_COLOUR, [s for i, s in enumerate(found) if i != ui["cur"]]), (CURRENT_COLOUR, [found[ui["cur"]]] if 0 <= ui["cur"] < len(found) else [])):
+        for colour, picked in ((SPOT_COLOUR, [s for i, s in enumerate(found) if i != cur]), (CURRENT_COLOUR, [found[cur]] if 0 <= cur < len(found) else [])):
             mask = np.zeros(len(res["faces"]), bool)
             for s in picked:
                 mask[s["faces"]] = True
             corners = tris[mask[owner]].reshape(-1)
             if len(corners):
-                pos = guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32)
-                ui["batch"].append(batch_for_shader(flat, "TRIS", {"pos": pos, "color": np.tile(np.float32(colour), (len(corners), 1))}))
-        ui["batch_key"] = key
-    for batch in ui["batch"]:
+                out.append((guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32), np.tile(np.float32(colour), (len(corners), 1))))
+        return out
+
+    built = overlay.drawn_arrays("issues.spots", (id(res), matrix, cur, ui["batch_key"]), arrays)
+    if built is None:
+        return
+    if ui.get("batch_of") is not built:
+        ui["batch"] = [batch_for_shader(flat, "TRIS", {"pos": pos, "color": col}) for pos, col in built]
+        ui["batch_of"] = built
+    for batch in ui["batch"] or ():
         flat.bind()
         batch.draw(flat)
 

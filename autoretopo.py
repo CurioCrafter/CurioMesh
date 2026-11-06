@@ -144,12 +144,8 @@ REDO_SPOTS = 200  # spots looked at per round, worst first
 REDO_RINGS = 2  # faces round a spot taken into its region, in rings of neighbours
 REDO_MOST_FACES = 600  # a region never gets bigger than this
 REDO_SHARES = (0.5, 1.0, 0.25)  # per region: how far its inner corners are put back towards the source, each tried
-if os.environ.get("CURIOMESH_NO_TIME_LIMITS", "").strip().lower() in {"1", "true", "on", "yes"}:
-    # The limits above end work by the clock, so a slower or busier computer stops at another point and the result differs a little.
-    # Set this to run to the end instead: the same model and settings then give the same result every time.
-    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = REDO_SECONDS = float("inf")
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
-INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
+BLENDER_OPERATOR_METHODS = ("QUADRIFLOW", "GRID", "FLOW")  # these call Blender operators, so each part is built on its own
 STEP = 0.8  # each size made in steps is this share of the size before it
 
 
@@ -686,6 +682,8 @@ class AutoJob:
         self._src_check = None
         self._src_middles = None  # each source face's middle, to find the source round a redone region
         self._known = None  # what the source crosses itself
+        self._src_pieces = None  # pieces the source was checked in
+        self.repair_fills = True  # off for the size ladder's rungs: one fill can hold Blender for seconds
         self._piece_trees: dict[int, BVHTree] = {}
         self._view = None
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
@@ -908,7 +906,7 @@ class AutoJob:
 
     def _measure_piece(self, ids: np.ndarray, pixels: int):
         """Generator: this piece at each size, smallest first, with how much each changes it."""
-        points, polys, kinds = yield from self._off(lambda: self._piece_arrays(ids))
+        points, polys, kinds = yield from self._slice(lambda: self._piece_arrays(ids))
         whole = (points, polys, kinds)
         triangles = _triangle_count(polys)
         cut = self._cut(ids)
@@ -922,7 +920,7 @@ class AutoJob:
             self.seen.append(0.0)
             return
         if self.spot_copies and not cut and not self.guide_lines and not self.strips and self.drop is None:
-            found = yield from self._off(lambda: self._copy_of(len(self.sizes), points, polys, kinds))
+            found = yield from self._slice(lambda: self._copy_of(len(self.sizes), points, polys, kinds))
             if found:
                 return
             if self._copy_plan is None:
@@ -968,13 +966,13 @@ class AutoJob:
             kind = max(set(kinds), key=kinds.count)
             tries = chain(parts.rebuilds(points, polys, kind), hardsurf.rebuilds(points, polys, kind, **self.hard))
             while True:
-                out = yield from self._off(lambda: next(tries, False))
+                out = yield from self._slice(lambda: next(tries, False))
                 if out is False:
                     break
                 yield
                 if out is None:
                     continue
-                turned = yield from self._off(lambda: parts.orient_like(out[0], out[1], points, polys))
+                turned = yield from self._slice(lambda: parts.orient_like(out[0], out[1], points, polys))
                 rebuilt = (out[0], turned, out[2])
                 view = yield from self._timed("pictures", self._pictures(rebuilt[0], rebuilt[1], center, half, pixels))
                 wrong, shown = self._counts(reference, view, pixel)
@@ -1037,7 +1035,7 @@ class AutoJob:
         floor = PIECE_LIMIT * self.detail / 100.0
         first, case = 0, None
         if self.table is not None:
-            case = yield from self._off(lambda: cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0)))
+            case = yield from self._slice(lambda: cases.classify(cases.features(points, polys, float(np.ptp(self.co, axis=0).max()) or 1.0)))
             if not self.target_faces:  # Reduce To may want any small size to land on its count
                 first = cases.first_size(case, shares, floor, self.table)
         area = pixel * pixel
@@ -1088,9 +1086,9 @@ class AutoJob:
                 # Density where the camera saw it go wrong: hold those spots while the rest goes further, then let go.
                 for k in () if painted else (upper - 1, upper, len(levels) - 1):
                     yield
-                    keep = yield from self._off(lambda: hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0))
+                    keep = yield from self._slice(lambda: hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0))
                     held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep if lock is None else keep | lock, one_off=True)
-                    border = None if lock is None else (yield from self._off(lambda: _same_points(held[0], points[lock])))  # a region's border never moved
+                    border = None if lock is None else (yield from self._slice(lambda: _same_points(held[0], points[lock])))  # a region's border never moved
                     reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), keep=border, one_off=True)
                     view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
                     sizes.append(reduced)
@@ -1122,7 +1120,7 @@ class AutoJob:
                     turned_sizes.append(out[0])
                     turned_levels.append(out[1])
         if self.hard.get("cylinders") and not cut and sizes:  # Even Cylinders: a visibly round part never becomes a coarse prism
-            least = yield from self._off(lambda: hardsurf.round_floor(points, polys, float(np.linalg.norm(np.ptp(self.co, axis=0)))))
+            least = yield from self._slice(lambda: hardsurf.round_floor(points, polys, float(np.linalg.norm(np.ptp(self.co, axis=0)))))
             if least and any(level.faces >= least for level in levels):
                 kept = [k for k, level in enumerate(levels) if level.faces >= least]
                 sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
@@ -1145,17 +1143,14 @@ class AutoJob:
             machine = {"cores": os.cpu_count() or 1, "ram_gb": total, "free_gb": free}
             work = sum(t for t in triangles if t > KEEP_TRIANGLES)
             measured = sum(t > KEEP_TRIANGLES for t in triangles)
-            most = os.environ.get("CURIOMESH_HELPERS", "").strip()  # a cap for timing tests: at most this many, whatever else the computer runs
-            most = int(most) if most.isdigit() else 0
-            busy = 0.0 if most else hardware.busy_cores()
-            return hardware.worker_count(machine, self.cfg.name, len(self.faces), max(len(ids) for ids in self.pieces), work, measured, busy, most), machine, work
+            return hardware.worker_count(machine, self.cfg.name, len(self.faces), max(len(ids) for ids in self.pieces), work, measured, hardware.busy_cores()), machine, work
 
-        count, _machine, self._work = yield from self._background(size_up)
+        count, _machine, self._work = yield from self._slice(size_up)
         if not count:
             return
         command, env = parallel.helper_command("parallel.worker_main", [])
         env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")  # the child's own copy: each helper's NumPy keeps to one core
-        setup = yield from self._off(lambda: parallel.setup_of(self))
+        setup = yield from self._slice(lambda: parallel.setup_of(self))
         self._pool = parallel.Pool(command, count, setup, env, hardware.job_folder("curiomesh_parts_"))
         self._copy_plan = {}
         self.notes.append(f"Parts were measured {count} at a time, in helper processes")
@@ -1172,7 +1167,7 @@ class AutoJob:
         """Generator: plan the parts up to `upto` and enough more to keep the helpers busy, hand tasks out, collect results."""
         while self._ahead < len(self.pieces) and (self._ahead <= upto or self._pool is not None and len(self._todo) < 2 * self._pool.alive()):
             index = self._ahead
-            wanted = yield from self._off(self._plan_next)
+            wanted = yield from self._slice(self._plan_next)
             if wanted and self._pool is not None:
                 self._todo.append(index)
         pool = self._pool
@@ -1191,7 +1186,7 @@ class AutoJob:
                 if isinstance(part, int) and not result.get("saved"):
                     key = self._piece_key(self.pieces[part])
                     file = hardware.piece_file(self.checkpoint, repr(key[2]).encode() + key[1])
-                    yield from self._off(lambda: hardware.save_piece(file, self.detail, result["sizes"][:-1], [(lv.faces, lv.loss) for lv in result["levels"]][:-1], result["seen"]))
+                    yield from self._slice(lambda: hardware.save_piece(file, self.detail, result["sizes"][:-1], [(lv.faces, lv.loss) for lv in result["levels"]][:-1], result["seen"]))
                     result["saved"] = True
 
     def _feed(self) -> None:
@@ -1248,7 +1243,7 @@ class AutoJob:
                     self.notes.append(str(exc))
                 return None
 
-        made = yield from self._background(work)
+        made = yield from self._slice(work)
         self.field_spent += time.perf_counter() - started
         self.timings["field"] = self.timings.get("field", 0.0) + time.perf_counter() - started
         if made is None or self._stopped:
@@ -1564,13 +1559,9 @@ class AutoJob:
         except Exception as exc:  # shown as the job's warning; the untidied quads stay
             self.warnings = [f"Tidying failed, kept the quads as they were: {exc}"]
 
-    def _background(self, work):
+    def _slice(self, work):
         """Generator: `work()` as a slice of its own, after handing the helpers their next tasks. Returns its result."""
         return (yield from tasks.run(work, tick=self._feed))
-
-    def _off(self, work):
-        """Generator: `work()` as a slice of its own. Returns its result."""
-        return (yield from self._background(work))
 
     def _counts(self, reference, view, pixel: float) -> tuple[int, int]:
         """(pixels that changed, pixels showing), by this job's way of judging."""
@@ -1652,7 +1643,7 @@ class AutoJob:
         # pixels they change; past that, the plain one, which only counts distance.
         chords = self.chords and len(result.faces) <= CHORDS_UP_TO
         judge = PictureJudge(reference, center, half, self.max_pixels, TURNED_DEG) if chords else None
-        reducer = yield from self._background(lambda: ChordReducer(result, judge) if chords else quad_reducer(result))
+        reducer = yield from self._slice(lambda: ChordReducer(result, judge) if chords else quad_reducer(result))
         if chords:
             chords_began = time.perf_counter()
             reducer.deadline = chords_began + CHORDS_SECONDS
@@ -1671,9 +1662,9 @@ class AutoJob:
             kept = np.isin(labels, parts)
             return np.asarray(sorted({v for k in np.flatnonzero(kept).tolist() for v in mesh.faces[k]}), dtype=np.int64)
 
-        full, back = yield from self._background(lambda: self._with_copies(result, owner))
+        full, back = yield from self._slice(lambda: self._with_copies(result, owner))
         view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
-        limited = yield from self._off(lambda: over_limit(full, view))
+        limited = yield from self._slice(lambda: over_limit(full, view))
         reducer.freeze(sorted(set(back[limited].tolist())))  # whatever is at its limit stays as it is
         already = set(reducer.original_ids(sorted(set(back[limited].tolist()))))  # numbered as the reducer started: parts over before are not to blame
 
@@ -1690,29 +1681,29 @@ class AutoJob:
             return attempt, attempt_owner, now, ruined
 
         def one_look():
-            attempt = yield from self._background(reducer.result)
+            attempt = yield from self._slice(reducer.result)
             ids = np.asarray(reducer.original_ids(range(len(attempt.vertices))), dtype=np.int64)
             attempt_owner = start_owner[np.asarray(reducer.home, dtype=np.int64)[ids]] if chords else start_owner[ids]
-            full, back = yield from self._background(lambda: self._with_copies(attempt, attempt_owner))
+            full, back = yield from self._slice(lambda: self._with_copies(attempt, attempt_owner))
             self.stage = f"Taking away quads: {len(full.faces):,}"
             view = yield from self._timed("pictures", self._pictures(np.asarray(full.vertices), full.faces, center, half, self.max_pixels))
             wrong, shown = self._counts(reference, view, pixel)
-            ruined = yield from self._off(lambda: over_limit(full, view))
+            ruined = yield from self._slice(lambda: over_limit(full, view))
             if len(ruined):  # those close behind would cost a look each, and with hundreds of parts the looks run out
-                ruined = yield from self._off(lambda: over_limit(full, view, NEARLY))
+                ruined = yield from self._slice(lambda: over_limit(full, view, NEARLY))
             found = sorted(set(back[ruined].tolist()))
             ruined = [v for v, name in zip(found, reducer.original_ids(found)) if name not in already]  # parts over before, and frozen, are not to blame
             return attempt, attempt_owner, 100.0 * wrong / max(shown, 1), ruined
-        saved = yield from self._background(reducer.save)
+        saved = yield from self._slice(reducer.save)
         if chords:
             self.stage = "Redrawing messy patches as grids..."
-            yield from self._background(reducer.tidy)
+            yield from self._slice(reducer.tidy)
             attempt, attempt_owner, now, ruined = yield from look(saved)
             if now <= self.detail and not ruined:
                 result, owner, loss = attempt, attempt_owner, now
-                saved = yield from self._background(reducer.save)
+                saved = yield from self._slice(reducer.save)
             else:
-                yield from self._background(lambda: reducer.restore(saved))
+                yield from self._slice(lambda: reducer.restore(saved))
         step = REDUCE_STEP
         looks = 0
         finest, most = (CHORDS_FINEST, CHORDS_LOOKS) if chords else (REDUCE_FINEST, MOST_LOOKS)
@@ -1732,10 +1723,10 @@ class AutoJob:
             attempt, attempt_owner, now, ruined = yield from look(saved)
             if now <= self.detail and not ruined:
                 result, owner, loss = attempt, attempt_owner, now
-                saved = yield from self._background(reducer.save)
+                saved = yield from self._slice(reducer.save)
                 continue
             names = reducer.original_ids(ruined)
-            yield from self._background(lambda: reducer.restore(saved))
+            yield from self._slice(lambda: reducer.restore(saved))
             if ruined:  # those parts stop here, and the rest can go on
                 reducer.freeze(names, renamed=True)
             else:
@@ -1748,7 +1739,7 @@ class AutoJob:
         """Generator: faces for these pieces by `method` in the chosen output. Returns (points, faces, materials) or None."""
         if method == "FIELD":  # a part it could do skips this: it is here because it was refused or isn't plain enough
             method = "AUTO"
-        if method in INLINE:
+        if method in BLENDER_OPERATOR_METHODS:
             try:
                 made = _quadriflow(self.context, co, faces, kinds, goal) if method == "QUADRIFLOW" else _fill(co, faces, kinds, method, goal)
                 return triangulate(*made) if self.output_kind == "TRIS" else made
@@ -1836,7 +1827,7 @@ class AutoJob:
                     continue
                 made = triangulate(co, polys, kinds) if self.output_kind == "TRIS" else (co, list(polys), list(kinds))
             builds[p] = made
-        return (yield from self._off(lambda: self._splice(points, faces, mats, piece, builds)))
+        return (yield from self._slice(lambda: self._splice(points, faces, mats, piece, builds)))
 
     def _inspected(self, points, faces, piece):
         """Generator: all the numbers for one mesh, the crossing test and the other checks in slices."""
@@ -1869,7 +1860,8 @@ class AutoJob:
         self.stage = "Repairing crossings"
         yield
         began = time.perf_counter()
-        fixed = yield from self._background(lambda: repair.fix_crossings(points, faces, mats, piece, after.pairs, self._known, self._near_source, self.output_kind == "TRIS", stopped=lambda: self._stopped or time.perf_counter() > self._repair_until))
+        yield  # one spot per slice: a spot's fills can take seconds, the whole repair up to REPAIR_SECONDS
+        fixed = yield from repair.fix_crossings_steps(points, faces, mats, piece, after.pairs, self._known, self._near_source, self.output_kind == "TRIS", growth=0.03 if self.repair_fills else 0.0, stopped=lambda: self._stopped or time.perf_counter() > self._repair_until)
         numbers = fixed[4]
         self.timings["fix crossings"] = self.timings.get("fix crossings", 0.0) + time.perf_counter() - began
         if not numbers["pushed"] and not numbers["filled"]:
@@ -1891,19 +1883,19 @@ class AutoJob:
         self.stage = "Turning folded faces back"
         yield
         began = time.perf_counter()
-        found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
         self._defects = (points, faces, found)
         bad = found.inward | found.folded_over
         if not bad.any():
             return same
-        moved, count = yield from self._background(lambda: repair.untangle(points, faces, piece, bad, self._near_source, stopped=lambda: self._stopped or time.perf_counter() > began + UNTANGLE_SECONDS))
+        moved, count = yield from repair.untangle_steps(points, faces, piece, bad, self._near_source, stopped=lambda: self._stopped or time.perf_counter() > began + UNTANGLE_SECONDS)  # one group of corners per slice
         self.timings["untangle"] = self.timings.get("untangle", 0.0) + time.perf_counter() - began
         if not count:
             return same
         now = yield from self._inspected(moved, faces, piece)
         if any(getattr(now, k) > getattr(after, k) for k in ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")):
             return same
-        left = yield from self._background(lambda: checks.defects(moved, faces, self.co, self.faces, pairs=now.pairs))
+        left = yield from self._slice(lambda: checks.defects(moved, faces, self.co, self.faces, pairs=now.pairs))
         if (left.inward | left.folded_over).sum() >= bad.sum():
             return same
         kept = list(faces)  # a new list: copies placed as instances no longer match
@@ -1915,7 +1907,7 @@ class AutoJob:
 
     def _serious(self, points, faces, after):
         """Generator: per face, turned inward, folded over or crossing (the Issue Finder's serious kinds). Kept for reuse."""
-        found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
         self._defects = (points, faces, found)
         return found.inward | found.folded_over | found.crossing
 
@@ -1936,7 +1928,8 @@ class AutoJob:
         began = time.perf_counter()
         self.stage = "Checking for broken topology"
         yield
-        if self._src_check is None:
+        if self._src_check is None or self._src_pieces != len(self.pieces):  # the size ladder hands its rungs the search's own
+            self._src_pieces = len(self.pieces)
             source_piece = np.zeros(len(self.faces), dtype=np.int64)
             for index, ids in enumerate(self.pieces):
                 source_piece[ids] = index
@@ -1997,7 +1990,7 @@ class AutoJob:
         self.face_piece, self.flag = piece, flag
         seen_before = self._defects
         if seen_before is None or seen_before[0] is not points or seen_before[1] is not faces:  # the repairs changed it, or it was never checked
-            found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+            found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
         else:
             found = seen_before[2]
         self.bad = found.any()
@@ -2027,7 +2020,7 @@ class AutoJob:
                 break
             self.stage = f"Redoing rough spots, round {round_index + 1}"
             yield
-            found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+            found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
             bad = found.any()
             if bad_before is None:
                 bad_before = int(bad.sum())
@@ -2035,7 +2028,7 @@ class AutoJob:
                 break
             spots = issues.find_spots(points, faces, {k: getattr(found, k) for k in checks.Defects.BROKEN}, piece, REDO_SPOTS)
             rings = REDO_RINGS + round_index
-            moved, regions = yield from self._background(lambda: self._redo_spots(points, faces, piece, spots, rings, until))
+            moved, regions = yield from self._slice(lambda: self._redo_spots(points, faces, piece, spots, rings, until))
             if not regions:
                 break
             now = yield from self._inspected(moved, faces, piece)
@@ -2128,6 +2121,10 @@ class AutoJob:
 
     def _kill_worker(self) -> None:
         if self._worker is not None:
+            try:
+                self._worker.stdin.close()
+            except (OSError, AttributeError):
+                pass
             self._worker.kill()
             self._worker.wait()
             self._worker = None
@@ -2151,20 +2148,28 @@ class AutoJob:
                 points, polys, _kinds = self._piece_arrays(self.pieces[k])
                 np.savez(os.path.join(folder, f"in_{k}.npz"), co=points, target=wants[k], lens=np.asarray([len(p) for p in polys], dtype=np.int64), flat=np.asarray([v for p in polys for v in p], dtype=np.int64))
                 yield
-            at = 0
+            at, made = 0, 0
             while at < len(jobs):
-                command, env = parallel.helper_command("rows_worker.main", [folder, str(jobs[at]), str(jobs[-1] + 1)])
-                self._worker = subprocess.Popen(
-                    command, env=env,
+                command, env = parallel.helper_command("rows_worker.main", [folder])
+                self._worker = subprocess.Popen(  # handed one piece at a time on stdin: it ends when that closes, even if this Blender crashes
+                    command, env=env, stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
-                since = time.perf_counter()
+                since, sent = time.perf_counter(), None
                 while at < len(jobs):
                     k = jobs[at]
+                    if sent != k:
+                        try:
+                            self._worker.stdin.write(b"%d\n" % k)
+                            self._worker.stdin.flush()
+                        except OSError:  # it has exited: seen just below
+                            pass
+                        sent = k
                     self.stage = f"Laying rows on piece {at + 1} of {len(jobs)}"
                     self.progress = (at, len(jobs))
                     if os.path.exists(os.path.join(folder, f"out_{k}.npz")):
                         at += 1
+                        made += 1
                         since = time.perf_counter()
                         continue
                     if self._stopped:
@@ -2172,9 +2177,14 @@ class AutoJob:
                         return None
                     if time.perf_counter() - since > ROWS_SECONDS + ROWS_SECONDS_PER_QUAD * float(wants[k]) or self._worker.poll() is not None:
                         if self._worker.poll() is None or not os.path.exists(os.path.join(folder, f"out_{k}.npz")):
+                            exited = self._worker.poll() is not None
                             self._kill_worker()
-                            self._refused += 1
                             at += 1
+                            if exited and not made:  # it could not even start: no use starting it again for every piece
+                                self.notes.append("Even Rows could not start a background Blender: the pieces were reduced with Decimate instead")
+                                at = len(jobs)
+                            else:
+                                self._refused += 1
                             break
                     yield WAITING
             self._kill_worker()
@@ -2432,16 +2442,16 @@ class AutoJob:
         return np.concatenate(([0.0], np.cumsum(weights))) / max(float(weights.sum()), 1.0)
 
     def _run(self):
-        done_share = yield from self._off(self._split_pieces)
+        done_share = yield from self._slice(self._split_pieces)
         if self.drop_hidden:
             yield from self._drop_hidden_pieces()
             if self.dropped:
                 done_share = np.linspace(0.0, 1.0, len(self.pieces) + 1)
         if self.baked:
-            self.baked = yield from self._off(self._baked_suits)
+            self.baked = yield from self._slice(self._baked_suits)
         picture_sizes = self.picture_sizes
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
-        yield from self._off(self._show)
+        yield from self._slice(self._show)
         measuring = time.perf_counter()
         self._done_share = done_share
         yield from self._start_pool()
@@ -2457,7 +2467,7 @@ class AutoJob:
                 if self._stopped:
                     return
                 if time.perf_counter() - self.shown_at > self.cfg.show_every:
-                    yield from self._off(self._show)
+                    yield from self._slice(self._show)
         finally:
             self._close_pool()  # also when the job is stopped or fails
         self.timings["measure"] = time.perf_counter() - measuring
@@ -2471,7 +2481,7 @@ class AutoJob:
         pixel = 2.0 * half / self.max_pixels
         self._mark("measured")
         reference = yield from self._reference(center, half, self.max_pixels, self.co, self.faces)
-        reference_shaded = yield from self._off(lambda: shaded(reference, self.co, self.faces, center, half, self.max_pixels))
+        reference_shaded = yield from self._slice(lambda: shaded(reference, self.co, self.faces, center, half, self.max_pixels))
         self._view = (center, half, reference, reference_shaded, pixel)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
@@ -2497,8 +2507,8 @@ class AutoJob:
                 break
             tried.add(pick)
             self.stage = f"Making the faces, try {round_index + 1}"
-            co, faces, kinds, from_part = yield from self._off(lambda: self._combined(False, join=True, firsts=True))
-            rco, rfaces, rkinds, rebuilt_part = yield from self._off(lambda: self._combined(True, firsts=True))  # rebuilt parts are already quads
+            co, faces, kinds, from_part = yield from self._slice(lambda: self._combined(False, join=True, firsts=True))
+            rco, rfaces, rkinds, rebuilt_part = yield from self._slice(lambda: self._combined(True, firsts=True))  # rebuilt parts are already quads
             input_co, input_faces = co, faces
             if self.guide_lines or self.strips:
                 self.stage = f"Cutting the guide curves in, try {round_index + 1}"
@@ -2514,7 +2524,7 @@ class AutoJob:
             points, out_faces, out_kinds = result
             owner = np.full(len(points), -1, dtype=np.int64)  # unknown: part 0 being rebuilt must not freeze every paired corner
             if self.twins and out_faces:
-                owner = yield from self._off(lambda: special.vertex_owners(points, out_faces, input_co, input_faces, from_part))
+                owner = yield from self._slice(lambda: special.vertex_owners(points, out_faces, input_co, input_faces, from_part))
             rebuilt_owner = np.zeros(len(rco), dtype=np.int64)
             for f, part in zip(rfaces, rebuilt_part.tolist()):
                 rebuilt_owner[list(f)] = part
@@ -2525,7 +2535,7 @@ class AutoJob:
             owner = np.concatenate([owner, rebuilt_owner])
             worked = (MeshData(points, out_faces, out_kinds), owner)
             if self.twins:
-                full, _back = yield from self._off(lambda: self._with_copies(worked[0], owner))
+                full, _back = yield from self._slice(lambda: self._with_copies(worked[0], owner))
                 points, out_faces, out_kinds = np.asarray(full.vertices, dtype=np.float64), [tuple(f) for f in full.faces], list(full.face_materials)
             self.fraction += 0.5 * (1.0 - MEASURE_SHARE) / ROUNDS
             picked, tuned = list(self.picked), dict(self.tuned)
@@ -2566,16 +2576,16 @@ class AutoJob:
             before = worked
             worked, owner, _loss = yield from self._reduce(worked, owner, loss, reference, center, half, pixel, take=self.collapse)
             if worked is not before:
-                full, _back = yield from self._off(lambda: self._with_copies(worked, owner))
+                full, _back = yield from self._slice(lambda: self._with_copies(worked, owner))
                 points, materials = np.asarray(full.vertices, dtype=np.float64), list(full.face_materials)
-                out_faces = yield from self._off(lambda: [tuple(face) for face in full.faces])
+                out_faces = yield from self._slice(lambda: [tuple(face) for face in full.faces])
                 loss, shading, soft = yield from self._look(points, out_faces, center, half, reference, reference_shaded, pixel)
             if self.chords and worked is not before:
                 # Redrawn and relaxed corners sit on the planes they were given, not on the source, and smooth shading
                 # shows that: fit them to the source again and keep it if the shading gets closer within what was asked for.
                 self.stage = "Fitting the redrawn quads to the source"
-                fitted = yield from self._off(lambda: self._fit(worked))
-                full, _back = yield from self._off(lambda: self._with_copies(fitted, owner))
+                fitted = yield from self._slice(lambda: self._fit(worked))
+                full, _back = yield from self._slice(lambda: self._with_copies(fitted, owner))
                 fitted_points = np.asarray(full.vertices, dtype=np.float64)
                 fit_loss, fit_shading, fit_soft = yield from self._look(fitted_points, out_faces, center, half, reference, reference_shaded, pixel)
                 if fit_loss <= max(self.detail, loss) and fit_shading is not None and (shading is None or fit_shading < shading):
@@ -2584,9 +2594,9 @@ class AutoJob:
             # Rows of quads break wherever a corner has more or fewer than four. Spinning an edge moves no corner, so the shape stays.
             # Balanced splits every quad, which leaves few poles: spinning there gained under a point.
             self.stage = "Spinning edges at poles"
-            turned = yield from self._background(lambda: self._turn_poles(worked, owner))
+            turned = yield from self._slice(lambda: self._turn_poles(worked, owner))
             if turned is not worked:
-                full, _back = yield from self._off(lambda: self._with_copies(turned, owner))
+                full, _back = yield from self._slice(lambda: self._with_copies(turned, owner))
                 turned_points, turned_faces = np.asarray(full.vertices, dtype=np.float64), [tuple(face) for face in full.faces]
                 turned_loss, turned_shading, turned_soft = yield from self._look(turned_points, turned_faces, center, half, reference, reference_shaded, pixel)
                 if turned_loss <= min(loss + TURN_LOSS, max(loss, 1.1 * self.detail)):
@@ -2594,7 +2604,7 @@ class AutoJob:
                     loss, shading, soft = turned_loss, turned_shading, turned_soft
         plain_faces = out_faces
         if self.twins and self.mirror is None:
-            self.instances = yield from self._off(lambda: self._instances(worked, owner))
+            self.instances = yield from self._slice(lambda: self._instances(worked, owner))
         for level in POLISH_LEVELS if self.tidy and self.output_kind != "TRIS" else ():  # an option: it is slow and the loss goes up a little
             self.stage = "Tidying the quads..."
             self._paired = None
@@ -2611,7 +2621,7 @@ class AutoJob:
             if tidied_loss <= max(1.1 * self.detail, loss) and _overlaps(tidied_points, tidied_faces) <= _overlaps(points, out_faces):
                 points, out_faces, materials, loss, shading, soft = tidied_points, tidied_faces, list(tidied.face_materials), tidied_loss, tidied_shading, tidied_soft
                 break
-        piece = yield from self._off(lambda: self._vote(points, out_faces))
+        piece = yield from self._slice(lambda: self._vote(points, out_faces))
         points, out_faces, materials, (loss, shading, soft), check = yield from self._check(points, out_faces, materials, piece, (loss, shading, soft))
         if out_faces is not plain_faces:  # tidied or repaired: copies are no longer alike
             self.instances = None
@@ -2625,7 +2635,7 @@ class AutoJob:
             self._show((points, out_faces, materials, np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]))
 
         self.fraction = 1.0
-        yield from self._off(last_look)
+        yield from self._slice(last_look)
         shown = self.output["faces"]
         follows = None
         if self.guide_lines:  # how far, along each stroke, the nearest edge of the result is: mean and worst, as a share of the size
@@ -2656,8 +2666,8 @@ class AutoJob:
 
     def _make_all(self, co, faces, kinds):
         """Generator: the faces for the whole object. Pieces on the usual method go in one call; others one by one."""
-        parts = (yield from self._off(lambda: self._combined(False, firsts=True)))[3]
-        special = {i for i, m in self.methods.items() if m != self.method} | ({i for i in range(len(self.pieces))} if self.method in INLINE else set())
+        parts = (yield from self._slice(lambda: self._combined(False, firsts=True)))[3]
+        special = {i for i, m in self.methods.items() if m != self.method} | ({i for i in range(len(self.pieces))} if self.method in BLENDER_OPERATOR_METHODS else set())
         if not special or self.guide_lines or self.strips:  # with strokes the faces have changed: one call
             return (yield from self._build(co, faces, kinds, self.method))
         results = []
@@ -2689,7 +2699,7 @@ class AutoJob:
         """Generator: percent of the view that differs in shape, and in smooth shading past 20 and 10 degrees, when exhausted."""
         view = yield from self._timed("pictures", self._pictures(points, out_faces, center, half, self.max_pixels))
         wrong, shown = self._counts(reference, view, pixel)
-        view_shaded = yield from self._off(lambda: shaded(view, points, out_faces, center, half, self.max_pixels))
+        view_shaded = yield from self._slice(lambda: shaded(view, points, out_faces, center, half, self.max_pixels))
         bad_shade, seen_both = shading_counts(reference, view, reference_shaded, view_shaded)
         soft = shading_counts(reference, view, reference_shaded, view_shaded, SOFT_DEG)[0]
         return 100.0 * wrong / max(shown, 1), 100.0 * bad_shade / max(seen_both, 1), 100.0 * soft / max(seen_both, 1)
@@ -2702,7 +2712,7 @@ class AutoJob:
             return
         made = [i for i in range(len(self.picked)) if not self.ready[i][self.picked[i]] and i not in self.twins]  # leave a rebuilt part alone while another can take it
         index = max(made or range(len(self.picked)), key=lambda i: self.levels[i][self.picked[i]].faces)
-        points, polys, kinds = yield from self._off(lambda: self._piece_arrays(self.pieces[index]))
+        points, polys, kinds = yield from self._slice(lambda: self._piece_arrays(self.pieces[index]))
         triangles = _triangle_count(polys)
         goal = self.levels[index][self.picked[index]].faces + miss
         if triangles <= KEEP_TRIANGLES or goal < 12 or goal >= triangles:

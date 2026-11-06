@@ -44,13 +44,13 @@ PREF_DEFAULTS = {
     "show_materials": True,
     "show_batch": True,
     "show_diagnostics": True,
-    "show_debug": True,
+    "show_debug": False,
     "show_regions": True,
     "show_guided": True,
     "advanced_mode": False,
     "flow_editor": False,
     "allow_helpers": False,
-    "hud_default": True,
+    "hud_default": False,
     "hud_corner": "BOTTOM_LEFT",
     "hud_offset_x": 70,
     "hud_offset_y": 40,
@@ -76,6 +76,31 @@ _DEFAULT_PREFS = SimpleNamespace(**PREF_DEFAULTS)
 _draw_handles: list = []
 _stats_cache: dict[str, "_CacheEntry"] = {}
 _draw_errors: set[str] = set()
+_built: dict[str, tuple] = {}  # name -> (key, arrays) a draw callback shows
+_pending: dict[str, tuple] = {}  # name -> (key, build) for the next timer tick
+
+
+def drawn_arrays(name: str, key, build):
+    """The arrays a draw callback shows under `name`. When `key` changes, `build()` runs in a one-shot timer, never inside
+    the draw; until then the arrays last built are returned (None before the first build)."""
+    have = _built.get(name)
+    if have is None or have[0] != key:
+        _pending[name] = (key, build)
+        if not bpy.app.timers.is_registered(_build_pending):
+            bpy.app.timers.register(_build_pending, first_interval=0.0)
+    return have[1] if have is not None else None
+
+
+def _build_pending():
+    while _pending:
+        name, (key, build) = _pending.popitem()
+        try:
+            _built[name] = (key, build())
+        except Exception:
+            _built[name] = (key, None)  # not tried again until the key changes
+            draw_failed(name)
+    tag_redraw()
+    return None
 
 
 def draw_failed(where: str) -> None:
@@ -654,10 +679,15 @@ CLASSES = (CURIOMESH_OT_toggle_heatmap,)
 WATCH_SECONDS = 0.5
 
 
+def _watched(settings) -> bool:
+    return settings is not None and bool(settings.hud_enabled or settings.heatmap_enabled or settings.live_enabled)
+
+
 def _watch():
-    """Timer: measures what the HUD and heatmap show, so their draw callbacks only draw. Ends when both (and Live) are off."""
+    """Timer: measures what the HUD and heatmap show, so their draw callbacks only draw. Ends when both (and Live) are off.
+    Meshes in Edit or Sculpt Mode are skipped: their stats wait until you are back in Object Mode."""
     settings = _settings()
-    if settings is None or not (settings.hud_enabled or settings.heatmap_enabled or settings.live_enabled):
+    if not _watched(settings):
         return None
     context = SimpleNamespace(scene=bpy.context.scene, object=bpy.context.view_layer.objects.active)
     heat = heatmap_targets(context, settings)
@@ -665,7 +695,7 @@ def _watch():
     colors = heat_colors()
     changed = False
     for obj in dict.fromkeys(o for o in shown if o is not None and o.type == "MESH"):
-        if len(obj.data.polygons) > HEATMAP_MAX_FACES:
+        if obj.mode != "OBJECT" or len(obj.data.polygons) > HEATMAP_MAX_FACES:
             continue
         old = _stats_cache.get(obj.name)
         entry = _entry(obj)
@@ -679,8 +709,13 @@ def _watch():
 
 
 def ensure_watch(_self=None, _context=None) -> None:
-    """Start the watch timer (from the HUD, Heatmap and Live switches, register and file loads). Usable as an update callback."""
-    if not bpy.app.timers.is_registered(_watch):
+    """Start the watch timer when the HUD, Heatmap or Live is on (their switches, and a loaded file whose scene has one
+    on). Nothing runs while all three are off. Usable as an update callback."""
+    try:
+        settings = _settings()
+    except AttributeError:  # no scene yet
+        return
+    if _watched(settings) and not bpy.app.timers.is_registered(_watch):
         bpy.app.timers.register(_watch, first_interval=0.0, persistent=True)
 
 
@@ -688,7 +723,6 @@ def register() -> None:
     unregister()
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_heatmap, (), "WINDOW", "POST_VIEW"))
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_hud, (), "WINDOW", "POST_PIXEL"))
-    ensure_watch()
 
 
 def unregister() -> None:
@@ -697,7 +731,10 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_draw_handles.pop(), "WINDOW")
         except Exception:
             pass
-    if bpy.app.timers.is_registered(_watch):
-        bpy.app.timers.unregister(_watch)
+    for timer in (_watch, _build_pending):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
+    _built.clear()
+    _pending.clear()
     _stats_cache.clear()
     _draw_errors.clear()

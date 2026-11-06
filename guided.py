@@ -136,6 +136,7 @@ state = {
     "auto_cache": (None, {}),  # (mesh signature, measurements of it): Start again with another amount skips the looking
     "fixes": [],  # remembered fixes, when the user's file can't be written
     "fixes_in_memory": False,
+    "fixes_saved": 0,
     "found": [],  # (fix, match) pairs of remembered fixes that fit the result, best first
     "lod": None,  # the LOD set being made: {"made": [(name, faces, view change, bake text)]}
     "lod_report": "",
@@ -1181,9 +1182,10 @@ class _PreviewOp:
         return bpy.data.objects.get(PREVIEW_NAME) is not None and state["res"] is not None
 
 
-def library_path() -> str | None:
-    """The user's own file of remembered fixes, in the add-on's user folder (not in the add-on). None if that can't be written."""
-    folder = hardware.user_folder()
+def library_path(create: bool = True) -> str | None:
+    """The user's own file of remembered fixes, in the add-on's user folder (not in the add-on). None if that can't be
+    written. With create False (reading), the folder is not made."""
+    folder = hardware.user_folder(create=create)
     if folder is None:
         return None
     return os.path.join(folder, "fixes.json")
@@ -1191,10 +1193,16 @@ def library_path() -> str | None:
 
 def _library() -> list[dict]:
     """The remembered fixes: from the user's file, or this session's memory when it can't be used."""
-    path = None if state["fixes_in_memory"] else library_path()
+    path = None if state["fixes_in_memory"] else library_path(create=False)
     if path is None:
         return state["fixes"]
     return teach.load(path)
+
+
+def fix_count() -> int | None:
+    """How many fixes are remembered, for the panel: read from the file in a one-shot timer, never in the panel's draw.
+    None until that has run."""
+    return overlay.drawn_arrays("teach.count", (state["fixes_saved"], state["fixes_in_memory"]), lambda: len(_library()))
 
 
 def _keep_library(fixes: list[dict]) -> None:
@@ -1208,6 +1216,7 @@ def _keep_library(fixes: list[dict]) -> None:
     except OSError:
         state["fixes"] = fixes
         state["fixes_in_memory"] = True
+    state["fixes_saved"] += 1  # the panel's count is read again
 
 
 def _drain(generator):
@@ -1711,7 +1720,7 @@ def _uv_charts(source, src):
 
 
 def machine_info(refresh: bool = False) -> dict:
-    """This computer, read once (graphics card lookup and a 0.1 s ray test) and kept."""
+    """This computer, read once (cores, memory and a 0.1 s ray test) and kept."""
     if state["machine"] is None or refresh:
         state["machine"] = hardware.detect()
         state["rays"] = hardware.benchmark()
@@ -2251,12 +2260,10 @@ def _world(matrix, arr):
 
 
 def _draw_data(source, gs):
+    """The arrays `_draw` shows. Built by overlay.drawn_arrays' one-shot timer when something changed, never in the draw."""
     global _SPHERE
     pts = gather(source, gs)
     preview = bpy.data.objects.get(PREVIEW_NAME)
-    key = (state["sig"], id(state["res"]), id(state["spot"]), gs.scope, gs.show_cage)
-    if state["draw_key"] == key and state["draw"] is not None:
-        return state["draw"]
     if _SPHERE is None:
         _SPHERE = _unit_sphere()
     m = source.matrix_world
@@ -2285,7 +2292,6 @@ def _draw_data(source, gs):
         up = np.array([0.0, 0.0, 1.0])
         side = np.array([1.0, 0.0, 0.0])
         data["spot"] = np.concatenate((_ring(c, up, r), _ring(c, side, r))).astype(np.float32)
-    state["draw"], state["draw_key"], state["batches"] = data, key, None
     return data
 
 
@@ -2298,7 +2304,14 @@ def _draw() -> None:
         import gpu
         from gpu_extras.batch import batch_for_shader
 
-        data = _draw_data(source, gs)
+        if state["draw_key"] is None:  # something set it to None: the arrays are built again
+            state["draw_key"] = time.perf_counter_ns()
+        key = (state["sig"], id(state["res"]), id(state["spot"]), gs.scope, gs.show_cage, state["draw_key"], source.name)
+        data = overlay.drawn_arrays("guided", key, lambda: _draw_data(source, gs))
+        if data is None:
+            return
+        if state["draw"] is not data:
+            state["draw"], state["batches"] = data, None
         shader = gpu.shader.from_builtin("UNIFORM_COLOR")
         colors, outline, lock_color, spot_color = _colors()
 
@@ -3835,9 +3848,10 @@ REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
 
 
 @functools.cache  # built once: the panel draws it on every redraw
+@functools.lru_cache(maxsize=1)
 def problem_url() -> str:
-    """New-issue link with Blender, OS and CurioMesh versions already filled in."""
-    import platform
+    """New-issue link with the Blender and CurioMesh versions filled in (nothing else about the computer). Built once:
+    the Issue Reports panel draws it on every redraw."""
     import tomllib
     from urllib.parse import urlencode  # only builds the link's query string; nothing is sent from Blender
 
@@ -3845,10 +3859,7 @@ def problem_url() -> str:
         version = tomllib.loads((Path(__file__).parent / "blender_manifest.toml").read_text(encoding="utf-8")).get("version", "?")
     except (OSError, ValueError):
         version = "?"
-    body = (
-        f"CurioMesh {version}, Blender {bpy.app.version_string}, {platform.system()} {platform.release()}\n\n"
-        "What I did:\n\nWhat happened:\n\nWhat I expected:\n"
-    )
+    body = f"CurioMesh {version}, Blender {bpy.app.version_string}\nOperating system: \n\nWhat I did:\n\nWhat happened:\n\nWhat I expected:\n"
     return f"{REPO_URL}/issues/new?" + urlencode({"title": "Problem: ", "body": body})
 
 
@@ -3912,7 +3923,7 @@ def _on_load_post(*_args):
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None, curve_sig=None, region=None, found=[])
     _preview_on.clear()  # its timer is gone after a load; the user turns it on again
     checks.forget()
-    overlay.ensure_watch()  # the new file's scene may have the HUD or heatmap on
+    overlay.ensure_watch()  # starts only if the loaded scene has the HUD, Heatmap or Live turned on
 
 
 def register() -> None:

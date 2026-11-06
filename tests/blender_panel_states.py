@@ -153,7 +153,7 @@ def snapshot(panel, label, out):
         if not closed:
             lines += [f"  {'  ' * d}{kind}: {words}" for d, kind, words in log]
     extra = []
-    for cls in (*panel.POPOVERS, *panel.PRO_PANELS):
+    for cls in (*panel.POPOVERS, *panel.ADVANCED_PANELS):
         if hasattr(cls, "poll") and "poll" in cls.__dict__ and not cls.poll(bpy.context):
             continue
         extra.append(f"{cls.bl_label} {controls(draw(cls, label))}")

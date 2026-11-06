@@ -988,10 +988,11 @@ def draw_teach(layout, obj) -> None:
     row = col.row(align=True)
     row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
     row.operator("curiomesh.teach_remember", text="Remember", icon="BOOKMARKS")
-    known = len(G._library())
-    col.label(text=f"{known} fix{'' if known == 1 else 'es'} remembered on this PC")
+    known = G.fix_count()
+    if known is not None:
+        col.label(text=f"{known} fix{'' if known == 1 else 'es'} remembered on this PC")
     if G.state["fixes_in_memory"]:
-        overlay.wrap_label(col, "Blender's config folder can't be written, so these last only until you close Blender. Export them to keep them.", icon="ERROR", width=WIDTH, limit=4)
+        overlay.wrap_label(col, "The add-on's user folder can't be written, so these last only until you close Blender. Export them to keep them.", icon="ERROR", width=WIDTH, limit=4)
     if G.state["found"]:
         col.label(text="You've fixed something like this before:", icon="INFO")
         col.operator("curiomesh.teach_apply", text=f"Apply ({len(G.state['found'])} places)", icon="CHECKMARK")
@@ -1159,7 +1160,7 @@ class CURIOMESH_PT_guided_advanced(_Advanced, bpy.types.Panel):
 # --------------------------------------------------------------------------- registration
 
 MAIN_PANELS = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_adjust, CURIOMESH_PT_guided_parts, CURIOMESH_PT_guided_apply)
-PRO_PANELS = (
+ADVANCED_PANELS = (
     CURIOMESH_PT_advanced_engine,
     CURIOMESH_PT_advanced_computer,
     CURIOMESH_PT_guided_shapes,
@@ -1179,7 +1180,7 @@ POPOVERS = (
     CURIOMESH_PT_pop_bake,
     CURIOMESH_PT_pop_lod,
 )
-CLASSES = (CURIOMESH_OT_pick_use, *POPOVERS, *MAIN_PANELS, *PRO_PANELS)
+CLASSES = (CURIOMESH_OT_pick_use, *POPOVERS, *MAIN_PANELS, *ADVANCED_PANELS)
 
 
 def register() -> None:

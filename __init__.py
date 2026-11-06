@@ -22,7 +22,7 @@ from .operators import (
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
-from . import batch, fix_select, game_export, guided, live, overlay, panel, region
+from . import batch, fix_select, game_export, guided, hardware, live, overlay, panel, region
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
 D = overlay.PREF_DEFAULTS
@@ -93,7 +93,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     show_materials: bpy.props.BoolProperty(name="Materials & UVs", description="Show the materials and UVs panel", default=True)
     show_batch: bpy.props.BoolProperty(name="Batch", description="Show the batch remesh panel", default=True)
     show_diagnostics: bpy.props.BoolProperty(name="Diagnostics", description="Show the measurements panel", default=True)
-    show_debug: bpy.props.BoolProperty(name="Debug", description="Show the panel with extra switches for finding problems", default=False)
+    show_debug: bpy.props.BoolProperty(name="Debug", description="Show the panel with extra switches for finding problems", default=D["show_debug"])
     show_regions: bpy.props.BoolProperty(name="Regions", description="Show the Regions panel", default=True)
     show_guided: bpy.props.BoolProperty(name="Guided", description="Show the main CurioMesh panel", default=True)
     advanced_mode: bpy.props.BoolProperty(
@@ -115,7 +115,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
 
     hud_default: bpy.props.BoolProperty(
         name="HUD On in New Scenes",
-        description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet",
+        description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet. Off by default: press HUD in the panel to show it",
         default=D["hud_default"],
         update=overlay.ensure_watch,
     )
@@ -255,7 +255,27 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         for name in ("guided_detail_color", "guided_loop_color", "guided_sharp_color", "guided_calm_color", "guided_outline_color", "guided_lock_color"):
             col.prop(self, name)
 
+        box = layout.box()
+        box.label(text="Saved Progress", icon="FILE_TICK")
+        note = box.column(align=True)
+        note.scale_y = 0.8
+        note.label(text="A stopped job keeps its finished parts in the add-on's user folder, so Start resumes it.")
+        note.label(text="They are cleared when the job finishes, or 3 days after it was stopped.")
+        box.operator("curiomesh.clear_saved_progress", icon="TRASH")
+
         layout.operator("curiomesh.reset_preferences", icon="LOOP_BACK")
+
+
+class CURIOMESH_OT_clear_saved_progress(bpy.types.Operator):
+    bl_idname = "curiomesh.clear_saved_progress"
+    bl_label = "Clear Saved Progress"
+    bl_description = "Delete the finished parts that stopped jobs keep so Start can resume them. A job that runs now keeps going"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        freed = hardware.clear_saved_progress()
+        self.report({"INFO"}, f"Cleared {freed / 2**20:.1f} MB of saved progress")
+        return {"FINISHED"}
 
 
 class CURIOMESH_OT_reset_preferences(bpy.types.Operator):
@@ -279,6 +299,7 @@ class CURIOMESH_OT_reset_preferences(bpy.types.Operator):
 classes = (
     CURIOMESH_AP_preferences,
     CURIOMESH_OT_reset_preferences,
+    CURIOMESH_OT_clear_saved_progress,
     batch.CURIOMESH_PG_batch_item,
     CURIOMESH_PG_settings,
     batch.CURIOMESH_OT_batch_remesh,

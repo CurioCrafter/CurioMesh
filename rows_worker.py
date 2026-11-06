@@ -5,10 +5,12 @@
 
 QuadriFlow can't be interrupted and blocks the Blender that runs it, so Even Rows gives it another Blender, which keeps
 the user's responsive and can be killed if a piece takes too long. Reads in_<k>.npz, writes out_<k>.npz. A piece that
-QuadriFlow refuses gets an out file with no faces.
+QuadriFlow refuses gets an out file with no faces. The job hands it one piece number per line on stdin; when stdin
+closes (the job ended or was stopped, or its Blender quit or crashed) it exits after the piece it is on.
 """
 
 import os
+import sys
 
 import bpy
 import numpy as np
@@ -45,9 +47,13 @@ def _solve(points, polys, target):
 
 
 def main(argv: list[str]) -> None:
-    """Started by `parallel.helper_command("rows_worker.main", [folder, first, last])`."""
-    folder, first, last = argv[argv.index("--") + 1 :]
-    for k in range(int(first), int(last)):
+    """Started by `parallel.helper_command("rows_worker.main", [folder])`. Does each piece named on stdin."""
+    folder = argv[argv.index("--") + 1]
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            os._exit(0)  # the job no longer needs it, or the Blender that started this one is gone
+        k = int(line)
         path = os.path.join(folder, f"in_{k}.npz")
         if not os.path.exists(path):
             continue
