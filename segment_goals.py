@@ -701,7 +701,9 @@ class GoalJob(view.PartJob):
             if "edge" not in record:
                 area_of = area_of if area_of is not None else S.face_frames(co, faces)[1]
                 record["edge"] = float(np.sqrt(area_of[ids].sum() / max(len(ids), 1)))
-            edge = record["edge"] * 2.5 ** (1.0 - 2.0 * record["goal_detail"]) * (LOW_POLY_EDGE if record["goal"] == "LOWPOLY" else 1.0)
+            # ponytail: Detail has no end, but quads never get smaller than an eighth of the part's own (64x its faces), so a
+            # long run of Smaller Quads can't build billions of faces and run out of memory; raise it if a part needs finer
+            edge = record["edge"] * max(2.5 ** (1.0 - 2.0 * record["goal_detail"]), 0.125) * (LOW_POLY_EDGE if record["goal"] == "LOWPOLY" else 1.0)
             made = yield from self._build(record["goal"], record, ids, edge, topology, project)
             if self._stopped:
                 return

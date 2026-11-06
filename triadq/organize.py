@@ -343,10 +343,10 @@ def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: 
     return points, [tuple(int(remap[v]) for v in reducer.faces[i]) for i in alive], [reducer.materials[i] for i in alive], held
 
 
-def fewer_poles(co, faces, keys, stay=None, judge=None, project=None, plane=None, cycles: int = CYCLES, redraw: bool = True):
+def fewer_poles(co, faces, keys, stay=None, judge=None, project=None, plane=None, cycles: int = CYCLES, redraw: bool = True, stopped=None):
     """`clean_poles` again and again with a short settle in between: once the quads are even, more patches fit a grid and
     more pole pairs can walk. At least `cycles` rounds, then on while a round still takes poles away. Same arguments and
-    result as `clean_poles`; `project` and `plane` as in `settle`."""
+    result as `clean_poles`; `project` and `plane` as in `settle`. `stopped()` True ends it after the round running."""
     co = np.asarray(co, dtype=np.float64)
     stay = np.zeros(len(co), dtype=bool) if stay is None else np.asarray(stay, dtype=bool)
     before, k = poles(co, faces), 0
@@ -354,7 +354,7 @@ def fewer_poles(co, faces, keys, stay=None, judge=None, project=None, plane=None
         co, faces, keys, stay = clean_poles(co, faces, keys, stay, judge, redraw=redraw)
         k += 1
         now = poles(co, faces)
-        if k >= cycles and now >= before:
+        if (k >= cycles and now >= before) or (stopped is not None and stopped()):
             return co, faces, keys, stay
         before = now
         stay = stay | pinned(co, faces, plane=plane)

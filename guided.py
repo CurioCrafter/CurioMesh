@@ -2110,8 +2110,8 @@ def run_update(context, force: bool = False) -> bool:
                 notes = warns[0] if warns else ""
         if res is None:
             qe = float(np.sum(src["tri_area"] / (L0 * multiplier(src["tri_cent"], pts)) ** 2))
-            if qe > HARD_QUAD_CAP and not force:
-                state["message"] = f"Would make {int(qe):,} quads: press Update to make them anyway (it can take a while)"
+            if qe > HARD_QUAD_CAP:  # safety: Classic Guided builds on Blender's main thread, so more would freeze it (or run out of memory)
+                state["message"] = f"Would make {int(qe):,} quads, too many to build without freezing Blender: lower Base Quads or the Detail strength, or use Start, which works in the background"
                 return False
             if not force and (qe > LIVE_QUAD_CAP or len(src["faces"]) > LIVE_SOURCE_FACES):
                 state["message"] = f"About {int(qe):,} quads: press Update"

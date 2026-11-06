@@ -275,7 +275,7 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0
             stay |= held_out
         project = lambda p: _nearest(tree, p)  # noqa: E731
         if choice["poles"]:
-            clean, clean_faces, clean_kinds, stay = O.fewer_poles(half, half_faces, tidy_kinds, stay, judge, project, plane, redraw=REDRAW)
+            clean, clean_faces, clean_kinds, stay = O.fewer_poles(half, half_faces, tidy_kinds, stay, judge, project, plane, redraw=REDRAW, stopped=lambda: box["stop"])
         else:
             clean, clean_faces, clean_kinds = half, half_faces, tidy_kinds
         if box["stop"]:

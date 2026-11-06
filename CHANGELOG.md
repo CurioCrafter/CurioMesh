@@ -70,9 +70,9 @@
   and Redo Rough Spots. When a step stops at its limit, the result line says so and that Longer or No Limit keeps
   going. No Limit also runs Redraw Messy Quads on models of more than 40 loose pieces.
 - **Bigger / Smaller Quads on a part have no end**: each press is one more step (they stopped at about 0.4x and 2.5x of
-  the part's first size). The Redo Detail slider can be typed past its ends.
+  the part's first size). The Redo Detail slider can be typed past its ends. Quads stop getting smaller at an eighth
+  of the part's first size (64 times its faces), so a long run of presses can't run Blender out of memory.
 - **Every try of a part is kept** (the oldest was thrown away after 6).
-- **Classic Guided** no longer refuses more than 60,000 quads: Update makes them anyway.
 - **Hard maxes became slider ends you can type past**: Most Detail Loss (20%, now up to 100%), point and Detail
   Marker Strength, Loops, Surface Fit Passes, Iterations, Texture Sets, Primitive Sides, Holding Edges distance,
   Attempts, Grow and Suggestions. Hard Edge Angle goes to 180 degrees in both places (it was 150 in one, 170 in the
