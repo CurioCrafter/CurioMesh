@@ -1219,8 +1219,169 @@ fn uvsnap_probe() -> usize {
     uvsnap::probe()
 }
 
+/// Seam chain arrays (as `uvseam_extract` returns them, `xyz` = 3 per welded vertex) checked and held for a call.
+struct UvsnapChains {
+    run_indptr: Vec<i64>,
+    run_vertex: Vec<i64>,
+    uv_a: Vec<f64>,
+    uv_b: Vec<f64>,
+    class: Vec<u8>,
+    gap_px: Vec<f64>,
+    xyz: Vec<f64>,
+}
+
+impl UvsnapChains {
+    #[allow(clippy::too_many_arguments)]
+    fn read(run_indptr: &[i64], run_vertex: &[i64], uv_a: &[f64], uv_b: &[f64], class: &[i64], gap_px: &[f64], xyz: &[f64]) -> PyResult<Self> {
+        let nw = xyz.len() / 3;
+        let nr = run_vertex.len();
+        let ok = xyz.len() % 3 == 0
+            && run_indptr.len() == class.len() + 1
+            && run_indptr.first() == Some(&0)
+            && *run_indptr.last().unwrap() as usize == nr
+            && run_indptr.windows(2).all(|w| w[1] - w[0] >= 1)
+            && run_vertex.iter().all(|&v| v >= 0 && (v as usize) < nw)
+            && uv_a.len() == 2 * nr
+            && uv_b.len() == 2 * nr
+            && gap_px.len() == nr
+            && class.iter().all(|&c| (0..=3).contains(&c))
+            && xyz.iter().chain(uv_a).chain(uv_b).chain(gap_px).all(|x| x.is_finite());
+        if !ok {
+            return Err(PyValueError::new_err("seam chains are invalid (run_indptr, run_vertex, uv_a, uv_b, class, gap_px, xyz)"));
+        }
+        Ok(UvsnapChains {
+            run_indptr: run_indptr.to_vec(),
+            run_vertex: run_vertex.to_vec(),
+            uv_a: uv_a.to_vec(),
+            uv_b: uv_b.to_vec(),
+            class: class.iter().map(|&c| c as u8).collect(),
+            gap_px: gap_px.to_vec(),
+            xyz: xyz.to_vec(),
+        })
+    }
+    fn view(&self) -> uvsnap::Chains<'_> {
+        uvsnap::Chains {
+            seams: uvseam::SeamUv { run_indptr: &self.run_indptr, run_vertex: &self.run_vertex, uv_a: &self.uv_a, uv_b: &self.uv_b, class: &self.class, gap_px: &self.gap_px },
+            xyz: &self.xyz,
+        }
+    }
+}
+
+fn uvsnap_tags(n: usize, nc: usize, vchain: &[i64], vparam: &[f64]) -> PyResult<()> {
+    let sizes = (vchain.is_empty() && vparam.is_empty()) || (vchain.len() == n && vparam.len() == n);
+    if sizes && vparam.iter().all(|x| x.is_finite()) && vchain.iter().all(|&c| c < nc as i64) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err("vchain and vparam need one value per vertex (or none), naming chains that are there"))
+    }
+}
+
+/// Seam snap (`uvsnap::snap`) of a result mesh onto the Soft chains: dict with points (moved), held, snapped, vchain,
+/// vparam (per vertex), state, mean_dist, turns, path_edges (per chain), moved, relaxed, done. `max_move` per vertex
+/// (empty: no limit); `vchain` / `vparam` earlier tags (empty: none); `rings` relaxed around snapped vertices.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvsnap_snap<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    run_indptr: PyReadonlyArray1<'py, i64>,
+    run_vertex: PyReadonlyArray1<'py, i64>,
+    uv_a: PyReadonlyArray1<'py, f64>,
+    uv_b: PyReadonlyArray1<'py, f64>,
+    class: PyReadonlyArray1<'py, i64>,
+    gap_px: PyReadonlyArray1<'py, f64>,
+    xyz: PyReadonlyArray1<'py, f64>,
+    max_move: PyReadonlyArray1<'py, f64>,
+    vchain: PyReadonlyArray1<'py, i64>,
+    vparam: PyReadonlyArray1<'py, f64>,
+    rings: usize,
+    stop: &StopFlag,
+) -> PyResult<Bound<'py, PyDict>> {
+    let (p, i, f) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let faces = uvseam_mesh(p, i, f)?;
+    let chains = UvsnapChains::read(slice(&run_indptr, "run_indptr")?, slice(&run_vertex, "run_vertex")?, slice(&uv_a, "uv_a")?, slice(&uv_b, "uv_b")?, slice(&class, "class")?, slice(&gap_px, "gap_px")?, slice(&xyz, "xyz")?)?;
+    let (mm, vc, vp) = (slice(&max_move, "max_move")?, slice(&vchain, "vchain")?, slice(&vparam, "vparam")?);
+    let n = p.len() / 3;
+    if !(mm.is_empty() || mm.len() == n) || mm.iter().any(|x| x.is_nan() || *x < 0.0) {
+        return Err(PyValueError::new_err("max_move needs one value >= 0 per vertex (or none)"));
+    }
+    uvsnap_tags(n, chains.class.len(), vc, vp)?;
+    let r = py.detach(|| uvsnap::snap(p, &faces, &chains.view(), mm, vc, vp, rings, &stop.0));
+    let d = PyDict::new(py);
+    d.set_item("done", !r.stopped)?;
+    d.set_item("moved", r.moved)?;
+    d.set_item("relaxed", r.relaxed)?;
+    d.set_item("points", r.points.into_pyarray(py))?;
+    d.set_item("held", r.held.into_pyarray(py))?;
+    d.set_item("snapped", r.snapped.into_pyarray(py))?;
+    d.set_item("vchain", r.vchain.into_pyarray(py))?;
+    d.set_item("vparam", r.vparam.into_pyarray(py))?;
+    d.set_item("state", r.state.iter().map(|&x| x as i64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("mean_dist", r.mean_dist.into_pyarray(py))?;
+    d.set_item("turns", r.turns.into_pyarray(py))?;
+    d.set_item("path_edges", r.path_edges.into_pyarray(py))?;
+    Ok(d)
+}
+
+/// Split leftovers (`uvsnap::split`): dict with the new mesh (points, indptr, flat, origin per new face), face_state
+/// per input face, vchain / vparam per new vertex, corner_uv (2 per new corner, NaN off seams) and corner_side (-1 off
+/// seams, 0 side A, 1 side B), and the counts. `budget` extra faces (negative: no limit); `seen_face` per input face
+/// (empty: all seen).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvsnap_split<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    run_indptr: PyReadonlyArray1<'py, i64>,
+    run_vertex: PyReadonlyArray1<'py, i64>,
+    uv_a: PyReadonlyArray1<'py, f64>,
+    uv_b: PyReadonlyArray1<'py, f64>,
+    class: PyReadonlyArray1<'py, i64>,
+    gap_px: PyReadonlyArray1<'py, f64>,
+    xyz: PyReadonlyArray1<'py, f64>,
+    vchain: PyReadonlyArray1<'py, i64>,
+    vparam: PyReadonlyArray1<'py, f64>,
+    seen_face: PyReadonlyArray1<'py, f64>,
+    budget: f64,
+    stop: &StopFlag,
+) -> PyResult<Bound<'py, PyDict>> {
+    let (p, i, f) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let faces = uvseam_mesh(p, i, f)?;
+    let chains = UvsnapChains::read(slice(&run_indptr, "run_indptr")?, slice(&run_vertex, "run_vertex")?, slice(&uv_a, "uv_a")?, slice(&uv_b, "uv_b")?, slice(&class, "class")?, slice(&gap_px, "gap_px")?, slice(&xyz, "xyz")?)?;
+    let (vc, vp, seen) = (slice(&vchain, "vchain")?, slice(&vparam, "vparam")?, slice(&seen_face, "seen_face")?);
+    uvsnap_tags(p.len() / 3, chains.class.len(), vc, vp)?;
+    if !(seen.is_empty() || seen.len() == faces.count()) || budget.is_nan() {
+        return Err(PyValueError::new_err("seen_face needs one value per face (or none) and budget a number"));
+    }
+    let r = py.detach(|| uvsnap::split(p, &faces, &chains.view(), vc, vp, seen, budget, &stop.0));
+    let d = PyDict::new(py);
+    d.set_item("done", !r.stopped)?;
+    for (k, v) in [("faces_split", r.faces_split), ("triangles_left", r.triangles_left), ("faces_left", r.faces_left), ("faces_cannot", r.faces_cannot), ("faces_bake", r.faces_bake)] {
+        d.set_item(k, v)?;
+    }
+    d.set_item("extra_faces", r.extra_faces)?;
+    d.set_item("spent", r.spent)?;
+    d.set_item("wanted", r.wanted)?;
+    d.set_item("points", r.points.into_pyarray(py))?;
+    d.set_item("indptr", r.indptr.into_pyarray(py))?;
+    d.set_item("flat", r.flat.into_pyarray(py))?;
+    d.set_item("origin", r.origin.into_pyarray(py))?;
+    d.set_item("face_state", r.face_state.iter().map(|&x| x as i64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("vchain", r.vchain.into_pyarray(py))?;
+    d.set_item("vparam", r.vparam.into_pyarray(py))?;
+    d.set_item("corner_uv", r.corner_uv.into_pyarray(py))?;
+    d.set_item("corner_side", r.corner_side.iter().map(|&x| x as i64).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok(d)
+}
+
 fn register_uvsnap(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvsnap_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(uvsnap_snap, m)?)?;
+    m.add_function(wrap_pyfunction!(uvsnap_split, m)?)?;
     Ok(())
 }
 // main-only: uv end snap

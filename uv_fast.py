@@ -20,7 +20,7 @@ def _install_seam() -> None:
 
 # main-only: uv begin snap
 def _install_snap() -> None:
-    uvsnap.set_fast(probe=turbo.uvsnap_probe)
+    uvsnap.set_fast(probe=turbo.uvsnap_probe, snap=turbo.uvsnap_snap, split=turbo.uvsnap_split)
 # main-only: uv end snap
 
 # main-only: uv begin qem

@@ -976,6 +976,27 @@ def uvsnap_probe() -> "int | None":
     """1 when the compiled `uvsnap` kernel is there and its compile probe passes; None for "use NumPy"."""
 
     return _uv_probe("uvsnap_probe")
+
+
+def _uvsnap_chains(seams: dict, xyz) -> tuple:
+    return (_uvseam_i64(seams["run_indptr"]), _uvseam_i64(seams["run_vertex"]), _uvseam_f64(seams["uv_a"]), _uvseam_f64(seams["uv_b"]),
+            _uvseam_i64(seams["class"]), _uvseam_f64(seams["gap_px"]), _uvseam_f64(xyz))
+
+
+def uvsnap_snap(points, indptr, flat, seams: dict, xyz, max_move=(), vchain=(), vparam=(), rings: int = 1) -> "UvJob | None":
+    """Seam snap as a worker-thread job: `result()` = dict (points, held, snapped, vchain, vparam, per-chain state...).
+
+    `seams` is the extract dict (chains and classes), `xyz` the welded source positions (3 per welded vertex)."""
+
+    return uv_job("uvsnap_snap", _uvseam_f64(points), _uvseam_i64(indptr), _uvseam_i64(flat), *_uvsnap_chains(seams, xyz), _uvseam_f64(max_move),
+                  _uvseam_i64(vchain), _uvseam_f64(vparam), int(rings), name="CurioMeshUVSnap")
+
+
+def uvsnap_split(points, indptr, flat, seams: dict, xyz, vchain=(), vparam=(), seen_face=(), budget: float = -1.0) -> "UvJob | None":
+    """Split leftovers as a job: `result()` = dict (new mesh, origin, face_state, seam vertex tags, corner_uv, counts)."""
+
+    return uv_job("uvsnap_split", _uvseam_f64(points), _uvseam_i64(indptr), _uvseam_i64(flat), *_uvsnap_chains(seams, xyz), _uvseam_i64(vchain),
+                  _uvseam_f64(vparam), _uvseam_f64(seen_face), float(budget), name="CurioMeshUVSplit")
 # main-only: uv end snap
 
 # main-only: uv begin qem
