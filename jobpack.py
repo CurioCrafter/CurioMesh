@@ -6,7 +6,7 @@
 `export_job` writes a folder: the mesh, the settings and `run_job.py`, which runs the very same `AutoJob` of the
 CurioMesh installed in the Blender that runs it, headless (`blender --background --python run_job.py`) and writes `result.npz`. `load_result` reads
 that file back as the dict the preview uses. Nothing here talks to a network, an account or a cloud service: you
-move the folder yourself. No `bpy` import, so the tests run outside Blender.
+move the folder yourself. No `bpy` import: the exported job and helper Blenders import it too.
 """
 
 from __future__ import annotations
@@ -98,8 +98,7 @@ Stopped, or the machine crashed?
 Good to know
   - The job uses the same engine as the button in Blender, so the result is the same kind of result.
   - Mirror, guide curves and painted density are carried in the folder (mesh.npz, guides.npz, job.json).
-  - Today the work runs on the CPU. A machine with many CPU cores and plenty of memory finishes soonest; a graphics
-    card does not speed it up yet.
+  - The work runs on the CPU. A machine with many CPU cores and plenty of memory finishes soonest.
   - Keep the mesh private if it is private: nothing in this folder sends anything anywhere.
   - run_job.py is a Python program. Only run a job folder you exported yourself or got from someone you trust,
     the same as any script. Importing a result.npz back runs nothing.

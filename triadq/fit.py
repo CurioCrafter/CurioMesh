@@ -79,16 +79,13 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
 
 
 def _crossings(points: np.ndarray, quads: np.ndarray) -> np.ndarray:
-    """Each pair of quads that pass through each other, as one number (lower * count + higher). Empty outside Blender."""
+    """Each pair of quads that pass through each other, as one number (lower * count + higher)."""
 
     from .checks import crossing_pairs
 
     if not len(quads):
         return np.zeros(0, dtype=np.int64)
-    try:
-        pairs = np.asarray(crossing_pairs(points, [tuple(q) for q in quads.tolist()]), dtype=np.int64).reshape(-1, 2)
-    except ImportError:  # no BVH outside Blender
-        return np.zeros(0, dtype=np.int64)
+    pairs = np.asarray(crossing_pairs(points, [tuple(q) for q in quads.tolist()]), dtype=np.int64).reshape(-1, 2)
     return pairs.min(axis=1) * len(quads) + pairs.max(axis=1)
 
 

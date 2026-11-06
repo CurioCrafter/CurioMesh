@@ -47,7 +47,8 @@ fe = {
     "last": None,  # (curve name, kind) of the last stroke drawn
     "meter": "",
     "crease": None,  # (source signature, sample points, directions)
-    "batch": None,
+    "batch": None,  # (the arrays drawn, their batch)
+    "stroke_key": 0,  # changed when the strokes change: the drawn lines are built again
 }
 
 
@@ -58,7 +59,7 @@ def _g():
 
 
 def cancel() -> None:
-    fe.update(job=None, base=None, origin=None, shown=None, centres=None, adjacency=None, cache={}, box=None, sig=None, meter="", batch=None)
+    fe.update(job=None, base=None, origin=None, shown=None, centres=None, adjacency=None, cache={}, box=None, sig=None, meter="", batch=None, stroke_key=time.perf_counter_ns())
 
 
 def _curves(gs):
@@ -229,8 +230,8 @@ def _tick():
         except Exception:
             now = fe["sig"]
         if now != fe["sig"]:
+            fe["stroke_key"] = time.perf_counter_ns()
             request(context)
-    fe["batch"] = None
     return GAP if fe["job"] is not None or (gs is not None and gs.flow_live) else None  # idle and not Live: the timer ends
 
 
@@ -297,7 +298,7 @@ def add_stroke(context, source, kind: str, line, raw=None):
     else:
         gs.guide_use = True
     fe["last"] = (obj.name, kind)
-    fe["batch"] = None
+    fe["stroke_key"] = time.perf_counter_ns()
     return obj
 
 
@@ -311,7 +312,7 @@ def remove_stroke(gs, obj) -> None:
     bpy.data.objects.remove(obj, do_unlink=True)
     if data is not None and data.users == 0:
         bpy.data.curves.remove(data)
-    fe["batch"] = None
+    fe["stroke_key"] = time.perf_counter_ns()
 
 
 def _nearest_surface(source):
@@ -675,24 +676,29 @@ def _draw_strokes() -> None:
         gs = getattr(context.scene, "curiomesh_guided", None)
         if gs is None:
             return
-        curves = _curves(gs)
-        if not curves:
-            return
-        if fe["batch"] is None:
+        def arrays():  # in overlay.drawn_arrays' timer, not in the draw
             ends, colours = [], []
-            for g in curves:
+            for g in _curves(gs):
                 obj = g.obj
                 for sp in obj.data.splines:
                     pts = [obj.matrix_world @ Vector(p.co[:3]) for p in sp.points]
                     for a, b in zip(pts[:-1], pts[1:]):
                         ends += [a[:], b[:]]
                         colours += [COLOURS.get(str(obj[KIND_KEY]), COLOURS["FLOW"])] * 2
+            if not ends:
+                return None
+            return np.asarray(ends, dtype=np.float32).reshape(-1, 3), np.asarray(colours, dtype=np.float32).reshape(-1, 4)
+
+        built = overlay.drawn_arrays("flowedit.strokes", (fe["stroke_key"], len(gs.guide_curves)), arrays)
+        if built is None:
+            return
+        if fe["batch"] is None or fe["batch"][0] is not built:
             shader = gpu.shader.from_builtin("FLAT_COLOR")
-            fe["batch"] = batch_for_shader(shader, "LINES", {"pos": np.asarray(ends, dtype=np.float32).reshape(-1, 3), "color": np.asarray(colours, dtype=np.float32).reshape(-1, 4)})
+            fe["batch"] = (built, batch_for_shader(shader, "LINES", {"pos": built[0], "color": built[1]}))
         shader = gpu.shader.from_builtin("FLAT_COLOR")
         gpu.state.line_width_set(3.0)
         shader.bind()
-        fe["batch"].draw(shader)
+        fe["batch"][1].draw(shader)
         gpu.state.line_width_set(1.0)
     except Exception:
         overlay.draw_failed("flowedit._draw_strokes")

@@ -3,7 +3,7 @@
 """Export for Game Engine: the selected meshes and their baked textures, set up the way each engine reads them.
 
 Unreal, Unity and Godot were tested here (Unreal 5.7, Unity 6, Godot 4.7) by lighting a baked result from eight sides
-next to its source. The other presets follow their engines' own documentation and are not tested here. Normal maps come
+next to its source. The other presets follow their engines' own documentation. Normal maps come
 in two kinds: green up (OpenGL: Blender, Unity, Godot, Roblox, glTF) and green down (DirectX: Unreal, CryEngine, O3DE).
 
 Your objects and images are never changed. Textures are written as PNG files next to the mesh (or inside a .glb), from
@@ -40,9 +40,9 @@ ENGINES = {
     "UNREAL": Engine("Unreal", "FBX and PNG maps. Normal map green flipped, as Unreal reads it (DirectX). Tested in Unreal 5.7", "FBX", directx=True),
     "UNITY": Engine("Unity", "FBX turned and scaled for Unity, PNG maps, normal map as baked (OpenGL). Tested in Unity 6", "FBX", unity_axes=True),
     "GODOT": Engine("Godot", "One .glb with the textures inside, normal map as baked (OpenGL). Tested in Godot 4.7", "GLB"),
-    "ROBLOX": Engine("Roblox", "FBX at FBX unit scale with tangents, PNG maps of at most 1024 pixels, normal map as baked (OpenGL). Meshes over 20,000 triangles are split. From Roblox's documentation, not tested here", "FBX", tris=20000, texture=1024, scale="FBX_SCALE_UNITS"),
+    "ROBLOX": Engine("Roblox", "FBX at FBX unit scale with tangents, PNG maps of at most 1024 pixels, normal map as baked (OpenGL). Meshes over 20,000 triangles are split. Set from Roblox's documentation", "FBX", tris=20000, texture=1024, scale="FBX_SCALE_UNITS"),
     "GLTF": Engine("Web and glTF", "One .glb for three.js, Babylon.js, Bevy, Sketchfab and other glTF readers. glTF normal maps are green up (OpenGL), as baked", "GLB"),
-    "DIRECTX": Engine("CryEngine, O3DE", "FBX and PNG maps with the normal map green flipped (DirectX). From these engines' documentation, not tested here", "FBX", directx=True),
+    "DIRECTX": Engine("CryEngine, O3DE", "FBX and PNG maps with the normal map green flipped (DirectX). Set from these engines' documentation", "FBX", directx=True),
     "CUSTOM": Engine("Custom", "Choose the file type, normal map kind, triangle limit and texture size yourself", "FBX"),
 }
 

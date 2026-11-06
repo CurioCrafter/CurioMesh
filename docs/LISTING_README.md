@@ -45,8 +45,9 @@ This is the extensions.blender.org build. It contains Python code only.
 - Blender stays usable while a job runs: the work is done in short steps from a timer. A few single steps (reducing
   a part, pairing, the topology check) can still hold Blender for up to about 3.5 seconds on a mid-size mesh; the wait
   cursor shows while they run, and **Stop** takes effect after them. **Apply** is available once the job has finished,
-  or after **Stop**. After a result appears, more sizes for the Quad Size and Rows sliders are worked out the same way,
-  and the panel says so while it happens; single steps there can hold Blender for a few seconds (up to about 6).
+  or after **Stop**. The first time you move Quad Size or Rows after a result, the other sizes for those sliders are
+  worked out the same way, and the panel says so while it happens; single steps there can hold Blender for a few
+  seconds (up to about 6). Auto alone does not start this.
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
 - Remembered fixes and resume points are kept in the extension's user folder. A job's working files go in a folder

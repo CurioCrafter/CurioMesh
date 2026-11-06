@@ -38,6 +38,7 @@ from .triadq.types import FlatFaces, MeshData
 from .triadq.uvs import chart_codes
 
 PREVIEW_NAME = "CurioMesh_GuidedPreview"
+SPARE_MESHES = (PREVIEW_NAME + "_Size", PREVIEW_NAME + "_Organize")  # preview meshes kept for a quick swap, with no users
 REGION_READY = False  # Selected Faces Only: off until it re-stitches its seam (226 of 398 outline vertices joined on a bust). Redo Inside Shapes covers it
 POINT_TAG = "curiomesh_point"
 DEBOUNCE_SECONDS = 0.35
@@ -1510,7 +1511,7 @@ def _build_preview(context, source, res, uvs=True, mesh=None) -> None:
     else:
         old = obj.data
         obj.data = mesh
-        if old.users == 0:
+        if old.users == 0 and not old.name.startswith(SPARE_MESHES):  # spares go when their size ladder or Organize forgets them
             bpy.data.meshes.remove(old)
     gs = context.scene.curiomesh_guided
     segments.place(obj, source, gs)
@@ -2136,7 +2137,7 @@ def _stop() -> None:
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
     stop_work()
-    ladder.cancel()  # its preview meshes have fake users: left, they would be saved in the file
+    ladder.cancel()
     remove_preview()
     state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}), lod=None)
     segments.reset()
@@ -3014,7 +3015,6 @@ def _lod_finished(context, source, report) -> None:
         bpy.data.objects.remove(old)
     out, baked = _write_result(context, source, state["res"], gs, name)
     out["curiomesh_lod"] = level
-    out["curiomesh_view_change"] = report["loss"]
     lod["made"].append((out.name, report["faces"], report["loss"], baked))
     if level < profiles.LOD_LEVELS - 1:
         _lod_next(context, source)
@@ -3255,7 +3255,7 @@ class CURIOMESH_OT_guided_auto_start(_AskFirst, bpy.types.Operator):
 class CURIOMESH_OT_guided_check_pc(bpy.types.Operator):
     bl_idname = "curiomesh.guided_check_pc"
     bl_label = "Check This Computer"
-    bl_description = "Read your cores, memory and graphics card, time a short test, and count the loose pieces of the selected mesh, so the panel can say how big this job is for this PC"
+    bl_description = "Read your cores and memory, time a short test, and count the loose pieces of the selected mesh, so the panel can say how big this job is for this PC"
     bl_options = {"INTERNAL"}
 
     def execute(self, context):
@@ -3754,7 +3754,7 @@ def progress_info(kind: str | None = None):
 
 
 def fold(layout, data, prop: str, text: str):
-    """A fold-out section (a native layout panel). Returns the body, or None when closed."""
+    """A fold-out section (Blender's layout.panel). Returns the body, or None when closed."""
     header, body = layout.panel_prop(data, prop)
     header.label(text=text)
     return body
@@ -3847,8 +3847,7 @@ def _bake_tag(layout, gs) -> None:
 REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
 
 
-@functools.cache  # built once: the panel draws it on every redraw
-@functools.lru_cache(maxsize=1)
+@functools.cache
 def problem_url() -> str:
     """New-issue link with the Blender and CurioMesh versions filled in (nothing else about the computer). Built once:
     the Issue Reports panel draws it on every redraw."""
@@ -3917,6 +3916,7 @@ _draw_handles: list = []
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
     stop_work()
+    remove_preview()  # a preview saved with the file: nothing can apply it after a load
     ladder.cancel()
     segments.reset()
     flowedit.cancel()

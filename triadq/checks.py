@@ -193,7 +193,7 @@ def folded_quads(co, faces) -> np.ndarray:
 
 
 def inspect(co, faces, piece, pairs=...) -> Inspect:
-    """All the numbers for one mesh. `piece` gives each face's piece. `pairs` defaults to a BVH test (Blender only)."""
+    """All the numbers for one mesh. `piece` gives each face's piece. `pairs` defaults to a BVH test."""
     steps = inspect_steps(co, faces, piece, pairs)
     while True:
         try:
@@ -391,12 +391,8 @@ class PointTree:
         return index, away
 
 
-def face_tree(co, faces) -> FaceTree | None:
-    """A `FaceTree`, or None outside Blender (the checks that need one are then left out)."""
-    try:
-        return FaceTree(co, faces)
-    except ImportError:
-        return None
+def face_tree(co, faces) -> FaceTree:
+    return FaceTree(co, faces)
 
 
 class _Source:
@@ -440,15 +436,14 @@ def forget() -> None:
     _source = ((), None)
 
 
-def _source_of(source_co, source_faces) -> _Source | None:
-    """The `_Source` of this mesh, None outside Blender. Kept while the same mesh (by size and corner sum) comes back."""
+def _source_of(source_co, source_faces) -> _Source:
+    """The `_Source` of this mesh. Kept while the same mesh (by size and corner sum) comes back."""
     global _source
     co = np.asarray(source_co, dtype=np.float64)
     key = (len(co), len(source_faces), float(co.sum()))
     if _source[0] != key:
         faces = [tuple(f) for f in source_faces]
-        tree = face_tree(co, faces)
-        _source = (key, None if tree is None else _Source(co, faces, tree))
+        _source = (key, _Source(co, faces, face_tree(co, faces)))
     return _source[1]
 
 
@@ -458,8 +453,6 @@ def _overlapping(co, faces, pad, normal, middle, size, tree=None) -> np.ndarray:
     if len(pad) < 2:
         return out
     tree = tree or face_tree(co, faces)
-    if tree is None:
-        return out
     # Every face within reach of each middle, from one tree: no face is missed, and one pass is cheaper than halves.
     near = tree._tree.find_nearest_range
     pairs = [(k, hit[2]) for k, (point, reach) in enumerate(zip(middle.tolist(), (0.02 * size).tolist())) for hit in near(point, reach) if hit[2] != k]
@@ -516,7 +509,7 @@ def touching_parts(ids, normal, middle, size, tree, source_normals, part) -> np.
 
 def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects:
     """Everything wrong with each face of a result, the source saying which way is out. The source lookups, the crossing
-    test and the overlap test use Blender's BVH: outside Blender those masks stay empty. `pairs`: crossings found already."""
+    test and the overlap test use Blender's BVH. `pairs`: crossings found already."""
     co = np.asarray(co, dtype=np.float64)
     faces = [tuple(f) for f in faces]
     count = len(faces)
@@ -535,10 +528,7 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
     duplicate = original != np.arange(count)
     bent = folded_quads(co, faces)
     if pairs is None:
-        try:
-            pairs = crossing_pairs(co, faces)
-        except ImportError:  # outside Blender: no BVH to find them with
-            pairs = np.zeros((0, 2), np.int64)
+        pairs = crossing_pairs(co, faces)
     pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     crossing = empty.copy()
     crossing[pairs.ravel()] = True

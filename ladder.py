@@ -64,15 +64,17 @@ def cancel() -> None:
     organize.cancel()
     if lad["job"] is not None:
         lad["job"].stop()
-    for mesh in lad["meshes"].values():
-        try:
-            mesh.use_fake_user = False
-            if mesh.users == 0:
-                bpy.data.meshes.remove(mesh)
-        except ReferenceError:  # gone with a file load
-            pass
+    drop_spares(_g().SPARE_MESHES[0])
     lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None, source_check=None)
     drag.update(pending=False, settled=True)
+
+
+def drop_spares(prefix: str) -> None:
+    """Remove the spare preview meshes named `prefix`... that nothing shows, also ones a file saved with a fake user."""
+    for mesh in [m for m in bpy.data.meshes if m.name.startswith(prefix)]:
+        mesh.use_fake_user = False
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
 
 
 def unregister() -> None:
@@ -82,9 +84,12 @@ def unregister() -> None:
 
 
 def start(context) -> bool:
-    """The search just finished: it is the first rung, and the others are worked out from now on."""
+    """The search just finished: it is the first rung. The others are worked out once Quad Size or Rows is first moved
+    (`on_slider`), so Auto alone never starts this work."""
     guided = _g()
     cancel()
+    if bpy.app.timers.is_registered(_tick):  # left from the last search: wait for a slider again
+        bpy.app.timers.unregister(_tick)
     base, inputs = guided.state["auto_base"], guided.state.get("auto_inputs")
     job = base and base["job"]
     if not isinstance(job, autoretopo.AutoJob) or inputs is None or guided.state.get("lod") is not None:
@@ -101,8 +106,6 @@ def start(context) -> bool:
     lad["source_check"] = (job, job._src_check, job._known, getattr(job, "_src_pieces", None)) if job._src_check is not None else None  # the same for every rung
     _mesh_for((here, here, ()), compose(here, here, ()))
     gs["quad_size"], gs["quad_order"], gs["organize"] = 0.5, L.order_of(job.style), 0.0  # no update: the result on screen is this already
-    if not bpy.app.timers.is_registered(_tick):
-        bpy.app.timers.register(_tick, first_interval=WAIT)
     return True
 
 
@@ -172,16 +175,6 @@ def _tick():
         return WAIT  # yours first, and nothing while a slider moves
     work(SLICE)
     return GAP if lad["job"] is not None or lad["plan"] else None
-
-
-def finish(timeout: float | None = None, styles=None) -> bool:
-    """Work out every rung (of these styles) now, for scripts and tests. True when none is left."""
-    ends = None if timeout is None else time.perf_counter() + timeout
-    if styles is not None:
-        lad["plan"] = [r for r in lad["plan"] if r[0] in styles]
-    while (lad["job"] is not None or lad["plan"]) and (ends is None or time.perf_counter() < ends):
-        work(1.0)
-    return lad["job"] is None and not lad["plan"]
 
 
 # --------------------------------------------------------------------------- picking rungs
@@ -293,14 +286,15 @@ def _mesh_for(picked, out):
     source = guided.state_source()
     if source is None:
         return None
-    mesh = _make_mesh(guided.PREVIEW_NAME + "_Size", out, source)
-    mesh.use_fake_user = True  # kept while another size is on screen
-    lad["meshes"][picked] = mesh
+    mesh = _make_mesh(guided.SPARE_MESHES[0], out, source)
+    lad["meshes"][picked] = mesh  # no fake user: a spare size has no users, so it is never saved in the file
     while len(lad["meshes"]) > MOST_MESHES:
         old = lad["meshes"].pop(next(iter(lad["meshes"])))
-        old.use_fake_user = False
-        if old.users == 0:
-            bpy.data.meshes.remove(old)
+        try:
+            if old.users == 0:
+                bpy.data.meshes.remove(old)
+        except ReferenceError:  # purged by the user
+            pass
     return mesh
 
 
@@ -420,6 +414,8 @@ def _drag_tick():
 
 
 def on_slider(self, context) -> None:
+    if active() and (lad["plan"] or lad["job"] is not None) and not bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.register(_tick, first_interval=WAIT)  # the first move asks for the other sizes
     drag.update(pending=True, moved=time.perf_counter())
     pump(context)
     if not bpy.app.timers.is_registered(_drag_tick):
@@ -433,6 +429,8 @@ def status() -> str:
     left = len(lad["plan"]) + (lad["job"] is not None)
     if not left:
         return ""
+    if not bpy.app.timers.is_registered(_tick):
+        return "Move a slider to work out the other sizes. Blender can pause for a few seconds during each"
     doing = lad["doing"]
     words = f" ({STYLE_WORDS.get(doing[0], doing[0])}, {doing[1]:g}%)" if doing else ""
     return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for a few seconds during each"

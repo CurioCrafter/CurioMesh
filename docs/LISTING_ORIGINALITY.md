@@ -6,8 +6,7 @@ the paper or author: that is how we credit ideas, and the code is our own writin
 (QuadriFlow Remesh, Voxel Remesh, Decimate, Multires, Bevel, Data Transfer) are called, not included.
 
 This build is Python only and contains no third-party code. Its bundled data and their sources are listed in
-[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and [PATTERN_SOURCES.md](PATTERN_SOURCES.md). QuadWild, QuadriFlow and
-Instant Meshes source is not included.
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and [PATTERN_SOURCES.md](PATTERN_SOURCES.md).
 
 ## Module by module
 

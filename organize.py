@@ -40,7 +40,7 @@ org = {
     "box": None,  # the strengths worked out so far
     "meshes": {},  # strength -> preview mesh
     "shown": 0.0,
-    "flow": None,  # (id of the result, line batch data, pole points)
+    "flow": None,  # (the arrays drawn, line batch, pole batch)
     "seg_piece": None,  # the segment of each face at strength 0 (the parts table's colours)
 }
 
@@ -59,13 +59,9 @@ def cancel() -> None:
     """Forget the strengths (a new result, another mesh, or the add-on going away)."""
     if org["box"] is not None:
         org["box"]["stop"] = True
-    for mesh in org["meshes"].values():
-        try:
-            mesh.use_fake_user = False
-            if mesh.users == 0:
-                bpy.data.meshes.remove(mesh)
-        except ReferenceError:
-            pass
+    from .ladder import drop_spares  # late: ladder imports this module
+
+    drop_spares(_g().SPARE_MESHES[1])
     org.update(base=None, origin=None, report=None, levels={}, box=None, meshes={}, shown=0.0, flow=None, seg_piece=None)
 
 
@@ -211,9 +207,7 @@ def _mesh_for(out):
     source = _g().state_source()
     if source is None:
         return None
-    mesh = _make_mesh(_g().PREVIEW_NAME + "_Organize", out, source)
-    mesh.use_fake_user = True  # kept while another strength is on screen
-    return mesh
+    return _make_mesh(_g().SPARE_MESHES[1], out, source)  # no fake user: a spare has no users, so it is never saved
 
 
 def _tick():
@@ -360,11 +354,18 @@ def _draw_flow() -> None:
         from gpu_extras.batch import batch_for_shader
 
         matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
-        key = (id(res), matrix)
-        if org["flow"] is None or org["flow"][0] != key:
+        world = np.array(preview.matrix_world)
+
+        def arrays():  # in overlay.drawn_arrays' timer, not in the draw
             lines, colours, dots, dot_colours = flow_lines(res["co"], res["faces"])
+            return guided._world(world, lines).astype(np.float32), colours, guided._world(world, dots).astype(np.float32), dot_colours
+
+        built = overlay.drawn_arrays("organize.flow", (id(res), matrix), arrays)
+        if built is None:
+            return
+        if org["flow"] is None or org["flow"][0] is not built:
             shader = gpu.shader.from_builtin("FLAT_COLOR")
-            org["flow"] = (key, batch_for_shader(shader, "LINES", {"pos": guided._world(preview.matrix_world, lines).astype(np.float32), "color": colours}), batch_for_shader(shader, "POINTS", {"pos": guided._world(preview.matrix_world, dots).astype(np.float32), "color": dot_colours}), res)
+            org["flow"] = (built, batch_for_shader(shader, "LINES", {"pos": built[0], "color": built[1]}), batch_for_shader(shader, "POINTS", {"pos": built[2], "color": built[3]}))
         shader = gpu.shader.from_builtin("FLAT_COLOR")
         gpu.state.depth_test_set("LESS_EQUAL")
         gpu.state.line_width_set(2.0)

@@ -4,7 +4,7 @@
 """CurioMesh's own coloured icons (icons/*.png, drawn by a script in the CurioMesh source repository), loaded once per session.
 
 `kw(name, fallback)` gives the keyword for any layout call: {"icon_value": id} when the picture loaded, else
-{"icon": fallback} with a stock Blender icon, so the panel draws the same way headless and in tests."""
+{"icon": fallback} with a stock Blender icon, so the panel draws the same way when a picture is missing."""
 
 from __future__ import annotations
 

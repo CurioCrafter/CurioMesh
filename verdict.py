@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
-"""The one-line verdict over a result (green, amber or red) and the word for its Tidiness score. No bpy: unit tested."""
+"""The one-line verdict over a result (green, amber or red) and the word for its Tidiness score."""
 
 from __future__ import annotations
 

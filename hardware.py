@@ -3,12 +3,12 @@
 
 """What this computer can do, and how to cut a job down to fit it.
 
-`detect` reads the machine (cores, memory and the graphics card Blender draws with) and never fails: whatever it cannot read
-is left out. `settings_for` turns an effort (Light, Normal, Full, or Auto) into the knobs `autoretopo.AutoJob` uses.
+`detect` reads the cores and memory (on Windows the memory is assumed) and never fails: whatever it cannot read is left
+out. `settings_for` turns an effort (Light, Normal, Full, or Auto) into the knobs `autoretopo.AutoJob` uses.
 `estimate` and `rate` turn face and part counts into a time, a memory figure and one plain sentence. `split_chunks`
 cuts a huge piece into compact regions, and the checkpoint helpers save finished parts so a stopped job can resume.
 
-No imports from the rest of the add-on and no `bpy` at import time, so the tests run outside Blender.
+No imports from the rest of the add-on and no `bpy` at import time: helper Blenders import it too.
 """
 
 from __future__ import annotations
@@ -98,28 +98,25 @@ def describe(machine: dict) -> list[str]:
 
 
 def benchmark() -> float:
-    """Camera rays per second on this computer, from a 0.1 s test on a small sphere. 0 outside Blender."""
-    try:
-        from mathutils import Vector
-        from mathutils.bvhtree import BVHTree
+    """Camera rays per second on this computer, from a 0.1 s test on a small sphere."""
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
 
-        n, m = 40, 80
-        theta = np.linspace(0.05, np.pi - 0.05, n)[:, None]
-        phi = np.linspace(0, 2 * np.pi, m, endpoint=False)[None, :]
-        pts = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta) + 0 * phi], axis=-1).reshape(-1, 3)
-        quads = [(i * m + j, i * m + (j + 1) % m, (i + 1) * m + (j + 1) % m, (i + 1) * m + j) for i in range(n - 1) for j in range(m)]
-        tree = BVHTree.FromPolygons(pts.tolist(), quads, all_triangles=False)
-        cast, direction = tree.ray_cast, Vector((0.0, 0.0, -1.0))
-        started, count = time.perf_counter(), 0
-        grid = np.linspace(-0.9, 0.9, 150).tolist()
-        while time.perf_counter() - started < 0.12:
-            for x in grid:
-                for y in grid[::5]:
-                    cast(Vector((x, y, 3.0)), direction)
-                    count += 1
-        return count / (time.perf_counter() - started)
-    except Exception:
-        return 0.0
+    n, m = 40, 80
+    theta = np.linspace(0.05, np.pi - 0.05, n)[:, None]
+    phi = np.linspace(0, 2 * np.pi, m, endpoint=False)[None, :]
+    pts = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta) + 0 * phi], axis=-1).reshape(-1, 3)
+    quads = [(i * m + j, i * m + (j + 1) % m, (i + 1) * m + (j + 1) % m, (i + 1) * m + j) for i in range(n - 1) for j in range(m)]
+    tree = BVHTree.FromPolygons(pts.tolist(), quads, all_triangles=False)
+    cast, direction = tree.ray_cast, Vector((0.0, 0.0, -1.0))
+    started, count = time.perf_counter(), 0
+    grid = np.linspace(-0.9, 0.9, 150).tolist()
+    while time.perf_counter() - started < 0.12:
+        for x in grid:
+            for y in grid[::5]:
+                cast(Vector((x, y, 3.0)), direction)
+                count += 1
+    return count / (time.perf_counter() - started)
 
 
 def peak_memory_mb() -> float:
@@ -320,7 +317,7 @@ def cheaper_ways(style: str, bake: str, size: int, effort: str, lods: bool = Fal
 def weak_pc(machine: dict | None) -> str:
     """One plain sentence when this computer is weak (4 cores or fewer, or 8 GB or less), else an empty string.
 
-    The graphics card is not part of it: bakes use the scene's Cycles device, and nothing else here uses the card."""
+    Only cores and memory count: bakes use the scene's Cycles device."""
     if not machine:
         return ""
     small = []
@@ -425,12 +422,12 @@ def _private_dir(folder: Path) -> bool:
 
 
 def user_folder(sub: str = "", create: bool = True) -> Path | None:
-    """The extension's own folder for files it keeps (Blender's extension user folder), None outside Blender."""
+    """The extension's own folder for files it keeps (Blender's extension user folder), None when there is none."""
     try:
         import bpy
 
         return Path(bpy.utils.extension_path_user(__package__ or "", path=sub, create=create))
-    except Exception:  # no bpy (tests), not loaded as an extension (a helper process), or the folder can't be made
+    except Exception:  # not loaded as an extension (a helper process), or the folder can't be made
         return None
 
 

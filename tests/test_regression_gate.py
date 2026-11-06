@@ -11,6 +11,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _nobvh  # noqa: E402,F401  (no BVH outside Blender)
 
 from triadq import checks, parts, special  # noqa: E402
 

@@ -197,7 +197,8 @@ BANNED_CODE = (
     (r"tempfile\.mkdtemp\((?![^)]*dir=)|dir=None", "job folders in system temp (use hardware.job_folder)"),
     (r"use_auto_smooth|free_normals_split|edge_creases|loop_data_types|auto_smooth_angle", "APIs that are gone before Blender 4.2 (dead code)"),
     (r"LAST_DRAW_ERROR", "errors kept where nothing reads them"),
-    (r"(?i)\bnative (QEM|core|proxy|cap|work)", "wording that reads as the removed compiled core"),
+    (r"(?i)\bnative\b", "wording that reads as the removed compiled core"),
+    (r"(?i)graphics card", "graphics-card wording (this build reads no card)"),
     (r"(?i)soft ?wrap|quad ?remesher|retopo ?flow|hard ?ops|box ?cutter|zremesher", "names of other add-ons"),
     (r"(?<![\w.])(eval|exec)\(", "eval / exec"),
     (r"[\"'](bl_ext|user_default|blender_org|user_repository)\b", "hard-coded repository names"),
@@ -230,6 +231,10 @@ def listing_overrides(root: Path) -> dict[str, bytes]:
     readme = (root / "docs" / "LISTING_README.md").read_text(encoding="utf-8")  # only what this build has
     sources = (root / "docs" / "PATTERN_SOURCES.md").read_text(encoding="utf-8")
     sources = "".join(line for line in sources.splitlines(True) if "CC-BY" not in line)
+    robots = "Most of it is characters, and the hard-surface part comes from two robots."
+    if robots not in sources:
+        raise ValueError("docs/PATTERN_SOURCES.md: the robots sentence changed; reword the listing copy here")
+    sources = sources.replace(robots, "All of it is characters: this set has no hard-surface meshes.")
     init = (root / "__init__.py").read_text(encoding="utf-8")
     init, found = re.subn(r"(?ms)^bl_info = \{\n.*?^\}\n\n", "", init, count=1)  # extensions use the manifest; bl_info is ignored
     if not found:
@@ -373,6 +378,34 @@ def unused_names(sources: dict[str, str]) -> list[str]:
     return found
 
 
+DRAW_BUILDERS = {"flow_lines", "Topology", "gather", "strokes", "_curves", "_draw_data", "_fan", "loop_labels", "evaluated_depsgraph_get", "to_mesh", "_source_data"}
+
+
+def draw_builds(sources: dict[str, str]) -> list[str]:
+    """Draw callbacks only draw: a function given to draw_handler_add may not call the helpers that work out geometry,
+    except inside the builder it hands to overlay.drawn_arrays (a nested function, run in a timer)."""
+    found = []
+    for name, text in sources.items():
+        tree = ast.parse(text)
+        handlers = {n.args[0].id for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "draw_handler_add" and n.args and isinstance(n.args[0], ast.Name)}
+        for node in tree.body:
+            if not (isinstance(node, ast.FunctionDef) and node.name in handlers):
+                continue
+            todo = list(node.body)
+            while todo:
+                item = todo.pop()
+                if isinstance(item, (ast.FunctionDef, ast.Lambda)):
+                    continue
+                if isinstance(item, ast.Call):
+                    called = getattr(item.func, "attr", None) or getattr(item.func, "id", None)
+                    if called in DRAW_BUILDERS:
+                        found.append(f"{name}:{item.lineno}: draw callback {node.name} calls {called} (build it in overlay.drawn_arrays)")
+                if isinstance(item, ast.Attribute) and item.attr == "splines":
+                    found.append(f"{name}:{item.lineno}: draw callback {node.name} reads curve splines (build it in overlay.drawn_arrays)")
+                todo.extend(ast.iter_child_nodes(item))
+    return found
+
+
 def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
     """What extensions.blender.org's review asks of the zip: only Python and CC0 assets, none of the banned code patterns."""
     problems = []
@@ -400,7 +433,9 @@ def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
                 problems.append(f"{folder or '.'}: images without a CC0 note ({note})")
         if re.search(r"(?m)^bl_info\s*=", archive.read("__init__.py").decode("utf-8")):
             problems.append("__init__.py: bl_info (the manifest replaces it)")
-        problems += unused_names({e: archive.read(e).decode("utf-8") for e in entries if e.endswith(".py")})
+        sources = {e: archive.read(e).decode("utf-8") for e in entries if e.endswith(".py")}
+        problems += unused_names(sources)
+        problems += draw_builds(sources)
     tagline = manifest.get("tagline", "")
     if len(tagline) > 64 or tagline.endswith((".", "!", "?")):
         problems.append(f"manifest tagline: at most 64 characters, no ending punctuation: {tagline!r}")

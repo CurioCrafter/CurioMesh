@@ -3,7 +3,7 @@
 
 """Fixed-boundary region retopology: masks, seam loops and all-quad patch fills.
 
-Pure NumPy (no bpy), so every step is unit-testable. A region is a boolean
+Pure NumPy (no bpy). A region is a boolean
 face mask; each connected, disk-shaped component is replaced by an all-quad
 patch that reuses the component's seam loop vertices exactly, so the patch
 welds back by index with no T-junctions.

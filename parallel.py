@@ -12,7 +12,7 @@ would. `Pool` starts, feeds and kills the helpers; `measure_in_worker` and `appl
 Files go in a private folder of the extension's user folder that only this job and its own helpers write. Each is one NumPy .npz (read
 with allow_pickle=False): the arrays as entries, everything else as JSON with tags that bring back tuples, sets,
 NumPy scalars and a short list of the add-on's own types exactly as they were sent, so the sizes come back as made.
-No `bpy`, so the tests run outside Blender.
+No `bpy` at import time: the helper Blenders import it too.
 """
 
 from __future__ import annotations

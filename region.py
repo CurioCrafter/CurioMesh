@@ -675,7 +675,6 @@ class CURIOMESH_OT_region_apply(bpy.types.Operator):
         if not created:
             self.report({"WARNING"}, cache["message"] or "Nothing to apply")
             return {"CANCELLED"}
-        target["curiomesh_region_faces"] = int(created)
         overlay.invalidate()
         self.report({"INFO"}, f"Region applied: {created:,} faces. {cache['message']}"[:200])
         return {"FINISHED"}

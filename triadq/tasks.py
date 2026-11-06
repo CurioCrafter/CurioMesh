@@ -16,12 +16,10 @@ from contextlib import contextmanager
 @contextmanager
 def busy_cursor():
     """The wait cursor in every Blender window while a step that can't be cut into slices runs. Nothing headless."""
-    try:
-        import bpy
+    import bpy
 
-        windows = list(bpy.context.window_manager.windows)
-    except (ImportError, AttributeError):  # no bpy (unit tests)
-        windows = []
+    wm = bpy.context.window_manager
+    windows = list(wm.windows) if wm is not None else []
     for window in windows:
         window.cursor_modal_set("WAIT")
     try:

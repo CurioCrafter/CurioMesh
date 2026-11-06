@@ -32,7 +32,7 @@ HUD_CORNERS = (
     ("TOP_RIGHT", "Top Right", "Upper right of the viewport (clear of the navigation gizmo)"),
 )
 
-# Single source of truth for the add-on preferences (also used when the add-on is not enabled, e.g. in tests).
+# Single source of truth for the add-on preferences (also used while the add-on's preferences are not registered).
 PREF_DEFAULTS = {
     "panel_tab": "CurioMesh",
     "compact_mode": False,

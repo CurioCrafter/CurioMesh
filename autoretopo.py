@@ -786,7 +786,7 @@ class AutoJob:
             self.busy = False
 
     def wait(self, timeout: float | None = None) -> bool:
-        """Run to the end in one call, for a script in background mode (an exported run_job.py, the tests). The panel never calls it."""
+        """Run to the end in one call, for a script in background mode (an exported run_job.py). The panel never calls it."""
         ends = None if timeout is None else time.perf_counter() + timeout
         while self.busy and (ends is None or time.perf_counter() < ends):
             began = time.perf_counter()
