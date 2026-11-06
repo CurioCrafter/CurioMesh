@@ -278,7 +278,7 @@ def next_step_hint(obj, stats: MeshStats | None, settings) -> str:
         return "Press Auto or Remesh for clean quads"
     if stats.tris:
         if settings is not None and not settings.require_quads:
-            return f"{stats.tris} triangles left - turn on Pure Quads"
+            return f"{stats.tris} triangles left - turn on All Quads"
         return f"{stats.tris} triangles left - try Hero quality or PairClosure"
     if stats.ngons:
         return f"{stats.ngons} n-gons left - raise Cleanup"

@@ -19,7 +19,7 @@ QUALITY_ITEMS = [
 ENGINE_ITEMS = [
     (
         "ATLAS_Q",
-        "Smart (Atlas-Q)",
+        "Atlas-Q",
         "Recommended. Atlas-Q measures your mesh, builds a simplified copy at the target size, tries several solvers and keeps the best result that passes the quad checks",
     ),
     ("QUADRIFLOW", "QuadriFlow", "Blender's built-in QuadriFlow remesher. Fast and tidy on clean, closed meshes"),
@@ -169,14 +169,14 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
     seed: bpy.props.IntProperty(name="Random Seed", description="Change this for a different but repeatable result", default=0, min=0, soft_max=100000)
     triad_seed_count: bpy.props.IntProperty(name="PairClosure Starts", description="How many different starting places PairClosure tries. More is slower and usually tidier", default=6, min=1, max=32)
     triad_feature_angle: bpy.props.FloatProperty(name="Feature Angle", description="Edges sharper than this angle (in degrees) count as creases and are kept", default=35.0, min=0.0, max=180.0)
-    triad_force_quads: bpy.props.BoolProperty(name="PairClosure Pure Quads", description="Force every face to be a quad, even if shape accuracy suffers", default=False)
+    triad_force_quads: bpy.props.BoolProperty(name="PairClosure All Quads", description="Force every face to be a quad, even if shape accuracy suffers", default=False)
     triad_flow_mode: bpy.props.EnumProperty(name="PairClosure Style", description="Match the settings to your mesh: organic, hard-surface, messy scan or textured. Auto decides for you", items=FLOW_ITEMS, default="AUTO")
     flat_tolerance: bpy.props.FloatProperty(name="Flatness", description="How far a surface may bump away from flat and still become one big quad, as a percent of the mesh size. Higher gives fewer faces and less detail", default=0.1, min=0.0, soft_max=2.0, precision=3, subtype="PERCENTAGE")
-    triad_field_mode: bpy.props.EnumProperty(name="Flow", description="Direction the quads follow: smoothed flow, or also the surface curvature (about 1.5x slower)", items=(("SMOOTH", "Smooth", "Smoothed flow pinned to sharp edges and borders"), ("CURVATURE", "Follow Curvature", "Also line up with the main bending directions of the surface")), default="SMOOTH")
+    triad_field_mode: bpy.props.EnumProperty(name="Flow", description="Direction the quads follow: smoothed flow, or also the surface curvature (about 1.5x slower)", items=(("SMOOTH", "Smooth", "Smoothed flow pinned to sharp edges and borders"), ("CURVATURE", "Along Curvature", "Also line up with the main bending directions of the surface")), default="SMOOTH")
     atlas_strategy: bpy.props.EnumProperty(name="Scan Type", description="What kind of mesh this is, so Smart can pick the right approach. Auto decides from the measurements", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
     atlas_candidate_count: bpy.props.IntProperty(name="Attempts", description="How many candidate results are built and compared; the best one wins. More is slower", default=3, min=1, max=8)
     topology_policy: bpy.props.EnumProperty(name="Holes & Shells", description="Preserve keeps holes, open borders and separate parts as they are. Repair may close holes and drop thin sheets", items=TOPOLOGY_ITEMS, default="PRESERVE")
-    require_quads: bpy.props.BoolProperty(name="Pure Quads", description="Reject results that still contain triangles or badly shaped quads. Turn off to keep the best attempt even with a few triangles", default=True)
+    require_quads: bpy.props.BoolProperty(name="All Quads", description="Reject results that still contain triangles or badly shaped quads. Turn off to keep the best attempt even with a few triangles", default=True)
     analysis_sample_faces: bpy.props.IntProperty(
         name="Analysis Detail", description="How many faces are sampled when scanning very large meshes. More is slower and more exact",
         default=120000,

@@ -68,7 +68,7 @@ Tell CurioMesh where shape matters and watch the quads follow. Open the
 Points can also be sphere Empties you move and scale like any object. Good to
 know:
 
-- Whole Mesh results are all quads by default. **Pure Quads** in Advanced turns
+- Whole Mesh results are all quads by default. **All Quads** in Advanced turns
   that off for a faster preview of big meshes; a few triangles then stay.
 - UV layers and materials carry over from your mesh in both modes. A quad
   crossing a UV seam takes its UVs from one side, so it does not stretch across
@@ -178,7 +178,7 @@ How the region tools work:
   untangling pass reshapes any bent quad with the seam held still. On a large organic
   scan this cut bent or caved-in quads from about 5% to 0.5%, and on a noisy
   scan from about 31% to 2.8%.
-- **Flow: Follow Curvature** (Advanced) lines quads up with the surface's main
+- **Flow: Along Curvature** (Advanced) lines quads up with the surface's main
   bending directions as well as its sharp edges. The same option is in the
   PairClosure settings for whole-mesh runs.
 

@@ -552,7 +552,7 @@ class CURIOMESH_PG_region_volume(bpy.types.PropertyGroup):
 
 FIELD_ITEMS = (
     ("SMOOTH", "Smooth", "Quads follow a smoothed flow pinned to sharp edges and borders (fast, default)"),
-    ("CURVATURE", "Follow Curvature", "Quads also line up with the main bending directions of the surface; about 1.5x slower"),
+    ("CURVATURE", "Along Curvature", "Quads also line up with the main bending directions of the surface; about 1.5x slower"),
 )
 SEAM_LAYER_ITEMS = (
     ("AUTO", "Auto", "Add a ring of quads along jagged borders so quads next to the seam stay well shaped"),

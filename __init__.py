@@ -52,7 +52,7 @@ def _color(name: str, label: str, description: str):
 # (property, label) of the optional panels.
 SUBPANEL_TOGGLES = (
     ("show_scan", "Scan"),
-    ("show_atlas", "Smart Solver"),
+    ("show_atlas", "Atlas-Q Solver"),
     ("show_shape", "Features to Keep"),
     ("show_pipeline", "Cleanup & Output"),
     ("show_pairclosure", "PairClosure"),
@@ -81,7 +81,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     )
     show_scan: bpy.props.BoolProperty(name="Scan", description="Show the panel that checks your mesh for holes and sharp edges and suggests a method", default=True)
     show_atlas: bpy.props.BoolProperty(
-        name="Smart Solver", description="Show the extra options of the Smart method", default=True
+        name="Atlas-Q Solver", description="Show the extra options of the Atlas-Q method", default=True
     )
     show_shape: bpy.props.BoolProperty(name="Features to Keep", description="Show the features-to-keep panel", default=True)
     show_pipeline: bpy.props.BoolProperty(
