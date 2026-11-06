@@ -1,6 +1,6 @@
 ## Bake it, fix it, guide it
 
-CurioMesh Standalone 0.4.0 does the jobs that used to need Blender. The result keeps the model's UVs and gets a baked normal and colour map. You can draw the edge loops it must follow, tidy its poles, fix one bad spot without redoing the whole model, and turn a rough scan into a few thousand quads.
+CurioMesh Standalone 0.4.1 does the jobs that used to need Blender. The result keeps the model's UVs and gets a baked normal and colour map. You can draw the edge loops it must follow, tidy its poles, fix one bad spot without redoing the whole model, and turn a rough scan into a few thousand quads.
 
 ![Drawing a loop round the bust's neck: the result follows it, 7,592 quads, "Good for game asset"](https://raw.githubusercontent.com/CurioCrafter/CurioMesh/standalone-v0.4.0/docs/images/standalone_loops.png)
 
@@ -8,9 +8,9 @@ CurioMesh Standalone 0.4.0 does the jobs that used to need Blender. The result k
 
 | Your computer | Download | Start |
 |---|---|---|
-| Windows 10 or 11 | `CurioMesh-0.4.0-windows-x64.zip` | `curiomesh-gui.exe` |
-| Any Mac (Apple silicon or Intel) | `CurioMesh-0.4.0-macos-universal.zip` | right-click `curiomesh-gui`, Open |
-| Linux (x64) | `CurioMesh-0.4.0-linux-x64.zip` | `./curiomesh-gui` |
+| Windows 10 or 11 | `CurioMesh-0.4.1-windows-x64.zip` | `curiomesh-gui.exe` |
+| Any Mac (Apple silicon or Intel) | `CurioMesh-0.4.1-macos-universal.zip` | right-click `curiomesh-gui`, Open |
+| Linux (x64) | `CurioMesh-0.4.1-linux-x64.zip` | `./curiomesh-gui` |
 
 Unpack the zip anywhere and start the app. Nothing to install. Each zip also holds `curiomesh`, the command line, and a short guide.
 

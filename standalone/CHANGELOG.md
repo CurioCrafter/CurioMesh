@@ -1,5 +1,10 @@
 # CurioMesh Standalone changelog
 
+## 0.4.1
+
+- The 0.4.0 features below, released: 0.4.0's Mac build stopped on a test bound too tight for the rounding of ARM
+  processors (a loop test landed at 0.0154 of the model's size against 0.015).
+
 ## 0.4.0
 
 - **Lands closer to the limit.** The add-on stops searching once a result changes 90% of the detail asked, to keep
