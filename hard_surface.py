@@ -6,7 +6,7 @@ and the controls (one small draw function, to be placed wherever the panel wants
 
 Clean Panels and Even Cylinders add rebuilt versions of a part to the search (`triadq.hardsurf`); the camera picks them
 only where they hold the view. They are off by default and on with the Hard Surface use: measured on six free
-hard-surface models they helped the crane and hurt the compressor (see the changelog). Hard Edges finishes the written mesh: Mark Sharp + Crease
+hard-surface models they helped the crane and, since 0.9.8.1, no longer hurt the compressor (see the changelog). Hard Edges finishes the written mesh: Mark Sharp + Crease
 flags every hard edge (a game engine shades it hard, a Subdivision Surface keeps it sharp, no extra faces), Holding
 Edges adds a loop on both sides of every hard edge at a small distance (Blender's own bevel, two segments with a square
 profile, so the shape does not move), which is how a modeller makes a mesh ready for subdivision.

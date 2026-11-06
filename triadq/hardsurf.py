@@ -10,7 +10,8 @@ shared by both sides, so every panel border is an exact edge loop and the result
 segment count from a target edge length, and the counts are balanced so the opposite sides of a four-cornered panel
 match and every panel border is even (a quad mesh needs that). A convex panel is then one transfinite grid (a Coons
 patch, Coons 1967): four corners, opposite sides equal, so a rectangle is an a x b grid along its own edges and a round
-cap is a grid with four corner poles instead of a fan. A panel with holes or a notch is cut into triangles (constrained
+cap is a grid with four corner poles instead of a fan. A notched panel (an L, a U) is first cut by straight lines from
+its inner corners along its own edges until every piece is convex. A panel with holes or a notch left over is cut into triangles (constrained
 Delaunay with a lattice inside, lined up with the panel's longest edge), paired, and split once (each triangle into
 three quads, each quad into four, the Catmull-Clark split), so it is all quads too; its chains get even counts for that.
 A chamfer or bevel strip is a long four-cornered panel, so it comes out as one clean row.
@@ -39,6 +40,7 @@ CHAIN_TOL = 0.001  # how far a border chain may straighten, as a share of the di
 MOST_REGIONS = 150  # a part with more panels than this is too busy to lay out by panels
 REGION_SHARE = 0.3  # ... and one with more panels than this share of its faces is curved, not made of panels
 CORNER_DEG = 25.0  # a turn of the outline past this is a corner of the panel
+MOST_CUTS = 6  # a notched panel needing more straight cuts than this to come apart into convex panels is left whole
 CONVEX_SIN = 0.05  # an outline turning the wrong way by less than this (sine) still counts as convex
 PANEL_STEPS = (0.0, 1.0 / 8.0, 1.0 / 16.0, 1.0 / 32.0)  # target edge length as a share of the diagonal; 0: as few faces as can be
 MOST_QUADS = 20_000
@@ -57,6 +59,7 @@ TURN_NEAR = 2.0  # a vertex this many cells from the profile is on it
 HOLLOW_APART = 2.0  # a height band of a scan has two walls when their radii lie this many spreads apart
 HOLLOW_SHARE = 0.7  # ...and a scan is a hollow tube when this share of its bands do
 ROUND_VISIBLE = 0.05  # a round part this big against the whole model keeps enough faces to stay round
+ROUND_FLAT = 0.2  # ...unless it is a disc thinner than this share of its radius: the camera alone sizes those
 ROUND_TRIANGLES = 1.6  # triangles per quad of its sweep it keeps at least (pairing makes about two triangles one quad)
 TURN_SUPPORT = 0.95  # share of the swept surface that must have the part near it
 TURN_SPREAD = 0.3  # each sixteenth of the turn needs at least this share of an even spread of vertices
@@ -489,6 +492,121 @@ def panel_layout(points: np.ndarray, polys) -> dict | None:
             return None
         return [(c, j) for _x, c, j in ring], abs(area), p2
 
+    def chain_end(r, x):
+        """Make vertex x an end of the chains of region r it lies on (splitting the chain there)."""
+        for c, (_path, a, b) in enumerate(chains):
+            if r in (a, b) and x in simple[c][1:-1]:
+                k = simple[c].index(x, 1)
+                chains[c] = (simple[c][: k + 1], a, b)
+                chains.append((simple[c][k:], a, b))
+                simple.append(simple[c][k:])
+                simple[c] = simple[c][: k + 1]
+                return
+
+    def cut(r):
+        """One straight cut through region r from a reflex corner along one of its edges to the far side of the outline,
+        as an artist splits an L into two rectangles. Returns the new region (the far side) or None."""
+        nonlocal points, regions
+        found = _loops_of(r, chains)
+        if not found or len(found) != 1:
+            return None
+        ring = outline(found[0])
+        origin, _n, u, v = frames[r]
+        d = points[[x for x, _c, _j in ring]] - origin
+        p2 = np.stack((d @ u, d @ v), axis=1)
+        n = len(p2)
+        sign = 1.0 if 0.5 * float((p2[:, 0] * np.roll(p2[:, 1], -1) - np.roll(p2[:, 0], -1) * p2[:, 1]).sum()) > 0 else -1.0
+        a2, b2 = p2, np.roll(p2, -1, axis=0)
+        best = None
+        for k in np.flatnonzero(sign * _turns(p2) < -CONVEX_SIN).tolist():
+            for back in (k - 1, (k + 1) % n):  # carry the edge arriving at the corner straight on, or the one leaving it
+                ray = p2[k] - p2[back]
+                ray /= max(float(np.linalg.norm(ray)), 1e-300)
+                seg = b2 - a2
+                den = ray[0] * seg[:, 1] - ray[1] * seg[:, 0]
+                rel = a2 - p2[k]
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    t = (rel[:, 0] * seg[:, 1] - rel[:, 1] * seg[:, 0]) / den
+                    s = (rel[:, 0] * ray[1] - rel[:, 1] * ray[0]) / den
+                ok = (np.abs(den) > 1e-12) & (t > 1e-9) & (s >= 0.0) & (s <= 1.0)
+                ok[[k, (k - 1) % n]] = False
+                if ok.any():
+                    i = int(np.flatnonzero(ok)[np.argmin(t[ok])])
+                    if best is None or t[i] < best[0]:
+                        best = (float(t[i]), k, i, float(s[i]))
+        if best is None:
+            return None
+        length, k, i, s = best
+        side = float(np.linalg.norm(b2[i] - a2[i]))
+        snap = max(CHAIN_TOL * diag, 0.05 * length)
+        x0, x1 = ring[i][0], ring[(i + 1) % n][0]
+        if s * side <= snap:
+            w, at = x0, i
+        elif (1.0 - s) * side <= snap:
+            w, at = x1, (i + 1) % n
+        else:
+            w, at = None, None
+        if at is not None and at in (k, (k - 1) % n, (k + 1) % n):
+            return None  # the cut would run along the outline
+        if w is None:  # a new vertex on that straight stretch of the border, shared with the panel beyond it
+            w = len(points)
+            points = np.vstack([points, points[x0] + s * (points[x1] - points[x0])])
+            c, j = ring[i][1], ring[i][2]
+            simple[c] = simple[c][: j + 1] + [w] + simple[c][j + 1 :]
+        x = ring[k][0]
+        chain_end(r, x)
+        chain_end(r, w)
+        found = _loops_of(r, chains)
+        if not found or len(found) != 1:
+            return None
+        loop = found[0]
+        start = next((m for m, (c, fwd) in enumerate(loop) if (simple[c][0] if fwd else simple[c][-1]) == x), None)
+        if start is None:
+            return None
+        loop = loop[start:] + loop[:start]
+        far, beyond = [], False
+        for c, fwd in loop:
+            if beyond:
+                far.append(c)
+            if (simple[c][-1] if fwd else simple[c][0]) == w:
+                beyond = True
+        if not far or len(far) == len(loop):
+            return None
+        new = regions
+        regions += 1
+        frames[new] = frames[r]
+        for c in far:
+            path, a, b = chains[c]
+            a, b = (new if a == r else a), (new if b == r else b)
+            chains[c] = (path, a, b) if b == -1 else (path, min(a, b), max(a, b))
+        chains.append(([x, w], r, new))
+        simple.append([x, w])
+        return new
+
+    for r in range(regions):  # a notched panel (an L, a U) is cut into convex panels, each then a clean grid
+        if len(loops[r]) != 1 or convex(r, loops[r][0]) is not None:
+            continue
+        saved = (list(chains), list(simple), points, regions)
+        todo, cuts, fine = [r], 0, True
+        while todo:
+            x = todo.pop()
+            here = _loops_of(x, chains)
+            if here and len(here) == 1 and convex(x, here[0]) is not None:
+                continue
+            made = cut(x) if cuts < MOST_CUTS else None
+            if made is None:
+                fine = False
+                break
+            cuts += 1
+            todo += [x, made]
+        if not fine:
+            for extra in range(saved[3], regions):
+                frames.pop(extra, None)
+            chains[:], simple[:], (points, regions) = saved[0], saved[1], saved[2:]
+    loops = {r: _loops_of(r, chains) for r in range(regions)}
+    if any(not found for found in loops.values()):
+        return None
+
     # convex single-loop panels are grids, a convex panel round one convex hole is rings of quads round the hole;
     # the rest are cut into triangles and split
     coons, fourway, annulus = {}, {}, {}
@@ -913,6 +1031,9 @@ def round_floor(points: np.ndarray, polys, model_diag: float) -> int:
         fit = dict(old, cell=parts.CLUSTER)
     radius = float(np.max(np.asarray(fit["profile"])[:, 0]))
     if radius < ROUND_VISIBLE * model_diag or parts.min_spin(fit) < parts.ROUND_SPIN:
+        return 0
+    height = float(np.ptp(np.asarray(points, dtype=np.float64) @ fit["frame"][:, 2]))
+    if height < ROUND_FLAT * radius:  # a flat disc (a cover, a gasket): 16 sides round its thin rim are all slivers
         return 0
     built = parts.build_revolve(fit, parts.ROUND_SPIN, parts.REVOLVES[0][1], "0")
     return 0 if built is None else int(ROUND_TRIANGLES * len(built[1]))
