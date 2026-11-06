@@ -19,6 +19,8 @@ const STEP_TURN: f64 = 0.5; // a face may turn at most 60 degrees in one collaps
 const SOURCE_TURN: f64 = 0.0; // nor ever end up more than 90 degrees from where it faced in the source
 const NEAREST_TURN: f64 = -0.5; // nor face more than 120 degrees from the source nearest its middle (triadq.checks.FACING)
 const FOLD: f64 = -0.866; // two faces around the new point more than 150 degrees apart fold over each other (triadq.checks.FOLD)
+const THIN_REACH: f64 = 0.03; // of the piece's size: a surface facing the other way this near makes a spot thin
+const THIN_DIRECTIONS: usize = 12; // ways the triangles of one cell face, kept to tell
 
 type Q = [f64; 10]; // the upper triangle of the symmetric 4x4 matrix, row by row
 
@@ -224,6 +226,7 @@ struct State {
     generation: u32,
     grid: Grid,          // the live triangles by place, for the crossing test
     tri_mark: Vec<u32>,  // scratch: the triangles a collapse changes, by generation
+    thin: Vec<bool>,     // near a surface facing the other way: only here can a collapse push through the piece
 }
 
 impl State {
@@ -384,23 +387,17 @@ impl State {
         [self.p[tri[0] as usize], self.p[tri[1] as usize], self.p[tri[2] as usize]]
     }
 
-    /// How many of the `near` triangles this one passes through, leaving out those sharing a corner with it.
-    fn crossings(&self, corners: &[[f64; 3]; 3], ends: [u32; 2], near: &[u32]) -> usize {
+    /// How many of the `near` triangles (with their corners in single precision and boxes) this one passes through,
+    /// leaving out those sharing a corner with it.
+    fn crossings(&self, corners: &[[f64; 3]; 3], ends: [u32; 2], near: &[(u32, [[f32; 3]; 3], [f64; 3], [f64; 3])]) -> usize {
         let (low, high) = Self::bounds(corners);
         let small = corners.map(|c| c.map(|x| x as f32));
-        let mut found = 0;
-        for &t in near {
-            let tri = self.tris[t as usize];
-            if tri.contains(&ends[0]) || tri.contains(&ends[1]) {
-                continue;
-            }
-            let other = self.corners(t);
-            let (o_low, o_high) = Self::bounds(&other);
-            if (0..3).all(|k| low[k] <= o_high[k] && o_low[k] <= high[k]) && crate::near::triangles_cross(&small, &other.map(|c| c.map(|x| x as f32))) {
-                found += 1;
-            }
-        }
-        found
+        near.iter()
+            .filter(|(t, other, o_low, o_high)| {
+                let tri = self.tris[*t as usize];
+                (0..3).all(|k| low[k] <= o_high[k] && o_low[k] <= high[k]) && !tri.contains(&ends[0]) && !tri.contains(&ends[1]) && crate::near::triangles_cross(&small, other)
+            })
+            .count()
     }
 
     /// The triangles around a and b, with a moved to `at` (or left, for None), as (corners, far ends), and the box round them.
@@ -444,7 +441,9 @@ impl State {
             let mut near = Vec::new();
             s.grid.visit(low, high, |t| {
                 if s.tri_mark[t as usize] != now {
-                    near.push(t);
+                    let corners = s.corners(t);
+                    let (l, h) = Self::bounds(&corners);
+                    near.push((t, corners.map(|c| c.map(|x| x as f32)), l, h));
                 }
             });
             if near.is_empty() {
@@ -501,6 +500,7 @@ impl State {
         q_add(&mut self.q[au], &qb);
         self.p[au] = at;
         self.border[au] |= self.border[bu];
+        self.thin[au] |= self.thin[bu];
         self.locked[au] |= self.locked[bu];
         self.dead[bu] = true;
         self.stamp[au] += 1;
@@ -545,6 +545,53 @@ impl State {
     }
 }
 
+/// Vertices with a surface facing the other way within THIN_REACH of the piece's size: thin rods, rings, flanges and
+/// plates, and parts close to each other. Elsewhere a collapse can't reach through the piece, so the crossing test is
+/// skipped there; on a big smooth scan that is nearly everywhere. Each cell keeps a few directions its triangles face.
+fn thin_vertices(p: &[[f64; 3]], tris: &[[u32; 3]]) -> Vec<bool> {
+    let mut cells: std::collections::HashMap<[i64; 3], Vec<[f64; 3]>, std::hash::BuildHasherDefault<Mix>> = Default::default();
+    let mut placed: Vec<Option<([i64; 3], [f64; 3])>> = Vec::with_capacity(tris.len());
+    for t in tris {
+        let (a, b, c) = (p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]);
+        let n = cross(sub(b, a), sub(c, a));
+        let l = dot(n, n).sqrt();
+        if l <= 0.0 {
+            placed.push(None);
+            continue;
+        }
+        let n = [n[0] / l, n[1] / l, n[2] / l];
+        let key = [0, 1, 2].map(|k| (((a[k] + b[k] + c[k]) / 3.0) / THIN_REACH).floor() as i64);
+        let row = cells.entry(key).or_default();
+        if row.len() < THIN_DIRECTIONS && !row.iter().any(|&m| dot(m, n) > 0.9) {
+            row.push(n);
+        }
+        placed.push(Some((key, n)));
+    }
+    let mut thin = vec![false; p.len()];
+    for (t, at) in tris.iter().zip(&placed) {
+        let Some((key, n)) = at else { continue };
+        let mut found = false;
+        'look: for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    if let Some(row) = cells.get(&[key[0] + x, key[1] + y, key[2] + z]) {
+                        if row.iter().any(|&m| dot(m, *n) < -0.5) {
+                            found = true;
+                            break 'look;
+                        }
+                    }
+                }
+            }
+        }
+        if found {
+            for &v in t {
+                thin[v as usize] = true;
+            }
+        }
+    }
+    thin
+}
+
 /// Run everything down to `least` triangles. `locked` vertices (may be empty) never move or go.
 pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
     let watch = crate::near::Watch::now(); // from the moment the call starts
@@ -584,6 +631,7 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         generation: 0,
         grid: Grid { base: 1.0, levels: Vec::new(), home: vec![(Grid::NOWHERE, [0; 3]); nf] },
         tri_mark: vec![0; nf],
+        thin: Vec::new(),
     };
     // Cells about as big as the piece's triangles are at the start.
     let edge: f64 = s.tris.iter().map(|t| dot(sub(s.p[t[1] as usize], s.p[t[0] as usize]), sub(s.p[t[1] as usize], s.p[t[0] as usize])).sqrt()).sum::<f64>() / nf.max(1) as f64;
@@ -592,6 +640,7 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         let (low, high) = State::bounds(&s.corners(t));
         s.grid.insert(t, low, high);
     }
+    s.thin = thin_vertices(&s.p, &s.tris);
     s.facing = s
         .tris
         .iter()
@@ -686,7 +735,7 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         let Some(at) = s.target(a, b, entry.way) else {
             continue;
         };
-        if s.flips(a, b, at) || s.crosses(a, b, at) {
+        if s.flips(a, b, at) || ((s.thin[a as usize] || s.thin[b as usize]) && s.crosses(a, b, at)) {
             match s.entry(a, b, entry.way + 1) {
                 Some(next) if entry.way < 3 => s.heap.push(next),
                 _ => {

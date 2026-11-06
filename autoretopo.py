@@ -2113,9 +2113,8 @@ class AutoJob:
             fixed += max(0, len(checks.new_spots(before, after)) - len(checks.new_spots(before, now)))
             points, faces, mats, piece = tried
             view, after, serious = seen, now, better
-        # The fills get their own time. More does not help: at 55 to 86 s instead of 30 they cleared no more parts on three
-        # test models, as the spots left are ones a fill can't clear.
-        self._repair_until = time.perf_counter() + REPAIR_SECONDS
+        # The fills have what the remakes left of the time. More does not help: at 55 to 120 s instead of 30 they cleared
+        # no more parts on four of six test models, as the spots left are ones a fill can't clear.
         points, faces, mats, piece, view, after, spots = yield from self._fix_locally(points, faces, mats, piece, view, after)
         fixed += spots
         points, faces, mats, piece, view, after = yield from self._redo_rough(points, faces, mats, piece, view, after)
@@ -2255,7 +2254,7 @@ class AutoJob:
             return 0, 0
         src_co, src_faces, _kinds = self._piece_arrays(ids)
         found = checks.defects(points, faces, src_co, src_faces)
-        return int(sum(getattr(found, k) for k in checks.Defects.KINDS if k != "sunk").sum()), int(found.bent.sum())
+        return int(sum(getattr(found, k) for k in checks.Defects.BROKEN if k != "sunk").sum()), int(found.bent.sum())
 
     def _kill_worker(self) -> None:
         if self._worker is not None:
