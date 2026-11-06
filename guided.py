@@ -406,7 +406,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bool_on: bpy.props.BoolProperty(name="Redo Inside Shapes", description="Redoes the result inside the shapes, live; everything outside stays as it is. Move or resize a shape and the quads follow", default=False, update=_redraw_update)
     bool_shapes: bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_shape)
     bool_index: bpy.props.IntProperty(default=0)
-    quad_size: bpy.props.FloatProperty(name="Quad Size", description="Left: smaller quads that keep more detail. Right: bigger quads and fewer faces. Each stop is a full result, worked out in short steps while you keep working", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
+    quad_size: bpy.props.FloatProperty(name="Quad Size", description="Left: smaller quads that keep more detail. Right: bigger quads and fewer faces. Each stop is a full result; Work Out Other Sizes makes them in short steps while you keep working", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
     quad_order: bpy.props.FloatProperty(name="Rows", description="Left: fewest faces, quads follow the shape. Right: even rows of square quads, with more faces and a little softer detail", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=ladder.on_slider)
     organize: bpy.props.FloatProperty(name="Tidy Up", description="Lays out the same faces more tidily: fewer messy spots, straighter rows. Costs a little detail; the line below shows how much", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=organize.on_slider)
     organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Stops Tidy Up before the look changes by more than the amount next to it", default=False, update=organize.on_cap)
@@ -3369,6 +3369,18 @@ class CURIOMESH_OT_ladder_stop(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CURIOMESH_OT_ladder_more(bpy.types.Operator):
+    bl_idname = "curiomesh.ladder_more"
+    bl_label = "Work Out Other Sizes"
+    bl_description = "Work out the other sizes for the Quad Size and Rows sliders in short steps. This can take several minutes, and single steps can hold Blender for a few seconds. Stop Working Out Sizes ends it at any time"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        if not ladder.more():
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
     bl_idname = "curiomesh.guided_stop_work"
     bl_label = "Stop"
@@ -3431,6 +3443,7 @@ class CURIOMESH_OT_guided_add_shape(bpy.types.Operator):
                 bm.free()
                 shape = bpy.data.objects.new("CurioBool_Sphere", mesh)
                 shape.display_type = "WIRE"
+            shape[MADE_KEY] = True
             shape.scale = (size, size, size)
             if anchor is not None:
                 shape.location = anchor.matrix_world.translation
@@ -3459,11 +3472,7 @@ class CURIOMESH_OT_guided_remove_shape(bpy.types.Operator):
         obj = gs.bool_shapes[gs.bool_index].obj
         gs.bool_shapes.remove(gs.bool_index)
         gs.bool_index = max(0, min(gs.bool_index, len(gs.bool_shapes) - 1))
-        if obj is not None and obj.name.startswith("CurioBool_"):
-            data = obj.data
-            bpy.data.objects.remove(obj, do_unlink=True)
-            if data is not None and data.users == 0 and isinstance(data, bpy.types.Mesh):
-                bpy.data.meshes.remove(data)
+        _remove_made(obj)
         return {"FINISHED"}
 
 
@@ -3505,12 +3514,24 @@ class CURIOMESH_OT_guided_remove_guide(bpy.types.Operator):
         obj = gs.guide_curves[gs.guide_index].obj
         gs.guide_curves.remove(gs.guide_index)
         gs.guide_index = max(0, min(gs.guide_index, len(gs.guide_curves) - 1))
-        if obj is not None and obj.name.startswith(("CM_Guide", "CM_Loop", "CM_Bend")):
-            data = obj.data
-            bpy.data.objects.remove(obj, do_unlink=True)
-            if data is not None and data.users == 0 and isinstance(data, bpy.types.Curve):
-                bpy.data.curves.remove(data)
+        _remove_made(obj)
         return {"FINISHED"}
+
+
+MADE_KEY = "curiomesh_made"  # custom property on a box, sphere or curve this add-on made; only those are ever deleted
+
+
+def _remove_made(obj) -> None:
+    """Delete `obj` and its unused data, but only when the add-on made it (it carries MADE_KEY). Anything else is yours."""
+    if obj is None or not obj.get(MADE_KEY):
+        return
+    data = obj.data
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data is not None and data.users == 0:
+        if isinstance(data, bpy.types.Mesh):
+            bpy.data.meshes.remove(data)
+        elif isinstance(data, bpy.types.Curve):
+            bpy.data.curves.remove(data)
 
 
 def new_curve(context, source, kind: str, points, normals=None, name: str | None = None):
@@ -3529,6 +3550,7 @@ def new_curve(context, source, kind: str, points, normals=None, name: str | None
         w = matrix @ Vector(co)
         p.co = (w.x, w.y, w.z, 1.0)
     obj = bpy.data.objects.new(name, curve)
+    obj[MADE_KEY] = True
     obj.show_in_front = True
     (context.collection or context.scene.collection).objects.link(obj)
     return obj
@@ -3567,12 +3589,7 @@ class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
         obj = new_curve(context, self.obj, self.kind, [co for co, _n in points], [n for _c, n in points])
         if self.replace and 0 <= gs.guide_index < len(gs.guide_curves):
             item = gs.guide_curves[gs.guide_index]
-            old = item.obj
-            if old is not None and old.name.startswith(("CM_Guide", "CM_Loop", "CM_Bend")):
-                data = old.data
-                bpy.data.objects.remove(old, do_unlink=True)
-                if data is not None and data.users == 0 and isinstance(data, bpy.types.Curve):
-                    bpy.data.curves.remove(data)
+            _remove_made(item.obj)
             item.obj = obj
             self.done = True
             return
@@ -3638,6 +3655,9 @@ class CURIOMESH_OT_guided_edit_guide(bpy.types.Operator):
         return {"FINISHED"}
 
 
+PAINT_SETTINGS = "Turns on unified weight in the tool settings and sets the brush weight to 1"
+
+
 class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
     bl_idname = "curiomesh.guided_paint_density"
     bl_label = "Paint"
@@ -3649,8 +3669,8 @@ class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.less:
-            return "Weight Paint the Less Detail group: red areas get bigger quads, so the faces go elsewhere. Leave Weight Paint (Tab) and press Start"
-        return "Weight Paint the More Detail group: red areas keep more, smaller quads at every Quad Size. Leave Weight Paint (Tab) and press Start"
+            return "Weight Paint the Less Detail group: red areas get bigger quads, so the faces go elsewhere. Leave Weight Paint (Tab) and press Start. " + PAINT_SETTINGS
+        return "Weight Paint the More Detail group: red areas keep more, smaller quads at every Quad Size. Leave Weight Paint (Tab) and press Start. " + PAINT_SETTINGS
 
     @classmethod
     def poll(cls, context):
@@ -3914,6 +3934,7 @@ CLASSES = (
     CURIOMESH_OT_multires_detail,
     CURIOMESH_OT_guided_stop_work,
     CURIOMESH_OT_ladder_stop,
+    CURIOMESH_OT_ladder_more,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,
     CURIOMESH_OT_guided_add_guide,

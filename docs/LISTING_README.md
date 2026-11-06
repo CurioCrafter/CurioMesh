@@ -50,11 +50,11 @@ CurioMesh contains Python code only and no compiled or third-party code.
 - Blender stays usable while a job runs: the work is done in short steps from a timer. A few single steps (reducing
   a part, pairing, the topology check) can still hold Blender for up to about 3.5 seconds on a mid-size mesh; the wait
   cursor shows while they run, and **Stop** takes effect after them. **Apply** is available once the job has finished,
-  or after **Stop**. The first time you move Quad Size or Rows after a result, the other sizes for those sliders are
-  worked out the same way, and the panel says so while it happens; single steps there can hold Blender for up to
-  about 7 seconds at a time on a 50,000-60,000-face mesh, and Blender is then left idle at least as long before the
-  next step. Working out all the sizes can take several minutes; **Stop Working Out Sizes** under the sliders ends it
-  at any time (the sizes already made stay). Auto alone does not start this.
+  or after **Stop**. The other sizes for the Quad Size and Rows sliders are worked out only when you press **Work Out
+  Other Sizes** under the sliders; neither Auto nor moving a slider starts it. While it runs the panel says so, single
+  steps can hold Blender for up to about 7 seconds at a time on a 50,000-60,000-face mesh, and Blender is then left
+  idle at least as long before the next step. Working out all the sizes can take several minutes; **Stop Working Out
+  Sizes** ends it at any time (the sizes already made stay).
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
 - Remembered fixes and resume points are kept in the extension's user folder. **Remember This Fix** also saves the fix
@@ -78,7 +78,5 @@ CurioMesh contains Python code only and no compiled or third-party code.
 - Bundled data: `triadq/patterns.json` holds statistics measured on CC0 and public-domain meshes (see
   `docs/PATTERN_SOURCES.md`). `triadq/cases_table.json` holds camera-check results measured on CC0 Poly Haven models. The
   icons are CC0 (`icons/LICENSE.txt`).
-
-Issues: https://github.com/CurioCrafter/CurioMesh/issues
 
 License: GPL-3.0-or-later.

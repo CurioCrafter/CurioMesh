@@ -10,7 +10,8 @@ in between two Styles the loose pieces change over one at a time (`triadq.ladder
 move only the selected parts: a whole loose piece takes its faces from the next rung, a segment of a bigger piece is
 remade for Reduce at a lower or higher Detail.
 
-The work runs from its own timer in small slices, and waits while any job of yours runs. A new Start cancels it.
+The work starts only when you press Work Out Other Sizes, then runs from its own timer in small slices, and waits
+while any job of yours runs. A new Start cancels it.
 """
 
 from __future__ import annotations
@@ -96,11 +97,11 @@ def unregister() -> None:
 
 
 def start(context) -> bool:
-    """The search just finished: it is the first rung. The others are worked out once Quad Size or Rows is first moved
-    (`on_slider`), so Auto alone never starts this work."""
+    """The search just finished: it is the first rung. The others are worked out only when you press Work Out Other
+    Sizes (`more`), so neither Auto nor a slider move starts this work."""
     guided = _g()
     cancel()
-    if bpy.app.timers.is_registered(_tick):  # left from the last search: wait for a slider again
+    if bpy.app.timers.is_registered(_tick):  # left from the last search: wait for the button again
         bpy.app.timers.unregister(_tick)
     base, inputs = guided.state["auto_base"], guided.state.get("auto_inputs")
     job = base and base["job"]
@@ -432,9 +433,16 @@ def _drag_tick():
     return pump(bpy.context)
 
 
+def more() -> bool:
+    """Start working out the other sizes (the Work Out Other Sizes button). Only the user starts this work."""
+    if not active() or not (lad["plan"] or lad["job"] is not None) or bpy.app.timers.is_registered(_tick):
+        return False
+    bpy.app.timers.register(_tick, first_interval=WAIT)
+    overlay.tag_redraw()
+    return True
+
+
 def on_slider(self, context) -> None:
-    if active() and (lad["plan"] or lad["job"] is not None) and not bpy.app.timers.is_registered(_tick):
-        bpy.app.timers.register(_tick, first_interval=WAIT)  # the first move asks for the other sizes
     drag.update(pending=True, moved=time.perf_counter())
     pump(context)
     if not bpy.app.timers.is_registered(_drag_tick):
@@ -449,7 +457,7 @@ def status() -> str:
     if not left:
         return ""
     if not bpy.app.timers.is_registered(_tick):
-        return "Move a slider to work out the other sizes. Blender can pause for up to about 7 seconds at a time while they are made"
+        return "Other sizes are not worked out yet. Blender can pause for up to about 7 seconds at a time while they are made"
     doing = lad["doing"]
     words = f" ({STYLE_WORDS.get(doing[0], doing[0])}, {doing[1]:g}%)" if doing else ""
     return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for up to about 7 seconds at a time"
@@ -480,6 +488,8 @@ def draw(layout, gs) -> None:
         overlay.wrap_label(box, note, icon="TIME", width=36, limit=2)
         if bpy.app.timers.is_registered(_tick):
             box.operator("curiomesh.ladder_stop", icon="CANCEL")
+        else:
+            box.operator("curiomesh.ladder_more", icon="PLAY")
 
 
 # --------------------------------------------------------------------------- per part
