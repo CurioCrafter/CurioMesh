@@ -166,11 +166,32 @@ def _series_overrides(root: Path, series: str, layout: str) -> dict[str, bytes]:
 # extensions.blender.org build: Python only, CC0 data only, no outside programs.
 # Rules read 2026-11-02: https://extensions.blender.org/terms-of-service/ (1.2, 3.6, 5.2).
 LISTING_NOTE = (
-    "> **Python-only build.** This is the extensions.blender.org version. The site allows only Python code, so it has\n"
-    "> no Turbo core and is slower on big meshes. Its tidiness score uses CC0 reference meshes only, so the numbers sit\n"
-    "> a few points higher than in the GitHub zips. The GitHub zips include the fast native core:\n"
-    "> https://github.com/CurioCrafter/CurioMesh/releases/latest\n\n"
+    "> **extensions.blender.org build.** Python only. Its tidiness score uses CC0 reference meshes only, so the numbers\n"
+    "> sit a few points higher than in the GitHub zips.\n\n"
 )
+# Only these files of docs/ go in the listing zip: the sources of the bundled data.
+LISTING_DOCS = ("docs/PATTERN_SOURCES.md",)
+LISTING_DROP = ("CHANGELOG.md",)  # release notes of every build, native ones included: the site has its own
+# README lines about the GitHub-only native core.
+README_DROP = ("Turbo", "native core", "Native core", "Rust", "Little GPU compute")
+
+# Banned in the listing zip's code (extensions.blender.org review): (pattern, why).
+BANNED_CODE = (
+    (r"\bsys\.path\b", "sys.path edits"),
+    (r"\bsys\.modules\b", "sys.modules use"),
+    (r"^\s*(import|from)\s+(threading|_thread|queue|multiprocessing|concurrent|pickle|ctypes)\b", "threads, pickle or ctypes"),
+    (r"\b(threading|concurrent\.futures|multiprocessing|pickle|ctypes)\.", "threads, pickle or ctypes"),
+    (r"allow_pickle\s*=\s*True", "pickle"),
+    (r"os\.environ\[[^\]]+\]\s*=|os\.environ\.(update|setdefault|pop|clear)\(|os\.putenv|os\.unsetenv", "writes to the process environment"),
+    (r"LOCALAPPDATA|APPDATA|expanduser|user_resource\(\s*[\"']CONFIG", "files outside the extension's user folder"),
+    (r"depsgraph_update", "depsgraph handlers"),
+    (r"nvidia-smi|sysctl|shutil\.which|os\.system|os\.popen|shell\s*=\s*True", "outside programs"),
+    (r"subprocess\.(run|call|check_call|check_output|getoutput|getstatusoutput)\b", "outside programs"),
+    (r"\b(Turbo|turbo|TURBO)\b|\bLite\b", "names of the GitHub-only native core or an old edition"),
+    (r"urllib\.request|http\.client|\bsocket\.|\brequests\.(get|post)\b", "network use"),
+    (r"Star on GitHub|star helps", "promotional prompts"),
+)
+BANNED_TEXT = ("CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core")
 LISTING_NOTICES = """# Third-party notices (extensions.blender.org build)
 
 CurioMesh is GPL-3.0-or-later. This build is Python only and contains no compiled code.
@@ -194,6 +215,8 @@ def listing_overrides(root: Path) -> dict[str, bytes]:
     readme = re.sub(r"- Credits for the CC-BY works.*?Security Bot Rig[^\n]*\n", "", readme, flags=re.S)
     readme = re.sub(r"- The triangle intersection test in the native core.*?THIRD_PARTY_NOTICES\.md\)\.\n", "", readme, flags=re.S)
     readme = re.sub(r" ?[^.\n]*flowtool[^.\n]*\.", "", readme)  # the QuadWild script needs an outside program
+    readme = readme.replace(" The GitHub zips include the fast native Turbo core.", "")
+    readme = "".join(line for line in readme.splitlines(True) if not any(word in line for word in README_DROP))
     readme = readme.replace("\n## ", "\n" + LISTING_NOTE + "## ", 1)
     sources = (root / "docs" / "PATTERN_SOURCES.md").read_text(encoding="utf-8")
     sources = "".join(line for line in sources.splitlines(True) if "CC-BY" not in line)
@@ -227,6 +250,7 @@ def _write_archive(
     files = source_files(root)
     if listing:
         files = [root / "triadq" / "patterns_cc0.json" if f.name == "patterns.json" else f for f in files]
+        files = [f for f in files if f.relative_to(root).as_posix() not in LISTING_DROP and (f.parent.name != "docs" or f.relative_to(root).as_posix() in LISTING_DOCS)]
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
@@ -287,10 +311,7 @@ def verify_archive(path: Path, *, prefix: str, series: str | None = None, listin
         else _major_minor(_bl_info(init_source, origin=str(path))["blender"])
     )
     if listing:
-        banned = [e for e in entries if e.startswith(f"{required_prefix}_native") or "patterns_cc0" in e]
-        text = " ".join(zipfile.ZipFile(path).read(e).decode("utf-8", "ignore") for e in entries if e.endswith((".md", ".json", ".toml")))
-        if banned or any(w in text for w in ("CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool")):
-            raise ValueError(f"{path}: listing zip must hold no native code, CC-BY data or outside-program notes: {banned}")
+        check_listing(path, entries, manifest)
         expected_name = f"{package_id}-{version}-blender-{minimum}-plus-listing.zip"
     elif series is not None:
         if minimum != series:
@@ -306,6 +327,44 @@ def verify_archive(path: Path, *, prefix: str, series: str | None = None, listin
         expected_name = asset_name(package_id, version, minimum, layout)
     if path.name != expected_name:
         raise ValueError(f"Archive filename must be {expected_name!r}, got {path.name!r}")
+
+
+def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
+    """What extensions.blender.org's review asks of the zip: only Python and CC0 assets, none of the banned code patterns."""
+    problems = []
+    allowed = (".py", ".md", ".json", ".toml", ".png", ".txt")
+    problems += [f"{e}: not allowed in the listing zip" for e in entries if not e.endswith(allowed) and e != "LICENSE"]
+    problems += [f"{e}: native code or unswapped data" for e in entries if e.startswith("_native") or "patterns_cc0" in e or e.endswith((".pyd", ".so", ".dll", ".dylib", ".exe"))]
+    problems += [f"{e}: only the data sources belong in docs/" for e in entries if e.startswith("docs/") and e not in LISTING_DOCS]
+    with zipfile.ZipFile(path) as archive:
+        for e in entries:
+            if e.endswith(".py"):
+                source = archive.read(e).decode("utf-8")
+                for pattern, why in BANNED_CODE:
+                    for match in re.finditer(pattern, source, flags=re.M):
+                        line = source.count("\n", 0, match.start()) + 1
+                        problems.append(f"{e}:{line}: {why} ({match.group(0).strip()!r})")
+                if re.search(r"[\"'][A-Za-z0-9_.]+\\\\[A-Za-z0-9_.]", source):
+                    problems.append(f"{e}: backslash path separator")
+            elif e.endswith((".md", ".json", ".toml", ".txt")) or e == "LICENSE":
+                text = archive.read(e).decode("utf-8", "ignore")
+                problems += [f"{e}: mentions {word!r}" for word in BANNED_TEXT if word in text and e != "LICENSE"]
+        pngs = [e for e in entries if e.endswith(".png")]
+        for folder in sorted({e.rpartition("/")[0] for e in pngs}):
+            note = f"{folder}/LICENSE.txt" if folder else "LICENSE.txt"
+            if note not in entries or "CC0" not in archive.read(note).decode("utf-8", "ignore"):
+                problems.append(f"{folder or '.'}: images without a CC0 note ({note})")
+    tagline = manifest.get("tagline", "")
+    if len(tagline) > 64 or tagline.endswith((".", "!", "?")):
+        problems.append(f"manifest tagline: at most 64 characters, no ending punctuation: {tagline!r}")
+    for key, reason in manifest.get("permissions", {}).items():
+        if reason.endswith((".", "!", "?")) or "\n" in reason:
+            problems.append(f"manifest permission {key}: one sentence, no ending punctuation")
+    for line in manifest.get("copyright", []):
+        if not re.fullmatch(r"\d{4}(-\d{4})? \S.*", line) or "native" in line:
+            problems.append(f"manifest copyright: 'Year Name' for included code only: {line!r}")
+    if problems:
+        raise ValueError(f"{path}: not ready for extensions.blender.org:\n" + "\n".join(problems))
 
 
 def build_archives(root: Path, output_dir: Path, native_dir: Path | None = None) -> tuple[Path, Path]:
