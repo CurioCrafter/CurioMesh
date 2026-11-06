@@ -3,9 +3,10 @@
 
 """The Organize slider: a tidier layout of the result on screen, at about the same faces, and a meter of what it costs.
 
-Moving the slider the first time works out a few strengths on a worker thread (`triadq.organize`: messy patches around
-poles redrawn as grids and edges spun, then the quads settled on your mesh step by step, then the loops straightened and
-stacked evenly). Each strength is measured (Tidiness, Loop Quality, poles, how much of the view changed, the Issue
+Moving the slider the first time works out a few strengths on a worker thread (`triadq.organize`: pole pairs walked
+together until they cancel and messy patches around poles redrawn as grids, then the quads settled on your mesh step by
+step, then the loops straightened and stacked evenly). The switches under the slider (Fewer Poles, Straighter Rows,
+Even Sizes, Square Corners, Selection Only) pick which of those steps run and where. Each strength is measured (Tidiness, Loop Quality, poles, how much of the view changed, the Issue
 Finder) and gets its own preview mesh, so dragging only swaps meshes. With a mirrored result one half is organized
 and mirrored again, so the seam stays exact. Most Detail Loss holds the slider back at the strongest one within it.
 
@@ -100,10 +101,40 @@ def start(context) -> bool:
     org["meshes"][0.0] = _mesh_for(out)
     strokes = list(getattr(job, "guide_lines", None) or []) + [line for _tag, rows in (getattr(job, "bend_groups", None) or []) for line in rows]
     gap = float(getattr(job, "gap", 0.0) or 0.0)
-    tasks.start(lambda: _work(box, out, job.co, job.faces, job.mirror, tree, seg_piece, (strokes, gap)), "CurioMeshOrganize")
+    choice = _choice(context, out)
+    tasks.start(lambda: _work(box, out, job.co, job.faces, job.mirror, tree, seg_piece, (strokes, gap), choice), "CurioMeshOrganize")
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=GAP)
     return True
+
+
+def _choice(context, out) -> dict:
+    """The Tidy Up switches, and with Selection Only the faces of the result selected in Edit Mode (None: all)."""
+    gs = context.scene.curiomesh_guided
+    picked = None
+    if gs.tidy_selected:
+        preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+        if preview is not None and preview.type == "MESH":
+            if preview.mode == "EDIT":
+                preview.update_from_editmode()
+            mesh = preview.data
+            if len(mesh.polygons) == len(out["faces"]):
+                picked = np.zeros(len(mesh.polygons), dtype=bool)
+                mesh.polygons.foreach_get("select", picked)
+                if not picked.any():
+                    picked = None
+    return {"poles": gs.tidy_poles, "rows": gs.tidy_rows, "sizes": gs.tidy_sizes, "square": gs.tidy_square, "picked": picked}
+
+
+def on_options(self, context) -> None:
+    """A switch changed: work the strengths out again (the slider keeps its place)."""
+    if not active() and self.organize <= 0.0:
+        return
+    if active():  # back to the result as it was, so the new strengths start from it
+        org["base"]["out"], org["base"]["report"] = org["origin"], dict(org["report"])
+    if start(context):
+        org["shown"] = -1.0  # whatever is on screen is stale: the next `show` swaps the preview
+        show(context, self)
 
 
 def _kinds(out, faces: int, seg_piece):
@@ -132,11 +163,13 @@ def _held_by_strokes(points: np.ndarray, strokes) -> np.ndarray:
     return out
 
 
-def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0)) -> None:
+def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0), choice=None) -> None:
     """On a worker thread: every strength, measured. Hands each over in `box["levels"]` as it is ready."""
+    choice = choice or {"poles": True, "rows": True, "sizes": True, "square": False, "picked": None}
     try:
         co, faces = np.asarray(out["co"], dtype=np.float64), [tuple(f) for f in out["faces"]]
         kind, table = _kinds(out, len(faces), seg_piece)
+        picked = choice.get("picked")
         if mirror is not None:
             axis, offset, size, _whole, keep = mirror
             half, half_faces, ids = O.half_of(co, faces, axis, offset, keep)
@@ -144,6 +177,14 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0
         else:
             half, half_faces, ids, plane = co, faces, np.arange(len(faces)), None
         half_kinds = [kind[i] for i in ids]
+        held_out, tidy_kinds = None, half_kinds
+        if picked is not None:  # outside the selection: its own key, so nothing is redrawn across, and its corners pinned
+            inside = np.asarray(picked, dtype=bool)[ids]
+            tidy_kinds = [(k, bool(i)) for k, i in zip(half_kinds, inside)]
+            held_out = np.zeros(len(half), dtype=bool)
+            for f, i in zip(half_faces, inside):
+                if not i:
+                    held_out[list(f)] = True
         box["stage"] = "Looking at your mesh"
         low, high = src_co.min(axis=0), src_co.max(axis=0)
         centre, reach = (low + high) / 2.0, (float(np.ptp(src_co, axis=0).max()) or 1.0) * 0.55
@@ -182,18 +223,36 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0
         box["levels"][0.0] = dict(measured(half, half_faces, first, kept), out=None)
         if box["stop"]:
             return
-        box["stage"] = "Redrawing patches around poles"
+        box["stage"] = "Walking poles together"
         stay = O.pinned(half, half_faces, plane=plane) | _held_by_strokes(half, strokes)
-        clean, clean_faces, clean_kinds, stay = O.clean_poles(half, half_faces, half_kinds, stay, judge, redraw=REDRAW)
+        if held_out is not None:
+            stay |= held_out
+        project = lambda p: _nearest(tree, p)  # noqa: E731
+        if choice["poles"]:
+            clean, clean_faces, clean_kinds, stay = O.fewer_poles(half, half_faces, tidy_kinds, stay, judge, project, plane, redraw=REDRAW)
+        else:
+            clean, clean_faces, clean_kinds = half, half_faces, tidy_kinds
         if box["stop"]:
             return
         box["stage"] = "Settling the quads"
         stay |= O.pinned(clean, clean_faces, plane=plane)
-        project = lambda p: _nearest(tree, p)  # noqa: E731
-        shots = O.settle(clean, clean_faces, project, stay, plane, snapshots=(0,), method=SETTLE_PULL)  # the weakest only cleans the poles
+        if held_out is not None:  # the selection's edge: corners touching a face outside it
+            outside = np.zeros(len(clean), dtype=bool)
+            for f, k in zip(clean_faces, clean_kinds):
+                if not k[1]:
+                    outside[list(f)] = True
+            stay |= outside
+            clean_kinds = [k[0] for k in clean_kinds]
+        if choice["sizes"] or choice["square"]:
+            shots = O.settle(clean, clean_faces, project, stay, plane, snapshots=(0,), method="settle" if choice["square"] else SETTLE_PULL)  # the weakest only cleans the poles
+        else:
+            shots = [(0, clean), (0, clean)]
         box["stage"] = "Straightening the loops"
         settled = shots[-1][1]
-        straight = O.settle(settled, clean_faces, project, stay, plane, snapshots=(O.STRAIGHT_STEPS // 2,), method="straighten", steps=O.STRAIGHT_STEPS)
+        if choice["rows"]:
+            straight = O.settle(settled, clean_faces, project, stay, plane, snapshots=(O.STRAIGHT_STEPS // 2,), method="straighten", steps=O.STRAIGHT_STEPS)
+        else:
+            straight = [(0, settled), (0, settled)]
         for strength, (_step, points) in zip(STRENGTHS, shots + straight):
             if box["stop"]:
                 return

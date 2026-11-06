@@ -21,6 +21,27 @@
   screen is swapped for the lighter one as soon as it is ready. When none is lighter, the verdict says "This mesh is
   already light: the result has more faces than the original. Keep the original or lower Detail."
 
+### Tidy Up
+- **Fewer poles**: Tidy Up now walks pole pairs (a corner with three edges next to one with five) along their rows
+  until they meet a pole they cancel with, collapses quads with a three on both ends of a diagonal, and spins edges that
+  take poles away. Each change is checked after a short relax of the corners it touches (no folded, turned or caved-in
+  quad, no corner moved far, and the camera's view trade), and a walk that finds nothing is undone. Cleaning runs three
+  times with a short settle in between, because evened-out quads let more patches redraw as grids. Pins on hard edges,
+  borders, the mirror seam, guide curves and drawn loops hold as before; Most Detail Loss still caps it.
+- **Switches under the slider**: Fewer Poles, Straighter Rows, Even Sizes (on by default) and Square Corners (off: pulls
+  each quad toward a rectangle instead of plain evening out) pick which steps run; **Selection Only** tidies only the
+  faces of the result selected in Edit Mode and leaves everything else, and the edge of the selection, where it is.
+  Changing a switch works the strengths out again from the result as it was.
+- Measured at Tidy Up 1, 0.9.8 -> 0.9.8.1 (Keep Detail 6%): bust poles 722 -> 525, Tidiness 56 -> 65, Loop Quality
+  32 -> 33, Issue Finder 170 -> 154, view changed 7.8% -> 8.4% (6.2% before Tidy Up), faces 2,410 -> 2,266.
+  Lion head poles 2,194 -> 1,871, Tidiness 55 -> 59, view 7.2% -> 7.6%, faces 7,246 -> 6,953; road barrier poles
+  255 -> 194, Tidiness 44 -> 54, Loop Quality 15 -> 17, view 8.0% -> 8.2%. Inward, folded and crossing faces not up.
+  Working out the strengths takes about twice as long (bust 7 -> 18 s).
+- Tried and left out: moving poles off flat spots toward curved ones with energy-neutral spins (on the bust it moved 4
+  of about 38 flat-spot poles and changed nothing else), and longer walks that may raise the energy part way (a few
+  more poles for far fewer faces and 2-3x the time). Under about 500 poles on the bust the rest mark where the quad size
+  changes, and only a different layout of sizes removes them.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

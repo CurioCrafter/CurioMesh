@@ -88,6 +88,11 @@ class OrganizeTest(unittest.TestCase):
         self.assertLessEqual(O.poles(new_co, new_faces), O.poles(co, faces))
         self.assertEqual(int(held.sum()), 1)
         self.assertEqual(set(new_keys), {"top", "low"})
+        more_co, more_faces, more_keys, more_held = O.fewer_poles(co, faces, keys, stay, project=onto_ball)
+        self.assertEqual(len(more_faces), len(more_keys))
+        self.assertLessEqual(O.poles(more_co, more_faces), O.poles(new_co, new_faces))
+        self.assertEqual(int(more_held.sum()), 1)
+        self.assertTrue(np.allclose(more_co[more_held], co[0]))
 
     def test_pick_and_meter(self):
         levels = {0.0: {"view": 5.0}, 0.5: {"view": 5.5}, 1.0: {"view": 7.0}}
