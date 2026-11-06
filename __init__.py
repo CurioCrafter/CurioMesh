@@ -6,7 +6,7 @@
 bl_info = {
     "name": "CurioMesh",
     "author": "CurioCrafter",
-    "version": (0, 9, 7),
+    "version": (0, 9, 8),
     "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
