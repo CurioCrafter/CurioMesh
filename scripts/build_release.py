@@ -165,15 +165,9 @@ def _series_overrides(root: Path, series: str, layout: str) -> dict[str, bytes]:
 
 # extensions.blender.org build: Python only, CC0 data only, no outside programs.
 # Rules read 2026-11-02: https://extensions.blender.org/terms-of-service/ (1.2, 3.6, 5.2).
-LISTING_NOTE = (
-    "> **extensions.blender.org build.** Python only. Its tidiness score uses CC0 reference meshes only, so the numbers\n"
-    "> sit a few points higher than in the GitHub zips.\n\n"
-)
 # Only these files of docs/ go in the listing zip: the sources of the bundled data.
 LISTING_DOCS = ("docs/PATTERN_SOURCES.md",)
 LISTING_DROP = ("CHANGELOG.md",)  # release notes of every build, native ones included: the site has its own
-# README lines about the GitHub-only native core.
-README_DROP = ("Turbo", "native core", "Native core", "Rust", "Little GPU compute")
 
 # Banned in the listing zip's code (extensions.blender.org review): (pattern, why).
 BANNED_CODE = (
@@ -190,6 +184,11 @@ BANNED_CODE = (
     (r"\b(Turbo|turbo|TURBO)\b|\bLite\b", "names of the GitHub-only native core or an old edition"),
     (r"urllib\.request|http\.client|\bsocket\.|\brequests\.(get|post)\b", "network use"),
     (r"Star on GitHub|star helps", "promotional prompts"),
+    (r"(?<![\w.])(eval|exec)\(", "eval / exec"),
+    (r"[\"'](bl_ext|user_default|blender_org|user_repository)\b", "hard-coded repository names"),
+    (r"addons\[__name__\]", "preferences keyed by __name__ (use __package__)"),
+    (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
+    (r"__pycache__|\.pyc\b", "bytecode"),
 )
 BANNED_TEXT = ("CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core")
 LISTING_NOTICES = """# Third-party notices (extensions.blender.org build)
@@ -211,13 +210,7 @@ def listing_overrides(root: Path) -> dict[str, bytes]:
     manifest = "".join(line for line in manifest.splitlines(True) if "native/src" not in line)
     if "[permissions]" not in manifest:  # the main manifest declares it already; a second table is invalid TOML
         manifest = manifest.rstrip("\n") + '\n\n[permissions]\nfiles = "Save job files and exports next to the .blend"\n'
-    readme = (root / "README.md").read_text(encoding="utf-8").replace("\r\n", "\n")
-    readme = re.sub(r"- Credits for the CC-BY works.*?Security Bot Rig[^\n]*\n", "", readme, flags=re.S)
-    readme = re.sub(r"- The triangle intersection test in the native core.*?THIRD_PARTY_NOTICES\.md\)\.\n", "", readme, flags=re.S)
-    readme = re.sub(r" ?[^.\n]*flowtool[^.\n]*\.", "", readme)  # the QuadWild script needs an outside program
-    readme = readme.replace(" The GitHub zips include the fast native Turbo core.", "")
-    readme = "".join(line for line in readme.splitlines(True) if not any(word in line for word in README_DROP))
-    readme = readme.replace("\n## ", "\n" + LISTING_NOTE + "## ", 1)
+    readme = (root / "docs" / "LISTING_README.md").read_text(encoding="utf-8")  # only what this build has
     sources = (root / "docs" / "PATTERN_SOURCES.md").read_text(encoding="utf-8")
     sources = "".join(line for line in sources.splitlines(True) if "CC-BY" not in line)
     return {
