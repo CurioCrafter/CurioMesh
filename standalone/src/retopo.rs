@@ -15,7 +15,11 @@ const FEATURE_DEG: f64 = 60.0; // pair_and_close: triangles meeting sharper than
 const PAIRED_SHARE: f64 = 0.6; // first guess of faces after pairing per triangle before it
 const CLOSE_ENOUGH: f64 = 0.10; // Reduce To: this near the face count asked for is a hit
 const ROUNDS: usize = 4;
-const MOST_LOOKS: usize = 12;
+// The add-on stops searching early to keep Blender responsive (it lands anywhere from 90% of the detail asked).
+// Without Blender a look costs well under a second, so the search lands within LANDED of the limit: fewer faces.
+const MOST_LOOKS: usize = 20;
+const LANDED: f64 = 0.98; // a result changing at least this share of the detail asked is close enough
+const FINEST_STEP: f64 = 1.01; // the search stops when its bounds are this close
 const TURN_LOSS: f64 = 1.0; // points of view change evening the quads out may add
 const TIDY_LOSS: f64 = 1.0; // points of view change Tidy Up may add
 
@@ -412,7 +416,7 @@ impl<'a> Prepared<'a> {
             let (mut low, mut high) = (smallest as f64, total as f64);
             let mut best: Option<(Mesh, f64)> = None;
             for _ in 0..MOST_LOOKS {
-                if high / low < 1.05 {
+                if high / low < FINEST_STEP {
                     break;
                 }
                 let middle = (low * high).sqrt() as usize;
@@ -420,7 +424,7 @@ impl<'a> Prepared<'a> {
                 log(&format!("  {} triangles kept -> {} faces, {:.2}% of the view changed", middle, out.faces(), change));
                 if change <= settings.detail {
                     high = middle as f64;
-                    let near = change >= 0.9 * settings.detail;
+                    let near = change >= LANDED * settings.detail;
                     best = Some((out, change));
                     if near {
                         break;

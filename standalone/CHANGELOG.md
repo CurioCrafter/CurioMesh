@@ -2,6 +2,10 @@
 
 ## 0.4.0 (in progress)
 
+- **Lands closer to the limit.** The add-on stops searching once a result changes 90% of the detail asked, to keep
+  Blender responsive; without Blender a look takes well under a second, so the search now lands within 2% of it.
+  Game Asset: a concrete barrier 2,678 -> 2,277 quads, a fire hydrant 25,310 -> 23,082, a lion head 21,312 -> 20,203,
+  0 bad faces.
 - **Judge as baked**, the add-on's Judge After Baking: a model that will get a normal map baked from the original
   (a scan, a sculpt) is judged as it will look then. Fine bumps the map paints back don't count; moved outlines, a
   surface far from the original and shading still wrong over a few pixels do. Scan Cleanup turns it on; the app has
