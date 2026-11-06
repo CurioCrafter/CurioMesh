@@ -78,6 +78,22 @@
   Attempts, Grow and Suggestions. Hard Edge Angle goes to 180 degrees in both places (it was 150 in one, 170 in the
   other).
 
+### Tidy Tools
+- **You can always go back.** Ctrl+Z and Ctrl+Shift+Z now also take back and bring back what CurioMesh keeps outside
+  Blender: each Tidy Up slider move, switch, Again, Keep Tidying pass and Undo Pass, each Quad Size and Rows move, a
+  new result, and each tool you keep is one step. A **History** list under the result shows every step with its
+  numbers; click one to go back to it (Ctrl+Z takes the jump back again). Steps keep references, not copies; only
+  when the computer runs short of memory are the oldest let go, and History says how many.
+- **Look First**, the preview every Tidy Tool shares: the change is drawn on the mesh before anything is kept (teal
+  new edges over the old wire, a purple-to-yellow tint for how far corners move, arrows, poles that go or come, a red
+  X where something was held back), with one ring near the middle of the view to drag for strength and a card with
+  up to three numbers, Apply (Enter), Cancel (Esc or right-click) and After / Before (B). Dragging shows a blend at
+  once and the exact result when the mouse rests; big areas get a quick preview first. The result is not touched
+  until Apply, which is one Undo step. Most Detail Loss holds a tool back ("held at 0.45").
+- **Tools** section between Adjust and Fix: Work on (Selection, Part, Whole Result), five groups that show only once
+  they have a tool, and a Last line with Again and Undo. While a tool is open the Adjust sliders wait.
+- Smooth Corners is the small example tool that proves the system (shown with Blender's Developer Extras on).
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface
