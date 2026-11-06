@@ -10,7 +10,7 @@ mod gui_guide;
 mod gui_prefs;
 
 use curiomesh::settings::{self, Mirror};
-use curiomesh::{export, io, issues};
+use curiomesh::{export, fix, io, issues, retopo};
 use gui_batch::Batch;
 use gui_prefs::{Prefs, CUSTOM};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextStyle, Vec2};
@@ -143,6 +143,8 @@ struct App {
     show: Show,
     split: f32,
     picked_spot: Option<usize>,
+    fixes: Vec<(io::Mesh, f64)>, // the result (and its view change) before each spot fix, for Put back
+    pending: Option<(fix::Fixed, Drawable)>, // a Keep original waiting to be applied, shown first
     batch: Batch,
     guide_open: bool,
     guide_topic: usize,
@@ -175,6 +177,8 @@ impl App {
             show: Show::Split,
             split: 0.5,
             picked_spot: None,
+            fixes: Vec::new(),
+            pending: None,
             batch: Batch::default(),
             guide_open: false,
             guide_topic: 0,
@@ -227,6 +231,7 @@ impl App {
                 self.model = Some(Loaded { drawable: Drawable::of(&mesh), path, mesh });
                 self.result = None;
                 self.picked_spot = None;
+                (self.fixes, self.pending) = (Vec::new(), None);
                 self.note = None;
                 self.show = Show::Split;
                 self.screen = Screen::Model;
@@ -257,6 +262,7 @@ impl App {
             Ok(mesh) => {
                 let drawable = Drawable::of(&mesh);
                 self.result = Some((Finished { check: issues::check(&mesh), mesh, loss: row.loss, seconds: row.seconds, tidy: None }, drawable));
+                (self.fixes, self.pending) = (Vec::new(), None);
             }
             Err(e) => self.note = Some((format!("Couldn't read the result. {e}"), true)),
         }
@@ -291,6 +297,7 @@ impl App {
                 Message::Done(Ok(finished)) => {
                     let drawable = Drawable::of(&finished.mesh);
                     self.result = Some((finished, drawable));
+                    (self.fixes, self.pending) = (Vec::new(), None);
                     self.running = None;
                     self.show = Show::Split;
                     return;
@@ -325,6 +332,43 @@ impl App {
                 Err(e) => (format!("Couldn't save: {e}"), true),
             });
         }
+    }
+
+    /// Redo spot `i` (applied at once) or Keep original there (shown first, applied with Apply).
+    fn fix_spot(&mut self, i: usize, keep: bool) {
+        let (Some(model), Some((finished, _))) = (&self.model, &self.result) else { return };
+        let spot = &finished.check.spots[i].faces;
+        let done = if keep { fix::keep_original(&model.mesh, &finished.mesh, spot) } else { fix::redo_spot(&model.mesh, &finished.mesh, spot) };
+        match done {
+            Err(e) => self.note = Some((format!("Not fixed: {e}. The result is unchanged."), true)),
+            Ok(done) if keep => {
+                let drawable = Drawable::of(&done.mesh);
+                self.pending = Some((done, drawable));
+            }
+            Ok(done) => self.apply_fix(done),
+        }
+    }
+
+    fn apply_fix(&mut self, done: fix::Fixed) {
+        let (Some(model), Some((finished, _))) = (&self.model, self.result.take()) else { return };
+        // ponytail: the view change is measured on this thread; a few seconds on a model of millions of faces.
+        let settings = self.prefs.choices.settings(true);
+        let loss = retopo::measure(&model.mesh, &done.mesh, settings.pixels, settings.gpu, settings.baked);
+        self.note = Some((format!("Spot fixed: {} faces there now, {} before. Bad faces {} -> {}.", done.faces_after, done.faces_before, done.bad_before, done.bad_after), false));
+        self.fixes.push((finished.mesh, finished.loss));
+        let drawable = Drawable::of(&done.mesh);
+        self.result = Some((Finished { check: issues::check(&done.mesh), mesh: done.mesh, loss, seconds: finished.seconds, tidy: None }, drawable));
+        (self.picked_spot, self.pending) = (None, None);
+    }
+
+    /// Put back: the result as it was before the last spot fix.
+    fn put_back(&mut self) {
+        let (Some((mesh, loss)), Some((finished, _))) = (self.fixes.pop(), &self.result) else { return };
+        let seconds = finished.seconds;
+        let drawable = Drawable::of(&mesh);
+        self.result = Some((Finished { check: issues::check(&mesh), mesh, loss, seconds, tidy: None }, drawable));
+        (self.picked_spot, self.pending) = (None, None);
+        self.note = Some(("Put back as it was before the last fix.".into(), false));
     }
 
     fn save_report(&mut self) {
@@ -869,6 +913,7 @@ impl App {
             }
         });
         section(ui, if spots == 0 { "Nothing to look at".to_string() } else { format!("Spots to look at ({spots})") }.as_str());
+        self.fix_buttons(ui);
         if spots == 0 {
             ui.label(RichText::new("No poles, slivers or folds were found.").small().color(MUTED));
             return;
@@ -881,6 +926,44 @@ impl App {
                 self.picked_spot = if picked { None } else { Some(i) };
                 self.focus_spot();
             }
+        }
+    }
+
+    /// Fix the picked spot: Redo, Keep original (its faces shown and asked about first) and Put back.
+    fn fix_buttons(&mut self, ui: &mut egui::Ui) {
+        if let Some((pending, _)) = &self.pending {
+            let (after, before) = (pending.faces_after, pending.faces_before);
+            let more = if after >= before { format!("adds {} faces", after - before) } else { format!("takes away {} faces", before - after) };
+            ui.add(egui::Label::new(RichText::new(format!("Keep original {more} here ({before} -> {after}, lit up on the model). Apply it?")).color(AMBER)).wrap());
+            let (mut apply, mut cancel) = (false, false);
+            ui.horizontal(|ui| {
+                apply = ui.button("Apply").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+            if apply {
+                let (done, _) = self.pending.take().unwrap();
+                self.apply_fix(done);
+            } else if cancel {
+                self.pending = None;
+            }
+            return;
+        }
+        let picked = self.picked_spot;
+        let (mut redo, mut keep, mut back) = (false, false, false);
+        ui.horizontal_wrapped(|ui| {
+            if picked.is_some() {
+                redo = ui.button("Redo this spot").on_hover_text("Remake the faces round this spot with smaller quads that follow the original closely. The rest stays as it is.").clicked();
+                keep = ui.button("Keep original here").on_hover_text("Put the original's own faces back round this spot, as quads. Shows how many faces it adds before it is applied.").clicked();
+            }
+            if !self.fixes.is_empty() {
+                back = ui.button("Put back").on_hover_text("Undo the last spot fix.").clicked();
+            }
+        });
+        match (picked, redo, keep, back) {
+            (Some(i), true, _, _) => self.fix_spot(i, false),
+            (Some(i), _, true, _) => self.fix_spot(i, true),
+            (_, _, _, true) => self.put_back(),
+            _ => {}
         }
     }
 
@@ -929,10 +1012,14 @@ impl App {
                 ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
             let camera = self.camera.as_ref().unwrap();
-            let highlight: Option<&[usize]> = self.picked_spot.and_then(|i| self.result.as_ref().map(|(f, _)| f.check.spots[i].faces.as_slice()));
+            let mut highlight: Option<&[usize]> = self.picked_spot.and_then(|i| self.result.as_ref().map(|(f, _)| f.check.spots[i].faces.as_slice()));
+            let mut shown = self.result.as_ref().map(|(_, d)| d);
+            if let Some((pending, drawable)) = &self.pending {
+                (shown, highlight) = (Some(drawable), Some(pending.new_faces.as_slice())); // the faces Keep original would add
+            }
             let painter = ui.painter_at(rect);
-            match (&self.result, self.show) {
-                (Some((_, result)), Show::Split) => {
+            match (shown, self.show) {
+                (Some(result), Show::Split) => {
                     painter.with_clip_rect(Rect::from_min_max(rect.min, Pos2::new(split_x, rect.max.y))).add(draw(&model.drawable, camera, rect, None, None));
                     painter.with_clip_rect(Rect::from_min_max(Pos2::new(split_x, rect.min.y), rect.max)).add(draw(result, camera, rect, Some(AMBER), highlight));
                     painter.line_segment([Pos2::new(split_x, rect.top()), Pos2::new(split_x, rect.bottom())], Stroke::new(2.0, TEXT));
@@ -941,7 +1028,7 @@ impl App {
                     painter.text(Pos2::new(split_x - 14.0, rect.top() + 18.0), Align2::RIGHT_TOP, "Original", FontId::proportional(14.0), MUTED);
                     painter.text(Pos2::new(split_x + 14.0, rect.top() + 18.0), Align2::LEFT_TOP, "CurioMesh", FontId::proportional(14.0), AMBER);
                 }
-                (Some((_, result)), Show::Result) => {
+                (Some(result), Show::Result) => {
                     painter.add(draw(result, camera, rect, Some(AMBER), highlight));
                 }
                 _ => {
@@ -982,6 +1069,17 @@ impl App {
         if !ready {
             ctx.request_repaint();
             return;
+        }
+        // CURIOMESH_FIX=keep:N or redo:N fixes spot N first, to show the Fix step.
+        if let Some((keep, n)) = std::env::var("CURIOMESH_FIX").ok().as_deref().and_then(|s| s.split_once(':')).and_then(|(how, n)| Some((how == "keep", n.parse::<usize>().ok()?.checked_sub(1)?))) {
+            if self.picked_spot.is_none() && self.pending.is_none() && self.fixes.is_empty() && self.note.is_none() && self.result.as_ref().is_some_and(|(f, _)| n < f.check.spots.len()) {
+                self.picked_spot = Some(n);
+                self.focus_spot();
+                self.fix_spot(n, keep);
+                self.frames = 0; // let the screen settle again
+                ctx.request_repaint();
+                return;
+            }
         }
         if !self.shot_asked {
             self.shot_asked = true;

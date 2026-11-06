@@ -24,6 +24,12 @@
   changes at most 1 point more. Game Asset at full Tidy Up: poles on a marble bust 2,521 -> 909, a lion head 8,020 ->
   3,311, a fire hydrant 9,634 -> 7,987, a chess set 1,924 -> 1,640, with 0.2 to 0.9 points more view change, 5 to 21%
   fewer faces and 0 bad faces. On a horse statue it was not kept (the view would have changed 1.2 points more).
+- **Fix one spot without redoing the model.** Pick a spot in the list and choose **Redo this spot** (smaller quads
+  that follow the original more closely) or **Keep original here** (the original's own faces back there, as quads;
+  it shows the faces it adds and asks first). **Put back** undoes the last fix. Only the spot and a ring round it
+  change: the edge of the fixed area keeps its corners, so nothing outside moves and no cracks open. Results stay all
+  quads, and a fix that would add bad faces is refused with the reason. The numbers, verdict and spot list update.
+- **`curiomesh fix SOURCE RESULT --spot N --redo|--keep-original -o OUT`** does the same on the command line.
 
 ## 0.3.0
 

@@ -32,6 +32,7 @@ pub mod topo;
 
 pub mod bake;
 pub mod batch;
+pub mod fix;
 pub mod export;
 pub mod io;
 pub mod issues;
