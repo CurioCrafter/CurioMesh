@@ -149,3 +149,78 @@ def sample_grid(radius: float, size: float):
     remap = np.full(len(points), -1, dtype=np.int64)
     remap[used] = np.arange(len(used))
     return points[used], remap[quads]
+
+
+# Hard Edges on Apply: which edges of the result Apply will mark sharp (or hold with loops), shown before Apply.
+ANGLE_LOW, ANGLE_HIGH = 5.0, 95.0  # degrees at the dial's two ends (the setting itself goes to 180 in the panel)
+
+
+def edge_angles(co, faces) -> tuple[np.ndarray, np.ndarray]:
+    """((e, 2) edges used by exactly two faces, (e,) degrees between those two faces' normals). Edges on a border or
+    shared by more than two faces are left out, as Apply leaves them out."""
+    co = np.asarray(co, dtype=np.float64)
+    if not faces:
+        return np.zeros((0, 2), dtype=np.int64), np.zeros(0)
+    normals = np.zeros((len(faces), 3))
+    by_size: dict[int, list] = {}
+    for i, f in enumerate(faces):
+        by_size.setdefault(len(f), []).append(i)
+    rows, pairs = [], []
+    for _size, which in by_size.items():  # one NumPy pass per face size (quads, triangles...)
+        which = np.asarray(which, dtype=np.int64)
+        ids = np.asarray([faces[i] for i in which.tolist()], dtype=np.int64)
+        p = co[ids]
+        normals[which] = np.cross(p, np.roll(p, -1, axis=1)).sum(axis=1)  # Newell's normal
+        nxt = np.roll(ids, -1, axis=1)
+        pairs.append(np.stack((np.minimum(ids, nxt).ravel(), np.maximum(ids, nxt).ravel()), axis=1))
+        rows.append(np.repeat(which, ids.shape[1]))
+    length = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = np.divide(normals, length, out=np.zeros_like(normals), where=length > 0)
+    pairs, rows = np.concatenate(pairs), np.concatenate(rows)
+    order = np.lexsort((pairs[:, 1], pairs[:, 0]))
+    pairs, rows = pairs[order], rows[order]
+    found, start, count = np.unique(pairs, axis=0, return_index=True, return_counts=True)
+    two = count == 2
+    a, b = rows[start[two]], rows[start[two] + 1]
+    cos = np.clip((normals[a] * normals[b]).sum(axis=1), -1.0, 1.0)
+    return found[two], np.degrees(np.arccos(cos))
+
+
+def angle_of(value: float) -> float:
+    """Degrees for a dial value 0..1."""
+    return ANGLE_LOW + (ANGLE_HIGH - ANGLE_LOW) * min(max(float(value), 0.0), 1.0)
+
+
+def value_of(angle: float) -> float:
+    """The dial value 0..1 for an angle in degrees."""
+    return min(max((float(angle) - ANGLE_LOW) / (ANGLE_HIGH - ANGLE_LOW), 0.0), 1.0)
+
+
+class HardEdges(Trial):
+    """Every edge of the result whose two faces meet at more than the angle, drawn pink: what Apply marks sharp (or
+    holds with loops). Nothing moves; Enter keeps the angle for Apply."""
+
+    name = "Hard Edges"
+    group = "HARD"
+    handles = ("angle",)
+    words = (f"{ANGLE_LOW:.0f}", f"{ANGLE_HIGH:.0f}")
+    defaults = {"angle": value_of(40.0)}
+    blendable = False
+    layers = ("scope", "kept")
+    stages = ()
+
+    def value_text(self, value: float) -> str:
+        return f"Angle {angle_of(value):.0f} degrees"
+
+    def check(self, base: Base) -> str:
+        return "" if len(base.faces) > 1 else "No hard edges in this area."
+
+    def run(self, base: Base, settings: dict, rough: bool = False):
+        if "edge_angles" not in base.cache:
+            base.cache["edge_angles"] = edge_angles(base.co, base.faces)
+            yield 0.8
+        edges, angles = base.cache["edge_angles"]
+        angle = angle_of(settings.get("angle", self.defaults["angle"]))
+        hard = edges[angles > angle]
+        word = "edge" if len(hard) == 1 else "edges"
+        return Candidate(base.co.copy(), strength=float(settings.get("angle", 0.0)), lines=base.co[hard], note=f"{len(hard):,} hard {word} at {angle:.0f} degrees, in pink")

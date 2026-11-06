@@ -73,6 +73,7 @@ WHITE = (1.0, 1.0, 1.0, 0.8)
 GONE = (0.243, 0.812, 0.431, 1.0)
 NEW = (1.0, 0.788, 0.302, 1.0)
 HELD = (1.0, 0.353, 0.373, 1.0)
+KEPT = (1.0, 0.373, 0.635, 1.0)  # pink: lines kept by meaning (the Sharp marker colour)
 HALO = (0.02, 0.02, 0.03, 0.55)
 BETTER, WORSE = (0.243, 0.812, 0.431, 1.0), (1.0, 0.72, 0.16, 1.0)
 CARD_BG = (0.07, 0.08, 0.11, 0.9)
@@ -388,6 +389,8 @@ class Session:
                     out["wash"] = batch_for_shader(smooth, "TRIS", {"pos": world(co + 0.5 * lift), "color": tint}, indices=tris.astype(np.int32))
             if cand.arrows is not None and len(cand.arrows):
                 out["arrows"] = _lines(flat, batch_for_shader, world(cand.arrows.reshape(-1, 3)), WHITE)
+            if cand.lines is not None and len(cand.lines):
+                out["kept"] = _lines(flat, batch_for_shader, world(np.asarray(cand.lines, dtype=np.float64).reshape(-1, 3)), KEPT)
         self.batch_key, self.batches = key, out
         return out
 
@@ -477,7 +480,7 @@ def _draw_view() -> None:
                 gpu.state.line_width_set(1.0)
                 flat.bind()
                 out["wire"].draw(flat)
-        for name, width in (("scope", 2.0), ("ghost", 2.0), ("arrows", 1.5)):
+        for name, width in (("scope", 2.0), ("ghost", 2.0), ("kept", 3.0), ("arrows", 1.5)):
             if name not in out or (name == "ghost" and s.before) or (name == "arrows" and not arrows) or (name not in layers and name != "scope"):
                 continue
             # the dark halo: the same lines wider, so teal, white and orange read on a light surface too

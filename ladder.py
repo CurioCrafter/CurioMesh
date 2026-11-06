@@ -32,6 +32,7 @@ SLOW = 120.0  # seconds: a search slower than this gets only the sizes next to i
 SLICE, GAP, WAIT = 0.03, 0.02, 0.25  # seconds of work per tick, between ticks, and between looks while a job of yours runs
 THROTTLE = 0.1  # while you drag a slider the preview changes at most this often
 SETTLE = 0.4  # seconds after the last move: then the segments of the result are found (and a blend is looked at)
+FLASH = 1.5  # seconds the HUD keeps "faces a -> b" after Quad Size or Rows rests
 QUIET = 1.0  # the ladder's own work waits this long after a slider moved, so dragging never competes with it
 MOST_MESHES = 40  # preview meshes kept, one per size or blend shown
 GOAL_STEP = 0.15  # Bigger or Smaller Quads on a segment: this much of its Detail slider
@@ -441,10 +442,22 @@ def on_rows(self, context) -> None:
 
 
 def on_slider(self, context) -> None:
-    drag.update(pending=True, moved=time.perf_counter())
+    now = time.perf_counter()
+    if now - drag["moved"] > FLASH:  # a new drag: the HUD compares with what it started from
+        res = _g().state["res"]
+        drag["from_faces"] = len(res["faces"]) if res is not None else 0
+    drag.update(pending=True, moved=now)
     pump(context)
     if not bpy.app.timers.is_registered(_drag_tick):
         bpy.app.timers.register(_drag_tick, first_interval=THROTTLE / 2)
+
+
+def slider_words() -> str:
+    """The HUD's line while Quad Size or Rows moves and for FLASH seconds after: "faces 6,210 -> 4,880"."""
+    res = _g().state["res"]
+    if res is None or not drag.get("from_faces") or time.perf_counter() - drag["moved"] > FLASH:
+        return ""
+    return f"faces {drag['from_faces']:,} -> {len(res['faces']):,}"
 
 
 def status() -> str:

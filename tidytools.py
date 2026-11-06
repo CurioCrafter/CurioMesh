@@ -12,6 +12,7 @@ How to add a tool: see the developer note at the top of `tidylive.py`.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 import bpy
@@ -19,6 +20,7 @@ import numpy as np
 
 from . import history, icons, overlay, tidylive
 from .triadq import tidytools as T
+from .triadq import trial as TT
 
 WIDTH = 36
 
@@ -43,6 +45,7 @@ GROUPS = (
 )
 TOOLS: list[Tool] = [
     Tool("RELAX", "curiomesh.tool_smooth_corners", "Smooth Corners", "tt_relax", "MOD_SMOOTH", developer=True),
+    Tool("HARD", "curiomesh.tool_hard_edges", "Hard Edges", "tt_true_edges", "MOD_EDGESPLIT"),
 ]
 FIRST_RUN = ""  # the tool "Even out the roughest patch" opens: Source Relax's idname once it exists
 
@@ -191,6 +194,378 @@ class CURIOMESH_OT_tool_smooth_corners(_Tool, bpy.types.Operator):
 
     strength: bpy.props.FloatProperty(name="Strength", description="How far each corner slides toward the middle of its neighbours. 0 leaves the result as it is", default=0.6, min=0.0, max=1.0, subtype="FACTOR")
     steps: bpy.props.IntProperty(name="Steps", description="How many small slides in a row. More evens out a wider area; higher can take longer", default=6, min=1, soft_max=50)
+
+
+class CURIOMESH_OT_tool_hard_edges(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_hard_edges"
+    bl_label = "Hard Edges"
+    bl_description = "Shows in pink which edges Apply will make hard, while you drag the angle. Enter keeps the angle for Apply; nothing on the result moves"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = T.HardEdges
+
+    degrees: bpy.props.FloatProperty(name="Angle", description="Faces meeting at more than this angle make a hard edge. Lower finds softer edges too", default=40.0, min=5.0, max=180.0, precision=0)
+
+    def _settings(self) -> dict:
+        return {"angle": T.value_of(self.degrees)}
+
+    def _scope(self, context) -> str:
+        return "WHOLE"  # Apply treats every edge of the result
+
+    def invoke(self, context, event):
+        self.degrees = context.scene.curiomesh_guided.hs_angle  # opens on the angle Apply would use now
+        return super().invoke(context, event)
+
+    def _set(self, context, degrees: float) -> None:
+        gs = context.scene.curiomesh_guided
+        gs.hs_angle = degrees
+        if gs.hs_edges == "NONE":
+            gs.hs_edges = "MARK"  # keeping an angle means wanting hard edges on Apply
+
+    def _keep(self, context):
+        s = self._s
+        degrees = float(round(T.angle_of(s.settings["angle"])))
+        note = s.cand.note if s.cand is not None else ""
+        tidylive.close("")
+        self._finish(context)
+        self.degrees = degrees  # what F9 shows and redoes
+        self._set(context, degrees)
+        tidylive._remember(context, self.bl_idname, "Hard Edges", note, {})
+        return {"FINISHED"}
+
+    def execute(self, context):
+        self._set(context, self.degrees)
+        return {"FINISHED"}
+
+
+# --------------------------------------------------------------------------- Detail Markers, Look First
+# The ball is placed by clicking the mesh. Inside its reach ring a sample grid of quads at the size it asks for is drawn
+# on the surface, and it follows the dial (strength) and the ring's edge (reach) live. Enter adds the ball (one Ctrl+Z
+# step, and the search it starts fills that step in); Esc adds nothing. The operator is `guided_add_marker`; these are
+# its invoke, modal and clean-up, kept here with the other Look First drawing.
+
+MARKER_HINT = "Detail Marker: click your mesh to place it, drag the ring's edge for reach and the small ring for strength. Enter keeps it, Esc cancels."
+MARKER_MISS = "Click on your mesh or the result to place the marker."
+marker_live = {"state": None, "handles": []}
+
+
+def _mat(obj) -> np.ndarray:
+    return np.asarray(obj.matrix_world, dtype=np.float64)
+
+
+def _marker_hit(m, x: float, y: float):
+    """(world point, world normal) of your mesh or the result under a region pixel, nearest first, or None."""
+    from bpy_extras import view3d_utils
+
+    guided = _guided()
+    region = m["region"]
+    origin = view3d_utils.region_2d_to_origin_3d(region, region.data, (x, y))
+    direction = view3d_utils.region_2d_to_vector_3d(region, region.data, (x, y))
+    best = None
+    for name in (m["src"], guided.PREVIEW_NAME):
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "MESH":
+            continue
+        hit = guided.surface_hit(obj, origin, direction)
+        if hit is None:
+            continue
+        mat = _mat(obj)
+        point = mat[:3, :3] @ hit[0] + mat[:3, 3]
+        normal = np.linalg.inv(mat[:3, :3]).T @ hit[1]
+        far = float(np.linalg.norm(point - np.asarray(origin)))
+        if best is None or far < best[0]:
+            best = (far, point, normal / (np.linalg.norm(normal) or 1.0))
+    return None if best is None else (best[1], best[2])
+
+
+def _marker_onto(m, points: np.ndarray) -> np.ndarray:
+    """World points moved onto your mesh (nearest point), so the ring and the grid lie on the surface."""
+    from mathutils import Vector
+
+    guided = _guided()
+    src = bpy.data.objects.get(m["src"])
+    if src is None:
+        return points
+    tree = guided._bvh(guided._source_data(src))
+    mat = _mat(src)
+    inv = np.linalg.inv(mat)
+    local = points @ inv[:3, :3].T + inv[:3, 3]
+    out = np.empty_like(local)
+    for i, p in enumerate(local.tolist()):
+        found = tree.find_nearest(Vector(p))[0]
+        out[i] = found if found is not None else p
+    return out @ mat[:3, :3].T + mat[:3, 3]
+
+
+def _marker_where(m):
+    return (m["at"], m["nrm"]) if m["at"] is not None else m["hover"] if m["hover"] is not None else (None, None)
+
+
+def _marker_numbers(m) -> tuple[float, float, int]:
+    """(quad side now, side the ball asks for at its middle, about how many faces it adds)."""
+    now = m["edge"] or m["reach"] / 4.0
+    scale = T.marker_scale(m["strength"], m["density"], m["less"])
+    extra = T.marker_extra_faces(m["reach"], now, m["strength"], m["density"], m["less"]) if m["edge"] else 0
+    return now, now * scale, extra
+
+
+def _marker_batches(m):
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    centre, normal = _marker_where(m)
+    if centre is None:
+        return None
+    key = (tuple(np.round(centre, 6)), round(m["reach"], 6), round(m["strength"], 3))
+    if key == m["key"]:
+        return m["batches"]
+    side = np.cross(normal, (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0))
+    side /= np.linalg.norm(side)
+    up = np.cross(normal, side)
+    _now, size, _extra = _marker_numbers(m)
+    lift = normal * 0.02 * min(size, m["reach"])
+    uv, quads = T.sample_grid(m["reach"], size)
+    flat = gpu.shader.from_builtin("FLAT_COLOR")
+    out = {}
+    if len(quads):
+        points = _marker_onto(m, centre + uv[:, :1] * side + uv[:, 1:] * up) + lift
+        edges = TT.edges_of([tuple(q) for q in quads.tolist()])
+        out["grid"] = tidylive._lines(flat, batch_for_shader, points[edges.ravel()].astype(np.float32), tidylive.TEAL)
+    turn = np.linspace(0.0, 2.0 * np.pi, 65)
+    ring = _marker_onto(m, centre + m["reach"] * (np.cos(turn)[:, None] * side + np.sin(turn)[:, None] * up)) + lift
+    out["ring"] = tidylive._lines(flat, batch_for_shader, np.repeat(ring, 2, axis=0)[1:-1].astype(np.float32), tidylive.ORANGE)
+    m["key"], m["batches"] = key, out
+    return out
+
+
+def _marker_draw_view() -> None:
+    m = marker_live["state"]
+    if m is None:
+        return
+    try:
+        import gpu
+
+        out = _marker_batches(m)
+        if not out:
+            return
+        flat = gpu.shader.from_builtin("FLAT_COLOR")
+        halo = gpu.shader.from_builtin("UNIFORM_COLOR")
+        gpu.state.blend_set("ALPHA")
+        gpu.state.depth_test_set("LESS_EQUAL")
+        for name, width in (("grid", 1.5), ("ring", 2.5)):
+            if name not in out:
+                continue
+            gpu.state.line_width_set(width + 2.0)  # dark halo: readable on a light surface too
+            halo.bind()
+            halo.uniform_float("color", tidylive.HALO)
+            out[name].draw(halo)
+            gpu.state.line_width_set(width)
+            flat.bind()
+            out[name].draw(flat)
+        gpu.state.line_width_set(1.0)
+        gpu.state.depth_test_set("NONE")
+        gpu.state.blend_set("NONE")
+    except Exception as exc:
+        overlay.LAST_DRAW_ERROR = repr(exc)
+
+
+def _marker_screen(m, point):
+    px, front = tidylive._to_screen(m["region"], m["region"].data, np.eye(4), point)
+    return (float(px[0][0]), float(px[0][1])) if front[0] else None
+
+
+def _marker_ring_px(m):
+    """(centre pixel, reach ring radius in pixels) or None."""
+    centre, normal = _marker_where(m)
+    if centre is None:
+        return None
+    mid = _marker_screen(m, centre)
+    if mid is None:
+        return None
+    region = m["region"]
+    view = np.asarray(region.data.view_matrix, dtype=np.float64)[:3, :3]
+    across = view.T @ np.array((1.0, 0.0, 0.0))  # the screen's sideways direction: the ring's size as seen
+    edge = _marker_screen(m, centre + m["reach"] * across)
+    return mid, (math.hypot(edge[0] - mid[0], edge[1] - mid[1]) if edge is not None else 0.0)
+
+
+def _marker_draw_pixel() -> None:
+    m = marker_live["state"]
+    context = bpy.context
+    if m is None or context.region is None or context.region.as_pointer() != m["region_ptr"]:
+        return
+    try:
+        import blf
+        import gpu
+
+        scale = tidylive._ui_scale()
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        shader.bind()
+        gpu.state.blend_set("ALPHA")
+        seen = _marker_ring_px(m)
+        dial = seen[0] if seen is not None else None
+        if dial is not None and m["at"] is not None:
+            x, y = dial
+            r = tidylive.DIAL_PX * scale
+            start, sweep = math.radians(225.0), -math.radians(270.0)
+            tidylive._poly(shader, tidylive._circle(x, y, r, 48), (*tidylive.ORANGE[:3], 0.45), 1.5)
+            tidylive._poly(shader, tidylive._circle(x, y, r, max(2, int(48 * m["strength"])), start, sweep * m["strength"]), tidylive.ORANGE, 4.0)
+        w, h = tidylive.CARD_W * scale, tidylive.CARD_H * scale
+        region = context.region
+        x, y = (dial[0] + 24 * scale, dial[1] - 24 * scale - h) if dial is not None else (16 * scale, 16 * scale)
+        right = region.width - overlay._sidebar_inset() - 8 * scale
+        x, y = max(8 * scale, min(x, right - w)), max(8 * scale, min(y, region.height - h - 8 * scale))
+        overlay._fill(shader, overlay._rounded_rect(x, y, w, h, 6 * scale), tidylive.CARD_BG)
+        overlay._fill(shader, overlay._rounded_rect(x, y, 5 * scale, h, 2 * scale), tidylive.GROUP_COLOURS["LOOPS"])
+        size, pad = max(11, int(11 * scale)), 12 * scale
+        _now, _new, extra = _marker_numbers(m)
+        ask = T.marker_scale(m["strength"], m["density"], m["less"])
+        reach = f"reach {m['reach'] / m['edge']:.0f} quads" if m["edge"] else f"reach {m['reach']:.3g}"
+        overlay._text(x + pad, y + h - 18 * scale, size, (1, 1, 1, 1), f"{'Less' if m['less'] else 'More'} Detail   Strength {m['strength']:.2f}   {reach}")
+        if m["note"]:
+            overlay._text(x + pad, y + h - 38 * scale, size, tidylive.HELD, m["note"][:70])
+        else:
+            words = f"quads here about {(ask if m['less'] else 1.0 / ask):.1f}x {'bigger' if m['less'] else 'smaller'}"
+            if m["edge"]:
+                words += f"   about {extra:+,} faces"
+            overlay._text(x + pad, y + h - 38 * scale, size, (0.85, 0.87, 0.9, 1.0), words if m["at"] is not None else "Click your mesh to place it")
+        chips, cx, cy = {}, x + pad, y + 8 * scale
+        for name, text, lit in (("apply", "Apply  Enter", tidylive.TEAL), ("cancel", "Cancel  Esc", tidylive.SLATE)):
+            blf.size(0, size)
+            cw = blf.dimensions(0, text)[0] + 14 * scale
+            overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 20 * scale, 4 * scale), (*lit[:3], 0.55))
+            overlay._text(cx + 7 * scale, cy + 6 * scale, size, (1, 1, 1, 1), text)
+            chips[name] = (cx, cy, cx + cw, cy + 20 * scale)
+            cx += cw + 8 * scale
+        m["chips"] = chips
+        gpu.state.line_width_set(1.0)
+        gpu.state.blend_set("NONE")
+    except Exception as exc:
+        overlay.LAST_DRAW_ERROR = repr(exc)
+
+
+def _marker_handlers_off() -> None:
+    while marker_live["handles"]:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(marker_live["handles"].pop(), "WINDOW")
+        except Exception:
+            pass
+
+
+def marker_invoke(op, context, event):
+    guided = _guided()
+    area, region = tidylive._view(context)
+    src = guided._source_mesh(context)
+    if region is None or src is None or event is None:
+        return op.execute(context)  # no view to show it in: the ball goes to the 3D cursor, as before
+    tidylive.close("")  # one preview at a time
+    marker_finish(None, context)
+    res = guided.state["res"]
+    scale = float(np.mean(np.asarray(src.matrix_world.to_scale())))
+    edge = TT.mean_edge(np.asarray(res["co"], dtype=np.float64), res["faces"]) * scale if res is not None and res["faces"] and guided.state_source() is src else None
+    marker_live["state"] = {
+        "src": src.name, "area": area, "region": region, "region_ptr": region.as_pointer(), "less": bool(op.less),
+        "strength": float(op.strength), "reach": float(op.reach) if op.reach > 0.0 else 0.1 * max(src.dimensions),
+        "density": float(context.scene.curiomesh_guided.density_strength), "edge": edge, "at": None, "nrm": None,
+        "hover": None, "drag": None, "note": "", "chips": {}, "key": None, "batches": None,
+    }
+    marker_live["handles"] = [bpy.types.SpaceView3D.draw_handler_add(_marker_draw_view, (), "WINDOW", "POST_VIEW"), bpy.types.SpaceView3D.draw_handler_add(_marker_draw_pixel, (), "WINDOW", "POST_PIXEL")]
+    area.header_text_set(MARKER_HINT)
+    context.window_manager.modal_handler_add(op)
+    area.tag_redraw()
+    return {"RUNNING_MODAL"}
+
+
+def marker_finish(op, context) -> None:
+    m = marker_live["state"]
+    marker_live["state"] = None
+    _marker_handlers_off()
+    if m is not None:
+        try:
+            m["area"].header_text_set(None)
+            m["area"].tag_redraw()
+        except Exception:
+            pass
+
+
+def marker_modal(op, context, event):
+    m = marker_live["state"]
+    if m is None:
+        return {"CANCELLED"}
+    region = m["region"]
+    x, y = event.mouse_x - region.x, event.mouse_y - region.y
+    inside = 0 <= x < region.width and 0 <= y < region.height
+    scale = tidylive._ui_scale()
+    if m["drag"] is not None:
+        kind, start, value = m["drag"]
+        if event.type == "MOUSEMOVE":
+            if kind == "dial":
+                fine = 0.1 if event.shift else 1.0
+                m["strength"] = min(max(value + (x - start[0]) / (tidylive.DRAG_PX * scale) * fine, 0.05), 1.0)
+            else:
+                seen = _marker_ring_px(m)
+                if seen is not None and start > 1.0:
+                    m["reach"] = max(value * math.hypot(x - seen[0][0], y - seen[0][1]) / start, 1e-6)
+            m["note"] = ""
+            m["area"].tag_redraw()
+            return {"RUNNING_MODAL"}
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            m["drag"] = None
+            return {"RUNNING_MODAL"}
+    if event.value == "PRESS" and event.type in {"RET", "NUMPAD_ENTER"}:
+        return _marker_keep(op, context)
+    if event.value == "PRESS" and event.type in {"ESC", "RIGHTMOUSE"}:
+        marker_finish(op, context)
+        return {"CANCELLED"}
+    if not inside or event.type in tidylive.NAVIGATION or event.type.startswith(("NDOF", "NUMPAD")):
+        return {"PASS_THROUGH"}
+    if event.type == "MOUSEMOVE":
+        if m["at"] is None:
+            m["hover"] = _marker_hit(m, x, y)
+            m["area"].tag_redraw()
+        return {"PASS_THROUGH"}
+    if event.type == "LEFTMOUSE" and event.value == "PRESS":
+        for name, (x0, y0, x1, y1) in m["chips"].items():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if name == "apply":
+                    return _marker_keep(op, context)
+                marker_finish(op, context)
+                return {"CANCELLED"}
+        seen = _marker_ring_px(m) if m["at"] is not None else None
+        if seen is not None:
+            (cx, cy), ring = seen
+            off = math.hypot(x - cx, y - cy)
+            dial = tidylive.DIAL_PX * scale
+            if abs(off - dial) < 0.45 * dial + 6:
+                m["drag"] = ("dial", (x, y), m["strength"])
+                return {"RUNNING_MODAL"}
+            if ring > 1.0 and abs(off - ring) < 8 * scale:
+                m["drag"] = ("reach", off, m["reach"])
+                return {"RUNNING_MODAL"}
+        hit = _marker_hit(m, x, y)
+        if hit is None:
+            m["note"] = MARKER_MISS
+        else:
+            m["at"], m["nrm"], m["note"] = hit[0], hit[1], ""
+        m["area"].tag_redraw()
+        return {"RUNNING_MODAL"}
+    if event.type.startswith(("TIMER", "WINDOW", "EVT")):
+        return {"PASS_THROUGH"}
+    return {"RUNNING_MODAL"}
+
+
+def _marker_keep(op, context):
+    m = marker_live["state"]
+    if m["at"] is None:
+        m["note"] = MARKER_MISS
+        m["area"].tag_redraw()
+        return {"RUNNING_MODAL"}
+    op.place, op.placed, op.reach, op.strength = m["at"].tolist(), True, m["reach"], m["strength"]
+    _now, _new, extra = _marker_numbers(m)
+    marker_finish(op, context)
+    done = op.execute(context)
+    if "FINISHED" in done:
+        tidylive._remember(context, "curiomesh.guided_add_marker", "Detail Marker", f"about {extra:+,} faces" if m["edge"] else "", {"less": bool(op.less), "strength": op.strength, "reach": op.reach})
+    return done
 
 
 # --------------------------------------------------------------------------- panel operators
@@ -379,7 +754,7 @@ def _popover(key, label, tip):
 
 POPOVERS = tuple(_popover(key, label, tip) for key, label, _icon, _stock, tip in GROUPS)
 PANELS = (CURIOMESH_PT_guided_tools, CURIOMESH_PT_guided_history)  # registered by panel.py, in the main tab's order
-CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
+CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_hard_edges, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
 
 
 def register() -> None:
@@ -389,6 +764,7 @@ def register() -> None:
 
 
 def unregister() -> None:
+    marker_finish(None, None)
     tidylive.unregister()
     for cls in reversed(CLASSES):
         try:

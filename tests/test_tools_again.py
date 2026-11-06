@@ -81,5 +81,34 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(len(tidytools.sample_grid(0.0, 0.1)[1]), 0)
 
 
+def _cube():
+    co = np.array([(x, y, z) for z in (0, 1) for y in (0, 1) for x in (0, 1)], dtype=np.float64)
+    faces = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+    return co, faces
+
+
+class HardEdgesTest(unittest.TestCase):
+    def test_cube_edges_are_hard_below_ninety_and_not_above(self):
+        co, faces = _cube()
+        edges, angles = tidytools.edge_angles(co, faces)
+        self.assertEqual(len(edges), 12)
+        self.assertTrue(np.allclose(angles, 90.0))
+        base = trial.make_base(co, faces)
+        tool = tidytools.HardEdges()
+        cand = trial.finish(tool.run(base, {"angle": tidytools.value_of(40.0)}))
+        self.assertEqual(len(cand.lines), 12)
+        self.assertTrue(np.array_equal(cand.co, co))  # nothing moves
+        self.assertIn("12 hard edges at 40", cand.note)
+        self.assertEqual(len(trial.finish(tool.run(base, {"angle": 1.0})).lines), 0)
+
+    def test_flat_strip_has_none_and_the_dial_reads_in_degrees(self):
+        co, faces = _strip(3)
+        self.assertEqual(len(tidytools.edge_angles(co, faces)[0]), 2)  # border edges are left out
+        self.assertAlmostEqual(tidytools.angle_of(tidytools.value_of(40.0)), 40.0)
+        title = trial.readout(None, tidytools.HardEdges(), {"angle": tidytools.value_of(40.0)}, "ready")[0]
+        self.assertIn("Angle 40 degrees", title)
+        self.assertIn("Strength 0.60", trial.readout(None, tidytools.SmoothCorners(), {"strength": 0.6}, "ready")[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -259,12 +259,12 @@ def _redraw_update(self, context):
     overlay.tag_redraw()
 
 
-def _tweak_update(name: str):
-    """A Fine-tune Tweak slider moved: its own History step (one drag is one step), which the search it starts fills
-    in, so Ctrl+Z goes back to the slider and the result together."""
+def _search_update(name: str):
+    """A setting the search reads moved (a Fine-tune Tweak slider, Mirror, Symmetrize): its own History step (one drag is
+    one step), which the search it starts fills in, so Ctrl+Z goes back to the setting and its result together."""
 
     def update(self, context):
-        history.note(context, "tweak", name)
+        history.note(context, "search", name)
         overlay.tag_redraw()
 
     return update
@@ -387,8 +387,8 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     seg_method: bpy.props.EnumProperty(name="Method", description="How the selected parts' quads are made when their Use is Reduce or Low Poly", items=segments.METHOD_ITEMS, default="AUTO")
     seg_parts: bpy.props.CollectionProperty(type=segments.CURIOMESH_PG_segpart)
     seg_index: bpy.props.IntProperty(default=-1, update=segments.on_index)
-    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Builds one half and mirrors it, so both sides match exactly. Used only when the mesh really is symmetric, unless Symmetrize is on", items=SYMMETRY_ITEMS, default="OFF", update=_redraw_update)
-    sym_force: bpy.props.BoolProperty(name="Symmetrize", description="Mirrors even when the two sides differ, so the result is exactly symmetric. Differences on the other side are lost", default=False, update=_redraw_update)
+    sym_axis: bpy.props.EnumProperty(name="Mirror", description="Builds one half and mirrors it, so both sides match exactly. Used only when the mesh really is symmetric, unless Symmetrize is on", items=SYMMETRY_ITEMS, default="OFF", update=_search_update("Mirror"))
+    sym_force: bpy.props.BoolProperty(name="Symmetrize", description="Mirrors even when the two sides differ, so the result is exactly symmetric. Differences on the other side are lost", default=False, update=_search_update("Symmetrize"))
     sym_side: bpy.props.EnumProperty(name="Keep Side", description="Which half is built and then mirrored", items=(("AUTO", "Auto", "The side with more surface"), ("POS", "+", "The side with larger coordinates"), ("NEG", "-", "The side with smaller coordinates")), default="AUTO", update=_redraw_update)
     sym_offset_use: bpy.props.BoolProperty(name="Set Plane", description="Puts the mirror plane where you say, in object space, instead of finding it", default=False, update=_redraw_update)
     sym_offset: bpy.props.FloatProperty(name="Plane Offset", description="Where the mirror plane crosses the axis, in object space", default=0.0, subtype="DISTANCE", update=_redraw_update)
@@ -460,9 +460,9 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bake_sets: bpy.props.IntProperty(name="Texture Sets", description="Normal + Color: bakes onto this many sets of maps, each its own material, so a big model keeps detail", default=1, min=1, soft_max=16, max=256)
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Classic Guided: how many passes settle the new quads onto your surface. More follows it closer, slower", default=2, min=0, soft_max=30, max=1000)
     ui_tweak_open: bpy.props.BoolProperty(name="Tweak", description="Sliders that change how the quads are laid out", default=False)
-    tweak_rows: bpy.props.FloatProperty(name="Rows on Round Areas", description="How readily round, smooth areas become rows of quads that follow their curve. Right finds more of them and adds faces. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_tweak_update("Rows on Round Areas"))
-    tweak_flat: bpy.props.FloatProperty(name="Flat Area Size", description="How big quads inside flat areas may get. Left makes them smaller and more even; right fewer and longer. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_tweak_update("Flat Area Size"))
-    tweak_poles: bpy.props.BoolProperty(name="Avoid Poles", description="Turns edges so rows of quads keep going past poles (points where 3 or 5+ edges meet). Off: about a fifth more poles, a touch more detail", default=True, update=_tweak_update("Avoid Poles"))
+    tweak_rows: bpy.props.FloatProperty(name="Rows on Round Areas", description="How readily round, smooth areas become rows of quads that follow their curve. Right finds more of them and adds faces. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_search_update("Rows on Round Areas"))
+    tweak_flat: bpy.props.FloatProperty(name="Flat Area Size", description="How big quads inside flat areas may get. Left makes them smaller and more even; right fewer and longer. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_search_update("Flat Area Size"))
+    tweak_poles: bpy.props.BoolProperty(name="Avoid Poles", description="Turns edges so rows of quads keep going past poles (points where 3 or 5+ edges meet). Off: about a fifth more poles, a touch more detail", default=True, update=_search_update("Avoid Poles"))
     feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Classic Guided: edges sharper than this angle count as hard edges and are kept", default=40.0, min=5.0, max=180.0)
     pure_quads: bpy.props.BoolProperty(name="All Quads", description="Classic Guided, Whole Mesh: makes every face a quad. Off is faster on big meshes and leaves a few triangles", default=True)
     suggest_count: bpy.props.IntProperty(name="Suggestions", description="Classic Guided: how many points Auto-suggest places", default=8, min=1, soft_max=40, max=1000)
@@ -1729,7 +1729,9 @@ def _painted(source, gs, src) -> np.ndarray | None:
     for marker in markers(bpy.context.scene):
         centre = np.asarray(inverse @ marker.matrix_world.translation)
         radius = marker.empty_display_size * max(marker.matrix_world.to_scale()) / scale
-        np.maximum(more if marker[MARKER_KEY] > 0 else less, marker_weights(src["co"], centre, radius), out=more if marker[MARKER_KEY] > 0 else less)
+        into = more if marker[MARKER_KEY] > 0 else less
+        how = min(abs(float(marker[MARKER_KEY])), 1.0)  # a ball's own strength: 1 for balls made before it had one
+        np.maximum(into, how * marker_weights(src["co"], centre, radius), out=into)
     marked = more - less
     return marked if np.abs(marked).max(initial=0.0) > 0.0 else None
 
@@ -2042,7 +2044,7 @@ def _collect_work(context) -> None:
             segments.segment_goals.start_find(context)
             ladder.start(context)
             words = f"{len(state['res']['faces']):,} faces" if state["res"] is not None else ""
-            if not history.settled("tweak", words):  # a Fine-tune slider asked for this search: it is that slider's step
+            if not history.settled("search", words):  # a Tweak slider or a Detail Marker asked for this search: it is that step
                 history.record(context, "New result", words, push=True)
         elif not runner.busy and runner.report is None and state["lod"] is not None:  # the search failed: nothing more to come
             state["lod"] = None
@@ -3718,23 +3720,44 @@ class CURIOMESH_OT_guided_add_marker(bpy.types.Operator):
 
     less: bpy.props.BoolProperty(name="Less Detail", description="On: bigger quads there (Less Detail). Off: smaller quads there (More Detail)", default=False, options={"SKIP_SAVE"})
 
+    strength: bpy.props.FloatProperty(name="Strength", description="How strongly this ball asks for smaller (or bigger) quads. 1 is the most; the Strength under Detail Markers scales every ball", default=1.0, min=0.05, max=1.0, subtype="FACTOR")
+    reach: bpy.props.FloatProperty(name="Reach", description="How far the ball reaches, as its radius. 0 uses a tenth of your mesh's size", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
+    place: bpy.props.FloatVectorProperty(name="Place", description="Where the ball goes, when it was clicked on the mesh", subtype="TRANSLATION", options={"SKIP_SAVE", "HIDDEN"})
+    placed: bpy.props.BoolProperty(name="Placed", description="On: the ball goes to Place. Off: to the 3D cursor", default=False, options={"SKIP_SAVE", "HIDDEN"})
+
     @classmethod
     def description(cls, context, properties):
         if properties.less:
-            return "A Less Detail ball at the 3D cursor: bigger quads inside it, at every Quad Size. Scale it to change its reach"
-        return "A More Detail ball at the 3D cursor: more, smaller quads inside it, kept even at low face counts. Scale it to change its reach"
+            return "Click your mesh to place a ball that asks for bigger quads inside it; you see their size before keeping it. Drag the ring to change how far it reaches"
+        return "Click your mesh to place a ball that asks for smaller quads inside it; you see their size before keeping it. Drag the ring to change how far it reaches"
 
     @classmethod
     def poll(cls, context):
         return _source_mesh(context) is not None
 
+    def invoke(self, context, event):
+        from . import tidytools
+
+        return tidytools.marker_invoke(self, context, event)
+
+    def modal(self, context, event):
+        from . import tidytools
+
+        return tidytools.marker_modal(self, context, event)
+
+    def cancel(self, context):
+        from . import tidytools
+
+        tidytools.marker_finish(self, context)
+
     def execute(self, context):
         gs, obj = _gs(context), _source_mesh(context)
+        history.note(context, "search", "Detail Marker")  # its own Ctrl+Z step, which the search it starts fills in
         ball = bpy.data.objects.new("CM_LessDetail" if self.less else "CM_MoreDetail", None)
         ball.empty_display_type = "SPHERE"
-        ball.empty_display_size = 0.1 * max(obj.dimensions)
-        ball.location = context.scene.cursor.location
-        ball[MARKER_KEY] = -1.0 if self.less else 1.0
+        ball.empty_display_size = self.reach if self.reach > 0.0 else 0.1 * max(obj.dimensions)
+        ball.location = self.place if self.placed else context.scene.cursor.location
+        ball[MARKER_KEY] = -self.strength if self.less else self.strength
         ball.color = (0.2, 0.4, 1.0, 1.0) if self.less else (1.0, 0.2, 0.1, 1.0)
         context.scene.collection.objects.link(ball)
         gs.density_use = True

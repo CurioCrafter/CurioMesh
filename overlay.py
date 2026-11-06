@@ -558,6 +558,9 @@ def hud_model(context) -> dict:
         auto = getattr(getattr(context.scene, "curiomesh_guided", None), "scope", "") == "AUTO"
         model["target"] = 0  # Classic Remesh's Target Faces is not what this result aimed for
         model["hint"] = "Check the parts, then press Apply" if auto else "Press Apply when it looks right"
+        from . import ladder
+
+        model["hint"] = ladder.slider_words() or model["hint"]  # while Quad Size or Rows moves: what it changed
     else:
         model["hint"] = next_step_hint(obj, stats, settings)
     # A mesh CurioMesh has not touched yet is the starting point, not a failure: no red, no NEEDS WORK
