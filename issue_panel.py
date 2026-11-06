@@ -26,6 +26,7 @@ KIND_WORDS = {
     "inward": "turned inward", "sunk": "sunk into your mesh", "crossing": "crossing", "folded_over": "folded over",
     "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping",
     "sliver": "slivers", "pinched": "pinched", "pole": "poles", "concave": "concave",
+    "touching": "touching parts",
 }
 
 ui = {"res": None, "cur": -1, "diff": None, "batch": None, "batch_key": None}

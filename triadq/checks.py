@@ -246,6 +246,12 @@ def new_spots(before: Inspect, after: Inspect) -> list[int]:
     return sorted(bad, key=lambda p: (-bad[p], p))
 
 
+def worst_parts(piece: np.ndarray, marked: np.ndarray) -> list[int]:
+    """Pieces holding marked faces, the most first (ties by number)."""
+    ids, counts = np.unique(np.asarray(piece)[np.asarray(marked, bool)], return_counts=True)
+    return [int(p) for p in ids[np.lexsort((ids, -counts))]]
+
+
 def describe(before: Inspect, after: Inspect, fixed: int, left: int, overlap: int = 0) -> str:
     """The outcome in plain words. Only what the result added counts. `overlap`: faces of the result lying on others
     (`Defects.overlap`, which already leaves out what the source has itself), so a pipe whose walls fall onto each other
@@ -276,6 +282,8 @@ FOLD = -0.866  # two faces on one edge more than 150 degrees apart lie folded ov
 SUNK = 0.5  # a face whose middle is inside the source by more than this share of its longest side has sunk into it
 LOOK_AHEAD = 1e-3  # of a face's longest side: how far in front of it the source is asked which way is out
 FLAT_AREA = 1e-6  # of the mean squared side: a face without area
+TOUCH_PROBE = 0.1  # of a face's longest side: how far behind and in front of it to ask which part is there
+TOUCH_NEAR = 0.5  # ...and how close both surfaces must be, so a part merely nearby doesn't count as touching
 MOST_SUNK = 20_000  # faces tested by winding number, deepest first: it looks at every source triangle
 OVERLAP_SPLITS = 4  # random halves tried for faces lying on each other: one misses a pair half the time
 
@@ -293,12 +301,18 @@ class Defects:
     duplicate: np.ndarray  # the same corners as an earlier face
     overlap: np.ndarray  # lies on another face, in its plane, without sharing a corner
     pairs: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.int64))  # the crossing pairs
+    touching: np.ndarray | None = None  # on its own part's surface where another part presses against it back to back
 
-    KINDS = ("inward", "sunk", "crossing", "folded_over", "bent", "flat", "duplicate", "overlap")
+    KINDS = ("inward", "sunk", "crossing", "folded_over", "bent", "flat", "duplicate", "overlap", "touching")
+    BROKEN = KINDS[:-1]  # touching is a note: the face is where its part is, the other part is in front of it
+
+    def __post_init__(self):
+        if self.touching is None:
+            self.touching = np.zeros(len(self.inward), bool)
 
     def any(self) -> np.ndarray:
         out = np.zeros(len(self.inward), bool)
-        for k in self.KINDS:
+        for k in self.BROKEN:
             out |= getattr(self, k)
         return out
 
@@ -355,6 +369,48 @@ def _overlapping(co, faces, pad, normal, middle, size, seed: int = 0) -> np.ndar
     return out
 
 
+def source_parts(pad: np.ndarray) -> np.ndarray:
+    """Per face of a corner table, which edge-connected part it belongs to (the smallest face number in it)."""
+    a, b = pad.ravel(), np.roll(pad, -1, axis=1).ravel()
+    face = np.repeat(np.arange(len(pad)), pad.shape[1])
+    real = a != b
+    key = np.minimum(a, b)[real] * (int(pad.max(initial=0)) + 1) + np.maximum(a, b)[real]
+    face = face[real]
+    order = np.argsort(key, kind="stable")
+    key, face = key[order], face[order]
+    same = key[1:] == key[:-1]
+    label = np.arange(len(pad))
+    first, second = face[:-1][same], face[1:][same]
+    while True:  # hook to the smaller label, then jump, until every edge agrees
+        low = np.minimum(label[first], label[second])
+        if np.array_equal(label[first], label[second]):
+            return label
+        np.minimum.at(label, first, low)
+        np.minimum.at(label, second, low)
+        label = label[label]
+
+
+def touching_parts(ids, normal, middle, size, tree, source_normals, source_pad) -> np.ndarray:
+    """Of these faces turned inward, those lying on their own part's surface with another part pressed against it.
+
+    Just behind such a face its own part's surface faces the same way; just in front another part's surface faces back
+    at it, close enough that the votes turn it inward. A face really turned inside out has the same part on both sides.
+    """
+    out = np.zeros(len(normal), bool)
+    if not len(ids):
+        return out
+    step = (TOUCH_PROBE * size[ids])[:, None] * normal[ids]
+    _a, behind, back_gap = tree.nearest(middle[ids] - step)
+    _b, ahead, front_gap = tree.nearest(middle[ids] + step)
+    behind, ahead = np.asarray(behind, dtype=np.int64), np.asarray(ahead, dtype=np.int64)
+    part = source_parts(source_pad)
+    near = (np.asarray(back_gap) < TOUCH_NEAR * size[ids]) & (np.asarray(front_gap) < TOUCH_NEAR * size[ids])
+    own = (source_normals[behind] * normal[ids]).sum(axis=1) > -FACING
+    other = (source_normals[ahead] * normal[ids]).sum(axis=1) < FACING
+    out[ids[near & own & other & (part[behind] != part[ahead])]] = True
+    return out
+
+
 def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects:
     """Everything wrong with each face of a result, the source saying which way is out. The source lookups, the crossing
     test and the overlap test need the native core: without it those masks stay empty. `pairs`: crossings found already."""
@@ -363,7 +419,7 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
     count = len(faces)
     empty = np.zeros(count, bool)
     if not count:
-        return Defects(*(empty.copy() for _ in Defects.KINDS))
+        return Defects(*(empty.copy() for _ in Defects.BROKEN))
     pad = corner_table(faces)
     normal, area, middle = _normals(co, pad)
     sides = np.linalg.norm(co[pad] - co[np.roll(pad, -1, axis=1)], axis=2)
@@ -381,7 +437,7 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
     pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     crossing = empty.copy()
     crossing[pairs.ravel()] = True
-    inward, sunk = empty.copy(), empty.copy()
+    inward, sunk, touching = empty.copy(), empty.copy(), empty.copy()
     edge = _edge_faces(pad)
     fold = (normal[edge[:, 0]] * normal[edge[:, 1]]).sum(axis=1) < FOLD
     tree = None
@@ -406,6 +462,8 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
         votes = np.where(stacked[near][:, :, None], 0.0, source_normals[near]).sum(axis=1) + np.where(stacked[hit][:, None], 0.0, source_normal)
         length = np.linalg.norm(votes, axis=1)
         inward = (length > 0.0) & ((normal * votes).sum(axis=1) < FACING * np.maximum(length, 1e-300))
+        touching = touching_parts(np.flatnonzero(inward), normal, middle, size, tree, source_normals, source_pad)
+        inward &= ~touching
         depth = -((middle - at) * source_normal).sum(axis=1)
         deep = np.flatnonzero((depth > SUNK * size) & (np.asarray(away) > 0.99 * SUNK * size))
         deep = deep[np.argsort(-depth[deep] / size[deep])][:MOST_SUNK]
@@ -427,4 +485,4 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
             crossing[:] = False
             crossing[pairs.ravel()] = True
             overlap &= new
-    return Defects(inward, sunk, crossing, folded_over, bent, flat, duplicate, overlap, pairs)
+    return Defects(inward, sunk, crossing, folded_over, bent, flat, duplicate, overlap, pairs, touching)

@@ -14,7 +14,7 @@ from mathutils.bvhtree import BVHTree
 
 from .triadq import checks, repair
 
-KIND_WORDS = {"inward": "inward", "sunk": "sunk", "crossing": "crossing", "folded_over": "folded over", "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping"}
+KIND_WORDS = {"inward": "inward", "sunk": "sunk", "crossing": "crossing", "folded_over": "folded over", "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping", "touching": "touching parts"}
 
 
 # --------------------------------------------------------------------------- the area and its checks
@@ -70,7 +70,7 @@ def measure(area, source):
     points, faces, _verts = _sub(area)
     found = checks.defects(points, faces, *(source or (None, None)))
     bad = np.zeros(len(faces), bool)
-    for k in checks.Defects.KINDS:
+    for k in checks.Defects.BROKEN:
         bad |= getattr(found, k)
     return found, bad
 
@@ -78,7 +78,7 @@ def measure(area, source):
 def describe(found, bad) -> str:
     if not bad.any():
         return "no bad faces"
-    parts = [f"{int(getattr(found, k).sum())} {KIND_WORDS[k]}" for k in checks.Defects.KINDS if getattr(found, k).any()]
+    parts = [f"{int(getattr(found, k).sum())} {KIND_WORDS[k]}" for k in checks.Defects.BROKEN if getattr(found, k).any()]
     return f"{int(bad.sum())} bad ({', '.join(parts)})"
 
 

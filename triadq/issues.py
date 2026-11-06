@@ -30,7 +30,7 @@ WEIGHTS = {  # how bad one kind is; a spot's score adds weight * (1 + log2(faces
     "inward": 10.0, "crossing": 10.0, "folded_over": 10.0,
     "sunk": 5.0, "overlap": 5.0, "duplicate": 4.0,
     "bent": 3.0, "flat": 3.0,
-    "concave": 2.0, "sliver": 1.0, "pinched": 1.0, "pole": 0.5,
+    "concave": 2.0, "sliver": 1.0, "pinched": 1.0, "pole": 0.5, "touching": 0.5,
 }
 
 

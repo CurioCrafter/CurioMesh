@@ -60,6 +60,28 @@ class DefectTests(unittest.TestCase):
         self.assertEqual(found(result, "overlap"), [0, 2])
 
 
+class TouchingTests(unittest.TestCase):
+    def test_parts_split_where_no_edge_joins_them(self):
+        pad = checks.corner_table([(0, 1, 2), (2, 1, 3), (4, 5, 6)])
+        self.assertEqual(checks.source_parts(pad).tolist(), [0, 0, 2])
+
+    @unittest.skipUnless(NATIVE, "needs the native core")
+    def test_a_face_on_its_part_with_another_part_against_it_is_touching_not_inward(self):
+        # A plate facing down at z=0 and, as a separate part, one facing up just under it; the face lies under the first.
+        source = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, -0.05), (1, 0, -0.05), (1, 1, -0.05), (0, 1, -0.05)], float)
+        plates = [(0, 3, 2), (0, 2, 1), (4, 5, 6), (4, 6, 7)]
+        face = np.array([(0.1, 0.1, -0.035), (0.1, 0.9, -0.035), (0.9, 0.9, -0.035), (0.9, 0.1, -0.035)])
+        result = checks.defects(face, [(0, 1, 2, 3)], source, plates)
+        self.assertEqual((found(result, "touching"), found(result, "inward"), int(result.any().sum())), ([0], [], 0))
+
+
+class WorstPartsTests(unittest.TestCase):
+    def test_parts_with_most_marked_faces_come_first(self):
+        piece = np.array([3, 3, 1, 1, 1, 2, 0])
+        marked = np.array([True, True, True, False, False, False, True])
+        self.assertEqual(checks.worst_parts(piece, marked), [3, 0, 1])
+
+
 class UntangleTests(unittest.TestCase):
     def test_a_corner_pulled_over_its_neighbours_goes_back(self):
         co = np.array([(i, j, 0.0) for j in range(5) for i in range(5)])

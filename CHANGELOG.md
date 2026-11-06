@@ -115,6 +115,32 @@
   user folder. "TRIAD-Q Lite" is now just "TRIAD-Q". The GitHub zips keep the native core and its speed.
 - A feature tour for testing in Blender (`tests/blender_feature_tour.py`), with an inventory of every button.
 
+### Auto Segments
+- **Reduction no longer pushes a thin ring or flange through the part it sits on.** The native reducer now refuses a
+  collapse that makes its new triangles pass through other triangles of the piece (more crossings than before the
+  collapse). Taken alone at the same sizes, the crane's ringed post went from 37-39 crossing pairs to none and the
+  drill press flange from 22-55 to none. The test only runs where a surface facing the other way is near (thin
+  rods, rings, plates, parts close together), and each nearby triangle is measured once per collapse; taking a whole
+  model down is still about 2.5-3 times slower than before (crane 1.1 to 2.7 s, ship pinnace 2.7 to 8 s).
+- **Repair remakes parts one size up before filling crossings spot by spot**, and parts still turned inward or folded
+  over after untangling are remade too; a size up is kept only if it leaves fewer such faces. The fills used to spend
+  the whole 30 s on spots they could not clear before any part was remade: on the chess set the knight head went from
+  47 inward and 20 crossing faces to none, and the run from 50 to 16 s. Giving the fills more time (up to 120 s) was
+  tried and cleared no more parts on four of the six test models, so remakes and fills share the 30 s, counted from
+  after the source is checked.
+- Measured on six hard-surface test models (Game Asset, Keep Detail, 6%): serious faces (inward, folded, crossing)
+  went from 1,969 to 1,775 in all (chess set 71 to 0, compressor 246 to 221, pinnace 579 to 466,
+  chest 246 to 233; crane 430 to 451 and drill press 397 to 404 barely moved), at the same face count overall (crane
+  +5%), measured with the repair taking 30 s for remakes and 30 s more for fills (pinnace 202 s instead of 134 s;
+  with the shared 30 s it took 163 s for the same counts). Most of what is left sits where a part is thinner than its
+  faces or touches another part back to back.
+
+### Issue Finder
+- **Touching parts** is a kind of its own: a face on its own part's surface with another part pressed against it back
+  to back was counted as turned inward. It now is "touching parts", a note that does not count as a bad face, is not
+  painted red and is not repaired. A face really turned inside out (the same part on both sides of it) stays inward.
+  On the test results 5-20% of the inward faces were touching parts (drill press 34 of 202, crane 18 of 203).
+
 ## 0.9.7 - 2026-11-05
 
 ### Auto Segments
