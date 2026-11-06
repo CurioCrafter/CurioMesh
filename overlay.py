@@ -137,8 +137,12 @@ def compute_stats(mesh: bpy.types.Mesh) -> MeshStats:
 
 
 def _cache_key(obj: bpy.types.Object) -> tuple:
+    """Changes when the mesh is edited: its sizes, and the sum of its corners for a move that keeps the sizes."""
     mesh = obj.data
-    return (mesh.as_pointer(), len(mesh.vertices), len(mesh.polygons), len(mesh.loops))
+    co = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", co)
+    # ponytail: a topology edit that keeps every count and corner (an edge spun in place) keeps the old stats until the next real change
+    return (mesh.as_pointer(), len(mesh.vertices), len(mesh.polygons), len(mesh.loops), float(co.sum(dtype=np.float64)))
 
 
 def _entry(obj: bpy.types.Object) -> _CacheEntry | None:
@@ -177,27 +181,13 @@ def remove_geometry_hook(fn) -> None:
         _geometry_hooks.remove(fn)
 
 
-def _on_depsgraph_update(scene, depsgraph) -> None:
-    try:
-        for update in depsgraph.updates:
-            if not update.is_updated_geometry:
-                continue
-            idb = update.id
-            if isinstance(idb, bpy.types.Object):
-                invalidate(idb.name)
-                names = [idb.name]
-            elif isinstance(idb, bpy.types.Mesh):
-                names = [n for n, e in _stats_cache.items() if e.key[0] == idb.as_pointer()]
-                for n in names:
-                    invalidate(n)
-                names += [o.name for o in bpy.data.objects if o.type == "MESH" and o.data == idb]
-            else:
-                continue
-            for hook in tuple(_geometry_hooks):
-                for n in names:
-                    hook(n)
-    except Exception:
-        pass
+def _draw_watch() -> None:
+    """Runs on every viewport redraw (an edit redraws it): each hook checks cheaply whether its mesh changed."""
+    for hook in tuple(_geometry_hooks):
+        try:
+            hook()
+        except Exception:
+            pass
 
 
 def get_prefs():
@@ -701,18 +691,16 @@ def register() -> None:
     unregister()
     import bpy.app.handlers as handlers
 
-    handlers.depsgraph_update_post.append(_on_depsgraph_update)
     handlers.load_post.append(_on_load_post)
     bpy.app.timers.register(_init_hud_default, first_interval=0.2)
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_heatmap, (), "WINDOW", "POST_VIEW"))
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_hud, (), "WINDOW", "POST_PIXEL"))
+    _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_watch, (), "WINDOW", "POST_PIXEL"))
 
 
 def unregister() -> None:
     import bpy.app.handlers as handlers
 
-    if _on_depsgraph_update in handlers.depsgraph_update_post:
-        handlers.depsgraph_update_post.remove(_on_depsgraph_update)
     if _on_load_post in handlers.load_post:
         handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_init_hud_default):

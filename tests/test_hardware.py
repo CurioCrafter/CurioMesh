@@ -108,24 +108,13 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual([p.name for p in folder.glob("*.tmp")], ["x.tmp"])
             self.assertIsNotNone(hardware.load_piece(path))
 
-    def test_nvidia_smi_is_never_taken_from_the_current_folder(self):
-        import os
-        from unittest import mock
-
-        name = "nvidia-smi" + (".exe" if sys.platform == "win32" else "")
-        with tempfile.TemporaryDirectory() as here, tempfile.TemporaryDirectory() as tools:
-            for folder in (here, tools):
-                (Path(folder) / name).write_bytes(b"")
-                os.chmod(Path(folder) / name, 0o755)
-            old = os.getcwd()
-            os.chdir(here)  # the folder of a .blend somebody sent
-            try:
-                with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([".", "", "relative"])}):
-                    self.assertIsNone(hardware._on_path("nvidia-smi"))
-                with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([".", tools])}):
-                    self.assertEqual(Path(hardware._on_path("nvidia-smi")), Path(tools) / name)
-            finally:
-                os.chdir(old)
+    def test_the_machine_is_read_without_outside_programs_or_ctypes(self):
+        text = (Path(__file__).resolve().parents[1] / "hardware.py").read_text(encoding="utf-8")
+        for word in ("subprocess", "ctypes", "nvidia-smi", "sysctl"):
+            self.assertNotIn(word, text)
+        machine = hardware.detect()
+        self.assertGreaterEqual(machine["cores"], 1)
+        self.assertTrue(hardware.describe(machine))
 
     def test_a_job_folder_name_cannot_leave_the_chosen_folder_and_a_bad_result_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
@@ -163,12 +152,15 @@ class JobFolderTests(unittest.TestCase):
         faces = [(0, 1, 2, 3)]
         with tempfile.TemporaryDirectory() as folder:
             out = jobpack.export_job(Path(folder) / "job", co, faces, [0], 6.0, 0, "FULL", Path(__file__).resolve().parents[1], mirror=(0, 0.5, 1.0, 2, 1), lines=[np.zeros((2, 3))], drop=np.zeros(4), source=(2, 6))
-            for name in ("mesh.npz", "guides.npz", "job.json", "run_job.py", "README.txt", "curiomesh_engine/autoretopo.py", "curiomesh_engine/triadq/budget.py", "curiomesh_engine/triadq/cases_table.json"):
+            for name in ("mesh.npz", "guides.npz", "job.json", "run_job.py", "README.txt"):
                 self.assertTrue((out / name).exists(), name)
             settings = __import__("json").loads((out / "job.json").read_text())
             self.assertEqual((settings["mirror"][3], settings["source_faces"]), (2, 2))
             self.assertIn("drop", np.load(out / "mesh.npz").files)
-            compile((out / "run_job.py").read_text(), "run_job.py", "exec")
+            self.assertFalse((out / "curiomesh_engine").exists())  # the installed add-on runs it
+            run_job = (out / "run_job.py").read_text()
+            compile(run_job, "run_job.py", "exec")
+            self.assertNotIn("sys.path", run_job)
             output = {"co": co, "faces": faces, "mat": np.zeros(1, np.int32), "parts": np.zeros(1, np.int64)}
             report = {"faces": 1, "quads": 1, "loss": 0.0, "seconds": 1.0}
             jobpack.save_result(out / "result.npz", output, report, 1, 4)
@@ -214,7 +206,7 @@ class CostTests(unittest.TestCase):
         self.assertIn("4 cores", hardware.weak_pc(dict(SMALL, cycles=["x (CUDA)"])))
         self.assertIn("no graphics card", hardware.weak_pc(SMALL))
         self.assertIn("processor", hardware.weak_pc(dict(BIG)))  # plenty of power but no card: bakes use the processor
-        self.assertEqual(hardware.weak_pc(dict(BIG, gpu="RTX")), "")
+        self.assertEqual(hardware.weak_pc(dict(BIG, cycles=["RTX (OPTIX)"])), "")
         self.assertEqual(hardware.weak_pc(None), "")
 
 

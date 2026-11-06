@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1163,11 +1164,18 @@ class _PreviewOp:
 
 
 def library_path() -> str | None:
-    """The user's own file of remembered fixes, in Blender's user config folder (not in the add-on). None if that can't be written."""
-    try:
-        return os.path.join(bpy.utils.user_resource("CONFIG", path="curiomesh", create=True), "fixes.json")
-    except (OSError, ValueError):
+    """The user's own file of remembered fixes, in the add-on's user folder (not in the add-on). None if that can't be written."""
+    folder = hardware.user_folder()
+    if folder is None:
         return None
+    path = os.path.join(folder, "fixes.json")
+    old = os.path.join(bpy.utils.user_resource("CONFIG"), "curiomesh", "fixes.json")  # where 0.9.7 and older kept it
+    if not os.path.exists(path) and os.path.isfile(old):
+        try:
+            shutil.copyfile(old, path)
+        except OSError:
+            pass
+    return path
 
 
 def _library() -> list[dict]:
@@ -3820,16 +3828,11 @@ REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
 
 def problem_url() -> str:
     """New-issue link with Blender, OS and CurioMesh versions already filled in."""
+    import importlib
     import platform
-    import sys
     from urllib.parse import urlencode
 
-    info = getattr(sys.modules.get(__package__), "bl_info", None) or {}
-    if not info.get("version"):  # an extension keeps its version in the manifest
-        import addon_utils
-
-        module = sys.modules.get(__package__)
-        info = addon_utils.module_bl_info(module) if module is not None else {}
+    info = getattr(importlib.import_module(__package__), "bl_info", None) or {}  # kept equal to the manifest's version
     version = ".".join(str(v) for v in info.get("version", ())) or "?"
     body = (
         f"CurioMesh {version}, Blender {bpy.app.version_string}, {platform.system()} {platform.release()}\n\n"
@@ -3906,6 +3909,7 @@ _draw_handles: list = []
 
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
+    segments.seglive.add_handlers()  # Blender drops the add-on's other handlers when a file loads
     stop_work()
     ladder.cancel()
     segments.reset()
@@ -3938,10 +3942,12 @@ def unregister() -> None:
     organize.unregister()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
-    if bpy.app.timers.is_registered(_poll):
-        bpy.app.timers.unregister(_poll)
+    for timer in (_poll, _auto_slice):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
     stop_work()
     ladder.cancel()
+    ladder.unregister()
     try:
         remove_preview()
     except Exception:

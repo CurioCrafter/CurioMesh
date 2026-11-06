@@ -79,11 +79,12 @@ def on_live_toggled(settings, context) -> None:
     overlay.tag_redraw()
 
 
-def _on_geometry(name: str) -> None:
+def _on_geometry() -> None:
+    """From the viewport's redraw: the live source was edited since its preview was made."""
     settings = bpy.context.scene.curiomesh_settings
-    if not settings.live_enabled or name != state["source"]:
+    if not settings.live_enabled or not state["source"] or state["sig"] is None:
         return
-    obj = bpy.data.objects.get(name)
+    obj = bpy.data.objects.get(state["source"])
     if obj is None or obj.type != "MESH" or obj.mode != "OBJECT":
         return
     if _signature(obj) != state["sig"]:
