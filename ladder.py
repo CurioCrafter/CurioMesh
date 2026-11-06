@@ -21,7 +21,7 @@ from itertools import chain
 import bpy
 import numpy as np
 
-from . import autoretopo, history, organize, overlay, segments, tidylive
+from . import autoretopo, history, organize, overlay, segments, tidylive, tidytools
 from .triadq import ladder as L
 from .triadq import tasks
 from .triadq import parts as P
@@ -495,12 +495,19 @@ def _rung_of(record):
     return b if record.get("loose") in moved else a
 
 
-def part_sizes(context, pieces, bigger: bool) -> tuple[int, list[str]]:
+def part_sizes(context, pieces, bigger: bool, name: str = "") -> tuple[int, list[str]]:
     """Bigger or smaller quads on these parts only. Returns (parts changed or started, why others could not)."""
+    wanted, todo, why = size_plan(pieces, bigger)
+    return apply_sizes(context, wanted, todo, bigger, name), why
+
+
+def size_plan(pieces, bigger: bool) -> tuple[dict, list, list[str]]:
+    """({part: (try index, rung)} that a ready size can swap in at once, [parts that need a redo in the background],
+    [why others could not]). Nothing changes yet, except that a ready size is kept in the part's tries."""
     seg, wanted, todo, why = segments.seg, {}, [], []
     base = _g().state["auto_base"]
     if base is not None and getattr(base["job"], "mirror", None) is not None:  # no piece per face, and one side alone would break the mirror
-        return 0, ["Bigger and Smaller Quads don't work on a mirrored result"]
+        return {}, [], ["Bigger and Smaller Quads don't work on a mirrored result"]
     for p in pieces:
         record = seg["parts"][p]
         loose = record.get("loose", p)
@@ -525,23 +532,37 @@ def part_sizes(context, pieces, bigger: bool) -> tuple[int, list[str]]:
                 change = 100.0 * level.loss / job.seen[k] if level is not None and job.seen[k] > 0 else None
                 record["tries"].append({"method": record["method"], "detail": None, "rung": rung, "after": len(build[1]), "change": change, "topology": None, "build": build})
                 index = len(record["tries"]) - 1
-            record["rung"] = rung
-            wanted[p] = index
+            wanted[p] = (index, rung)
         elif not segments.mirrored():
-            record.update(goal="REDUCE", goal_detail=record["goal_detail"] + (-GOAL_STEP if bigger else GOAL_STEP))  # no end: each press is one more step
             todo.append(p)
-    changed = 0
-    if wanted and segments.use_tries(context, wanted):
-        changed += len(wanted)
+    return wanted, todo, why
+
+
+def apply_sizes(context, wanted: dict, todo: list, bigger: bool, name: str = "") -> int:
+    """Make a `size_plan`: one Ctrl+Z step for the swapped parts, and one when the background redo finishes."""
+    seg, changed = segments.seg, 0
+    name = name or ("Bigger Quads" if bigger else "Smaller Quads")
+    if wanted:
+        rungs = {p: seg["parts"][p].get("rung") for p in wanted}
+        for p, (_index, rung) in wanted.items():
+            seg["parts"][p]["rung"] = rung
+        if segments.use_tries(context, {p: index for p, (index, _rung) in wanted.items()}, name):
+            changed += len(wanted)
+        else:
+            for p, rung in rungs.items():
+                seg["parts"][p]["rung"] = rung
     if todo:
+        for p in todo:
+            record = seg["parts"][p]
+            record.update(goal="REDUCE", goal_detail=record["goal_detail"] + (-GOAL_STEP if bigger else GOAL_STEP))  # no end: each press is one more step
         segments.segment_goals.save()
-        if segments.segment_goals.start_goal(context, todo):
+        if segments.segment_goals.start_goal(context, todo, name):
             _g().state["work"]["runner"].direction = -1 if bigger else 1  # it keeps only fewer (or more) faces
             changed += len(todo)
-    return changed, why
+    return changed
 
 
-class CURIOMESH_OT_part_size(bpy.types.Operator):
+class CURIOMESH_OT_part_size(tidytools.PartSwap, bpy.types.Operator):
     bl_idname = "curiomesh.part_size"
     bl_label = "Quad Size of Selected"
     bl_description = "Bigger or smaller quads on the selected parts only; the rest stays as it is"
@@ -552,18 +573,23 @@ class CURIOMESH_OT_part_size(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.bigger:
-            return "Bigger quads on the selected parts only: fewer faces there, the rest stays as it is"
-        return "Smaller quads on the selected parts only: more faces and more detail there, the rest stays as it is"
+            return "Shows the picked parts redone with bigger quads, then Enter keeps them. Fewer faces there; the rest stays as it is"
+        return "Shows the picked parts redone with smaller quads, then Enter keeps them. More faces and more detail there; the rest stays as it is"
 
     @classmethod
     def poll(cls, context):
         return segments.ready() and bool(segments.seg["sel"]) and _g().progress_info() is None
 
-    def execute(self, context):
-        changed, why = part_sizes(context, sorted(segments.seg["sel"]), self.bigger)
-        if why:
-            self.report({"WARNING"}, why[0])
-        return {"FINISHED"} if changed else {"CANCELLED"}
+    def plan(self, context) -> dict:
+        wanted, todo, why = size_plan(sorted(segments.seg["sel"]), self.bigger)
+        name = "Bigger Quads" if self.bigger else "Smaller Quads"
+        return {"name": name, "tries": {p: i for p, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "why": why[0] if why else ""}
+
+    def keep(self, context, plan: dict) -> bool:
+        return apply_sizes(context, plan["sizes"], plan["todo"], self.bigger, plan["name"]) > 0
+
+    def again(self, plan: dict):
+        return "curiomesh.part_size", {"bigger": bool(self.bigger)}  # Again: one more step from the result as it is now
 
 
 CLASSES = (CURIOMESH_OT_part_size,)

@@ -259,6 +259,17 @@ def _redraw_update(self, context):
     overlay.tag_redraw()
 
 
+def _tweak_update(name: str):
+    """A Fine-tune Tweak slider moved: its own History step (one drag is one step), which the search it starts fills
+    in, so Ctrl+Z goes back to the slider and the result together."""
+
+    def update(self, context):
+        history.note(context, "tweak", name)
+        overlay.tag_redraw()
+
+    return update
+
+
 # Stored by number in .blend files: the numbers of these items never change.
 STYLE_ITEMS = [
     ("DETAIL", "Fewest Faces", "The fewest faces that hold the look you asked for. Quads follow the shape, so some can look slanted", 0),
@@ -449,9 +460,9 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     bake_sets: bpy.props.IntProperty(name="Texture Sets", description="Normal + Color: bakes onto this many sets of maps, each its own material, so a big model keeps detail", default=1, min=1, soft_max=16, max=256)
     fit_iterations: bpy.props.IntProperty(name="Surface Fit Passes", description="Classic Guided: how many passes settle the new quads onto your surface. More follows it closer, slower", default=2, min=0, soft_max=30, max=1000)
     ui_tweak_open: bpy.props.BoolProperty(name="Tweak", description="Sliders that change how the quads are laid out", default=False)
-    tweak_rows: bpy.props.FloatProperty(name="Rows on Round Areas", description="How readily round, smooth areas become rows of quads that follow their curve. Right finds more of them and adds faces. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
-    tweak_flat: bpy.props.FloatProperty(name="Flat Area Size", description="How big quads inside flat areas may get. Left makes them smaller and more even; right fewer and longer. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
-    tweak_poles: bpy.props.BoolProperty(name="Avoid Poles", description="Turns edges so rows of quads keep going past poles (points where 3 or 5+ edges meet). Off: about a fifth more poles, a touch more detail", default=True, update=_redraw_update)
+    tweak_rows: bpy.props.FloatProperty(name="Rows on Round Areas", description="How readily round, smooth areas become rows of quads that follow their curve. Right finds more of them and adds faces. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_tweak_update("Rows on Round Areas"))
+    tweak_flat: bpy.props.FloatProperty(name="Flat Area Size", description="How big quads inside flat areas may get. Left makes them smaller and more even; right fewer and longer. Reruns the search", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_tweak_update("Flat Area Size"))
+    tweak_poles: bpy.props.BoolProperty(name="Avoid Poles", description="Turns edges so rows of quads keep going past poles (points where 3 or 5+ edges meet). Off: about a fifth more poles, a touch more detail", default=True, update=_tweak_update("Avoid Poles"))
     feature_angle: bpy.props.FloatProperty(name="Hard Edge Angle", description="Classic Guided: edges sharper than this angle count as hard edges and are kept", default=40.0, min=5.0, max=180.0)
     pure_quads: bpy.props.BoolProperty(name="All Quads", description="Classic Guided, Whole Mesh: makes every face a quad. Off is faster on big meshes and leaves a few triangles", default=True)
     suggest_count: bpy.props.IntProperty(name="Suggestions", description="Classic Guided: how many points Auto-suggest places", default=8, min=1, soft_max=40, max=1000)
@@ -2030,7 +2041,9 @@ def _collect_work(context) -> None:
             segments.ensure()
             segments.segment_goals.start_find(context)
             ladder.start(context)
-            history.record(context, "New result", f"{len(state['res']['faces']):,} faces" if state["res"] is not None else "", push=True)
+            words = f"{len(state['res']['faces']):,} faces" if state["res"] is not None else ""
+            if not history.settled("tweak", words):  # a Fine-tune slider asked for this search: it is that slider's step
+                history.record(context, "New result", words, push=True)
         elif not runner.busy and runner.report is None and state["lod"] is not None:  # the search failed: nothing more to come
             state["lod"] = None
         overlay.tag_redraw()

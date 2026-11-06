@@ -16,7 +16,7 @@ import numpy as np
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 from mathutils import Vector
 
-from . import overlay
+from . import overlay, tidytools
 from .triadq import issues
 
 LISTED = 8  # spots shown in the panel; Next Issue walks through all of them
@@ -170,10 +170,10 @@ class _SpotPartOp(_IssueOp):
         return p if 0 <= p < len(segments.seg["parts"]) else None
 
 
-class CURIOMESH_OT_issue_redo(_SpotPartOp, bpy.types.Operator):
+class CURIOMESH_OT_issue_redo(_SpotPartOp, tidytools.PartSwap, bpy.types.Operator):
     bl_idname = "curiomesh.issue_redo"
     bl_label = "Redo This Spot"
-    bl_description = "Remakes the part under this spot with smaller quads, which usually clears folded or crossing faces. The old version stays in the part's tries"
+    bl_description = "Shows the part under this spot remade with smaller quads, which usually clears folded or crossing faces, then Enter keeps it. The old version stays in the part's tries"
 
     @classmethod
     def description(cls, context, properties):
@@ -182,28 +182,34 @@ class CURIOMESH_OT_issue_redo(_SpotPartOp, bpy.types.Operator):
         p = spot_part(properties.index)
         if not 0 <= p < len(segments.seg["parts"]):
             return cls.bl_description
-        return f"Remakes {segments.name_of(p)} ({segments.seg['parts'][p]['after']:,} faces now) with smaller quads, which usually clears folded or crossing faces. The old version stays in its tries"
+        return f"Shows {segments.name_of(p)} ({segments.seg['parts'][p]['after']:,} faces now) remade with smaller quads, which usually clears folded or crossing faces. Enter keeps it; the old version stays in its tries"
 
-    def execute(self, context):
+    def plan(self, context) -> dict:
         from . import ladder, segments
 
         p = self._part()
         if p is None:
-            self.report({"WARNING"}, "This spot is not on a part that can be redone")
-            return {"CANCELLED"}
+            return {"name": "Redo This Spot", "tries": {}, "todo": [], "sizes": {}, "why": "This spot is not on a part that can be redone"}
         ui["cur"] = self.index
         segments.select([p])
-        changed, why = ladder.part_sizes(context, [p], bigger=False)
-        if why:
-            self.report({"WARNING"}, why[0])
+        wanted, todo, why = ladder.size_plan([p], bigger=False)
+        return {"name": "Redo This Spot", "tries": {q: i for q, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "why": why[0] if why else ""}
+
+    def keep(self, context, plan: dict) -> bool:
+        from . import ladder
+
+        changed = ladder.apply_sizes(context, plan["sizes"], plan["todo"], False, plan["name"]) > 0
         overlay.tag_redraw()
-        return {"FINISHED"} if changed else {"CANCELLED"}
+        return changed
+
+    def again(self, plan: dict):
+        return "curiomesh.part_size", {"bigger": False}  # Again: the same part, smaller again, from the result as it is now
 
 
-class CURIOMESH_OT_issue_keep_original(_SpotPartOp, bpy.types.Operator):
+class CURIOMESH_OT_issue_keep_original(_SpotPartOp, tidytools.PartSwap, bpy.types.Operator):
     bl_idname = "curiomesh.issue_keep_original"
     bl_label = "Keep Original Here"
-    bl_description = "Puts your own faces back on the part under this spot. It asks first; Put Reduced Back undoes it"
+    bl_description = "Shows your own faces back on the part under this spot, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it"
 
     @classmethod
     def description(cls, context, properties):
@@ -212,25 +218,21 @@ class CURIOMESH_OT_issue_keep_original(_SpotPartOp, bpy.types.Operator):
         p = spot_part(properties.index)
         if not 0 <= p < len(segments.seg["parts"]):
             return cls.bl_description
-        return f"Puts your own faces back on {segments.name_of(p)}: about {segments.original_cost([p]):,} more faces. Put Reduced Back undoes it"
+        return f"Shows your own faces back on {segments.name_of(p)}, about {segments.original_cost([p]):,} more faces, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it"
 
-    def invoke(self, context, event):
+    def plan(self, context) -> dict:
         from . import segments
 
         p = self._part()
-        if p is None:
-            return {"CANCELLED"}
-        return segments.ask(self, context, event, f"Your own faces go back on {segments.name_of(p)}: about {segments.original_cost([p]):,} more faces.")
+        tries = segments.original_tries([p]) if p is not None else {}
+        if p is not None:
+            ui["cur"] = self.index
+        return {"name": "Keep Original Here", "tries": tries, "todo": [], "why": "" if tries else "This part could not be put back"}
 
-    def execute(self, context):
+    def keep(self, context, plan: dict) -> bool:
         from . import segments
 
-        p = self._part()
-        if p is None or not segments.keep_original(context, [p]):
-            self.report({"WARNING"}, "This part could not be put back")
-            return {"CANCELLED"}
-        ui["cur"] = self.index
-        return {"FINISHED"}
+        return bool(plan["tries"]) and segments.use_tries(context, plan["tries"], plan["name"])
 
 
 def original_parts() -> list[int]:
@@ -240,10 +242,10 @@ def original_parts() -> list[int]:
     return [p for p, r in enumerate(segments.seg["parts"]) if r["method"] == segments.ORIGINAL]
 
 
-class CURIOMESH_OT_issue_put_back(bpy.types.Operator):
+class CURIOMESH_OT_issue_put_back(tidytools.PartSwap, bpy.types.Operator):
     bl_idname = "curiomesh.issue_put_back"
     bl_label = "Put Reduced Back"
-    bl_description = "Switches the parts that got your own faces back to the reduced faces they had before Keep Original"
+    bl_description = "Shows the parts that got your own faces back with the reduced faces they had before Keep Original, then Enter keeps them"
     bl_options = {"INTERNAL"}
 
     part: bpy.props.IntProperty(name="Part", description="Which part to switch back; -1 for every part showing your own faces", default=-1)
@@ -255,18 +257,23 @@ class CURIOMESH_OT_issue_put_back(bpy.types.Operator):
         segments.ensure()
         return segments.ready() and _g().progress_info() is None and bool(original_parts())
 
-    def execute(self, context):
+    def plan(self, context) -> dict:
         from . import segments
 
         wanted = {}
         for p in original_parts() if self.part < 0 else [self.part]:
+            if not 0 <= p < len(segments.seg["parts"]):
+                continue
             tries = segments.seg["parts"][p]["tries"]
             index = next((i for i in range(len(tries) - 1, -1, -1) if tries[i]["method"] != segments.ORIGINAL), None)
             if index is not None:
                 wanted[p] = index
-        if not wanted or not segments.use_tries(context, wanted):
-            return {"CANCELLED"}
-        return {"FINISHED"}
+        return {"name": "Put Reduced Back", "tries": wanted, "todo": [], "why": "" if wanted else "These parts have no reduced faces to go back to"}
+
+    def keep(self, context, plan: dict) -> bool:
+        from . import segments
+
+        return bool(plan["tries"]) and segments.use_tries(context, plan["tries"], plan["name"])
 
 
 def _record(context) -> dict:

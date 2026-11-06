@@ -15,6 +15,7 @@ import json
 from dataclasses import dataclass
 
 import bpy
+import numpy as np
 
 from . import history, icons, overlay, tidylive
 from .triadq import tidytools as T
@@ -111,6 +112,71 @@ class _Tool(tidylive.LiveTool):
         if why:
             cls.poll_message_set(why)
         return not why
+
+
+class PartSwap(tidylive.LiveTool):
+    """Look First for the buttons that give parts other faces (Bigger and Smaller Quads, Redo This Spot, Keep Original
+    Here, Put Reduced Back). The new faces already exist as a part's try, so the preview shows exactly what Enter keeps;
+    Enter makes it one Ctrl+Z step and one History entry, Esc changes nothing. A size that is not worked out yet is
+    redone in the background as before, and that redo is its own Ctrl+Z step when it finishes.
+
+    A subclass writes `plan(context)` -> {"name", "tries": {part: try index}, "todo": [parts to redo], "why": ""} and
+    `keep(context, plan)` -> bool, and may set `again` -> (operator idname, settings) for the Last line's Again."""
+
+    def plan(self, context) -> dict:
+        raise NotImplementedError
+
+    def keep(self, context, plan: dict) -> bool:
+        raise NotImplementedError
+
+    def again(self, plan: dict):
+        return None
+
+    def _scope(self, context) -> str:
+        return "PART"
+
+    def invoke(self, context, event):
+        from . import segments
+
+        plan = self.plan(context)
+        if plan["why"] and not plan["tries"] and not plan["todo"]:
+            self.report({"WARNING"}, plan["why"])
+            return {"CANCELLED"}
+        made = segments.preview_tries(plan["tries"]) if not plan["todo"] else None
+        if made is None or tidylive._view(context)[1] is None:
+            return self.execute(context)  # a redo in the background: nothing to show before it is done
+        self._plan = plan
+        segments.select(sorted(plan["tries"]))
+        old = np.asarray(segments.seg["piece"]).copy()
+        self.trial = type("SwapNow", (T.SwapParts,), {"name": plan["name"], "swap": (made[0], made[1], made[3], old, tuple(plan["tries"]))})
+        return super().invoke(context, event)
+
+    def _keep(self, context):
+        s = self._s
+        plan, numbers = self._plan, tidylive.numbers_text(s.cand, s.trial, s.cap)
+        tidylive.close("")  # the preview goes first, so it does not close itself when the result changes under it
+        kept = self.keep(context, plan)
+        self._finish(context)
+        if not kept:
+            self.report({"WARNING"}, f"{plan['name']}: nothing to keep")
+            return {"CANCELLED"}
+        self._remember(context, plan, numbers)
+        return {"FINISHED"}
+
+    def _remember(self, context, plan: dict, numbers: str) -> None:
+        again = self.again(plan)
+        if again is not None:
+            tidylive._remember(context, again[0], plan["name"], numbers, again[1])
+
+    def execute(self, context):
+        plan = self.plan(context)
+        if not self.keep(context, plan):
+            self.report({"WARNING"}, plan["why"] or f"{plan['name']}: nothing changed")
+            return {"CANCELLED"}
+        if plan["why"]:
+            self.report({"WARNING"}, plan["why"])
+        self._remember(context, plan, "")
+        return {"FINISHED"}
 
 
 # --------------------------------------------------------------------------- tools

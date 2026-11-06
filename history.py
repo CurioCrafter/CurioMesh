@@ -69,9 +69,18 @@ def snapshot(context=None) -> dict:
         "res": guided.state["res"],
         "org": {k: list(organize.org[k]) if k == "passes" else organize.org[k] for k in ORG_KEYS},
         "lad": {k: ladder.lad.get(k) for k in LAD_KEYS},
-        "seg": {k: (list(v) if isinstance(v, list) else set(v) if isinstance(v, set) else v) for k, v in ((k, segments.seg.get(k)) for k in SEG_KEYS)},
+        "seg": {k: _seg_copy(k, v) for k, v in ((k, segments.seg.get(k)) for k in SEG_KEYS)},
         "sliders": None if gs is None else {k: float(getattr(gs, k)) for k in SLIDERS},
+        "curve_sig": guided.state.get("curve_sig"),  # the search's inputs for this result: an undone Tweak does not restart it
     }
+
+
+def _seg_copy(key, value):
+    """A copy later changes cannot reach. Part records are changed in place (which try is shown, its face count), so
+    each one is copied too; the tries themselves are only added to, so they are shared."""
+    if key == "parts" and isinstance(value, list):
+        return [dict(r, tries=list(r["tries"])) if isinstance(r, dict) and "tries" in r else r for r in value]
+    return list(value) if isinstance(value, list) else set(value) if isinstance(value, set) else value
 
 
 def restore(context, snap: dict, sliders: bool = False) -> bool:
@@ -92,7 +101,9 @@ def restore(context, snap: dict, sliders: bool = False) -> bool:
     organize.org.update({k: list(v) if k == "passes" else v for k, v in org.items()}, keep=False)
     ladder.lad.update(snap["lad"])
     new_parts = segments.seg.get("parts") is not snap["seg"]["parts"]
-    segments.seg.update({k: (list(v) if isinstance(v, list) else set(v) if isinstance(v, set) else v) for k, v in snap["seg"].items()})
+    segments.seg.update({k: _seg_copy(k, v) for k, v in snap["seg"].items()})
+    if "curve_sig" in snap:
+        guided.state["curve_sig"] = snap["curve_sig"]
     segments.seg.update(batch_key=None, bad_key=None, tris=None, hover=None, lines_key=None, outline_key=None, high_key=None)
     if new_parts:
         segments.refresh_list()
@@ -171,11 +182,23 @@ def note(context, kind: str, name: str) -> None:
     _set_step(context.scene, step)
 
 
-def settled(kind: str, numbers: str = "") -> None:
-    """The result a slider asked for is on screen: keep it in that slider's step."""
+def settled(kind: str, numbers: str = "") -> bool:
+    """The result a slider asked for is on screen: keep it in that slider's step. False when the step on screen is not
+    one of that kind (nothing was kept)."""
     if steps.entries and steps.entries[-1].kind == kind and steps.entries[-1].step == current():
         entry = steps.entries[-1]
         entry.state, entry.numbers = snapshot(), numbers or entry.numbers
+        entry.size = H.size_of(entry.state, steps._seen)
+        return True
+    return False
+
+
+def refresh(context) -> None:
+    """Something finished in the background on the step on screen (the whole-result check after a part swap): its
+    entry keeps what is shown now, so Ctrl+Z and Ctrl+Shift+Z come back to the checked result."""
+    if steps.entries and steps.entries[-1].step == current(context.scene) and steps.entries[-1].state is not None:
+        entry = steps.entries[-1]
+        entry.state = snapshot(context)
         entry.size = H.size_of(entry.state, steps._seen)
 
 
