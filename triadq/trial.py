@@ -35,6 +35,8 @@ class Base:
     mirror: tuple | None = None  # (axis, offset) when the result is mirrored
     pick: dict = field(default_factory=dict)  # what the user picked: {"strip": ...} / {"pole": v} / {}
     cache: dict = field(default_factory=dict)  # numbers of the result as it is, worked out once
+    facing: Callable | None = None  # (k, 3) points -> unit normals of your original at the nearest points, or None
+    labels: dict = field(default_factory=dict)  # per-face "chart" (UV island) and "piece" (part), per-corner "guide"
 
     @property
     def topo(self):
@@ -55,7 +57,7 @@ class Base:
         return self.cache["free"]
 
 
-def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=None) -> Base:
+def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=None, facing=None, labels=None) -> Base:
     """A Base with the usual holds: corners on a border, a hard edge or a non-quad (`organize.pinned`), on the mirror
     plane, and every corner a face outside the scope uses, so the edge of the scope never moves."""
     from .organize import pinned
@@ -72,7 +74,8 @@ def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=
         axis, offset = mirror
         size = float(np.ptp(co, axis=0).max()) if len(co) else 1.0
         held |= np.abs(co[:, axis] - offset) < 1e-6 * (size or 1.0)
-    return Base(co, faces, scope, held, project, mean_edge(co, [faces[f] for f in np.flatnonzero(scope).tolist()]), mirror, dict(pick or {}))
+    edge = mean_edge(co, [faces[f] for f in np.flatnonzero(scope).tolist()])
+    return Base(co, faces, scope, held, project, edge, mirror, dict(pick or {}), facing=facing, labels=dict(labels or {}))
 
 
 def mean_edge(co, faces) -> float:
@@ -110,6 +113,8 @@ class Candidate:
     numbers: dict = field(default_factory=dict)  # filled by `measure`: {"poles": (a, b), "faces": (a, b), ...}
     note: str = ""
     refusal: str = ""
+    kept: np.ndarray | None = None  # (k, 2) corner pairs of lines the tool keeps, drawn pink ("kept" layer)
+    tint: np.ndarray | None = None  # per corner -1..1, drawn instead of the move wash: blue grew, orange shrank
 
 
 class Trial:
@@ -123,6 +128,8 @@ class Trial:
     blendable = True  # positions only, and strength s about lerp(before, full, s): the dial is instant
     layers = ("scope", "ghost", "wash", "arrows", "poles", "held")
     stages = ("poles", "move", "look")  # card numbers, most important first (up to three are shown)
+    toggles: tuple = ()  # ((setting, words), ...): on/off chips on the card's fourth row
+    legend = ""  # the fourth row's words when the tool tints by something other than how far corners moved
 
     def check(self, base: Base) -> str:
         """"" when the tool can run here, else the message the card shows instead."""
@@ -187,7 +194,7 @@ def diff(base: Base, cand: Candidate) -> Candidate:
 def blend(base: Base, full: Candidate, s: float) -> Candidate:
     """An instant stand-in at strength `s`: each corner `s` of the way to where the full-strength run put it."""
     co = base.co + float(s) * (np.asarray(full.co) - base.co)
-    return diff(base, Candidate(co, strength=float(s), exact=False, held=list(full.held), note=full.note))
+    return diff(base, Candidate(co, strength=float(s), exact=False, held=list(full.held), note=full.note, kept=full.kept))
 
 
 def _tidiness(co, faces) -> float:
@@ -227,7 +234,10 @@ def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=
 
 
 def number_text(key: str, value, cap: float | None = None) -> tuple[str, int]:
-    """(words, sign) of one card number: sign 1 better (up triangle), -1 worse (down triangle), 0 the same."""
+    """(words, sign) of one card number: sign 1 better (up triangle), -1 worse (down triangle), 0 the same. A tool's
+    own number is stored already worded, as (words, sign)."""
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], str):
+        return value
     if key == "poles":
         a, b = value
         if b < a:

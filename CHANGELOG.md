@@ -93,6 +93,16 @@
 - **Tools** section between Adjust and Fix: Work on (Selection, Part, Whole Result), five groups that show only once
   they have a tool, and a Last line with Again and Undo. While a tool is open the Adjust sliders wait.
 - Smooth Corners is the small example tool that proves the system (shown with Blender's Developer Extras on).
+- **Relax tools**, the first real tools in the Relax group, each with the Look First preview, Again, Keep Going (F9)
+  and one Undo step per Apply:
+  - **Source Relax** evens out the spacing of the corners by sliding them on your original mesh, so nothing shrinks.
+    The first-time button "Even out the roughest patch" opens it on the roughest part, framed in the view.
+  - **Keep Lines Relax** does the same while hard edges, the outline, UV seams, part borders and guides stay put;
+    corners on them only slide along them. One chip per kind on the card turns it off.
+  - **Square Up** turns slanted quads toward square corners and keeps each quad's size and place in its rows.
+  - **Relax Toward Detail** moves corners so quads get smaller where your mesh bends and bigger where it is flat, with
+    the same faces. Its ring goes from Flat to Detail; the preview tints quads blue where they grew, orange where they
+    shrank.
 
 ## 0.9.8 - 2026-11-06
 

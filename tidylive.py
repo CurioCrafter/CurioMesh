@@ -74,6 +74,9 @@ GONE = (0.243, 0.812, 0.431, 1.0)
 NEW = (1.0, 0.788, 0.302, 1.0)
 HELD = (1.0, 0.353, 0.373, 1.0)
 HALO = (0.02, 0.02, 0.03, 0.55)
+PINK = (1.0, 0.373, 0.635, 1.0)  # kept lines (the Sharp marker colour)
+GREW, SHRANK = np.array((0.231, 0.510, 0.965)), np.array((0.976, 0.502, 0.141))  # size tint: blue grew, orange shrank
+ROW4_H = 22.0
 BETTER, WORSE = (0.243, 0.812, 0.431, 1.0), (1.0, 0.72, 0.16, 1.0)
 CARD_BG = (0.07, 0.08, 0.11, 0.9)
 SLATE = (0.36, 0.40, 0.48, 1.0)
@@ -166,6 +169,60 @@ def _projector(src_co, src_faces):
     return lambda points: organize._nearest(tree, np.asarray(points, dtype=np.float64))
 
 
+def _facer(src_co, src_faces):
+    """`facing(points)`: unit normals of your original at the nearest points. The lookup is built on first use, since
+    only tools that read your original's bends ask for it."""
+    from . import turbo
+
+    held = {}
+
+    def facing(points):
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if "find" not in held:
+            tree = turbo.face_tree(src_co, src_faces)
+            if tree is not None:
+                normals = _face_normals(src_co, src_faces)
+                held["find"] = lambda q: normals[np.asarray(tree.nearest(q)[1], dtype=np.int64)]
+            else:
+                from mathutils.bvhtree import BVHTree
+
+                bvh = BVHTree.FromPolygons(src_co.tolist(), [list(f) for f in src_faces], all_triangles=False, epsilon=0.0)
+                held["find"] = lambda q: np.asarray([tuple(bvh.find_nearest(x)[1] or (0.0, 0.0, 1.0)) for x in q.tolist()], dtype=np.float64).reshape(-1, 3)
+        return held["find"](points)
+
+    return facing
+
+
+def _face_normals(co, faces) -> np.ndarray:
+    out = np.zeros((len(faces), 3))
+    by_size: dict[int, list] = {}
+    for i, f in enumerate(faces):
+        by_size.setdefault(len(f), []).append(i)
+    for _size, ids in by_size.items():
+        corners = np.asarray([faces[i] for i in ids], dtype=np.int64)
+        q = co[corners]
+        out[ids] = np.cross(q, np.roll(q, -1, axis=1)).sum(axis=1)  # Newell's normal
+    length = np.linalg.norm(out, axis=1, keepdims=True)
+    return np.divide(out, length, out=np.zeros_like(out), where=length > 0)
+
+
+def _labels(res, co) -> dict:
+    """What the kept-line tools read: UV island ("chart") and part ("piece") per face, on-a-guide ("guide") per corner."""
+    from . import organize, segments
+
+    out = {}
+    if res.get("chart") is not None:
+        out["chart"] = np.asarray(res["chart"])
+    if segments.seg.get("piece") is not None:
+        out["piece"] = np.asarray(segments.seg["piece"])
+    base = _g().state["auto_base"]
+    job = base.get("job") if base else None
+    strokes = list(getattr(job, "guide_lines", None) or []) + [line for _tag, rows in (getattr(job, "bend_groups", None) or []) for line in rows]
+    if strokes:
+        out["guide"] = organize._held_by_strokes(co, (strokes, float(getattr(job, "gap", 0.0) or 0.0)))
+    return out
+
+
 def _looker(src_co, src_faces):
     """`look(co, faces)`: a generator returning the share of the camera pictures that differ from your original."""
     from . import autoretopo
@@ -240,7 +297,9 @@ class Session:
         yield
         project = _projector(src_co, src_faces) if src_co is not None else None
         yield
-        self.base = T.make_base(co, faces, scope=mask, project=project, mirror=plane)
+        facing = _facer(src_co, src_faces) if src_co is not None else None
+        labels = _labels(self.res, co) if self.trial.toggles else None
+        self.base = T.make_base(co, faces, scope=mask, project=project, mirror=plane, facing=facing, labels=labels)
         self.look = _looker(src_co, src_faces) if src_co is not None and "look" in self.trial.stages else None
         yield
         refusal = self.trial.check(self.base)
@@ -270,7 +329,8 @@ class Session:
         self.ran_for = settings.get(self.handle)
         if self.trial.blendable and self.handle and (self.full is None or (not self.full.exact and not rough)):
             self.full = yield from self._run(dict(settings, **{self.handle: 1.0}), rough)
-            self.shown = T.blend(self.base, self.full, float(settings[self.handle]))
+            if self.full.co is not None:  # a refused full-strength run has nothing to blend toward
+                self.shown = T.blend(self.base, self.full, float(settings[self.handle]))
         cand = yield from self._run(settings, rough)
         self.cand = self.shown = cand
         held = None
@@ -344,6 +404,13 @@ class Session:
         if self.trial.blendable and self.full is not None and not self.full.refusal:
             self.shown = T.blend(self.base, self.full, value)
 
+    def toggle(self, key: str) -> None:
+        """A chip on the card's fourth row was clicked: flip that setting and work the preview out again."""
+        self.settings[key] = not bool(self.settings.get(key))
+        self.ran_for, self.full, self.work = None, None, None  # stale: the exact run starts once it rests
+        self.moved_at = time.perf_counter()
+        self.status = "..."
+
     def ready_to_keep(self) -> bool:
         c = self.cand
         return c is not None and not c.refusal and c.exact and self.work is None and self.shown is c and not self.stale()
@@ -380,7 +447,14 @@ class Session:
             out["ghost"] = _lines(flat, batch_for_shader, world((co + lift)[edges.ravel()]), TEAL)
             old = T.edges_of(scope_faces_)[:GHOST_MOST]
             out["wire"] = _lines(flat, batch_for_shader, world(base.co[old.ravel()]), (0.9, 0.9, 0.95, 0.3))
-            if cand.moved is not None and len(cand.moved) == len(co):
+            if cand.kept is not None and len(cand.kept):
+                out["kept"] = _lines(flat, batch_for_shader, world((co + 1.5 * lift)[np.asarray(cand.kept).ravel()]), PINK)
+            if cand.tint is not None and len(cand.tint) == len(co):
+                tris = _triangles(faces)
+                if len(tris):
+                    tint = _size_tint(cand.tint)
+                    out["wash"] = batch_for_shader(smooth, "TRIS", {"pos": world(co + 0.5 * lift), "color": tint}, indices=tris.astype(np.int32))
+            elif cand.moved is not None and len(cand.moved) == len(co):
                 tris = _triangles(faces)
                 if len(tris):
                     top = float(cand.moved.max())
@@ -435,6 +509,14 @@ def _wash(t: np.ndarray) -> np.ndarray:
     return np.concatenate((rgb, np.full((len(rgb), 1), 0.4)), axis=1).astype(np.float32)
 
 
+def _size_tint(t: np.ndarray) -> np.ndarray:
+    """-1..1 per corner: orange where quads shrank, pale where they stayed, blue where they grew."""
+    t = np.clip(np.asarray(t, dtype=np.float64), -1.0, 1.0)[:, None]
+    pale = np.array((0.92, 0.92, 0.9))
+    rgb = np.where(t >= 0.0, pale + t * (GREW - pale), pale - t * (SHRANK - pale))
+    return np.concatenate((rgb, np.full((len(rgb), 1), 0.45)), axis=1).astype(np.float32)
+
+
 def _to_screen(region, rv3d, matrix, points) -> tuple[np.ndarray, np.ndarray]:
     """(pixels (k, 2), in front (k,)) of object-space points."""
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -477,7 +559,7 @@ def _draw_view() -> None:
                 gpu.state.line_width_set(1.0)
                 flat.bind()
                 out["wire"].draw(flat)
-        for name, width in (("scope", 2.0), ("ghost", 2.0), ("arrows", 1.5)):
+        for name, width in (("scope", 2.0), ("kept", 3.0), ("ghost", 2.0), ("arrows", 1.5)):
             if name not in out or (name == "ghost" and s.before) or (name == "arrows" and not arrows) or (name not in layers and name != "scope"):
                 continue
             # the dark halo: the same lines wider, so teal, white and orange read on a light surface too
@@ -615,7 +697,8 @@ def card_lines(s) -> tuple:
 
 
 def _draw_card(shader, s, region, dial, scale) -> None:
-    w, h = CARD_W * scale, CARD_H * scale
+    row4 = bool(s.trial.toggles or s.trial.legend)
+    w, h = CARD_W * scale, (CARD_H + (ROW4_H if row4 else 0.0)) * scale
     if dial is None:
         x, y = 16 * scale, 16 * scale  # the ring left the view: the card parks in the bottom-left corner
     else:
@@ -642,17 +725,30 @@ def _draw_card(shader, s, region, dial, scale) -> None:
                 _triangle(shader, cx + 4 * scale, y + h - 34 * scale, 4 * scale, sign > 0, colour)
                 cx += 10 * scale
             cx += 10 * scale
-    chips = {}
-    cx, cy = x + pad, y + 8 * scale
-    for name, text, lit in (("apply", "Apply  Enter", TEAL), ("cancel", "Cancel  Esc", SLATE), ("before", "Before  B" if s.before else "After  B", SLATE if s.before else TEAL)):
-        import blf
+    import blf
 
+    chips = {}
+    cx, cy = x + pad, y + (8 + (ROW4_H if row4 else 0.0)) * scale
+    for name, text, lit in (("apply", "Apply  Enter", TEAL), ("cancel", "Cancel  Esc", SLATE), ("before", "Before  B" if s.before else "After  B", SLATE if s.before else TEAL)):
         blf.size(0, size)
         cw = blf.dimensions(0, text)[0] + 14 * scale
         overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 20 * scale, 4 * scale), (*lit[:3], 0.55))
         overlay._text(cx + 7 * scale, cy + 6 * scale, size, (1, 1, 1, 1), text)
         chips[name] = (cx, cy, cx + cw, cy + 20 * scale)
         cx += cw + 8 * scale
+    if s.trial.toggles:  # row 4: one on/off chip per setting, lit when on
+        cx, cy = x + pad, y + 6 * scale
+        small = max(10, int(10 * scale))
+        for key, words in s.trial.toggles:
+            on = bool(s.settings.get(key))
+            blf.size(0, small)
+            cw = blf.dimensions(0, words)[0] + 10 * scale
+            overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 17 * scale, 4 * scale), (*(PINK if on else SLATE)[:3], 0.5 if on else 0.3))
+            overlay._text(cx + 5 * scale, cy + 5 * scale, small, (1, 1, 1, 1.0 if on else 0.6), words)
+            chips["toggle:" + key] = (cx, cy, cx + cw, cy + 17 * scale)
+            cx += cw + 5 * scale
+    elif s.trial.legend:
+        overlay._text(x + pad, y + 10 * scale, size, (0.85, 0.87, 0.9, 1.0), s.trial.legend)
     s.chips = chips
 
 
@@ -871,6 +967,10 @@ class LiveTool:
                         close("")
                         self._finish(context)
                         return {"CANCELLED"}
+                    if name.startswith("toggle:"):
+                        s.toggle(name[7:])
+                        s.area.tag_redraw()
+                        return {"RUNNING_MODAL"}
                     s.before = not s.before
                     s.area.tag_redraw()
                     return {"RUNNING_MODAL"}
