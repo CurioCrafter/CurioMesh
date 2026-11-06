@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import bpy
 
 from . import history, icons, overlay, tidylive
+from .triadq import hardtidy as HT
 from .triadq import tidytools as T
 
 WIDTH = 36
@@ -42,6 +43,8 @@ GROUPS = (
 )
 TOOLS: list[Tool] = [
     Tool("RELAX", "curiomesh.tool_smooth_corners", "Smooth Corners", "tt_relax", "MOD_SMOOTH", developer=True),
+    Tool("HARD", "curiomesh.tool_true_up_edges", "True Up Edges", "tt_true_up_edges", "MOD_EDGESPLIT"),
+    Tool("HARD", "curiomesh.tool_press_panels_flat", "Press Panels Flat", "tt_press_panels_flat", "MESH_PLANE"),
 ]
 FIRST_RUN = ""  # the tool "Even out the roughest patch" opens: Source Relax's idname once it exists
 
@@ -125,6 +128,26 @@ class CURIOMESH_OT_tool_smooth_corners(_Tool, bpy.types.Operator):
 
     strength: bpy.props.FloatProperty(name="Strength", description="How far each corner slides toward the middle of its neighbours. 0 leaves the result as it is", default=0.6, min=0.0, max=1.0, subtype="FACTOR")
     steps: bpy.props.IntProperty(name="Steps", description="How many small slides in a row. More evens out a wider area; higher can take longer", default=6, min=1, soft_max=50)
+
+
+class CURIOMESH_OT_tool_true_up_edges(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_true_up_edges"
+    bl_label = "True Up Edges"
+    bl_description = "Finds the hard edges and lays each one on the crease of your original mesh, straight ones straight and curved ones smooth. Use it on wavy hard edges"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = HT.TrueUpEdges
+
+    strength: bpy.props.FloatProperty(name="Strength", description="How far each hard edge goes onto the crease of your original mesh. 1 lays it right on the crease, 0 leaves it as it is", default=1.0, min=0.0, max=1.0, subtype="FACTOR")
+
+
+class CURIOMESH_OT_tool_press_panels_flat(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_press_panels_flat"
+    bl_label = "Press Panels Flat"
+    bl_description = "Finds the flat panels of your original mesh and lays each one exactly flat, with clean shared edges and corners. Use it on hard-surface parts that look bumpy"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = HT.PressPanelsFlat
+
+    strength: bpy.props.FloatProperty(name="Strength", description="How far each corner goes onto its panel's plane. 1 makes the panels exactly flat, 0 leaves them as they are", default=1.0, min=0.0, max=1.0, subtype="FACTOR")
 
 
 # --------------------------------------------------------------------------- panel operators
@@ -313,7 +336,7 @@ def _popover(key, label, tip):
 
 POPOVERS = tuple(_popover(key, label, tip) for key, label, _icon, _stock, tip in GROUPS)
 PANELS = (CURIOMESH_PT_guided_tools, CURIOMESH_PT_guided_history)  # registered by panel.py, in the main tab's order
-CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
+CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_true_up_edges, CURIOMESH_OT_tool_press_panels_flat, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
 
 
 def register() -> None:

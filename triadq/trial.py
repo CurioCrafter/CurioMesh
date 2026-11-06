@@ -110,6 +110,7 @@ class Candidate:
     numbers: dict = field(default_factory=dict)  # filled by `measure`: {"poles": (a, b), "faces": (a, b), ...}
     note: str = ""
     refusal: str = ""
+    lines: np.ndarray | None = None  # (k, 2, 3) lines the tool keeps by meaning (hard edges, panel borders): the pink layer
 
 
 class Trial:
@@ -187,7 +188,7 @@ def diff(base: Base, cand: Candidate) -> Candidate:
 def blend(base: Base, full: Candidate, s: float) -> Candidate:
     """An instant stand-in at strength `s`: each corner `s` of the way to where the full-strength run put it."""
     co = base.co + float(s) * (np.asarray(full.co) - base.co)
-    return diff(base, Candidate(co, strength=float(s), exact=False, held=list(full.held), note=full.note))
+    return diff(base, Candidate(co, strength=float(s), exact=False, held=list(full.held), note=full.note, lines=full.lines))
 
 
 def _tidiness(co, faces) -> float:
@@ -227,7 +228,10 @@ def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=
 
 
 def number_text(key: str, value, cap: float | None = None) -> tuple[str, int]:
-    """(words, sign) of one card number: sign 1 better (up triangle), -1 worse (down triangle), 0 the same."""
+    """(words, sign) of one card number: sign 1 better (up triangle), -1 worse (down triangle), 0 the same. A tool's
+    own number is stored already worded, as (words, sign)."""
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], str):
+        return value
     if key == "poles":
         a, b = value
         if b < a:
