@@ -41,6 +41,9 @@ Settings (later ones win, so --use game-asset --detail 4 is Game Asset with deta
   --rows            offer them (the default)
   --baked           judge the result as it will look with a normal map baked from the source: fine bumps don't count,
                     moved outlines and shading do (scans; Scan Cleanup turns it on). --not-baked turns it off
+  --tidy T          Tidy Up, 0 to 1 (default 0): fewer poles at about the same faces, by redrawing the patches round
+                    them as plain grids. 0.5 is one round, 1 two rounds and spinning edges after. Kept only if the view
+                    changes at most 1 point more
   --pixels N        camera picture size per side (default 192)
   --cpu             make the camera pictures on the processor, not the graphics card
 Writing (for game engines):
@@ -84,6 +87,7 @@ fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
             "--no-rows" => s.rows = false,
             "--baked" => s.baked = true,
             "--not-baked" => s.baked = false,
+            "--tidy" => s.tidy = number(value("--tidy")?, "--tidy")?.clamp(0.0, 1.0),
             "--rows" => s.rows = true,
             "--mirror" => s.mirror = Mirror::parse(&value("--mirror")?)?,
             "--use" => *s = settings::preset(&value("--use")?)?,

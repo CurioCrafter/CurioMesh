@@ -28,6 +28,7 @@ pub struct Choices {
     pub count: usize,
     pub rows: bool,
     pub baked: bool,
+    pub tidy: f64, // Tidy Up, 0 to 1
     pub triangulate: bool, // from the preset (Low Poly writes triangles)
     pub mirror: Mirror,
     pub engine: String, // an engine's key, or "" for a plain OBJ
@@ -37,7 +38,7 @@ pub struct Choices {
 
 impl Default for Choices {
     fn default() -> Self {
-        Choices { preset: "game-asset".into(), custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, baked: false, triangulate: false, mirror: Mirror::Off, engine: String::new(), gpu: true, pixels: 192 }
+        Choices { preset: "game-asset".into(), custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, baked: false, tidy: 0.0, triangulate: false, mirror: Mirror::Off, engine: String::new(), gpu: true, pixels: 192 }
     }
 }
 
@@ -73,6 +74,7 @@ impl Choices {
             gpu: self.gpu,
             rows: self.rows,
             baked: self.baked,
+            tidy: self.tidy,
             mirror: self.mirror,
             export,
         }
@@ -123,6 +125,7 @@ impl Prefs {
         c.count = v["count"].as_u64().map_or(c.count, |n| (n as usize).clamp(24, 5_000_000));
         c.rows = v["rows"].as_bool().unwrap_or(c.rows);
         c.baked = v["baked"].as_bool().unwrap_or(c.baked);
+        c.tidy = v["tidy"].as_f64().unwrap_or(c.tidy).clamp(0.0, 1.0);
         c.gpu = v["gpu"].as_bool().unwrap_or(true);
         c.pixels = v["pixels"].as_u64().map_or(192, |n| (n as usize).clamp(64, 512));
         p.recent = v["recent"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(PathBuf::from)).take(MOST_RECENT).collect()).unwrap_or_default();
@@ -134,7 +137,7 @@ impl Prefs {
         let c = &self.choices;
         json!({
             "preset": c.preset, "triangulate": c.triangulate, "mirror": c.mirror.word(), "engine": c.engine, "custom_detail": c.custom_detail, "aim_for_count": c.aim_for_count, "count": c.count,
-            "rows": c.rows, "baked": c.baked, "gpu": c.gpu, "pixels": c.pixels, "tour_done": self.tour_done,
+            "rows": c.rows, "baked": c.baked, "tidy": c.tidy, "gpu": c.gpu, "pixels": c.pixels, "tour_done": self.tour_done,
             "recent": self.recent.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
         })
     }

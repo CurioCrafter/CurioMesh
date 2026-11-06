@@ -19,25 +19,25 @@ const MIN_JACOBIAN: f64 = 0.2; // a moved corner may not leave a quad less squar
 fn p(points: &[f64], v: i64) -> V3 {
     [points[v as usize * 3], points[v as usize * 3 + 1], points[v as usize * 3 + 2]]
 }
-fn sub(a: V3, b: V3) -> V3 {
+pub(crate) fn sub(a: V3, b: V3) -> V3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
-fn cross(a: V3, b: V3) -> V3 {
+pub(crate) fn cross(a: V3, b: V3) -> V3 {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
-fn dot(a: V3, b: V3) -> f64 {
+pub(crate) fn dot(a: V3, b: V3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 fn unit(a: V3) -> V3 {
     let n = dot(a, a).sqrt();
     if n > 1e-30 { [a[0] / n, a[1] / n, a[2] / n] } else { [0.0; 3] }
 }
-fn normal(q: &[V3; 4]) -> V3 {
+pub(crate) fn normal(q: &[V3; 4]) -> V3 {
     unit(cross(sub(q[2], q[0]), sub(q[3], q[1])))
 }
 
 /// `engine._min_scaled_jacobians` for one quad: 1 for a square, <= 0 when folded.
-fn jacobian(q: &[V3; 4]) -> f64 {
+pub(crate) fn jacobian(q: &[V3; 4]) -> f64 {
     let n = normal(q);
     (0..4).map(|k| {
         let (a, b) = (sub(q[(k + 1) % 4], q[k]), sub(q[(k + 3) % 4], q[k]));
@@ -46,13 +46,13 @@ fn jacobian(q: &[V3; 4]) -> f64 {
     }).fold(1.0, f64::min)
 }
 
-struct Limits {
+pub(crate) struct Limits {
     epsilon: f64,
     warp: f64,
 }
 
 impl Limits {
-    fn of(points: &[f64]) -> Limits {
+    pub(crate) fn of(points: &[f64]) -> Limits {
         let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
         for c in points.chunks_exact(3) {
             for k in 0..3 {
@@ -63,7 +63,7 @@ impl Limits {
         let span = sub(high, low);
         Limits { epsilon: (dot(span, span) * 1e-14).max(1e-20), warp: crate::retopo::MAX_QUAD_WARP_DEGREES.to_radians().cos() }
     }
-    fn ok(&self, q: &[V3; 4]) -> bool {
+    pub(crate) fn ok(&self, q: &[V3; 4]) -> bool {
         geom::quad_valid(q, self.epsilon, self.warp)
     }
 }

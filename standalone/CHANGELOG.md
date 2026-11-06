@@ -7,6 +7,12 @@
   surface far from the original and shading still wrong over a few pixels do. Scan Cleanup turns it on; the app has
   it under More options, the command line as `--baked`. Game Asset with it on: a boulder scan 97,964 -> 1,847 quads
   (was 116,974), a cliff scan 1.5 million -> 991, a lion head 47,214 -> 1,708, all 0 bad faces.
+- **Tidy Up**, the add-on's Organize redraw: patches of quads round poles are redrawn as plain grids where one fits
+  the outline with fewer poles, new corners on the original surface, hard edges, borders and materials kept. A slider
+  under Options ("More detail" to "Tidier", off by default) and `--tidy` on the command line; kept only if the view
+  changes at most 1 point more. Game Asset at full Tidy Up: poles on a marble bust 2,521 -> 909, a lion head 8,020 ->
+  3,311, a fire hydrant 9,634 -> 7,987, a chess set 1,924 -> 1,640, with 0.2 to 0.9 points more view change, 5 to 21%
+  fewer faces and 0 bad faces. On a horse statue it was not kept (the view would have changed 1.2 points more).
 
 ## 0.3.0
 
