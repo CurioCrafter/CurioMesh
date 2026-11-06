@@ -66,6 +66,8 @@ POLES_MOST = 5_000
 ARROWS_SHOWN = 0.5  # seconds the arrows stay in After after the ring moved
 DIAL_PX, DRAG_PX = 28.0, 300.0  # ring radius; mouse travel for the whole range
 CARD_W, CARD_H = 340.0, 74.0
+ROW_H, ROWS_W = 22.0, 430.0  # a report line on the card (Preview Tidy), and the card's width when it has lines
+PINK = (1.0, 0.373, 0.635, 1.0)  # Kept lines: the mirror plane
 
 ORANGE = (0.961, 0.651, 0.137, 1.0)  # Curio Orange: the scope edge and the ring
 TEAL = (0.180, 0.769, 0.714, 1.0)  # ghost
@@ -148,7 +150,7 @@ def _source():
     guided = _g()
     base = guided.state["auto_base"]
     job = base and base.get("job")
-    if job is not None and getattr(job, "co", None) is not None and getattr(job, "faces", None) is not None:
+    if job is not None and not getattr(job, "mirror", None) and getattr(job, "co", None) is not None and getattr(job, "faces", None) is not None:  # a mirrored job holds one half
         return np.asarray(job.co, dtype=np.float64), job.faces
     source = guided.state_source()
     if source is None:
@@ -197,7 +199,7 @@ class Session:
     """One open preview. `pump` advances its work for about `budget` seconds; `set` moves the handle; `apply` asks
     for the exact result and `ready_to_keep` says when it is there."""
 
-    def __init__(self, context, trial: T.Trial, settings: dict, scope: str = "WHOLE"):
+    def __init__(self, context, trial: T.Trial, settings: dict, scope: str = "WHOLE", pick: dict | None = None):
         guided = _g()
         self.trial, self.settings = trial, dict(trial.defaults, **settings)
         self.handle = trial.handles[0] if trial.handles else ""
@@ -221,6 +223,9 @@ class Session:
         self.ran_for = None  # the handle value the last run started with
         self.area = self.region = None
         self.region_ptr = 0
+        self.pick = dict(pick or {})
+        self.showing: tuple[int, int] | None = None  # (report line, spot) lit by Show
+        self.message = ""  # a short word for the card ("Pick Fix These on a line first.")
         if self.res is None:
             self.error = "Make a result first with Start. Tools work on the result before you apply it."
             return
@@ -229,7 +234,8 @@ class Session:
             self.error = refusal
             return
         mirror = getattr(guided.state["auto_base"].get("job"), "mirror", None) if guided.state["auto_base"] else None
-        self._inputs = (np.asarray(self.res["co"], dtype=np.float64), self.res["faces"], mask, None if mirror is None else (mirror[0], mirror[1]))
+        self._inputs = (np.asarray(self.res["co"], dtype=np.float64), self.res["faces"], mask, (mirror[0], mirror[1]) if mirror else None)  # blockout's is ()
+        self.kinds = _kinds(self.res)
         self.work = self._open()
 
     # ---- the work, as generators
@@ -240,7 +246,7 @@ class Session:
         yield
         project = _projector(src_co, src_faces) if src_co is not None else None
         yield
-        self.base = T.make_base(co, faces, scope=mask, project=project, mirror=plane)
+        self.base = T.make_base(co, faces, scope=mask, project=project, mirror=plane, pick=self.pick, kinds=self.kinds)
         self.look = _looker(src_co, src_faces) if src_co is not None and "look" in self.trial.stages else None
         yield
         refusal = self.trial.check(self.base)
@@ -284,6 +290,36 @@ class Session:
             cand = yield from self._run(settings, rough)
             self.cand = self.shown = cand
         self.status = f"held at {held:.2f}" if held is not None else ("quick preview" if rough else "ready")
+        yield from self._row_costs(cand)
+
+    def _row_costs(self, cand):
+        """A report's lines each get the look change their fix would make, worked out after everything else."""
+        if self.look is None or not cand.rows or cand.co is not None:  # only while the list is up: a picked line keeps first
+            return
+        if "look" not in self.base.cache:
+            self.base.cache["look"] = yield from self.look(self.base.co, self.base.faces)
+        for row in cand.rows:
+            if row.get("cost") is not None or row.get("fix") is None:
+                continue
+            co, faces, _parent = row["fix"]
+            after = yield from self.look(np.asarray(co, dtype=np.float64), self.base.faces if faces is None else faces)
+            row["cost"] = after - self.base.cache["look"]
+
+    def choose(self, **settings) -> None:
+        """Settings without a handle changed (a report line picked): work the candidate out again now."""
+        self.settings.update(settings)
+        self.work, self.cand, self.message = None, None, ""
+        self.status = "..."
+        self.moved_at = -1e9
+
+    def show(self, line: int):
+        """Show on a report line: light up its spots, the next one each time. Returns the spot (object space) or None."""
+        rows = self.shown.rows if self.shown is not None else []
+        if not 0 <= line < len(rows) or not len(rows[line]["spots"]):
+            return None
+        spot = 0 if self.showing is None or self.showing[0] != line else (self.showing[1] + 1) % len(rows[line]["spots"])
+        self.showing = (line, spot)
+        return rows[line]["spots"][spot]
 
     def pump(self, budget: float = BUDGET) -> bool:
         """Advance the work for about `budget` seconds. True when there is something new to draw."""
@@ -346,7 +382,7 @@ class Session:
 
     def ready_to_keep(self) -> bool:
         c = self.cand
-        return c is not None and not c.refusal and c.exact and self.work is None and self.shown is c and not self.stale()
+        return c is not None and c.co is not None and not c.refusal and c.exact and self.work is None and self.shown is c and not self.stale()
 
     def apply(self) -> None:
         self.applying = True
@@ -388,6 +424,8 @@ class Session:
                     out["wash"] = batch_for_shader(smooth, "TRIS", {"pos": world(co + 0.5 * lift), "color": tint}, indices=tris.astype(np.int32))
             if cand.arrows is not None and len(cand.arrows):
                 out["arrows"] = _lines(flat, batch_for_shader, world(cand.arrows.reshape(-1, 3)), WHITE)
+        if cand is not None and cand.kept is not None and len(cand.kept):
+            out["kept"] = _lines(flat, batch_for_shader, world(np.asarray(cand.kept, dtype=np.float64).reshape(-1, 3)), PINK)
         self.batch_key, self.batches = key, out
         return out
 
@@ -467,7 +505,7 @@ def _draw_view() -> None:
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_test_set("LESS_EQUAL")
         now = time.perf_counter()
-        arrows = s.before or s.dragging or now - s.moved_at < ARROWS_SHOWN
+        arrows = s.before or s.dragging or now - s.moved_at < ARROWS_SHOWN or not s.handle  # no handle: nothing to drag, so always
         layers = s.trial.layers
         if not s.before:
             if "wash" in out and "wash" in layers:
@@ -477,7 +515,7 @@ def _draw_view() -> None:
                 gpu.state.line_width_set(1.0)
                 flat.bind()
                 out["wire"].draw(flat)
-        for name, width in (("scope", 2.0), ("ghost", 2.0), ("arrows", 1.5)):
+        for name, width in (("scope", 2.0), ("kept", 3.0), ("ghost", 2.0), ("arrows", 1.5)):
             if name not in out or (name == "ghost" and s.before) or (name == "arrows" and not arrows) or (name not in layers and name != "scope"):
                 continue
             # the dark halo: the same lines wider, so teal, white and orange read on a light surface too
@@ -554,6 +592,13 @@ def _draw_pixel() -> None:
             for (x, y), ok in zip(px.tolist(), front.tolist()):
                 if ok:
                     _poly(shader, [(x - r, y - r), (x + r, y + r), (x - r, y + r), (x + r, y - r)], HELD, 2.0, "LINES")
+        found = _found_points(s)
+        if found is not None and len(found) and "found" in s.trial.layers:
+            px, front = _to_screen(region, rv3d, obj.matrix_world, found[:POLES_MOST])
+            lit = s.showing[1] if s.showing is not None else -1
+            for i, ((x, y), ok) in enumerate(zip(px.tolist(), front.tolist())):
+                if ok:
+                    _dashed(shader, x, y, (14.0 if i == lit else 9.0) * scale)
         dial = _dial_point(s, region, rv3d, obj.matrix_world)
         if dial is not None and s.handle:
             _draw_dial(shader, s, dial, scale)
@@ -562,6 +607,36 @@ def _draw_pixel() -> None:
         gpu.state.blend_set("NONE")
     except Exception as exc:
         overlay.LAST_DRAW_ERROR = repr(exc)
+
+
+def _found_points(s):
+    """The Found layer: the spots of the report line Show lit, else the candidate's own."""
+    cand = s.shown
+    if cand is None or cand.refusal:
+        return None
+    if s.showing is not None and s.showing[0] < len(cand.rows):
+        return cand.rows[s.showing[0]]["spots"]
+    return cand.found
+
+
+def _dashed(shader, x, y, r, dashes=8) -> None:
+    """A white dashed ring: "found here", said by shape and not by colour."""
+    ring = _circle(x, y, r, dashes * 2)
+    pairs = [p for i in range(0, len(ring) - 1, 2) for p in (ring[i], ring[i + 1])]
+    _poly(shader, pairs, (1.0, 1.0, 1.0, 0.95), 2.0, "LINES")
+
+
+def _kinds(res) -> np.ndarray | None:
+    """Per face: material and UV island together, so a tool never joins faces across either border."""
+    count = len(res["faces"])
+    out, any_ = np.zeros(count, dtype=np.int64), False
+    for key in ("mat", "chart"):
+        arr = res.get(key)
+        if arr is not None and len(arr) == count:
+            arr = np.asarray(arr).astype(np.int64)
+            out = out * (int(arr.max(initial=0)) + 1) + arr
+            any_ = True
+    return out if any_ else None
 
 
 def _dial_point(s, region, rv3d, matrix):
@@ -614,8 +689,24 @@ def card_lines(s) -> tuple:
     return T.readout(s.shown, s.trial, s.settings, s.status, s.cap)
 
 
+def _chip(shader, cx, cy, text, colour, size, scale, alpha=0.55) -> float:
+    """One clickable chip; returns its width."""
+    import blf
+
+    blf.size(0, size)
+    cw = blf.dimensions(0, text)[0] + 14 * scale
+    overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 20 * scale, 4 * scale), (*colour[:3], alpha))
+    overlay._text(cx + 7 * scale, cy + 6 * scale, size, (1, 1, 1, 1 if alpha > 0.3 else 0.5), text)
+    return cw
+
+
 def _draw_card(shader, s, region, dial, scale) -> None:
-    w, h = CARD_W * scale, CARD_H * scale
+    title, numbers, third = card_lines(s)
+    refused = s.error or (s.shown is not None and s.shown.refusal)
+    rows = [] if refused or s.shown is None else s.shown.rows
+    words = s.message or third
+    note_line = bool(not refused and numbers and words)  # the tool's own line under its numbers ("14 seam vertices ...")
+    w, h = (ROWS_W if rows else CARD_W) * scale, (CARD_H + ROW_H * (note_line + len(rows))) * scale
     if dial is None:
         x, y = 16 * scale, 16 * scale  # the ring left the view: the card parks in the bottom-left corner
     else:
@@ -624,15 +715,15 @@ def _draw_card(shader, s, region, dial, scale) -> None:
     x, y = max(8 * scale, min(x, right - w)), max(8 * scale, min(y, region.height - h - 8 * scale))
     overlay._fill(shader, overlay._rounded_rect(x, y, w, h, 6 * scale), CARD_BG)
     overlay._fill(shader, overlay._rounded_rect(x, y, 5 * scale, h, 2 * scale), GROUP_COLOURS.get(s.trial.group, TEAL))
-    title, numbers, third = card_lines(s)
     size = max(11, int(11 * scale))
     pad = 12 * scale
-    refused = s.error or (s.shown is not None and s.shown.refusal)
     overlay._text(x + pad, y + h - 18 * scale, size, (1, 1, 1, 1), title)
     if refused:
         overlay._text(x + pad, y + h - 38 * scale, size, HELD, third[:70])
         if len(third) > 70:
             overlay._text(x + pad, y + h - 54 * scale, size, HELD, third[70:140])
+    elif not numbers:
+        overlay._text(x + pad, y + h - 38 * scale, size, (0.85, 0.87, 0.9, 1.0), words[:80])
     else:
         cx = x + pad
         for text, sign in numbers:
@@ -642,15 +733,26 @@ def _draw_card(shader, s, region, dial, scale) -> None:
                 _triangle(shader, cx + 4 * scale, y + h - 34 * scale, 4 * scale, sign > 0, colour)
                 cx += 10 * scale
             cx += 10 * scale
+        if note_line:
+            overlay._text(x + pad, y + h - 60 * scale, size, (0.85, 0.87, 0.9, 1.0), words[:80])
     chips = {}
+    top = y + h - (60 + ROW_H * note_line) * scale  # the first report line sits under the numbers
+    picked = s.settings.get("row", "")
+    for i, row in enumerate(rows):
+        ry = top - (i + 1) * ROW_H * scale + 4 * scale
+        overlay._text(x + pad, ry + 6 * scale, size, (1, 1, 1, 1), row["words"])
+        cost = "no fix" if row.get("fix") is None else "look ..." if row.get("cost") is None else f"look {row['cost']:+.1f}%"
+        cx = x + w - pad - 150 * scale
+        overlay._text(cx - 70 * scale, ry + 6 * scale, size, (0.75, 0.78, 0.85, 1.0), cost)
+        shown = s.showing is not None and s.showing[0] == i
+        cw = _chip(shader, cx, ry, "Show", TEAL if shown else SLATE, size, scale)
+        chips[f"show:{i}"] = (cx, ry, cx + cw, ry + 20 * scale)
+        cx += cw + 6 * scale
+        cw = _chip(shader, cx, ry, "Fix These", TEAL if picked == row["key"] else SLATE, size, scale, 0.55 if row.get("fix") is not None else 0.2)
+        chips[f"fix:{i}"] = (cx, ry, cx + cw, ry + 20 * scale)
     cx, cy = x + pad, y + 8 * scale
     for name, text, lit in (("apply", "Apply  Enter", TEAL), ("cancel", "Cancel  Esc", SLATE), ("before", "Before  B" if s.before else "After  B", SLATE if s.before else TEAL)):
-        import blf
-
-        blf.size(0, size)
-        cw = blf.dimensions(0, text)[0] + 14 * scale
-        overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 20 * scale, 4 * scale), (*lit[:3], 0.55))
-        overlay._text(cx + 7 * scale, cy + 6 * scale, size, (1, 1, 1, 1), text)
+        cw = _chip(shader, cx, cy, text, lit, size, scale)
         chips[name] = (cx, cy, cx + cw, cy + 20 * scale)
         cx += cw + 8 * scale
     s.chips = chips
@@ -742,13 +844,17 @@ class LiveTool:
         ts = history.settings(context.scene)
         return ts.tool_scope if ts is not None else "WHOLE"
 
+    def _pick(self, context) -> dict:
+        """What the tool needs to know before it opens, beyond the scope (Seal the Middle: the mirror plane found)."""
+        return {}
+
     def invoke(self, context, event):
         area, region = _view(context)
         if region is None:
             self.report({"WARNING"}, "Open a 3D view first: the preview is drawn there.")
             return {"CANCELLED"}
         close("")  # one preview at a time: opening a second cancels the first
-        s = Session(context, self.trial(), self._settings(), self._scope(context))
+        s = Session(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
         if s.error:
             self.report({"WARNING"}, s.error)
             return {"CANCELLED"}
@@ -808,9 +914,30 @@ class LiveTool:
             self._finish(context)
             return {"CANCELLED"}
         _remember(context, self.bl_idname, name, numbers, s.settings)
+        if s.trial.stay_open:
+            return self._reopen(context, name)
         close("")
         self._finish(context)
         return {"FINISHED"}
+
+    def _reopen(self, context, name: str):
+        """A tool that stays open (Preview Tidy): the kept change gets its own Undo step now, and the tool opens again
+        on the new result, its list refreshed. Esc closes it; nothing more is pushed then."""
+        history._push(f"Tidy: {name}")
+        old = self._s
+        settings = {k: v for k, v in old.settings.items() if k != "row"}
+        s = Session(context, self.trial(), settings, self._scope(context), self._pick(context))
+        close("")
+        if s.error:
+            live["note"] = f"Kept. {s.error}"
+            self._finish(context)
+            return {"CANCELLED"}  # the change is kept: its Undo step was pushed above
+        s.area, s.region, s.region_ptr = old.area, old.region, old.region_ptr
+        live["session"], live["note"] = s, ""
+        self._s = s
+        _add_handlers()
+        s.area.tag_redraw()
+        return {"RUNNING_MODAL"}
 
     def _region_xy(self, event):
         r = self._s.region
@@ -833,6 +960,10 @@ class LiveTool:
                 return self._keep(context)
             if s.applying and s.cand is not None and s.cand.refusal:
                 s.applying = False  # Apply does nothing on a refusal
+            if s.applying and s.work is None and s.cand is not None and s.cand.co is None and not s.stale():
+                s.applying = False  # a report with no line picked: nothing to keep yet
+                s.message = "Pick Fix These on a line first, then Enter keeps it."
+                s.area.tag_redraw()
             return {"PASS_THROUGH"}
         x, y, inside = self._region_xy(event)
         if s.dragging:
@@ -871,6 +1002,9 @@ class LiveTool:
                         close("")
                         self._finish(context)
                         return {"CANCELLED"}
+                    if name.startswith(("show:", "fix:")):
+                        self._line(s, name)
+                        return {"RUNNING_MODAL"}
                     s.before = not s.before
                     s.area.tag_redraw()
                     return {"RUNNING_MODAL"}
@@ -892,9 +1026,30 @@ class LiveTool:
             return {"PASS_THROUGH"}
         return {"RUNNING_MODAL"}  # other keys would edit the scene under the preview
 
+    def _line(self, s, name: str) -> None:
+        """A report line's chip: Show lights its spots and frames the next one; Fix These shows that line's fix."""
+        kind, _, i = name.partition(":")
+        i = int(i)
+        rows = s.shown.rows if s.shown is not None else []
+        if i >= len(rows):
+            return
+        if kind == "show":
+            spot = s.show(i)
+            obj = _preview()
+            if spot is not None and obj is not None:
+                from mathutils import Vector
+
+                s.region.data.view_location = obj.matrix_world @ Vector(spot.tolist())  # frame it: the view turns round it
+        elif rows[i].get("fix") is None:
+            s.message = f"The {rows[i]['words'].split(' ', 1)[1]} here cannot be fixed without bad faces."
+        else:
+            s.showing = (i, s.showing[1]) if s.showing is not None and s.showing[0] == i else (i, -1)
+            s.choose(row=rows[i]["key"])
+        s.area.tag_redraw()
+
     def execute(self, context):
         """No preview: run to the end and keep it (F9 redo, scripts, the agent skills)."""
-        s = Session(context, self.trial(), self._settings(), self._scope(context))
+        s = Session(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
         if s.error:
             self.report({"WARNING"}, s.error)
             return {"CANCELLED"}
@@ -902,12 +1057,17 @@ class LiveTool:
         if s.cand is not None and s.cand.refusal:
             self.report({"WARNING"}, s.cand.refusal)
             return {"CANCELLED"}
+        if s.cand is not None and s.cand.co is None and not s.error:
+            self.report({"WARNING"}, s.cand.note or f"{s.trial.name}: nothing to keep")
+            return {"CANCELLED"}
         if s.error or not s.ready_to_keep():
             self.report({"WARNING"}, s.error or f"{s.trial.name} did not finish")
             return {"CANCELLED"}
         numbers = numbers_text(s.cand, s.trial, s.cap)
         if not commit(context, s.cand, s.trial.name, numbers):
             return {"CANCELLED"}
+        if s.trial.stay_open:  # no UNDO flag on these operators (one step per Enter instead): push it here
+            history._push(f"Tidy: {s.trial.name}")
         _remember(context, self.bl_idname, s.trial.name, numbers, s.settings)
         return {"FINISHED"}
 
@@ -921,7 +1081,7 @@ def _remember(context, idname: str, name: str, numbers: str, settings: dict) -> 
     if ts is None:
         return
     ts.last_tool, ts.last_name, ts.last_numbers = idname, name, numbers
-    ts.last_settings = json.dumps({k: v for k, v in settings.items() if isinstance(v, (int, float, bool, str))})
+    ts.last_settings = json.dumps({k: v for k, v in settings.items() if isinstance(v, (int, float, bool, str)) and k != "row"})  # Again opens a report on its list
 
 
 def register() -> None:

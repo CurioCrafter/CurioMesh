@@ -15,6 +15,7 @@ import json
 from dataclasses import dataclass
 
 import bpy
+import numpy as np
 
 from . import history, icons, overlay, tidylive
 from .triadq import tidytools as T
@@ -42,6 +43,8 @@ GROUPS = (
 )
 TOOLS: list[Tool] = [
     Tool("RELAX", "curiomesh.tool_smooth_corners", "Smooth Corners", "tt_relax", "MOD_SMOOTH", developer=True),
+    Tool("CLEANUP", "curiomesh.tool_preview_tidy", "Preview Tidy", "tt_preview_tidy", "VIEWZOOM"),
+    Tool("CLEANUP", "curiomesh.tool_seal_middle", "Seal the Middle", "mirror", "MOD_MIRROR"),
 ]
 FIRST_RUN = ""  # the tool "Even out the roughest patch" opens: Source Relax's idname once it exists
 
@@ -125,6 +128,49 @@ class CURIOMESH_OT_tool_smooth_corners(_Tool, bpy.types.Operator):
 
     strength: bpy.props.FloatProperty(name="Strength", description="How far each corner slides toward the middle of its neighbours. 0 leaves the result as it is", default=0.6, min=0.0, max=1.0, subtype="FACTOR")
     steps: bpy.props.IntProperty(name="Steps", description="How many small slides in a row. More evens out a wider area; higher can take longer", default=6, min=1, soft_max=50)
+
+
+class CURIOMESH_OT_tool_preview_tidy(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_preview_tidy"
+    bl_label = "Preview Tidy"
+    bl_description = "Lists the problems found in this area, each with a count, Show and Fix These. Nothing changes until you fix a line"
+    bl_options = {"REGISTER"}  # no UNDO flag: each Fix These pushes its own Undo step while the list stays open
+    trial = T.PreviewTidy
+
+    row: bpy.props.StringProperty(
+        name="Line",
+        description="Which line to fix when run from a script: corners, doublets, pairs, slivers or inward. Empty only opens the list",
+        default="",
+        options={"SKIP_SAVE"},
+    )
+
+
+def _mirror_plane(context) -> dict:
+    """{"plane": (axis, offset)} found on the result when it was not made mirrored, else {}."""
+    from mathutils.bvhtree import BVHTree
+
+    from . import symmetry
+
+    g = _guided()
+    job = (g.state["auto_base"] or {}).get("job")
+    res = g.state["res"]
+    if getattr(job, "mirror", None) or res is None or not len(res["faces"]):
+        return {}  # mirrored already: the Session reads the plane from the job
+    co = np.asarray(res["co"], dtype=np.float64)
+    tree = BVHTree.FromPolygons(co.tolist(), [list(f) for f in res["faces"]], all_triangles=False, epsilon=0.0)
+    best = symmetry.find_plane(co, tree)[0]
+    return {"plane": (best.axis, best.offset)} if best.ok() else {}
+
+
+class CURIOMESH_OT_tool_seal_middle(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_seal_middle"
+    bl_label = "Seal the Middle"
+    bl_description = "Puts every vertex near the mirror plane onto it and merges the doubled ones. Use it when the middle of a mirrored model has gaps or overlaps"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = T.SealMiddle
+
+    def _pick(self, context) -> dict:
+        return _mirror_plane(context)
 
 
 # --------------------------------------------------------------------------- panel operators
@@ -313,7 +359,7 @@ def _popover(key, label, tip):
 
 POPOVERS = tuple(_popover(key, label, tip) for key, label, _icon, _stock, tip in GROUPS)
 PANELS = (CURIOMESH_PT_guided_tools, CURIOMESH_PT_guided_history)  # registered by panel.py, in the main tab's order
-CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
+CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_preview_tidy, CURIOMESH_OT_tool_seal_middle, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
 
 
 def register() -> None:

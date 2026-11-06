@@ -35,6 +35,7 @@ class Base:
     mirror: tuple | None = None  # (axis, offset) when the result is mirrored
     pick: dict = field(default_factory=dict)  # what the user picked: {"strip": ...} / {"pole": v} / {}
     cache: dict = field(default_factory=dict)  # numbers of the result as it is, worked out once
+    kinds: np.ndarray | None = None  # per face: material and UV island together; tools never join faces of two kinds
 
     @property
     def topo(self):
@@ -55,7 +56,7 @@ class Base:
         return self.cache["free"]
 
 
-def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=None) -> Base:
+def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=None, kinds=None) -> Base:
     """A Base with the usual holds: corners on a border, a hard edge or a non-quad (`organize.pinned`), on the mirror
     plane, and every corner a face outside the scope uses, so the edge of the scope never moves."""
     from .organize import pinned
@@ -72,7 +73,8 @@ def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=
         axis, offset = mirror
         size = float(np.ptp(co, axis=0).max()) if len(co) else 1.0
         held |= np.abs(co[:, axis] - offset) < 1e-6 * (size or 1.0)
-    return Base(co, faces, scope, held, project, mean_edge(co, [faces[f] for f in np.flatnonzero(scope).tolist()]), mirror, dict(pick or {}))
+    kinds = None if kinds is None or len(kinds) != len(faces) else np.asarray(kinds)
+    return Base(co, faces, scope, held, project, mean_edge(co, [faces[f] for f in np.flatnonzero(scope).tolist()]), mirror, dict(pick or {}), {}, kinds)
 
 
 def mean_edge(co, faces) -> float:
@@ -110,6 +112,9 @@ class Candidate:
     numbers: dict = field(default_factory=dict)  # filled by `measure`: {"poles": (a, b), "faces": (a, b), ...}
     note: str = ""
     refusal: str = ""
+    found: np.ndarray | None = None  # (k, 3) spots the tool found to work on: the dashed Found rings
+    kept: np.ndarray | None = None  # (k, 2, 3) lines kept by meaning (the mirror plane): the pink Kept layer
+    rows: list = field(default_factory=list)  # a report's lines (Preview Tidy): {"key", "words", "spots", "cost", ...}
 
 
 class Trial:
@@ -123,6 +128,7 @@ class Trial:
     blendable = True  # positions only, and strength s about lerp(before, full, s): the dial is instant
     layers = ("scope", "ghost", "wash", "arrows", "poles", "held")
     stages = ("poles", "move", "look")  # card numbers, most important first (up to three are shown)
+    stay_open = False  # True: after Enter the tool opens again on the new result (one Undo step per Enter)
 
     def check(self, base: Base) -> str:
         """"" when the tool can run here, else the message the card shows instead."""
@@ -180,7 +186,8 @@ def diff(base: Base, cand: Candidate) -> Candidate:
         cand.moved = np.linalg.norm(co - base.co, axis=1) / base.edge
     else:
         cand.moved = np.zeros(len(co))
-    cand.arrows = np.zeros((0, 2, 3))
+    if cand.arrows is None:  # a tool may draw its own (Seal the Middle's moves onto the plane and merges)
+        cand.arrows = np.zeros((0, 2, 3))
     return cand
 
 
@@ -258,6 +265,8 @@ def readout(cand: Candidate | None, trial: Trial, settings: dict, status: str, c
     if cand is not None and cand.refusal:
         return f"{trial.name}", [], cand.refusal
     title = f"{trial.name}{value}   {status}"
+    if cand is not None and cand.co is None:  # a report with nothing picked yet: no numbers, its own line
+        return title, [], cand.note
     numbers = []
     for key in trial.stages:
         if len(numbers) == 3:
