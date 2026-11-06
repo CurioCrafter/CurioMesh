@@ -5,7 +5,7 @@ all-quad, low-poly mesh, one loose part at a time. A camera check compares the r
 and says how much of the view changed, so you can redo only the parts that still look wrong. Everything runs inside
 Blender on your computer.
 
-This is the extensions.blender.org build. It contains Python code only.
+CurioMesh contains Python code only and no compiled or third-party code.
 
 ## Use
 
@@ -61,6 +61,10 @@ This is the extensions.blender.org build. It contains Python code only.
   on the mesh, as a custom property `curiomesh_kept`, so it travels with the .blend; **Forget Kept Fixes** removes it. A job's working files go in a folder
   there too (`jobs`) and are deleted when the job ends; folders left by a Blender that quit mid-job are cleared later.
   Resume points of a stopped job are kept for 3 days; **Clear Saved Progress** in the add-on preferences deletes them.
+- While a Region or Live preview is shown, the preview is a wireframe object and your mesh is hidden under it. Turning
+  the preview off, disabling CurioMesh or opening the .blend with CurioMesh on removes the preview and shows your mesh
+  again. If you save with a preview on and open the file without CurioMesh, delete the preview object and unhide your
+  mesh (Alt+H).
 - Segments you edit by hand (merge, split, paint, rename, lock, a Use, Bigger/Smaller Quads on a part) are saved on your object, as a face attribute
   `curiomesh_segment` and a custom property `curiomesh_segments`, so the next run and a saved .blend keep them. Finding
   segments alone writes nothing on your object. Delete both to forget them.

@@ -250,8 +250,6 @@ def _kill(proc: subprocess.Popen) -> None:
 
 def setup_of(job) -> dict:
     """What a helper needs to rebuild this job: the mesh, the settings, and the parts as `_split_pieces` cut them."""
-    import numpy as np
-
     from .triadq.types import FlatFaces
 
     return {

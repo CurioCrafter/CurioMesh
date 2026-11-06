@@ -422,8 +422,6 @@ def _meshdata_from_object(obj: bpy.types.Object) -> MeshData:
                 uv_face.append(uv_index)
             face_uvs.append(tuple(uv_face))
         if uv_values:
-            import numpy as np
-
             uvs = np.asarray(uv_values, dtype=float)
 
     return MeshData(

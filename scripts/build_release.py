@@ -206,10 +206,10 @@ BANNED_CODE = (
     (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
     (r"__pycache__|\.pyc\b", "bytecode"),
 )
-BANNED_TEXT = ("bench/", "Clean Rows", "WreckQuad", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
-LISTING_NOTICES = """# Third-party notices (extensions.blender.org build)
+BANNED_TEXT = ("bench/", "GPU bake", "extensions.blender.org build", "Clean Rows", "WreckQuad", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
+LISTING_NOTICES = """# Third-party notices
 
-CurioMesh is GPL-3.0-or-later. This build is Python only and contains no compiled code.
+CurioMesh is GPL-3.0-or-later. It contains Python code only and no compiled or third-party code.
 
 ## Data
 
@@ -464,7 +464,7 @@ def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
         if reason.endswith((".", "!", "?")) or "\n" in reason:
             problems.append(f"manifest permission {key}: one sentence, no ending punctuation")
     for line in manifest.get("copyright", []):
-        if not re.fullmatch(r"\d{4}(-\d{4})? \S.*", line) or "native" in line:
+        if not re.fullmatch(r"\d{4}(-\d{4})? \S.*", line) or re.search(r"native|\.rs\b|\bRust\b", line):
             problems.append(f"manifest copyright: 'Year Name' for included code only: {line!r}")
     if problems:
         raise ValueError(f"{path}: not ready for extensions.blender.org:\n" + "\n".join(problems))

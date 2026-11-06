@@ -50,14 +50,12 @@ class FlatQuadReport:
     input_faces: int = 0
     output_faces: int = 0
     regions: int = 0
-    rejected_regions: int = 0
     flat_faces_in: int = 0
     flat_faces_out: int = 0
     detail_faces: int = 0
     tolerance: float = 0.0
     all_quads: bool = False
     message: str = ""
-    flat_face_mask: list[bool] = field(default_factory=list)
     rejected_faces: dict[str, int] = field(default_factory=dict)  # faces in regions turned down, by reason
 
 
@@ -623,12 +621,10 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
         name=mesh.name,
     )
     report.regions = len(built)
-    report.rejected_regions = int(sum(1 for group in members if len(group) >= options.min_faces)) - len(built)
     report.flat_faces_in = int(is_flat.sum())
     report.flat_faces_out = int(sum(flags))
     report.detail_faces = int(len(flags) - sum(flags))
     report.output_faces = len(result.faces)
-    report.flat_face_mask = flags
     report.message = f"{report.regions} flat regions: {report.flat_faces_in:,} faces became {report.flat_faces_out:,} triangles"
     return result, report
 

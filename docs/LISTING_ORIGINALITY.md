@@ -1,11 +1,11 @@
-# Originality (extensions.blender.org build)
+# Originality
 
 CurioMesh is written for this repository. No code, UI, feature names or text were copied or translated from other
 retopology tools, commercial or open source. Where an algorithm rests on published math, the module says so and cites
 the paper or author: that is how we credit ideas, and the code is our own writing of them. Blender's own operators
 (QuadriFlow Remesh, Voxel Remesh, Decimate, Multires, Bevel, Data Transfer) are called, not included.
 
-This build is Python only and contains no third-party code. Its bundled data and their sources are listed in
+CurioMesh contains Python code only and no compiled or third-party code. Its bundled data and their sources are listed in
 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and [PATTERN_SOURCES.md](PATTERN_SOURCES.md).
 
 ## Module by module

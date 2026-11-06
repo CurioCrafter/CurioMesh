@@ -255,7 +255,7 @@ def rate(machine: dict, est: dict, settings: Settings, slow: bool = False) -> tu
 # makes each ray dearer); the unwrap of 3,000 faces is inside the fixed part.
 BAKE_FIXED_S = 0.04
 BAKE_S_PER_MPIX_MAP = 1.18
-BAKE_FIT_THREADS = 4  # more cores bake faster, up to BAKE_MOST_THREADS (limitation: linear in threads, GPU bakes are not modelled)
+BAKE_FIT_THREADS = 4  # more cores bake faster, up to BAKE_MOST_THREADS (limitation: assumes bake time falls linearly with cores)
 BAKE_MOST_THREADS = 16
 BAKE_MAPS = {"OFF": 0, "NORMAL": 1, "NORMAL_COLOR": 2}
 # Not fitted: how much longer than Keep Detail each style runs. Even Rows (QuadriFlow, capped at 10 minutes a try) and the
