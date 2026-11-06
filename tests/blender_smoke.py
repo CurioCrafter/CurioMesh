@@ -937,6 +937,18 @@ class _MockLayout:
         if propname not in data.bl_rna.properties or active_propname not in active_data.bl_rna.properties:
             raise AssertionError(f"ui draw: bad template_list {propname!r}")
 
+    def prop_enum(self, data, name, value, **kwargs):
+        if name not in data.bl_rna.properties:
+            raise AssertionError(f"ui draw: {data.bl_rna.identifier} has no property {name!r}")
+
+    def popover(self, panel, text="", icon="NONE", **kwargs):
+        self._icon(icon)
+        if not hasattr(bpy.types, panel):
+            raise AssertionError(f"ui draw: unknown popover {panel!r}")
+
+    def template_icon(self, icon_value=0, scale=1.0):
+        pass
+
 
 def _draw_all_panels(label):
     """Draw every CurioMesh panel (and its header) against the mock layout; return how many drew."""
@@ -944,7 +956,9 @@ def _draw_all_panels(label):
 
     _MockLayout.ICONS = set(bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items.keys())
     drawn = 0
-    for cls in ui.panel_classes():
+    from curiomesh import panel
+
+    for cls in (*ui.panel_classes(), *panel.POPOVERS):
         poll = getattr(cls, "poll", None)
         if poll is not None and not poll(bpy.context):
             continue
@@ -987,13 +1001,17 @@ def run_ui_prefs_case(module):
         if value != want and not (isinstance(want, float) and abs(value - want) < 1e-6):
             raise AssertionError(f"ui prefs: default of {name} is {value!r}, expected {want!r}")
 
-    # Tab rename re-registers every panel (Quick Start, its folds and Regions).
+    # Tab rename re-registers every panel: the main ones to the tab, the Pro ones to "<tab> Pro".
+    prefs.pro_mode = True
     prefs.panel_tab = "Retopo"
     for cls in ui.panel_classes():
-        if cls.bl_category != "Retopo" or getattr(bpy.types, cls.__name__).bl_category != "Retopo":
-            raise AssertionError(f"ui prefs: {cls.__name__} did not move to the Retopo tab")
+        want = "Retopo Pro" if cls in ui.pro_panel_classes() else "Retopo"
+        if cls.bl_category != want or getattr(bpy.types, cls.__name__).bl_category != want:
+            raise AssertionError(f"ui prefs: {cls.__name__} did not move to the {want} tab")
+    if bpy.types.CURIOMESH_PT_guided.bl_category != "Retopo" or bpy.types.CURIOMESH_PT_panel.bl_category != "Retopo Pro":
+        raise AssertionError("ui prefs: main or Pro panel in the wrong tab")
     prefs.panel_tab = "   "
-    if bpy.types.CURIOMESH_PT_panel.bl_category != "CurioMesh":
+    if bpy.types.CURIOMESH_PT_panel.bl_category != "CurioMesh Pro":
         raise AssertionError("ui prefs: blank tab name should fall back to CurioMesh")
     prefs.panel_tab = "CurioMesh"
 
@@ -1127,7 +1145,7 @@ def run_ui_prefs_case(module):
     prefs.hud_scale = 1.8
     prefs.panel_tab = "Temp"
     bpy.ops.curiomesh.reset_preferences()
-    if prefs.hud_scale != 1.0 or bpy.types.CURIOMESH_PT_panel.bl_category != "CurioMesh":
+    if prefs.hud_scale != 1.0 or bpy.types.CURIOMESH_PT_guided.bl_category != "CurioMesh" or prefs.pro_mode:
         raise AssertionError("ui prefs: reset_preferences did not restore defaults")
     print("PASS ui_prefs")
 
