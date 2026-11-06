@@ -78,11 +78,24 @@ def fit_vertices(points, quads, sample_pos, sample_nrm, sample_area, owner) -> n
     return untangled(points, moved, quads)
 
 
+def _crossings(points: np.ndarray, quads: np.ndarray) -> np.ndarray:
+    """Each pair of quads that pass through each other, as one number (lower * count + higher). Empty outside Blender."""
+
+    from .checks import crossing_pairs
+
+    if not len(quads):
+        return np.zeros(0, dtype=np.int64)
+    try:
+        pairs = np.asarray(crossing_pairs(points, [tuple(q) for q in quads.tolist()]), dtype=np.int64).reshape(-1, 2)
+    except ImportError:  # no BVH outside Blender
+        return np.zeros(0, dtype=np.int64)
+    return pairs.min(axis=1) * len(quads) + pairs.max(axis=1)
+
+
 def untangled(before: np.ndarray, after: np.ndarray, quads: np.ndarray, rounds: int = 6) -> np.ndarray:
     """`after` with the corners put back of every quad the move folded over its neighbour, bent across a diagonal, or
     pushed through another quad, where `before` had none of that. Fitting each corner to its own share of the source
-    pulls neighbouring corners different ways on thin walls and in creases, which tangles the faces between them.
-    Quads pushed through others are not looked for in this build."""
+    pulls neighbouring corners different ways on thin walls and in creases, which tangles the faces between them."""
 
     moved = after.copy()
     if not len(quads):
@@ -93,11 +106,14 @@ def untangled(before: np.ndarray, after: np.ndarray, quads: np.ndarray, rounds: 
         normal = _normals(at, quads)[0]
         return (normal[edge[:, 0]] * normal[edge[:, 1]]).sum(axis=1) < FOLD
 
-    was_folded, was_bent = folded(before), quad_quality(before[quads]) <= 0.0
+    was_folded, was_bent, was_crossing = folded(before), quad_quality(before[quads]) <= 0.0, _crossings(before, quads)
     for _ in range(rounds):
         bad = np.zeros(len(quads), dtype=bool)
         bad[edge[folded(moved) & ~was_folded].ravel()] = True
         bad |= (quad_quality(moved[quads]) <= 0.0) & ~was_bent
+        crossing = _crossings(moved, quads)
+        new = crossing[~np.isin(crossing, was_crossing)]
+        bad[new // len(quads)] = bad[new % len(quads)] = True
         ids = np.unique(quads[bad])
         ids = ids[(moved[ids] != before[ids]).any(axis=1)]
         if not len(ids):

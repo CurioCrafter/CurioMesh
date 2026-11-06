@@ -32,7 +32,7 @@ from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
 from .triadq import tasks
-from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patterns, repair, special, views
+from .triadq import bakescore, cases, checks, detail, hardsurf, issues, parts, patch, patterns, redo, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
@@ -107,6 +107,7 @@ CHORDS_SECONDS = 240.0  # time for redrawing and judging per run; plain collapse
 CHORDS_MESSY = 0.3  # a part is redrawn when more than this share of its corners are poles
 TURN_UP_TO = 150_000  # quads: edges are spun at poles up to here (plain Python, about 3 s per 15,000 quads)
 TURN_LOSS = 1.0  # points of view change spinning edges may add, staying within what Keep Detail counts as a fit
+HARD = {"panels": False, "cylinders": False}  # hard-surface rebuilds when the caller says nothing (hard_surface.job_flags)
 TWEAK = {"rows": 0.5, "flat": 0.5, "poles": 1}  # the Tweak settings as they are by default: what the constants above give (poles: 1 on, 0 off)
 
 
@@ -139,10 +140,16 @@ REPAIR_MOST_FACES = 200_000  # a part bigger than this is left and its spots sel
 UNTANGLE_SECONDS = 60.0  # safety net only: turning folded faces back ends after its rounds (a big scan takes a few seconds)
 REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is selected on Apply (the crane spent 215 s for 71 spots)
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
+REDO_SECONDS = 60.0  # Redo Rough Spots: time per run; the spots not reached stay as they are
+REDO_ROUNDS = 2  # the second round goes back to spots still rough, in a region one ring wider
+REDO_SPOTS = 200  # spots looked at per round, worst first
+REDO_RINGS = 2  # faces round a spot taken into its region, in rings of neighbours
+REDO_MOST_FACES = 600  # a region never gets bigger than this
+REDO_SHARES = (0.5, 1.0, 0.25)  # per region: how far its inner corners are put back towards the source, each tried
 if os.environ.get("CURIOMESH_NO_TIME_LIMITS", "").strip().lower() in {"1", "true", "on", "yes"}:
     # The limits above end work by the clock, so a slower or busier computer stops at another point and the result differs a little.
     # Set this to run to the end instead: the same model and settings then give the same result every time.
-    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = float("inf")
+    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = REDO_SECONDS = float("inf")
 SOURCE_BACK = 3000  # faces: only a part this small is put back as the source's own faces; a bigger one is left and selected
 INLINE = ("QUADRIFLOW", "GRID", "FLOW")  # methods that must run on the main thread
 STEP = 0.8  # each size made in steps is this share of the size before it
@@ -636,7 +643,8 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False, tweak: dict | None = None):
+    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
+        self.hard = dict(HARD if hard is None else hard)  # Clean Panels and Even Cylinders: more rebuilt sizes per part
         self.redo_rough = bool(redo_rough)  # Redo Rough Spots: regions round the spots still bad after the repairs are made again, finer
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
         self.redo_counts = {"regions": 0, "no better": 0, "kept": 0}  # what happened to the regions tried, for the bench
@@ -987,7 +995,8 @@ class AutoJob:
         seen = 0.0
         enough = GOOD_ENOUGH * self.detail / 100.0
         if not cut and self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
-            tries = parts.rebuilds(points, polys, max(set(kinds), key=kinds.count))
+            kind = max(set(kinds), key=kinds.count)
+            tries = chain(parts.rebuilds(points, polys, kind), hardsurf.rebuilds(points, polys, kind, **self.hard))
             while True:
                 out = yield from self._off(lambda: next(tries, False))
                 if out is False:
@@ -1001,7 +1010,8 @@ class AutoJob:
                 wrong, shown = self._counts(reference, view, pixel)
                 seen = max(seen, shown * pixel * pixel)
                 turned_sizes.append(rebuilt)
-                turned_levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
+                weight = hardsurf.WEIGHTS.get(out[3], QUAD_WEIGHT) if len(out) > 3 else QUAD_WEIGHT  # clean panels and even cylinders count as fewer faces
+                turned_levels.append(Level(len(rebuilt[1]) * weight, REBUILD_MARGIN * wrong * pixel * pixel))
                 if wrong <= enough * shown:
                     break
             hopeless = HOPELESS * PIECE_LIMIT * self.detail / 100.0
@@ -1140,6 +1150,11 @@ class AutoJob:
                 if out is not None:
                     turned_sizes.append(out[0])
                     turned_levels.append(out[1])
+        if self.hard.get("cylinders") and not cut and sizes:  # Even Cylinders: a visibly round part never becomes a coarse prism
+            least = yield from self._off(lambda: hardsurf.round_floor(points, polys, float(np.linalg.norm(np.ptp(self.co, axis=0)))))
+            if least and any(level.faces >= least for level in levels):
+                kept = [k for k, level in enumerate(levels) if level.faces >= least]
+                sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
         ready = [all(len(f) == 4 for f in size[1]) for size in turned_sizes] + [False] * (len(sizes) + 1)
         sizes = turned_sizes + sizes + [whole]
         levels = turned_levels + levels + [Level(len(polys), 0.0)]
@@ -1941,6 +1956,12 @@ class AutoJob:
             return same
         return moved, kept, seen, now, count
 
+    def _serious(self, points, faces, after):
+        """Generator: per face, turned inward, folded over or crossing (the Issue Finder's serious kinds). Kept for reuse."""
+        found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        self._defects = (points, faces, found)
+        return found.inward | found.folded_over | found.crossing
+
     def _affordable(self, bad: list[int], start_faces: int) -> list[int]:
         """As many of these parts as can go one size up inside REPAIR_GROWTH, so one big part does not stop the small ones."""
         room = (REPAIR_GROWTH - 1.0) * start_faces
@@ -1956,7 +1977,6 @@ class AutoJob:
     def _check(self, points, faces, mats, piece, view):
         """Generator: measure the result against the source, repair the parts that got new problems, say what happened."""
         began = time.perf_counter()
-        self._repair_until = began + REPAIR_SECONDS
         self.stage = "Checking for broken topology"
         yield
         if self._src_check is None:
@@ -1969,13 +1989,21 @@ class AutoJob:
         after = yield from self._inspected(points, faces, piece)
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
         first = {k: getattr(after, k) for k in keys}
+        self._repair_until = time.perf_counter() + REPAIR_SECONDS  # from here: checking the source first must not use it up
         start_faces = len(faces)
         points, faces, view, after, _turned = yield from self._untangle(points, faces, piece, view, after)
-        points, faces, mats, piece, view, after, fixed = yield from self._fix_locally(points, faces, mats, piece, view, after)
+        # Parts one size up first, then the crossings left filled spot by spot. A size up costs a pairing and a look, a
+        # filled spot about a second, and the fills used to eat the whole time before any part was remade: the chess
+        # knight's crossings took 30 s of fills and stayed, one size up cleared them. Parts still turned inward or
+        # folded over after untangling go too: their size is too coarse for how thin they are.
+        fixed, stuck, serious = 0, set(), None
         for attempt in range(0 if self.chunks else FIX_TRIES):  # a cut piece's parts are one surface: they can't be remade alone
             spots = checks.new_spots(before, after)
             bent = set(np.unique(piece[after.bent]).tolist()) if len(after.bent) == len(piece) else set()
             spots = sorted(spots, key=lambda p: p not in bent)  # folded quads first: small thin parts, cheap to remake a size up
+            if serious is None:
+                serious = yield from self._serious(points, faces, after)
+            spots += [p for p in checks.worst_parts(piece, serious) if p not in stuck and p not in spots]
             bad = self._affordable([p for p in spots[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES and not self._cut(self.pieces[p])], start_faces)
             if not bad or self._stopped or time.perf_counter() > self._repair_until:
                 break
@@ -1988,12 +2016,21 @@ class AutoJob:
             if seen[0] > max(1.1 * self.detail, 1.02 * view[0]) or len(tried[1]) > REPAIR_GROWTH * start_faces:  # worse than what it repairs
                 self.picked, self.tuned = picked, tuned
                 break
+            now = yield from self._inspected(tried[0], tried[1], tried[3])
+            better = yield from self._serious(tried[0], tried[1], now)
+            if better.sum() > serious.sum():  # a size up that leaves more broken faces is no repair
+                self.picked, self.tuned = picked, tuned
+                stuck |= set(bad)
+                continue
+            stuck |= {p for p in bad if better[tried[3] == p].sum() >= serious[piece == p].sum()}  # one size up didn't help: try others next
+            fixed += max(0, len(checks.new_spots(before, after)) - len(checks.new_spots(before, now)))
             points, faces, mats, piece = tried
-            view = seen
-            after = yield from self._inspected(points, faces, piece)
-            fixed += len(bad) - len(checks.new_spots(before, after))
-            points, faces, mats, piece, view, after, spots = yield from self._fix_locally(points, faces, mats, piece, view, after)
-            fixed += spots
+            view, after, serious = seen, now, better
+        # The fills have what the remakes left of the time. More does not help: at 55 to 120 s instead of 30 they cleared
+        # no more parts on four of six test models, as the spots left are ones a fill can't clear.
+        points, faces, mats, piece, view, after, spots = yield from self._fix_locally(points, faces, mats, piece, view, after)
+        fixed += spots
+        points, faces, mats, piece, view, after = yield from self._redo_rough(points, faces, mats, piece, view, after)
         left = checks.new_spots(before, after)
         flag = np.zeros(len(faces), bool)
         for p in left:
@@ -2014,8 +2051,123 @@ class AutoJob:
         self.timings["check and repair"] = self.timings.get("check and repair", 0.0) + time.perf_counter() - began
         if left and time.perf_counter() > self._repair_until:
             self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
-        check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left)), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
+        check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left), int(found.overlap.sum())), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
         return points, faces, mats, view, check
+
+    def _redo_rough(self, points, faces, mats, piece, view, after):
+        """Generator: the spots still bad after the repairs, each in a small region whose outline stays, laid out again:
+        its inner corners put back towards the source, part or all of the way. A region's redo is kept if it leaves fewer bad
+        faces there; a round is kept if nothing broke and the camera still agrees. Returns (points, faces, mats, piece, view, after)."""
+        same = (points, faces, mats, piece, view, after)
+        if not self.redo_rough or self.output_kind == "TRIS" or self.mirror is not None or self.outside is not None or self.guide_lines or self.strips:
+            return same
+        began = time.perf_counter()
+        until = began + REDO_SECONDS
+        keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
+        redone, bad_before = 0, None
+        for round_index in range(REDO_ROUNDS):
+            if self._stopped or time.perf_counter() > until:
+                break
+            self.stage = f"Redoing rough spots, round {round_index + 1}"
+            yield
+            found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+            bad = found.any()
+            if bad_before is None:
+                bad_before = int(bad.sum())
+            if not bad.any():
+                break
+            spots = issues.find_spots(points, faces, {k: getattr(found, k) for k in checks.Defects.BROKEN}, piece, REDO_SPOTS)
+            rings = REDO_RINGS + round_index
+            moved, regions = yield from self._background(lambda: self._redo_spots(points, faces, piece, spots, rings, until))
+            if not regions:
+                break
+            now = yield from self._inspected(moved, faces, piece)
+            if any(getattr(now, k) > getattr(after, k) for k in keys):
+                # A moved corner can pass through a face outside its region's window: those regions go back, the rest stay.
+                touched = np.zeros(len(points), bool)
+                for f in np.flatnonzero(now.crossing | now.bent if len(now.bent) == len(faces) else now.crossing).tolist():
+                    touched[list(faces[f])] = True
+                kept = [ids for ids in regions if not touched[ids].any()]
+                back = np.array(points, dtype=np.float64)
+                for ids in kept:
+                    back[ids] = moved[ids]
+                self.redo_counts["undone"] = self.redo_counts.get("undone", 0) + len(regions) - len(kept)
+                moved, regions = back, kept
+                if kept:
+                    now = yield from self._inspected(moved, faces, piece)
+                if not kept or any(getattr(now, k) > getattr(after, k) for k in keys):
+                    self.redo_counts["broke"] = {k: (getattr(after, k), getattr(now, k)) for k in keys if getattr(now, k) != getattr(after, k)}
+                    break
+            seen = yield from self._look(moved, faces, *self._view)
+            if seen[0] > max(1.1 * self.detail, 1.02 * view[0]):
+                self.redo_counts["view"] = (view[0], seen[0])
+                break
+            points, view, after = moved, seen, now
+            faces = list(faces)  # a new list: copies placed as instances no longer match
+            redone += len(regions)
+        self.timings["redo rough spots"] = time.perf_counter() - began
+        if redone:
+            self.redo_numbers = (redone, bad_before)
+            self._defects = None
+        return points, faces, mats, piece, view, after
+
+    def _redo_spots(self, points, faces, piece, spots, rings: int, until: float):
+        """(points, the corners moved in each region redone): each spot's region with its inner corners laid out the way
+        that leaves the fewest bad faces round it, where that is fewer than now. Worker thread."""
+        if self._src_middles is None:
+            sizes = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
+            flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes.sum()))
+            self._src_middles = np.add.reduceat(self.co[flat], np.concatenate(([0], np.cumsum(sizes)[:-1])), axis=0) / sizes[:, None]
+        taken = np.zeros(len(faces), bool)
+        users = redo.corner_users(faces)
+        points = np.array(points, dtype=np.float64)
+        regions = []
+        for spot in spots:
+            if self._stopped or time.perf_counter() > until:
+                break
+            region = redo.carve(faces, spot["faces"], rings, REDO_MOST_FACES, taken, users)
+            if not len(region):
+                continue
+            taken[region] = True
+            window = redo.carve(faces, region, 2, 50 * REDO_MOST_FACES, users=users)
+            used = np.unique(np.fromiter((v for f in window.tolist() for v in faces[f]), dtype=np.int64))
+            local = {int(v): k for k, v in enumerate(used.tolist())}
+            near = [tuple(local[v] for v in faces[f]) for f in window.tolist()]
+            mine = np.flatnonzero(np.isin(window, region))
+            free = redo.free_corners(near, mine, len(used))
+            if not free.any():
+                continue
+            self.redo_counts["regions"] += 1
+            co = points[used]
+            region_faces = [near[i] for i in mine.tolist()]
+            edge = float(np.mean([np.linalg.norm(co[f[k]] - co[f[k - 1]]) for f in region_faces for k in range(len(f))]))
+            on = self._near_source(int(np.bincount(piece[window[mine]]).argmax()), co[free])[0]
+            close = np.linalg.norm(on - co[free], axis=1) < edge
+            best, best_co = self._bad_here(co, near), None
+            for share in REDO_SHARES:
+                tried = co.copy()
+                tried[free] = redo.toward(co[free], on, close, share)
+                bad = self._bad_here(tried, near)
+                if redo.better(best, bad):
+                    best, best_co = bad, tried
+            if best_co is None:
+                self.redo_counts["no better"] += 1
+                continue
+            points[used[free]] = best_co[free]
+            regions.append(used[free])
+            self.redo_counts["kept"] += 1
+        return points, regions
+
+    def _bad_here(self, points, faces) -> tuple[int, int]:
+        """(bad faces, bent quads) of this patch of the result, against the source round it. Sunk is not asked: that needs the whole source."""
+        low, high = points.min(axis=0), points.max(axis=0)
+        margin = 0.5 * float((high - low).max())
+        ids = np.flatnonzero(((self._src_middles >= low - margin) & (self._src_middles <= high + margin)).all(axis=1))
+        if not len(ids):
+            return 0, 0
+        src_co, src_faces, _kinds = self._piece_arrays(ids)
+        found = checks.defects(points, faces, src_co, src_faces)
+        return int(sum(getattr(found, k) for k in checks.Defects.BROKEN if k != "sunk").sum()), int(found.bent.sum())
 
     def _kill_worker(self) -> None:
         if self._worker is not None:

@@ -251,14 +251,14 @@ def setup_of(job) -> dict:
     return {
         "co": job.co, "faces": FlatFaces.of(job.faces), "materials": np.asarray([int(m) for m in job.materials], dtype=np.int32),
         "detail": job.detail, "target_faces": job.target_faces, "mirror": job.mirror, "drop": job.drop, "method": job.method, "output": job.output_kind,
-        "methods": dict(job.methods), "style": job.style, "settings": job.cfg, "rough": job.rough, "baked": job.baked,
+        "methods": dict(job.methods), "style": job.style, "settings": job.cfg, "rough": job.rough, "baked": job.baked, "hard": job.hard,
         "pieces": job.pieces, "locked": job.locked, "chunks": job.chunks, "names": job.names, "picture_sizes": job.picture_sizes,
     }
 
 
 def worker_job(job_class, context, setup: dict):
     """The job a helper measures parts of: built like the one in the user's Blender, already cut into its parts."""
-    job = job_class(context, setup["co"], setup["faces"], setup["materials"], setup["detail"], setup["target_faces"], mirror=setup["mirror"], drop=setup["drop"], method=setup["method"], output=setup["output"], methods=setup["methods"], style=setup["style"], settings=setup["settings"], rough=setup["rough"], baked=setup["baked"])
+    job = job_class(context, setup["co"], setup["faces"], setup["materials"], setup["detail"], setup["target_faces"], mirror=setup["mirror"], drop=setup["drop"], method=setup["method"], output=setup["output"], methods=setup["methods"], style=setup["style"], settings=setup["settings"], rough=setup["rough"], baked=setup["baked"], hard=setup.get("hard"))
     for name in ("pieces", "locked", "chunks", "names", "picture_sizes"):
         setattr(job, name, setup[name])
     job.spot_copies = False  # the job that sent the part already knows it is no copy

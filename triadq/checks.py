@@ -239,8 +239,16 @@ def new_spots(before: Inspect, after: Inspect) -> list[int]:
     return sorted(bad, key=lambda p: (-bad[p], p))
 
 
-def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
-    """The outcome in plain words. Only what the result added counts."""
+def worst_parts(piece: np.ndarray, marked: np.ndarray) -> list[int]:
+    """Pieces holding marked faces, the most first (ties by number)."""
+    ids, counts = np.unique(np.asarray(piece)[np.asarray(marked, bool)], return_counts=True)
+    return [int(p) for p in ids[np.lexsort((ids, -counts))]]
+
+
+def describe(before: Inspect, after: Inspect, fixed: int, left: int, overlap: int = 0) -> str:
+    """The outcome in plain words. Only what the result added counts. `overlap`: faces of the result lying on others
+    (`Defects.overlap`, which already leaves out what the source has itself), so a pipe whose walls fall onto each other
+    is never "no new problems"."""
     new = {
         "non-manifold edges": max(0, after.nm_edges - before.nm_edges),
         "non-manifold vertices": max(0, after.nm_verts - before.nm_verts),
@@ -249,6 +257,7 @@ def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
         "folded quads": max(0, after.folded - before.folded),
         "holes opened": max(0, after.holes - before.holes),
         "self-intersections": sum(after.new_cross.values()) if after.new_cross is not None else max(0, (after.selfx or 0) - (before.selfx or 0)),
+        "faces lying on each other": int(overlap),
     }
     found = ", ".join(f"{n:,} {name}" for name, n in new.items() if n)
     note = "" if after.selfx is not None else " (self-intersections not tested)"
@@ -263,7 +272,13 @@ def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
 
 FACING = -0.5  # a face whose normal is more than 120 degrees off the source's there is turned inward
 FOLD = -0.866  # two faces on one edge more than 150 degrees apart lie folded over each other
+SUNK = 0.5  # a face whose middle is inside the source by more than this share of its longest side has sunk into it
+LOOK_AHEAD = 1e-3  # of a face's longest side: how far in front of it the source is asked which way is out
 FLAT_AREA = 1e-6  # of the mean squared side: a face without area
+TOUCH_PROBE = 0.1  # of a face's longest side: how far behind and in front of it to ask which part is there
+TOUCH_NEAR = 0.5  # ...and how close both surfaces must be, so a part merely nearby doesn't count as touching
+MOST_SUNK = 20_000  # faces tested by winding number, deepest first: it looks at every source triangle
+OVERLAP_SPLITS = 4  # random halves tried for faces lying on each other: one misses a pair half the time
 
 
 @dataclass
@@ -279,12 +294,18 @@ class Defects:
     duplicate: np.ndarray  # the same corners as an earlier face
     overlap: np.ndarray  # lies on another face, in its plane, without sharing a corner
     pairs: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.int64))  # the crossing pairs
+    touching: np.ndarray | None = None  # on its own part's surface where another part presses against it back to back
 
-    KINDS = ("inward", "sunk", "crossing", "folded_over", "bent", "flat", "duplicate", "overlap")
+    KINDS = ("inward", "sunk", "crossing", "folded_over", "bent", "flat", "duplicate", "overlap", "touching")
+    BROKEN = KINDS[:-1]  # touching is a note: the face is where its part is, the other part is in front of it
+
+    def __post_init__(self):
+        if self.touching is None:
+            self.touching = np.zeros(len(self.inward), bool)
 
     def any(self) -> np.ndarray:
         out = np.zeros(len(self.inward), bool)
-        for k in self.KINDS:
+        for k in self.BROKEN:
             out |= getattr(self, k)
         return out
 
@@ -317,19 +338,147 @@ def _edge_faces(pad: np.ndarray) -> np.ndarray:
     return np.column_stack((face[two], face[two + 1]))
 
 
+class FaceTree:
+    """Blender's BVHTree of polygons, asked about many points at once."""
+
+    def __init__(self, co, faces):
+        from mathutils.bvhtree import BVHTree
+
+        self._tree = BVHTree.FromPolygons(np.asarray(co, dtype=np.float64).tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+
+    def nearest(self, queries) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(closest point (N, 3), polygon, distance) for each query; distance inf where the tree is empty."""
+        queries = np.asarray(queries, dtype=np.float64).reshape(-1, 3)
+        at, face, away = np.zeros((len(queries), 3)), np.zeros(len(queries), dtype=np.int64), np.full(len(queries), np.inf)
+        find = self._tree.find_nearest
+        for k, point in enumerate(queries.tolist()):
+            hit, _normal, index, distance = find(point)
+            if index is not None:
+                at[k], face[k], away[k] = hit, index, distance
+        return at, face, away
+
+
+class PointTree:
+    """Blender's KDTree, asked about many points at once."""
+
+    def __init__(self, points):
+        from mathutils.kdtree import KDTree
+
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        self._tree = KDTree(len(points))
+        for index, point in enumerate(points.tolist()):
+            self._tree.insert(point, index)
+        self._tree.balance()
+
+    def nearest(self, queries) -> tuple[np.ndarray, np.ndarray]:
+        """(index, distance) of the nearest point to each query."""
+        queries = np.asarray(queries, dtype=np.float64).reshape(-1, 3)
+        index, away = np.zeros(len(queries), dtype=np.int64), np.full(len(queries), np.inf)
+        for k, point in enumerate(queries.tolist()):
+            _co, found, distance = self._tree.find(point)
+            if found is not None:
+                index[k], away[k] = found, distance
+        return index, away
+
+
+def face_tree(co, faces) -> FaceTree | None:
+    """A `FaceTree`, or None outside Blender (the checks that need one are then left out)."""
+    try:
+        return FaceTree(co, faces)
+    except ImportError:
+        return None
+
+
+_source_tree: tuple = ((), None)  # (which source, its tree): the same source is checked again and again in one job
+
+
+def _tree_of_source(source_co, source_faces):
+    global _source_tree
+    key = (id(source_co), len(source_co), len(source_faces))
+    if _source_tree[0] != key:
+        _source_tree = (key, face_tree(source_co, source_faces))
+    return _source_tree[1]
+
+
+def _overlapping(co, faces, pad, normal, middle, size, seed: int = 0) -> np.ndarray:
+    """Faces whose middle lies on another face, in its plane, that shares no corner with it."""
+    out = np.zeros(len(pad), bool)
+    if len(pad) < 2:
+        return out
+    rng = np.random.default_rng(seed)
+    for _ in range(OVERLAP_SPLITS):  # ponytail: random halves miss a pair 1/16 of the time; a k-nearest query would not
+        half = rng.random(len(pad)) < 0.5
+        here, there = np.flatnonzero(half), np.flatnonzero(~half)
+        if not len(here) or not len(there):
+            continue
+        tree = face_tree(co, [faces[f] for f in there.tolist()])
+        if tree is None:
+            return out
+        _at, hit, away = tree.nearest(middle[here])
+        hit = there[np.asarray(hit, dtype=np.int64)]
+        close = (np.asarray(away) < 0.02 * size[here]) & (np.abs((normal[here] * normal[hit]).sum(axis=1)) > 0.95)
+        if close.any():
+            a, b = here[close], hit[close]
+            apart = ~(pad[a][:, :, None] == pad[b][:, None, :]).any(axis=(1, 2))
+            out[a[apart]] = out[b[apart]] = True
+    return out
+
+
+def source_parts(pad: np.ndarray) -> np.ndarray:
+    """Per face of a corner table, which edge-connected part it belongs to (the smallest face number in it)."""
+    a, b = pad.ravel(), np.roll(pad, -1, axis=1).ravel()
+    face = np.repeat(np.arange(len(pad)), pad.shape[1])
+    real = a != b
+    key = np.minimum(a, b)[real] * (int(pad.max(initial=0)) + 1) + np.maximum(a, b)[real]
+    face = face[real]
+    order = np.argsort(key, kind="stable")
+    key, face = key[order], face[order]
+    same = key[1:] == key[:-1]
+    label = np.arange(len(pad))
+    first, second = face[:-1][same], face[1:][same]
+    while True:  # hook to the smaller label, then jump, until every edge agrees
+        low = np.minimum(label[first], label[second])
+        if np.array_equal(label[first], label[second]):
+            return label
+        np.minimum.at(label, first, low)
+        np.minimum.at(label, second, low)
+        label = label[label]
+
+
+def touching_parts(ids, normal, middle, size, tree, source_normals, source_pad) -> np.ndarray:
+    """Of these faces turned inward, those lying on their own part's surface with another part pressed against it.
+
+    Just behind such a face its own part's surface faces the same way; just in front another part's surface faces back
+    at it, close enough that the votes turn it inward. A face really turned inside out has the same part on both sides.
+    """
+    out = np.zeros(len(normal), bool)
+    if not len(ids):
+        return out
+    step = (TOUCH_PROBE * size[ids])[:, None] * normal[ids]
+    _a, behind, back_gap = tree.nearest(middle[ids] - step)
+    _b, ahead, front_gap = tree.nearest(middle[ids] + step)
+    behind, ahead = np.asarray(behind, dtype=np.int64), np.asarray(ahead, dtype=np.int64)
+    part = source_parts(source_pad)
+    near = (np.asarray(back_gap) < TOUCH_NEAR * size[ids]) & (np.asarray(front_gap) < TOUCH_NEAR * size[ids])
+    own = (source_normals[behind] * normal[ids]).sum(axis=1) > -FACING
+    other = (source_normals[ahead] * normal[ids]).sum(axis=1) < FACING
+    out[ids[near & own & other & (part[behind] != part[ahead])]] = True
+    return out
+
+
 def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects:
-    """Everything wrong with each face of a result. `pairs`: crossings found already, else none are looked for.
-    `source_co` and `source_faces` are taken for the callers' sake: the lookups on the source (inward, sunk, faces lying
-    on each other) are not done in this build, so those masks stay empty."""
+    """Everything wrong with each face of a result, the source saying which way is out. The source lookups, the crossing
+    test and the overlap test use Blender's BVH: outside Blender those masks stay empty. `pairs`: crossings found already."""
     co = np.asarray(co, dtype=np.float64)
     faces = [tuple(f) for f in faces]
     count = len(faces)
     empty = np.zeros(count, bool)
     if not count:
-        return Defects(*(empty.copy() for _ in Defects.KINDS))
+        return Defects(*(empty.copy() for _ in Defects.BROKEN))
     pad = corner_table(faces)
-    normal, area, _middle = _normals(co, pad)
+    normal, area, middle = _normals(co, pad)
     sides = np.linalg.norm(co[pad] - co[np.roll(pad, -1, axis=1)], axis=2)
+    size = sides.max(axis=1)
     mean_side = float(sides[sides > 0].mean()) if (sides > 0).any() else 1.0
     sizes = np.fromiter((len(f) for f in faces), dtype=np.int64, count=count)
     flat = (area < FLAT_AREA * mean_side * mean_side) | np.fromiter((len(set(f)) < len(f) for f in faces), dtype=bool, count=count)
@@ -337,12 +486,63 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
     original = first[inverse.ravel()]
     duplicate = original != np.arange(count)
     bent = folded_quads(co, faces)
-    pairs = np.zeros((0, 2), np.int64) if pairs is None else np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+    if pairs is None:
+        try:
+            pairs = crossing_pairs(co, faces)
+        except ImportError:  # outside Blender: no BVH to find them with
+            pairs = np.zeros((0, 2), np.int64)
+    pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     crossing = empty.copy()
     crossing[pairs.ravel()] = True
-    inward, sunk, overlap = empty.copy(), empty.copy(), empty.copy()
+    inward, sunk, touching = empty.copy(), empty.copy(), empty.copy()
     edge = _edge_faces(pad)
     fold = (normal[edge[:, 0]] * normal[edge[:, 1]]).sum(axis=1) < FOLD
+    tree = None
+    if source_co is not None:
+        tree = _tree_of_source(source_co, source_faces)
+        source_co = np.asarray(source_co, dtype=np.float64)
+        source_faces = [tuple(f) for f in source_faces]
+    if tree is not None:
+        source_pad = corner_table(source_faces)
+        source_normals, _area, source_middle = _normals(source_co, source_pad)
+        source_sides = np.linalg.norm(source_co[source_pad] - source_co[np.roll(source_pad, -1, axis=1)], axis=2).max(axis=1)
+        stacked = _overlapping(source_co, source_faces, source_pad, source_normals, source_middle, source_sides)
+        at, hit, away = tree.nearest(middle)
+        hit = np.asarray(hit, dtype=np.int64)
+        source_normal = source_normals[hit]
+        # Which way is out, from the middle and halfway to each corner: a face across a sharp edge of the source gets
+        # both sides' say. A face lying on two source faces back to back (a sheet with both sides) can't be turned. The
+        # points sit just in front of the face, so one midway between the two sides of a plate asks the side it faces.
+        towards = 0.5 * (middle[:, None, :] + co[pad]) + (LOOK_AHEAD * size)[:, None, None] * normal[:, None, :]
+        _at, near, _away = tree.nearest(towards.reshape(-1, 3))
+        near = np.asarray(near, dtype=np.int64).reshape(len(pad), -1)
+        votes = np.where(stacked[near][:, :, None], 0.0, source_normals[near]).sum(axis=1) + np.where(stacked[hit][:, None], 0.0, source_normal)
+        length = np.linalg.norm(votes, axis=1)
+        inward = (length > 0.0) & ((normal * votes).sum(axis=1) < FACING * np.maximum(length, 1e-300))
+        touching = touching_parts(np.flatnonzero(inward), normal, middle, size, tree, source_normals, source_pad)
+        inward &= ~touching
+        depth = -((middle - at) * source_normal).sum(axis=1)
+        deep = np.flatnonzero((depth > SUNK * size) & (np.asarray(away) > 0.99 * SUNK * size))
+        deep = deep[np.argsort(-depth[deep] / size[deep])][:MOST_SUNK]
+        if len(deep):
+            tris = np.asarray([(f[0], f[i], f[i + 1]) for f in source_faces for i in range(1, len(f) - 1)], dtype=np.int64)
+            from .patch import inside_volume
+
+            sunk[deep] = inside_volume(middle[deep], source_co[tris])
+        fold &= (source_normal[edge[:, 0]] * source_normal[edge[:, 1]]).sum(axis=1) > FACING  # a knife edge of the source folds so too
     folded_over = empty.copy()
     folded_over[edge[fold].ravel()] = True
-    return Defects(inward, sunk, crossing, folded_over, bent, flat, duplicate, overlap, pairs)
+    overlap = _overlapping(co, faces, pad, normal, middle, size) & ~duplicate
+    overlap[original[duplicate]] = False  # the first of two duplicates is not also an overlap
+    if tree is not None:  # where the source passes through itself or lies on itself, the result may too
+        old = stacked.copy()
+        if len(pairs) or overlap.any():  # only then is it worth finding where the source crosses itself
+            old[crossing_pairs(source_co, source_faces).ravel()] = True
+        if old.any() and (len(pairs) or overlap.any()):
+            _near, gap = PointTree(source_middle[old]).nearest(middle)
+            new = np.asarray(gap) > 2.0 * size
+            pairs = pairs[new[pairs[:, 0]] | new[pairs[:, 1]]]
+            crossing[:] = False
+            crossing[pairs.ravel()] = True
+            overlap &= new
+    return Defects(inward, sunk, crossing, folded_over, bent, flat, duplicate, overlap, pairs, touching)

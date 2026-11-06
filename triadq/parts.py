@@ -418,10 +418,47 @@ def orient_like(points: np.ndarray, polys, source_points: np.ndarray, source_pol
     return [tuple(reversed(p)) for p in polys] if facing(points, polys, source_points, source_polys) < 0 else list(polys)
 
 
+ROUND_SHARE = 0.1  # a turned part whose radius is at least this share of its diagonal is visibly round (a pipe, a barrel, a wheel, a bolt)...
+ROUND_SPIN = 16  # ...and gets at least this many steps around, so it still reads as round
+WALL_KEEP = 0.7  # a closed profile (a hollow tube, a ring) simplified to less than this share of its area has lost a wall
+
+
+def min_spin(fit: dict) -> int:
+    """Fewest steps around for this turned part: a mostly round one never becomes an 8- or 12-sided prism."""
+
+    radius = float(np.max(np.asarray(fit["profile"])[:, 0])) if len(fit["profile"]) else 0.0
+    return ROUND_SPIN if radius >= ROUND_SHARE * fit["diag"] else 0
+
+
+def profile_holds(fit: dict, tol_share: float) -> bool:
+    """False when simplifying a closed profile at this tolerance would fold its inner and outer walls onto each other."""
+
+    if not fit["closed"]:
+        return True
+    profile = np.asarray(fit["profile"], dtype=np.float64)
+
+    def area(p):
+        return 0.5 * abs(float((p[:, 0] * np.roll(p[:, 1], -1) - np.roll(p[:, 0], -1) * p[:, 1]).sum()))
+
+    full = area(profile)
+    simple = _simplify(profile, True, tol_share * fit["diag"])
+    return full > 0.0 and len(simple) >= 4 and area(simple) >= WALL_KEEP * full
+
+
+def sweeps(fit: dict, kind: str = "0", floor: float = 0.0):
+    """The turned part at each step count of REVOLVES that keeps it round and its walls apart, fewest faces first.
+    `floor`: the smallest profile tolerance, as a share of the diagonal."""
+
+    least = min_spin(fit)
+    for spin, tolerance in REVOLVES:
+        tolerance = max(tolerance, floor)
+        if spin >= least and profile_holds(fit, tolerance):
+            yield build_revolve(fit, spin, tolerance, kind)
+
+
 def rebuilds(points: np.ndarray, polys, kind: str = "0"):
     """Generator of rebuilt versions of a piece, fewest faces first, as (points, quads, kinds); nothing if it isn't a known part."""
 
     fit = fit_revolve(points, polys)
     if fit is not None:
-        for spin, tolerance in REVOLVES:
-            yield build_revolve(fit, spin, tolerance, kind)
+        yield from sweeps(fit, kind)

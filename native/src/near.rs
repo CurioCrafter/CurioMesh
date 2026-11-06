@@ -365,7 +365,7 @@ fn closest_on_triangle(p: V3, a: V3, b: V3, c: V3) -> V3 {
 /// Do two triangles pass through each other? Blender's `isect_tri_tri_v3_ex` (GPL-2.0-or-later, see the file header), step for step and with its mix of
 /// single and double precision, so the count matches what Blender's BVH overlap gave: coplanar ones don't cross, and
 /// the pieces along the line where the planes meet must overlap by more than a point.
-fn triangles_cross(ta: &[[f32; 3]; 3], tb: &[[f32; 3]; 3]) -> bool {
+pub(crate) fn triangles_cross(ta: &[[f32; 3]; 3], tb: &[[f32; 3]; 3]) -> bool {
     let a = [to_f64(ta[0]), to_f64(ta[1]), to_f64(ta[2])];
     let b = [to_f64(tb[0]), to_f64(tb[1]), to_f64(tb[2])];
     let plane = |t: &[V3; 3]| {
