@@ -28,7 +28,8 @@ from .triadq import parts as P
 MOST_FACES = 400_000  # faces of your mesh: past this each rung is a long search, so there is no ladder
 ROWS_MOST = 100_000  # Even Rows rungs only up to here: one took over three minutes on a 17,000 face bust
 SLOW = 120.0  # seconds: a search slower than this gets only the sizes next to its own, and no Even Rows (a 79,000 triangle machine took about 6 minutes a rung)
-SLICE, GAP, WAIT = 0.03, 0.02, 0.25  # seconds of work per tick, between ticks, and between looks while a job of yours runs
+SLICE, GAP, WAIT = 0.03, 0.05, 0.25  # seconds of work per tick, between ticks, and between looks while a job of yours runs
+REST = 1.0  # seconds Blender is left alone after each finished size, before the next one starts
 THROTTLE = 0.1  # while you drag a slider the preview changes at most this often
 SETTLE = 0.4  # seconds after the last move: then the segments of the result are found (and a blend is looked at)
 QUIET = 1.0  # the ladder's own work waits this long after a slider moved, so dragging never competes with it
@@ -67,6 +68,16 @@ def cancel() -> None:
     drop_spares(_g().SPARE_MESHES[0])
     lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None, source_check=None)
     drag.update(pending=False, settled=True)
+
+
+def stop_more() -> None:
+    """Stop working out more sizes. The sizes already made stay on the sliders; a new Start works them all out again."""
+    if lad["job"] is not None:
+        lad["job"].stop()
+    lad.update(plan=[], job=None, doing=None)
+    if bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.unregister(_tick)
+    overlay.tag_redraw()
 
 
 def drop_spares(prefix: str) -> None:
@@ -173,8 +184,11 @@ def _tick():
     work_ = _g().state["work"]
     if (work_ is not None and work_["runner"].busy) or time.perf_counter() - drag["moved"] < QUIET:
         return WAIT  # yours first, and nothing while a slider moves
+    finished = len(lad["rungs"]) + len(lad["failed"])
     work(SLICE)
-    return GAP if lad["job"] is not None or lad["plan"] else None
+    if not (lad["job"] is not None or lad["plan"]):
+        return None
+    return REST if len(lad["rungs"]) + len(lad["failed"]) > finished else GAP
 
 
 # --------------------------------------------------------------------------- picking rungs
@@ -238,9 +252,9 @@ def compose(a, b, moved) -> dict:
 class ShowJob(segments.segment_goals.FindJob):
     """A blend of two rungs: look at the whole object first (its numbers are not known yet), then find its segments."""
 
-    def __init__(self, context, measure: bool):
+    def __init__(self, measure: bool):
         self.measure = measure
-        super().__init__(context)
+        super().__init__()
 
     def _run(self):
         if self.measure:
@@ -363,7 +377,7 @@ def _finish(context) -> None:
     if segments.seg.get("tree") is not None:
         segments.seg["tree_job"] = lad["rungs"][a]  # every rung is of the same mesh: the segment tree holds
     if moved or not segments.mirrored():  # finding the segments makes the parts table
-        runner = ShowJob(context, bool(moved))
+        runner = ShowJob(bool(moved))
         guided.state["work"] = {"key": lad["key"], "runner": runner, "cent": None, "seen": 0, "areas": []}
         if not bpy.app.timers.is_registered(guided._auto_slice):
             bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
@@ -459,6 +473,8 @@ def draw(layout, gs) -> None:
     note = status()
     if note:
         overlay.wrap_label(box, note, icon="TIME", width=36, limit=2)
+        if bpy.app.timers.is_registered(_tick):
+            box.operator("curiomesh.ladder_stop", icon="CANCEL")
 
 
 # --------------------------------------------------------------------------- per part

@@ -378,6 +378,23 @@ def unused_names(sources: dict[str, str]) -> list[str]:
     return found
 
 
+def unread_props(sources: dict[str, str]) -> list[str]:
+    """PropertyGroup and operator properties whose name appears only in their definition and in writes
+    (`x.name = ...`): nothing reads them."""
+    found = []
+    for name, text in sources.items():
+        for cls in ast.parse(text).body:
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            for item in cls.body:
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and "props." in ast.unparse(item.annotation):
+                    prop = item.target.id
+                    reads = sum(len(re.findall(rf"\b{prop}\b", t)) - len(re.findall(rf"\.{prop}\s*=(?!=)", t)) for t in sources.values()) - 1
+                    if reads <= 0:
+                        found.append(f"{name}:{item.lineno}: property {cls.name}.{prop} is written but never read")
+    return found
+
+
 DRAW_BUILDERS = {"flow_lines", "Topology", "gather", "strokes", "_curves", "_draw_data", "_fan", "loop_labels", "evaluated_depsgraph_get", "to_mesh", "_source_data"}
 
 
@@ -435,6 +452,7 @@ def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
             problems.append("__init__.py: bl_info (the manifest replaces it)")
         sources = {e: archive.read(e).decode("utf-8") for e in entries if e.endswith(".py")}
         problems += unused_names(sources)
+        problems += unread_props(sources)
         problems += draw_builds(sources)
     tagline = manifest.get("tagline", "")
     if len(tagline) > 64 or tagline.endswith((".", "!", "?")):

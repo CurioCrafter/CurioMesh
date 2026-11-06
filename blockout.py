@@ -18,7 +18,6 @@ import math
 import time
 
 import bmesh
-import bpy
 import numpy as np
 
 from . import autoretopo, hardware
@@ -242,7 +241,7 @@ class BlockoutJob:
         for ratio in REDUCE_RATIOS:
             if ratio * triangles < 12:
                 continue
-            pts, fs, ms = autoretopo._decimate(bpy.context, points, polys, kinds, ratio)
+            pts, fs, ms = autoretopo._decimate(points, polys, kinds, ratio)
             pts, fs, ms = autoretopo.make_pure(MeshData(pts, fs, ms), "AUTO", "MIXED")
             view = yield from self._pictures(pts, fs, *frame[:3])
             made = (pts, fs, ms)

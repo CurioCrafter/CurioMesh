@@ -1306,7 +1306,7 @@ def _restore_kept(context, source) -> None:
 class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
     bl_idname = "curiomesh.teach_remember"
     bl_label = "Remember This Fix"
-    bl_description = "Remember the area you fixed by hand on the preview, and offer the same fix where the pattern shows up again. Kept on this PC only; nothing is uploaded"
+    bl_description = "Remember the area you fixed by hand on the preview, and offer the same fix where the pattern shows up again. Kept on this mesh (custom property curiomesh_kept, saved in the .blend) and in the add-on's user folder; nothing is uploaded"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -1836,7 +1836,7 @@ def make_job(context, gs, src, inputs, detail: float | None = None, style: str |
         state["auto_cache"] = (cache_key, {})  # a different mesh: what was measured on the old one is no use
     saved = None if quiet else hardware.checkpoint_dir(co, len(faces))
     resume = len(list(saved.glob("*.npz"))) if saved is not None else 0
-    job = autoretopo.AutoJob(context, co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, helpers=parallel.allowed(), redo_rough=gs.auto_redo_rough, tweak=tweaks(gs), hard=hard_surface.job_flags(gs))
+    job = autoretopo.AutoJob(co, faces, mat, detail, target // 2 if mirror and target else target, state["auto_cache"][1], mirror, note, lines, lambda p: bvh.find_nearest(Vector(p))[0], None if paint is None else density_drop(paint, gs.density_strength), tidy=gs.auto_tidy, chords=chords, method="AUTO" if baked else gs.auto_method, output="QUADS" if baked else gs.auto_output, strips=strips, outside=outside, style=style or gs.auto_style, settings=settings, checkpoint=saved, rough=gs.auto_rough, drop_hidden=gs.auto_drop_hidden, baked=baked, parallel=gs.auto_parallel and not quiet, helpers=parallel.allowed(), redo_rough=gs.auto_redo_rough, tweak=tweaks(gs), hard=hard_surface.job_flags(gs))
     if gs.auto_chords and not chords and not baked:
         job.note = (job.note + " | " if job.note else "") + f"Redraw Messy Quads was left off: {loose_pieces(src):,} loose pieces, where it stalls"
     if resume:
@@ -3346,6 +3346,17 @@ class CURIOMESH_OT_guided_import_result(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CURIOMESH_OT_ladder_stop(bpy.types.Operator):
+    bl_idname = "curiomesh.ladder_stop"
+    bl_label = "Stop Working Out Sizes"
+    bl_description = "Stop working out more sizes for the sliders. The sizes already made stay; Start again to work out the rest"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        ladder.stop_more()
+        return {"FINISHED"}
+
+
 class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
     bl_idname = "curiomesh.guided_stop_work"
     bl_label = "Stop"
@@ -3849,8 +3860,8 @@ REPO_URL = "https://github.com/CurioCrafter/CurioMesh"
 
 @functools.cache
 def problem_url() -> str:
-    """New-issue link with the Blender and CurioMesh versions filled in (nothing else about the computer). Built once:
-    the Issue Reports panel draws it on every redraw."""
+    """New-issue link with the Blender and CurioMesh versions filled in (nothing else about the computer). Built once,
+    at register: the Issue Reports panel draws it on every redraw."""
     import tomllib
     from urllib.parse import urlencode  # only builds the link's query string; nothing is sent from Blender
 
@@ -3890,6 +3901,7 @@ CLASSES = (
     CURIOMESH_OT_guided_auto_all,
     CURIOMESH_OT_multires_detail,
     CURIOMESH_OT_guided_stop_work,
+    CURIOMESH_OT_ladder_stop,
     CURIOMESH_OT_guided_add_shape,
     CURIOMESH_OT_guided_remove_shape,
     CURIOMESH_OT_guided_add_guide,
@@ -3936,7 +3948,9 @@ def register() -> None:
     segments.register()
     organize.register()
     flowedit.register()
-    bpy.app.handlers.load_post.append(_on_load_post)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
+    problem_url()  # reads the manifest once here, never during a panel draw
 
 
 def unregister() -> None:

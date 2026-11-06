@@ -24,11 +24,16 @@ This is the extensions.blender.org build. It contains Python code only.
 - **Hard Surface:** Clean Panels, Even Cylinders, and hard edges marked on Apply.
 - **Shape the flow:** edge loops, deformation lines, guide curves, Detail Markers, Mirror and Symmetrize, and the Flow
   Editor (experimental, off by default).
-- **Finish:** Apply, Bake Detail (normal or normal + color maps), LOD sets, Multires Detail and Export for Game Engine
-  (Unreal, Unity, Godot, Roblox).
+- **Finish:** Apply, Bake Detail (normal or normal + color maps), LOD sets, Multires Detail and Export for Game Engine:
+  presets for Unreal, Unity, Godot, Roblox, glTF/web and DirectX engines (CryEngine, O3DE), or Custom (FBX, glTF or OBJ).
 - **Job folders:** Export Job writes a folder with a Python script, `run_job.py`, that you run yourself in any
   Blender that has CurioMesh installed (`blender --background --python run_job.py`). Import Result brings the result
   back.
+- **Advanced tab** (off by default): Regions (redo a boxed area on a fixed seam, Fill Loop), Blockout volumes and
+  Redo Inside Shapes, the Smart Solver (Atlas-Q), remembered fixes you can look for, apply, and export or import as
+  JSON files, Materials & UVs and texture sets, the older Classic Remesh, Classic Guided and QuadriFlow methods, the
+  quality heatmap and viewport HUD, Work Live, Import Job Result, Judge After Baking (experimental) and Diagnostics
+  (Measure Active Mesh, Check This Computer).
 
 ## Notes
 
@@ -47,13 +52,15 @@ This is the extensions.blender.org build. It contains Python code only.
   cursor shows while they run, and **Stop** takes effect after them. **Apply** is available once the job has finished,
   or after **Stop**. The first time you move Quad Size or Rows after a result, the other sizes for those sliders are
   worked out the same way, and the panel says so while it happens; single steps there can hold Blender for a few
-  seconds (up to about 6). Auto alone does not start this.
+  seconds, and **Stop Working Out Sizes** under the sliders ends it (the sizes already made stay). Auto alone does not
+  start this.
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
-- Remembered fixes and resume points are kept in the extension's user folder. A job's working files go in a folder
+- Remembered fixes and resume points are kept in the extension's user folder. **Remember This Fix** also saves the fix
+  on the mesh, as a custom property `curiomesh_kept`, so it travels with the .blend; **Forget Kept Fixes** removes it. A job's working files go in a folder
   there too (`jobs`) and are deleted when the job ends; folders left by a Blender that quit mid-job are cleared later.
   Resume points of a stopped job are kept for 3 days; **Clear Saved Progress** in the add-on preferences deletes them.
-- Segments you edit by hand (merge, split, paint, rename, lock, a Use) are saved on your object, as a face attribute
+- Segments you edit by hand (merge, split, paint, rename, lock, a Use, Bigger/Smaller Quads on a part) are saved on your object, as a face attribute
   `curiomesh_segment` and a custom property `curiomesh_segments`, so the next run and a saved .blend keep them. Finding
   segments alone writes nothing on your object. Delete both to forget them.
 - The viewport HUD is off by default: turn it on with **HUD On in New Scenes** in the preferences (or the HUD button on

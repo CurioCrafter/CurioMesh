@@ -317,9 +317,9 @@ class FindJob(view.PartJob):
 
     is_find = True
 
-    def __init__(self, context, fresh: bool = False):
+    def __init__(self, fresh: bool = False):
         self.fresh = fresh
-        super().__init__(context, [], "AUTO")
+        super().__init__([], "AUTO")
         self.stage = "Finding the segments"
         self.report = self.base["report"]  # finding them changes no face, so the search's numbers still hold
 
@@ -479,7 +479,7 @@ def start_find(context, fresh: bool = False) -> bool:
     if not parallel.find_may_start(work and work["runner"]):
         return False
     guided.stop_work()
-    runner = FindJob(context, fresh)
+    runner = FindJob(fresh)
     guided.state["work"] = {"key": base.get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     if not bpy.app.timers.is_registered(guided._auto_slice):
         bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
@@ -506,8 +506,8 @@ def in_step(call):
 class GoalJob(view.PartJob):
     """Remake the chosen segments for their Use, one at a time, then look at the whole object again."""
 
-    def __init__(self, context, pieces):
-        super().__init__(context, pieces, "AUTO")
+    def __init__(self, pieces):
+        super().__init__(pieces, "AUTO")
         self.opened = 0
         self.direction = 0  # Bigger Quads (-1) keeps a remake only with fewer faces, Smaller Quads (+1) only with more
 
@@ -521,7 +521,7 @@ class GoalJob(view.PartJob):
     def _strokes(self, record: dict) -> list:
         """(stroke, loops, tag) for the drawn edge loops and deformation lines that run over this segment."""
         guided = _g()
-        gs = self.context.scene.curiomesh_guided
+        gs = bpy.context.scene.curiomesh_guided
         src = guided._source_data(guided.state_source())
         bvh = guided._bvh(src)
         labels = view.seg["src"]
@@ -529,7 +529,7 @@ class GoalJob(view.PartJob):
             return []
         found = []
         for kind, count in (("LOOP", gs.loop_count), ("BEND", gs.bend_loops)):
-            for line in guided._guide_lines(self.context, gs, src, kind):
+            for line in guided._guide_lines(bpy.context, gs, src, kind):
                 nearest = [bvh.find_nearest(Vector(p))[2] for p in line[:: max(len(line) // 16, 1)].tolist()]
                 if np.mean([labels[src["tri_face"][t]] == record["id"] for t in nearest]) > 0.5:
                     found.append((line, count, kind))
@@ -537,7 +537,7 @@ class GoalJob(view.PartJob):
 
     def _cut_strokes(self, points, polys, kinds, items, nearest):
         """Drawn lines go into the reduced triangles as strips of quads, the way Auto Segments does. Returns (points, triangles, kinds, edges to keep)."""
-        gs = self.context.scene.curiomesh_guided
+        gs = bpy.context.scene.curiomesh_guided
         tris, kind = [], []
         for f, k in zip(polys, kinds):
             for c in range(1, len(f) - 1):
@@ -638,7 +638,7 @@ class GoalJob(view.PartJob):
                 ratio = (STROKE_SHARE if goal == "STROKES" else CLOSED_SHARE if goal in {"REDUCE", "LOWPOLY"} else 2.0) * area / max(edge * edge, 1e-30) / max(triangles, 1)
                 if ratio < 0.98:
                     yield
-                    points, polys, kinds = autoretopo._decimate(self.context, points, polys, kinds, max(ratio, 1e-4))
+                    points, polys, kinds = autoretopo._decimate(points, polys, kinds, max(ratio, 1e-4))
             choice = record.get("choice", "AUTO") if goal in {"REDUCE", "LOWPOLY"} else "AUTO"
             quads = goal in {"REDUCE", "LOWPOLY", "STROKES"} and choice != "TRIS"
             seeds = 4 if choice == "PAIRING" else 2
@@ -773,7 +773,7 @@ def start_goal(context, pieces) -> bool:
     if guided.state["auto_base"] is None or not pieces:
         return False
     guided.stop_work()
-    runner = GoalJob(context, pieces)
+    runner = GoalJob(pieces)
     guided.state["work"] = {"key": guided.state["auto_base"].get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     guided.state["message"] = runner.status()
     if not bpy.app.timers.is_registered(guided._auto_slice):

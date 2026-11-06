@@ -427,7 +427,7 @@ def user_folder(sub: str = "", create: bool = True) -> Path | None:
         import bpy
 
         return Path(bpy.utils.extension_path_user(__package__ or "", path=sub, create=create))
-    except Exception:  # not loaded as an extension (a helper process), or the folder can't be made
+    except Exception:  # the folder can't be made (read-only disk, no permission)
         return None
 
 

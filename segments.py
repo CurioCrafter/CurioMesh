@@ -275,10 +275,9 @@ def _step(work):
 class PartJob:
     """Remake some parts by a chosen method on the main thread's timer, then look at the whole object again."""
 
-    def __init__(self, context, pieces, method: str):
+    def __init__(self, pieces, method: str):
         guided = _g()
         base = guided.state["auto_base"]
-        self.context = context
         self.base = base
         self.job = base["job"]
         self.pieces = [int(p) for p in pieces]
@@ -459,7 +458,7 @@ def start_redo(context, pieces, method: str) -> bool:
     if guided.state["auto_base"] is None or not pieces:
         return False
     guided.stop_work()
-    runner = PartJob(context, pieces, method)
+    runner = PartJob(pieces, method)
     guided.state["work"] = {"key": guided.state["auto_base"].get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     guided.state["message"] = runner.status()
     if not bpy.app.timers.is_registered(guided._auto_slice):
@@ -504,7 +503,7 @@ def use_tries(context, wanted: dict) -> bool:
     guided._build_preview(context, guided.state_source(), new, uvs=False)
     guided.state["draw_key"] = None
     refresh_list()
-    runner = PartJob(context, [], base["job"].method if base["job"] is not None else "AUTO")  # no part to remake: only the whole-object check
+    runner = PartJob([], base["job"].method if base["job"] is not None else "AUTO")  # no part to remake: only the whole-object check
     guided.state["work"] = {"key": base.get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     if not bpy.app.timers.is_registered(guided._auto_slice):
         bpy.app.timers.register(guided._auto_slice, first_interval=0.0)

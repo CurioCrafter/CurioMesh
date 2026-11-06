@@ -272,6 +272,9 @@ class CURIOMESH_OT_clear_saved_progress(bpy.types.Operator):
     bl_description = "Delete the finished parts that stopped jobs keep so Start can resume them. A job that runs now keeps going"
     bl_options = {"INTERNAL"}
 
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
     def execute(self, context):
         freed = hardware.clear_saved_progress()
         self.report({"INFO"}, f"Cleared {freed / 2**20:.1f} MB of saved progress")

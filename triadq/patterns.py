@@ -324,14 +324,11 @@ def code_cost(row: dict, reference: dict) -> float:
     return cost / max(total, 1)
 
 
-def score(measured: dict, database: dict | None = None, use: str | None = None) -> dict:
-    """0-100, 100 meaning as tidy as the hand-made references, class by class, plus which parts cost the most.
-
-    `use` picks the "character" or "hard_surface" numbers instead of everything pooled.
-    """
+def score(measured: dict, database: dict | None = None) -> dict:
+    """0-100, 100 meaning as tidy as the hand-made references, class by class, plus which parts cost the most."""
 
     database = database or load_database()
-    known = database["uses"][use] if use else database["classes"]
+    known = database["classes"]
     parts: dict[str, float] = {}
     likely = 0.0
     total = max(sum(r["quads"] for r in measured["classes"].values()), 1)

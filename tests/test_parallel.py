@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -120,7 +121,9 @@ class PoolTests(unittest.TestCase):
                 parallel._read(path)
 
     def test_helper_command_enables_the_addon_by_its_package_name(self):
-        command, env = parallel.helper_command("rows_worker.main", ["folder"], binary="blender")
+        fake_bpy = SimpleNamespace(app=SimpleNamespace(binary_path="blender"))
+        with mock.patch.dict(sys.modules, {"bpy": fake_bpy}):
+            command, env = parallel.helper_command("rows_worker.main", ["folder"])
         self.assertEqual(command[:4], ["blender", "--background", "--factory-startup", "--python"])
         self.assertTrue(os.path.isfile(command[4]) and command[4].endswith("helper_entry.py"))  # a shipped script, no code string
         self.assertEqual(command[5:], ["--", parallel.PACKAGE, "rows_worker", "main", "folder"])

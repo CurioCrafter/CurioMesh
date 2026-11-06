@@ -256,8 +256,8 @@ def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
     return points, out_faces, mats
 
 
-def _quadriflow(context, points, polys, kinds, goal):
-    context = bpy.context  # the operator's context, kept by the job, is gone by now
+def _quadriflow(points, polys, kinds, goal):
+    context = bpy.context  # read at slice time: an operator's context does not outlive the operator
     mesh = bpy.data.meshes.new("CurioMesh_Piece")
     mesh.from_pydata(points.tolist(), [], polys)
     mesh.update()
@@ -408,8 +408,9 @@ SPLIT_FACES = 2 * HUGE_FROM  # with helpers, a piece of more faces is cut into r
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
 
-def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
+def _decimate(points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     """Reduce to `ratio`. `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders."""
+    context = bpy.context  # read at slice time: an operator's context does not outlive the operator
 
     free = None if keep is None else np.flatnonzero(~keep)
     if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
@@ -601,7 +602,7 @@ class _SizesOnDisk:
 class AutoJob:
     """One Auto Segments run. Call `step` from a timer until `busy` is False; `output` holds the latest result to show."""
 
-    def __init__(self, context, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, helpers: bool = False, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
+    def __init__(self, co, faces, materials, detail: float, target_faces: int = 0, cache: dict | None = None, mirror: tuple | None = None, note: str = "", guide_lines: list | None = None, project=None, drop: np.ndarray | None = None, tidy: bool = False, method: str = "AUTO", output: str = "QUADS", methods: dict | None = None, strips=None, outside=None, style: str = "DETAIL", settings=None, checkpoint=None, keep_progress: bool = False, rough: bool = False, drop_hidden: bool = False, baked: bool = False, chords: bool = False, parallel: bool = False, helpers: bool = False, redo_rough: bool = False, tweak: dict | None = None, hard: dict | None = None):
         self.hard = dict(HARD if hard is None else hard)  # Clean Panels and Even Cylinders: more rebuilt sizes per part
         self.redo_rough = bool(redo_rough)  # Redo Rough Spots: regions round the spots still bad after the repairs are made again, finer
         self.redo_numbers: tuple[int, int] | None = None  # (spots redone, bad faces before); the bad faces after are counted at the end
@@ -630,7 +631,6 @@ class AutoJob:
         self._refused = 0
         self.collapse = style == "DETAIL" and method == "AUTO" and output == "QUADS" and not guide_lines and not strips and mirror is None and (drop is None or not float(np.max(drop, initial=0.0)) > 0.0)  # take quads away after pairing: only where nothing else asks for the layout
         self.tidy = tidy  # try to tidy the finished quads, kept only if the score rises and the camera allows it
-        self.context = context
         self.co = np.asarray(co, dtype=np.float64)
         self.faces = faces if isinstance(faces, FlatFaces) else list(faces)
         self.materials = [str(int(m)) for m in materials]
@@ -785,21 +785,11 @@ class AutoJob:
             self.warnings = [f"Auto Segments failed: {exc}"]
             self.busy = False
 
-    def wait(self, timeout: float | None = None) -> bool:
-        """Run to the end in one call, for a script in background mode (an exported run_job.py). The panel never calls it."""
-        ends = None if timeout is None else time.perf_counter() + timeout
-        while self.busy and (ends is None or time.perf_counter() < ends):
-            began = time.perf_counter()
-            self.step(1.0)
-            if self.busy and time.perf_counter() - began < 0.05:
-                time.sleep(0.05)  # only helper Blenders are working: don't spin a core (never in a timer, see step)
-        return not self.busy
-
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
         """Generator: this piece reduced to `ratio` by `_decimate`, which has to run on the main thread."""
         started = time.perf_counter()
         with tasks.busy_cursor():
-            out = _decimate(self.context, points, polys, kinds, ratio, drop, keep)
+            out = _decimate(points, polys, kinds, ratio, drop, keep)
         yield from ()
         self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
         return out
@@ -1100,8 +1090,8 @@ class AutoJob:
             while reduced is not None and len(reduced[1]) * STEP >= 12.0:
                 yield
                 before = len(reduced[1])
-                reduced = _decimate(self.context, *reduced, STEP)
-                if len(reduced[1]) >= before:  # Decimate can't take this piece further: stepping again would never end (30 GB on a ship)
+                reduced = _decimate(*reduced, STEP)
+                if len(reduced[1]) >= before:  # Decimate can't take this piece further: stepping again would never end and use up memory
                     break
                 view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
                 sizes.append(reduced)
@@ -1732,7 +1722,7 @@ class AutoJob:
             else:
                 step *= 0.5
         if chords:
-            self.notes.append(f"Redraw Messy Quads was on: {time.perf_counter() - chords_began:.0f} s of this run; tidier loops cost more faces (7-50% more in tests)")
+            self.notes.append(f"Redraw Messy Quads was on: {time.perf_counter() - chords_began:.0f} s of this run; tidier loops cost more faces (often 7-50% more)")
         return result, owner, loss
 
     def _build(self, co, faces, kinds, method, goal=0):
@@ -1741,7 +1731,7 @@ class AutoJob:
             method = "AUTO"
         if method in BLENDER_OPERATOR_METHODS:
             try:
-                made = _quadriflow(self.context, co, faces, kinds, goal) if method == "QUADRIFLOW" else _fill(co, faces, kinds, method, goal)
+                made = _quadriflow(co, faces, kinds, goal) if method == "QUADRIFLOW" else _fill(co, faces, kinds, method, goal)
                 return triangulate(*made) if self.output_kind == "TRIS" else made
             except Exception as exc:
                 self.notes.append(f"{method.title()} did not work on a part ({str(exc)[:60]}): Auto was used there")
@@ -2202,7 +2192,7 @@ class AutoJob:
                     triangles = sum(len(p) - 2 for p in polys)
                     want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
                     if triangles > want:
-                        points, polys, kinds = _decimate(self.context, points, polys, kinds, want / triangles)
+                        points, polys, kinds = _decimate(points, polys, kinds, want / triangles)
                     leftovers.append((points, polys, kinds))
                     yield
                     continue
@@ -2232,7 +2222,7 @@ class AutoJob:
                     triangles_in = sum(len(p) - 2 for p in polys)
                     want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
                     if triangles_in > want:
-                        points, polys, kinds = _decimate(self.context, points, polys, kinds, want / triangles_in)
+                        points, polys, kinds = _decimate(points, polys, kinds, want / triangles_in)
                     leftovers.append((points, polys, kinds))
                     self._refused += 1
                     continue

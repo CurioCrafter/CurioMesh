@@ -11,7 +11,6 @@ from pathlib import Path
 import sys
 
 import bmesh
-import bpy
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO.parent))
@@ -27,8 +26,9 @@ co = [tuple(v.co) for v in sphere.verts]
 faces = [tuple(v.index for v in f.verts) for f in sphere.faces]
 sphere.free()
 
-job = autoretopo.AutoJob(bpy.context, co, faces, [0] * len(faces), 6.0)
-job.wait()
+job = autoretopo.AutoJob(co, faces, [0] * len(faces), 6.0)
+while job.busy:
+    job.step(1.0)
 assert not job.warnings, job.warnings
 counts = [level.faces for level in job.levels[0]]
 assert any(abs(a / b - autoretopo.STEP) < 0.02 for a, b in zip(counts, counts[1:])), counts

@@ -78,7 +78,7 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     output_mode: bpy.props.EnumProperty(name="Result", description="New Object keeps your original; Replace overwrites its mesh", items=OUTPUT_ITEMS, default="NEW")
     apply_source_modifiers: bpy.props.BoolProperty(name="Apply Modifiers First", description="Bake the source's modifiers into the mesh before remeshing", default=True)
     keep_debug_objects: bpy.props.BoolProperty(name="Keep Debug Objects", description="Keep the intermediate meshes the solver creates, for troubleshooting", default=False)
-    debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", description="Print step-by-step details to the system console", default=False)
+    debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", description="Print step-by-step details to the system console, and keep a few troubleshooting values as custom properties on the result object", default=False)
 
     hud_enabled: bpy.props.BoolProperty(
         name="HUD", description="Show the quad-quality dashboard in the 3D viewport (position and size: add-on Preferences)", get=_hud_get, set=_hud_set, update=_redraw_update
@@ -365,6 +365,9 @@ class CURIOMESH_PT_scan(_SubPanel, bpy.types.Panel):
         col.label(text=f"Suggested: {names.get(settings.analysis_strategy, settings.analysis_strategy)}", icon="LIGHT")
         qualifier = "exact topology" if settings.analysis_exact else f"sampled {settings.analysis_sampled_faces:,} faces"
         col.label(text=f"Measured from {qualifier}")
+        if settings.analysis_boundary_loops >= 0:
+            col.label(text=f"Holes {settings.analysis_boundary_loops:,}   Non-manifold edges {settings.analysis_non_manifold:,}")
+        col.label(text=f"Sharp edges {settings.analysis_sharp_ratio:.0%}   Edge scale {settings.analysis_target_edge:.4g}")
         if settings.analysis_warning:
             warn = box.column(align=True)
             warn.alert = True
@@ -558,7 +561,9 @@ DETAIL_PROPS = (
     "metrics_sampling_status",
     "metrics_min_jacobian",
     "metrics_p95_aspect",
+    "metrics_quads",
     "metrics_extraordinary",
+    "metrics_extraordinary_ratio",
     "metrics_non_manifold_edges",
     "metrics_non_manifold_vertices",
     "metrics_duplicate_faces",

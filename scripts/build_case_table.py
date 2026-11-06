@@ -56,7 +56,6 @@ def measure(out_path: str, model_path: str, parts_path: str | None) -> None:
     import importlib
     import importlib.util
 
-    import bpy
     import numpy as np
 
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -79,7 +78,7 @@ def measure(out_path: str, model_path: str, parts_path: str | None) -> None:
     faces = [tuple(loops[a : a + b]) for a, b in zip(starts, totals)]
     co = data["co"].astype(np.float64)
     auto.USE_CASES = False  # this is what builds the table
-    job = auto.AutoJob(bpy.context, co, faces, [0] * len(faces), 6.0)
+    job = auto.AutoJob(co, faces, [0] * len(faces), 6.0)
     fa, fb = patch.face_adjacency(faces)
     shell = np.unique(patch._labels(len(faces), fa, fb), return_inverse=True)[1]
     order = np.argsort(shell, kind="stable")
@@ -110,7 +109,7 @@ def measure(out_path: str, model_path: str, parts_path: str | None) -> None:
                 if share * triangles < 12.0:
                     continue
                 started = time.perf_counter()
-                mesh = auto._decimate(bpy.context, points, polys, kinds, share)
+                mesh = auto._decimate(points, polys, kinds, share)
                 row["tries"].append(_try(auto, flatquad, types, view, "decimate", share, mesh, time.perf_counter() - started, True))
             if rebuilds is not None:
                 started = time.perf_counter()

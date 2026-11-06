@@ -23,10 +23,10 @@ RUN_JOB = '''# Runs one CurioMesh Auto Segments job without a window. Made by th
 import importlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import addon_utils
-import bpy
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
@@ -61,13 +61,19 @@ print("Machine:", "; ".join(hardware.describe(machine)), flush=True)
 settings = hardware.settings_for(job["effort"], machine)
 print(f"Working at {settings.name}: {len(faces):,} faces", flush=True)
 runner = autoretopo.AutoJob(
-    bpy.context, data["co"], faces, data["mat"], job["detail"], job["target_faces"], mirror=mirror, guide_lines=lines, project=project, drop=drop,
+    data["co"], faces, data["mat"], job["detail"], job["target_faces"], mirror=mirror, guide_lines=lines, project=project, drop=drop,
     settings=settings, checkpoint=hardware.checkpoint_dir(data["co"], len(faces), str(HERE)), keep_progress=True, parallel=True,
     helpers=job.get("helpers", False),  # Background Blender Processes as it was set when the job was exported
 )
-while runner.busy:
-    runner.wait(10.0)
-    print(f"{runner.fraction * 100:5.1f}%  {runner.stage}", flush=True)
+shown = time.perf_counter() + 10.0
+while runner.busy:  # background mode: no window to keep responsive, so run the job's slices back to back
+    began = time.perf_counter()
+    runner.step(1.0)
+    if runner.busy and time.perf_counter() - began < 0.05:
+        time.sleep(0.05)  # only helper Blenders are working: don't spin a core
+    if time.perf_counter() > shown:
+        shown = time.perf_counter() + 10.0
+        print(f"{runner.fraction * 100:5.1f}%  {runner.stage}", flush=True)
 if runner.warnings or runner.report is None:
     print("FAILED:", runner.warnings or "stopped before the end", flush=True)
     raise SystemExit(1)

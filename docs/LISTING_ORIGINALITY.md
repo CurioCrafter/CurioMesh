@@ -39,5 +39,3 @@ This build is Python only and contains no third-party code. Its bundled data and
 
 Names in the panel are plain descriptions of what each control does. A few are standard Blender or modelling terms
 (Mark Sharp, Crease, Holding Edges, Multires, LOD), used in their ordinary meaning.
-
-When a new algorithm is added, add a row here and cite its paper in the module.

@@ -267,7 +267,7 @@ def tag_redraw() -> None:
 
 
 def next_step_hint(obj, stats: MeshStats | None, settings) -> str:
-    """One-line guidance; pure so it can be tested without a GPU."""
+    """One-line guidance, from plain data (no drawing)."""
     if obj is None or obj.type != "MESH":
         return "Select a mesh"
     if obj.name == REGION_PREVIEW_NAME:
@@ -531,7 +531,7 @@ def hud_object(context):
 
 
 def hud_model(context) -> dict:
-    """Everything the HUD shows, as plain data (testable without a GPU). Reads the cached stats only."""
+    """Everything the HUD shows, as plain data (no drawing). Reads the cached stats only."""
     settings = _settings()
     obj, showing_result = hud_object(context)
     model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": "", "original": False}

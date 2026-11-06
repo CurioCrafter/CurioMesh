@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 
 
-PACKAGE = __name__.rpartition(".")[0]  # the add-on's package: an extension's is longer in the user's Blender than in a helper
+PACKAGE = __name__.rpartition(".")[0]  # the add-on's package name, which a helper Blender enables too
 # The add-on's own types a helper file may hold: name -> module, relative to the package. Nothing else is rebuilt.
 TYPES = {"Settings": "hardware", "Level": "triadq.budget", "FlatFaces": "triadq.types"}
 
@@ -112,22 +112,20 @@ def allowed() -> bool:
     return bool(getattr(overlay.get_prefs(), "allow_helpers", False))
 
 
-def helper_command(entry: str, args: list[str], binary: str | None = None) -> tuple[list[str], dict]:
+def helper_command(entry: str, args: list[str]) -> tuple[list[str], dict]:
     """(command, environment) for a background Blender that runs `<the add-on>.<entry>(sys.argv)` with `args` after "--".
 
-    `binary` is Blender itself (bpy.app.binary_path) and nothing else, started without a shell. It runs the shipped
+    The program is always Blender itself (bpy.app.binary_path), started without a shell. It runs the shipped
     script `helper_entry.py`, which enables the add-on by its own package name (`bl_ext.<repo>.curiomesh`) with
     `addon_utils.enable`, the way Blender loads it, and then calls the function; no code string is built here and
     nothing edits Python's import path. If the add-on can't be enabled there, the child exits and the job does that
     work itself.
     """
-    if binary is None:
-        import bpy
+    import bpy
 
-        binary = bpy.app.binary_path
     module, _, function = entry.rpartition(".")
     script = os.path.join(os.path.dirname(__file__), "helper_entry.py")
-    command = [binary, "--background", "--factory-startup", "--python", script, "--", PACKAGE, module, function, *args]
+    command = [bpy.app.binary_path, "--background", "--factory-startup", "--python", script, "--", PACKAGE, module, function, *args]
     return command, dict(os.environ)
 
 
