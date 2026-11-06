@@ -39,7 +39,8 @@ def _install_sight() -> None:
 
 # main-only: uv begin flat
 def _install_flat() -> None:
-    uvflat.set_fast(probe=turbo.uvflat_probe)
+    uvflat.set_fast(probe=turbo.uvflat_probe, flatten=turbo.uvflat_flatten, grid_layout=turbo.uvflat_grid_layout,
+                    quick_stretch=turbo.uvflat_quick_stretch, stretch=turbo.uvflat_stretch)
 # main-only: uv end flat
 
 # main-only: uv begin chart

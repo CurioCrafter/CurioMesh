@@ -1005,8 +1005,163 @@ fn uvflat_probe() -> usize {
     uvflat::probe()
 }
 
+fn uvflat_mesh<'a>(points: &'a [f64], indptr: &'a [i64], flat: &'a [i64]) -> PyResult<topo::Faces<'a>> {
+    check_faces(indptr, flat)?;
+    let n = points.len() / 3;
+    if points.len() % 3 != 0 || flat.iter().any(|&v| v < 0 || v as usize >= n) || points.iter().any(|x| !x.is_finite()) {
+        return Err(PyValueError::new_err("points or face vertex ids are invalid"));
+    }
+    Ok(topo::Faces { indptr, flat })
+}
+
+fn uvflat_stopped(stop: &StopFlag) -> PyResult<()> {
+    finished(!stop.0.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Flatten every chart of a mesh in one call (`uvflat::flatten`): returns (UVs per corner, stats rows of
+/// `uvflat::STATS_LEN`). rows: 0 Off, 1 Soft, 2 On, 3 Auto; start: 0 given, 1 LSCM pulled toward the given, 2 free.
+/// A stop returns the flip-free state each chart had reached (STOPPED = 1 in its row), so Keep going can resume.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvflat_flatten<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    chart: PyReadonlyArray1<'py, i64>,
+    start: PyReadonlyArray1<'py, f64>,
+    col: PyReadonlyArray1<'py, i64>,
+    row: PyReadonlyArray1<'py, i64>,
+    rows: u8,
+    start_mode: u8,
+    stretch_allowed: f64,
+    steps: usize,
+    max_factor_bytes: f64,
+    texture_px: f64,
+    stop: &StopFlag,
+) -> PyResult<(F64Array<'py>, F64Array<'py>)> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let (chart, start, col, row) = (slice(&chart, "chart")?, slice(&start, "start")?, slice(&col, "col")?, slice(&row, "row")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    let corners = flat.len();
+    if chart.len() != faces.count() || !(start.is_empty() || start.len() == 2 * corners) || col.len() != row.len() || !(col.is_empty() || col.len() == corners) {
+        return Err(PyValueError::new_err("flatten arrays are inconsistent"));
+    }
+    let rows = match rows {
+        0 => uvflat::Rows::Off,
+        1 => uvflat::Rows::Soft,
+        2 => uvflat::Rows::On,
+        _ => uvflat::Rows::Auto,
+    };
+    let start_mode = match start_mode {
+        0 => uvflat::Start::Given,
+        1 => uvflat::Start::Pull,
+        _ => uvflat::Start::Free,
+    };
+    let opts = uvflat::FlatOpts { rows, start: start_mode, stretch_allowed, steps, max_factor_bytes, texture_px, force_iterative: false };
+    let (uv, stats) = py.detach(|| uvflat::flatten(points, &faces, chart, start, col, row, &opts, &stop.0));
+    Ok((uv.into_pyarray(py), stats.into_pyarray(py)))
+}
+
+/// Exact grid UVs of a pole-free quad chart (the given faces): (UVs per vertex, column, row), NaN / -1 for vertices
+/// the faces do not use; None when the faces are not a grid.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn uvflat_grid_layout<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    stop: &StopFlag,
+) -> PyResult<Option<(F64Array<'py>, I64Array<'py>, I64Array<'py>)>> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    let n = points.len() / 3;
+    let found = py.detach(|| {
+        let ids: Vec<u32> = (0..faces.count() as u32).collect();
+        let (pts, ip, fl, global) = uvflat::sub_chart(points, &faces, &ids);
+        let g = uvflat::grid_layout(&uvflat::Chart { points: &pts, faces: topo::Faces { indptr: &ip, flat: &fl } }).ok()?;
+        let (mut uv, mut col, mut row) = (vec![f64::NAN; 2 * n], vec![-1i64; n], vec![-1i64; n]);
+        for (k, &v) in global.iter().enumerate() {
+            let v = v as usize;
+            uv[2 * v] = g.uv[2 * k];
+            uv[2 * v + 1] = g.uv[2 * k + 1];
+            col[v] = g.col[k];
+            row[v] = g.row[k];
+        }
+        Some((uv, col, row))
+    });
+    uvflat_stopped(stop)?;
+    Ok(found.map(|(uv, col, row)| (uv.into_pyarray(py), col.into_pyarray(py), row.into_pyarray(py))))
+}
+
+/// Stretch of a merge candidate (`uvflat::quick_stretch`): the given faces, UVs per vertex (2 per vertex of
+/// `points`), `free` per vertex (the band). Returns (band stretch, chart stretch, UVs per vertex after the band moved).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvflat_quick_stretch<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    uv: PyReadonlyArray1<'py, f64>,
+    free: PyReadonlyArray1<'py, bool>,
+    max_factor_bytes: f64,
+    stop: &StopFlag,
+) -> PyResult<(f64, f64, F64Array<'py>)> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let (uv, free) = (slice(&uv, "uv")?, slice(&free, "free")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    let n = points.len() / 3;
+    if uv.len() != 2 * n || free.len() != n {
+        return Err(PyValueError::new_err("quick_stretch arrays are inconsistent"));
+    }
+    let found = py.detach(|| {
+        let ids: Vec<u32> = (0..faces.count() as u32).collect();
+        let (pts, ip, fl, global) = uvflat::sub_chart(points, &faces, &ids);
+        let mut luv: Vec<f64> = global.iter().flat_map(|&v| [uv[2 * v as usize], uv[2 * v as usize + 1]]).collect();
+        let lfree: Vec<bool> = global.iter().map(|&v| free[v as usize]).collect();
+        let chart = uvflat::Chart { points: &pts, faces: topo::Faces { indptr: &ip, flat: &fl } };
+        let (band, all) = uvflat::quick_stretch(&chart, &mut luv, &lfree, max_factor_bytes, &stop.0)?;
+        let mut out = uv.to_vec();
+        for (k, &v) in global.iter().enumerate() {
+            out[2 * v as usize] = luv[2 * k];
+            out[2 * v as usize + 1] = luv[2 * k + 1];
+        }
+        Ok::<_, String>((band, all, out))
+    });
+    uvflat_stopped(stop)?;
+    let (band, all, out) = found.map_err(PyValueError::new_err)?;
+    Ok((band, all, out.into_pyarray(py)))
+}
+
+/// Chart stretch (`uvflat::stretch`) of the given faces with UVs per vertex: (quantile, per face).
+#[pyfunction]
+fn uvflat_stretch<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    uv: PyReadonlyArray1<'py, f64>,
+    stop: &StopFlag,
+) -> PyResult<(f64, F64Array<'py>)> {
+    let (points, indptr, flat, uv) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&uv, "uv")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    if uv.len() != 2 * (points.len() / 3) {
+        return Err(PyValueError::new_err("uv must hold 2 numbers per point"));
+    }
+    let (q, per) = py.detach(|| uvflat::stretch(&uvflat::Chart { points, faces }, uv));
+    uvflat_stopped(stop)?;
+    Ok((q, per.into_pyarray(py)))
+}
+
 fn register_uvflat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvflat_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_flatten, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_grid_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_quick_stretch, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_stretch, m)?)?;
+    m.add("UVFLAT_STATS_LEN", uvflat::STATS_LEN)?;
     Ok(())
 }
 // main-only: uv end flat
