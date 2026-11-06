@@ -205,6 +205,15 @@ class CURIOMESH_OT_tool_hard_edges(_Tool, bpy.types.Operator):
 
     degrees: bpy.props.FloatProperty(name="Angle", description="Faces meeting at more than this angle make a hard edge. Lower finds softer edges too", default=40.0, min=5.0, max=180.0, precision=0)
 
+    @classmethod
+    def poll(cls, context):
+        why = "" if result_ready() else "Make a result first with Start. Tools work on the result before you apply it."
+        if not why and _guided().progress_info("AUTO") is not None:
+            why = "Wait for the search to finish or press Stop."
+        if why:  # Work On does not matter: Apply treats every edge
+            cls.poll_message_set(why)
+        return not why
+
     def _settings(self) -> dict:
         return {"angle": T.value_of(self.degrees)}
 
