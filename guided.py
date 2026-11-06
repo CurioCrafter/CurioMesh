@@ -215,7 +215,9 @@ def _profile_update(self, context):
             self.auto_detail, self.auto_method, self.auto_output = values
             self.bend_use = self.auto_profile == "ANIMATION"  # Deformation Lines are for joints: on with Animation, off again with any other use
             self.auto_chords = self.auto_profile in CHORDS_PROFILES  # tidiness first: Animation and Subdivision
-            self.hs_edges = "MARK" if self.auto_profile == "HARD" else "NONE"  # Hard Surface marks its hard edges on Apply
+            hard = self.auto_profile == "HARD"  # Hard Surface: clean panels, even cylinders, hard edges marked on Apply
+            self.hs_panels = self.hs_cylinders = hard
+            self.hs_edges = "MARK" if hard else "NONE"
         finally:
             _applying = False
     if self.multires_on != (self.auto_profile == "ANIMATION"):  # Animation's route: a QuadriFlow cage, with the detail in Multires levels

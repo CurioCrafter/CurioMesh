@@ -46,11 +46,18 @@ PANEL_MOST = 0.6  # a layout with more quads than this share of the part's trian
 BALANCE_ROUNDS = 400
 SMOOTH_ROUNDS = 12
 
+# How many faces a rebuilt layout counts as, per face, when the search weighs faces against change (a reduced size
+# counts 1, a paired quad QUAD_WEIGHT): a clean layout that holds the view wins over a reduced one with up to about
+# twice the faces, as an artist would choose.
+WEIGHTS = {"panels": 0.5, "cylinders": 0.6}
+
 TURN_CELLS = (0.004, 0.015)  # ring grouping: a clean part first, then a scan (share of the diagonal)
 TURN_COVER = 0.9  # share of vertices that must lie near the profile for the part to count as turned
 TURN_NEAR = 2.0  # a vertex this many cells from the profile is on it
 HOLLOW_APART = 2.0  # a height band of a scan has two walls when their radii lie this many spreads apart
 HOLLOW_SHARE = 0.7  # ...and a scan is a hollow tube when this share of its bands do
+ROUND_VISIBLE = 0.05  # a round part this big against the whole model keeps enough faces to stay round
+ROUND_TRIANGLES = 1.6  # triangles per quad of its sweep it keeps at least (pairing makes about two triangles one quad)
 TURN_SUPPORT = 0.95  # share of the swept surface that must have the part near it
 TURN_SPREAD = 0.3  # each sixteenth of the turn needs at least this share of an even spread of vertices
 SCAN_FACES = 2000  # the coarse (scan) grid is only tried on parts with at least this many faces
@@ -780,7 +787,10 @@ def _hollow_profile(rz: np.ndarray, bins: int = 32) -> np.ndarray | None:
         inner.append((float(np.median(r[: cut + 1])), mid))
     if used < 8 or walls < HOLLOW_SHARE * used:
         return None
-    return np.asarray(outer + inner[::-1], dtype=np.float64)
+    outer, inner = np.asarray(outer), np.asarray(inner)
+    outer[0, 1] = inner[0, 1] = z.min()  # the end bands reach the rims, not just their middles
+    outer[-1, 1] = inner[-1, 1] = z.max()
+    return np.vstack([outer, inner[::-1]])
 
 
 def _supported(fit: dict, cloud: np.ndarray, cell: float) -> float:
@@ -890,6 +900,24 @@ def cylinder_rebuilds(points: np.ndarray, polys, kind: str = "0"):
     yield from parts.sweeps(fit, kind, 0.5 * fit["cell"])
 
 
+def round_floor(points: np.ndarray, polys, model_diag: float) -> int:
+    """Fewest triangles a reduced size of this part may keep when it is a visibly round part of the model (its radius at
+    least ROUND_VISIBLE of the model's size): about what its 16-step sweep would take, so a pipe or barrel never ends up
+    as a 6- or 12-sided prism however little of the view that changes. 0 when it isn't such a part."""
+
+    fit = fit_turned(points, polys)
+    if fit is None:
+        old = parts.fit_revolve(points, polys)
+        if old is None or cover(dict(old, cell=parts.CLUSTER), points) < TURN_COVER:
+            return 0
+        fit = dict(old, cell=parts.CLUSTER)
+    radius = float(np.max(np.asarray(fit["profile"])[:, 0]))
+    if radius < ROUND_VISIBLE * model_diag or parts.min_spin(fit) < parts.ROUND_SPIN:
+        return 0
+    built = parts.build_revolve(fit, parts.ROUND_SPIN, parts.REVOLVES[0][1], "0")
+    return 0 if built is None else int(ROUND_TRIANGLES * len(built[1]))
+
+
 def panel_rebuilds(points: np.ndarray, polys, kind: str = "0"):
     """Generator: Clean Panels layouts of the part, fewest faces first; nothing if it isn't made of flat panels."""
 
@@ -908,9 +936,11 @@ def panel_rebuilds(points: np.ndarray, polys, kind: str = "0"):
 
 
 def rebuilds(points: np.ndarray, polys, kind: str = "0", panels: bool = True, cylinders: bool = True):
-    """Generator of hard-surface rebuilds of a part for the camera to judge, as (points, quads, kinds)."""
+    """Generator of hard-surface rebuilds of a part for the camera to judge, as (points, quads, kinds, family)."""
 
     if cylinders:
-        yield from cylinder_rebuilds(points, polys, kind)
+        for out in cylinder_rebuilds(points, polys, kind):
+            yield None if out is None else (*out, "cylinders")
     if panels:
-        yield from panel_rebuilds(points, polys, kind)
+        for out in panel_rebuilds(points, polys, kind):
+            yield (*out, "panels")

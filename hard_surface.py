@@ -5,7 +5,8 @@
 and the controls (one small draw function, to be placed wherever the panel wants it).
 
 Clean Panels and Even Cylinders add rebuilt versions of a part to the search (`triadq.hardsurf`); the camera picks them
-only where they hold the view, so they are on by default. Hard Edges finishes the written mesh: Mark Sharp + Crease
+only where they hold the view. They are off by default and on with the Hard Surface use: measured on six free
+hard-surface models they helped the crane and hurt the compressor (see the changelog). Hard Edges finishes the written mesh: Mark Sharp + Crease
 flags every hard edge (a game engine shades it hard, a Subdivision Surface keeps it sharp, no extra faces), Holding
 Edges adds a loop on both sides of every hard edge at a small distance (Blender's own bevel, two segments with a square
 profile, so the shape does not move), which is how a modeller makes a mesh ready for subdivision.
@@ -29,8 +30,8 @@ HOLD_UNITS = [
 ]
 
 TIPS = {
-    "hs_panels": "Auto Segments: flat parts (boxes, planks, plates, brackets, bevel strips) are also laid out as clean panels: each flat area becomes one grid along its own edges, holes get rings of quads, and every panel border stays an exact edge loop. The camera keeps it only where the view holds. Costs a little search time on parts made of flat faces",
-    "hs_cylinders": "Auto Segments: round parts (pipes, rods, barrels, rings, also scanned ones) are also rebuilt as even cylinders: the same number of segments all the way round (a multiple of four, at least 16 unless the part is a thin rod), straight rows along it and grid caps with no fans. The camera keeps it only where the view holds; dents and bumps of a scan are smoothed away",
+    "hs_panels": "Auto Segments: flat parts (boxes, planks, plates, brackets, bevel strips) are also laid out as clean panels: each flat area becomes one grid along its own edges, holes get rings of quads, and every panel border stays an exact edge loop. The camera keeps it only where the view holds, and a clean layout counts as half its faces when the search weighs faces against change, so it can win with up to about twice the faces. Costs some search time; on with the Hard Surface use",
+    "hs_cylinders": "Auto Segments: round parts (pipes, rods, barrels, rings, also scanned ones) are also rebuilt as even cylinders: the same number of segments all the way round (a multiple of four, at least 16 unless the part is a thin rod), straight rows along it and grid caps with no fans. A visibly round part (a pipe, a barrel) also never drops below about 16 sides. The camera keeps the rebuild only where the view holds; dents and bumps of a scan are smoothed away, so scans rarely take it. On with the Hard Surface use",
     "hs_edges": "What happens to hard edges when you Apply",
     "hs_angle": "Faces meeting at more than this angle make a hard edge. Lower finds softer edges too",
     "hs_hold_unit": "How the distance of the holding loops is given",
@@ -102,8 +103,8 @@ def prop(name: str):
     """One of the properties, for the Auto Segments settings (an annotation of its property group)."""
     tip = TIPS[name]
     return {
-        "hs_panels": lambda: bpy.props.BoolProperty(name="Clean Panels", description=tip, default=True),
-        "hs_cylinders": lambda: bpy.props.BoolProperty(name="Even Cylinders", description=tip, default=True),
+        "hs_panels": lambda: bpy.props.BoolProperty(name="Clean Panels", description=tip, default=False),
+        "hs_cylinders": lambda: bpy.props.BoolProperty(name="Even Cylinders", description=tip, default=False),
         "hs_edges": lambda: bpy.props.EnumProperty(name="Hard Edges", description=tip, items=EDGE_ITEMS, default="NONE"),
         "hs_angle": lambda: bpy.props.FloatProperty(name="Hard Edge Angle", description=tip, default=40.0, min=5.0, max=150.0, precision=0),
         "hs_hold_unit": lambda: bpy.props.EnumProperty(name="Distance In", description=tip, items=HOLD_UNITS, default="PERCENT"),

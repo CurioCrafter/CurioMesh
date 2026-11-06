@@ -94,7 +94,7 @@ def choose(facts: dict, free_gb: float) -> dict:
     if many_parts:
         return {"use": "GAME", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "assembly", "why": f"{size}: an assembly. Game Asset, part by part. No Multires: its levels would round hard edges and many small parts gain little."}
     if facts["flat"] >= 0.2:
-        return {"use": "HARD", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "hard", "why": f"{size}, {100.0 * facts['flat']:.0f}% of its edges flat: a hard-surface model. Hard Surface: Game Asset with its hard edges marked. No Multires: its levels would round the hard edges."}
+        return {"use": "GAME", "levels": 0, "bake": "OFF", "bake_size": bake_size, "kind": "hard", "why": f"{size}, {100.0 * facts['flat']:.0f}% of its edges flat: a hard-surface model. Game Asset. No Multires: its levels would round the hard edges."}
     levels = levels_for(cage_faces(faces), free_gb, faces)
     room = f"{levels} Multires level{'s' if levels != 1 else ''}: past that your mesh has no more to give, or the {free_gb:.0f} GB free runs out"
     if facts["flat"] < 0.06:

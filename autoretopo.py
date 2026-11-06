@@ -1073,7 +1073,8 @@ class AutoJob:
                 wrong, shown = self._counts(reference, view, pixel)
                 seen = max(seen, shown * pixel * pixel)
                 turned_sizes.append(rebuilt)
-                turned_levels.append(Level(len(rebuilt[1]) * QUAD_WEIGHT, REBUILD_MARGIN * wrong * pixel * pixel))
+                weight = hardsurf.WEIGHTS.get(out[3], QUAD_WEIGHT) if len(out) > 3 else QUAD_WEIGHT  # clean panels and even cylinders count as fewer faces
+                turned_levels.append(Level(len(rebuilt[1]) * weight, REBUILD_MARGIN * wrong * pixel * pixel))
                 if wrong <= enough * shown:
                     break
             hopeless = HOPELESS * PIECE_LIMIT * self.detail / 100.0
@@ -1212,6 +1213,11 @@ class AutoJob:
                 if out is not None:
                     turned_sizes.append(out[0])
                     turned_levels.append(out[1])
+        if self.hard.get("cylinders") and not cut and sizes:  # Even Cylinders: a visibly round part never becomes a coarse prism
+            least = yield from self._off(lambda: hardsurf.round_floor(points, polys, float(np.linalg.norm(np.ptp(self.co, axis=0)))))
+            if least and any(level.faces >= least for level in levels):
+                kept = [k for k, level in enumerate(levels) if level.faces >= least]
+                sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]
         ready = [all(len(f) == 4 for f in size[1]) for size in turned_sizes] + [False] * (len(sizes) + 1)
         sizes = turned_sizes + sizes + [whole]
         levels = turned_levels + levels + [Level(len(polys), 0.0)]

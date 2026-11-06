@@ -59,7 +59,7 @@ class DetailTests(unittest.TestCase):
         self.assertEqual(choose(base, 16.0)["use"], "ANIMATION")
         self.assertGreater(choose(base, 16.0)["levels"], 0)
         self.assertEqual(choose(dict(base, parts=200, biggest_part=0.05), 16.0)["levels"], 0)
-        self.assertEqual(choose(dict(base, flat=0.4), 16.0)["use"], "HARD")
+        self.assertEqual(choose(dict(base, flat=0.4), 16.0)["use"], "GAME")
         self.assertEqual(choose(dict(base, flat=0.03), 16.0)["kind"], "scan")
         self.assertEqual(levels_for(12000, 0.5), 2)
         self.assertEqual(levels_for(5000, 16.0, 20000), 2)
