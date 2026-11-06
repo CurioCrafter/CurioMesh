@@ -11,7 +11,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import guides  # noqa: E402
-import loops  # noqa: E402
+import _addon  # noqa: E402
+
+loops = _addon.load("loops")
 
 
 def _plane(n=30):

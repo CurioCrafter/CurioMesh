@@ -20,16 +20,10 @@ from __future__ import annotations
 
 import numpy as np
 
-try:  # inside the add-on, or on its own for the tests
-    from . import guides
-    from .triadq import parts as P
-    from .triadq import patch
-    from .triadq import segment as S
-except ImportError:
-    import guides
-    from triadq import parts as P
-    from triadq import patch
-    from triadq import segment as S
+from . import guides
+from .triadq import parts as P
+from .triadq import patch
+from .triadq import segment as S
 
 KINDS = ("FLOW", "RING", "EDGE")
 NAMES = {"FLOW": "Flow", "RING": "Ring", "EDGE": "Edge"}

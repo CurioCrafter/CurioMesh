@@ -278,7 +278,6 @@ FLAT_AREA = 1e-6  # of the mean squared side: a face without area
 TOUCH_PROBE = 0.1  # of a face's longest side: how far behind and in front of it to ask which part is there
 TOUCH_NEAR = 0.5  # ...and how close both surfaces must be, so a part merely nearby doesn't count as touching
 MOST_SUNK = 20_000  # faces tested by winding number, deepest first: it looks at every source triangle
-OVERLAP_SPLITS = 4  # random halves tried for faces lying on each other: one misses a pair half the time
 
 
 @dataclass
@@ -349,13 +348,11 @@ class FaceTree:
     def nearest(self, queries) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(closest point (N, 3), polygon, distance) for each query; distance inf where the tree is empty."""
         queries = np.asarray(queries, dtype=np.float64).reshape(-1, 3)
-        at, face, away = np.zeros((len(queries), 3)), np.zeros(len(queries), dtype=np.int64), np.full(len(queries), np.inf)
-        find = self._tree.find_nearest
-        for k, point in enumerate(queries.tolist()):
-            hit, _normal, index, distance = find(point)
-            if index is not None:
-                at[k], face[k], away[k] = hit, index, distance
-        return at, face, away
+        found = list(map(self._tree.find_nearest, queries.tolist()))
+        if any(f[2] is None for f in found):  # an empty tree: nothing near anything
+            return np.zeros((len(queries), 3)), np.zeros(len(queries), dtype=np.int64), np.full(len(queries), np.inf)
+        at = np.asarray([f[0] for f in found], dtype=np.float64).reshape(-1, 3)
+        return at, np.fromiter((f[2] for f in found), dtype=np.int64, count=len(found)), np.fromiter((f[3] for f in found), dtype=np.float64, count=len(found))
 
 
 class PointTree:
@@ -389,38 +386,71 @@ def face_tree(co, faces) -> FaceTree | None:
         return None
 
 
-_source_tree: tuple = ((), None)  # (which source, its tree): the same source is checked again and again in one job
+class _Source:
+    """Everything the checks need of one source mesh, worked out once: a job checks the same source again and again."""
+
+    def __init__(self, co, faces, tree):
+        self.co, self.faces, self.tree = co, faces, tree
+        self.pad = corner_table(faces)
+        self.normals, _area, self.middle = _normals(co, self.pad)
+        sides = np.linalg.norm(co[self.pad] - co[np.roll(self.pad, -1, axis=1)], axis=2).max(axis=1)
+        self.stacked = _overlapping(co, faces, self.pad, self.normals, self.middle, sides, tree)
+        self._parts = self._tris = self._crossed = None
+
+    @property
+    def parts(self) -> np.ndarray:
+        if self._parts is None:
+            self._parts = source_parts(self.pad)
+        return self._parts
+
+    @property
+    def tris(self) -> np.ndarray:
+        if self._tris is None:
+            self._tris = np.asarray([(f[0], f[i], f[i + 1]) for f in self.faces for i in range(1, len(f) - 1)], dtype=np.int64)
+        return self._tris
+
+    @property
+    def crossed(self) -> np.ndarray:
+        """Faces that pass through or lie on another face of the source."""
+        if self._crossed is None:
+            self._crossed = self.stacked.copy()
+            self._crossed[crossing_pairs(self.co, self.faces).ravel()] = True
+        return self._crossed
 
 
-def _tree_of_source(source_co, source_faces):
-    global _source_tree
-    key = (id(source_co), len(source_co), len(source_faces))
-    if _source_tree[0] != key:
-        _source_tree = (key, face_tree(source_co, source_faces))
-    return _source_tree[1]
+_source: tuple = ((), None)  # (which source, its `_Source`)
 
 
-def _overlapping(co, faces, pad, normal, middle, size, seed: int = 0) -> np.ndarray:
+def _source_of(source_co, source_faces) -> _Source | None:
+    """The `_Source` of this mesh, None outside Blender. Kept while the same mesh (by size and corner sum) comes back."""
+    global _source
+    co = np.asarray(source_co, dtype=np.float64)
+    key = (len(co), len(source_faces), float(co.sum()))
+    if _source[0] != key:
+        faces = [tuple(f) for f in source_faces]
+        tree = face_tree(co, faces)
+        _source = (key, None if tree is None else _Source(co, faces, tree))
+    return _source[1]
+
+
+def _overlapping(co, faces, pad, normal, middle, size, tree=None) -> np.ndarray:
     """Faces whose middle lies on another face, in its plane, that shares no corner with it."""
     out = np.zeros(len(pad), bool)
     if len(pad) < 2:
         return out
-    rng = np.random.default_rng(seed)
-    for _ in range(OVERLAP_SPLITS):  # ponytail: random halves miss a pair 1/16 of the time; a k-nearest query would not
-        half = rng.random(len(pad)) < 0.5
-        here, there = np.flatnonzero(half), np.flatnonzero(~half)
-        if not len(here) or not len(there):
-            continue
-        tree = face_tree(co, [faces[f] for f in there.tolist()])
-        if tree is None:
-            return out
-        _at, hit, away = tree.nearest(middle[here])
-        hit = there[np.asarray(hit, dtype=np.int64)]
-        close = (np.asarray(away) < 0.02 * size[here]) & (np.abs((normal[here] * normal[hit]).sum(axis=1)) > 0.95)
-        if close.any():
-            a, b = here[close], hit[close]
-            apart = ~(pad[a][:, :, None] == pad[b][:, None, :]).any(axis=(1, 2))
-            out[a[apart]] = out[b[apart]] = True
+    tree = tree or face_tree(co, faces)
+    if tree is None:
+        return out
+    # Every face within reach of each middle, from one tree: no face is missed, and one pass is cheaper than halves.
+    near = tree._tree.find_nearest_range
+    pairs = [(k, hit[2]) for k, (point, reach) in enumerate(zip(middle.tolist(), (0.02 * size).tolist())) for hit in near(point, reach) if hit[2] != k]
+    if not pairs:
+        return out
+    a, b = np.asarray(pairs, dtype=np.int64).T
+    keep = np.abs((normal[a] * normal[b]).sum(axis=1)) > 0.95
+    a, b = a[keep], b[keep]
+    apart = ~(pad[a][:, :, None] == pad[b][:, None, :]).any(axis=(1, 2))
+    out[a[apart]] = out[b[apart]] = True
     return out
 
 
@@ -445,7 +475,7 @@ def source_parts(pad: np.ndarray) -> np.ndarray:
         label = label[label]
 
 
-def touching_parts(ids, normal, middle, size, tree, source_normals, source_pad) -> np.ndarray:
+def touching_parts(ids, normal, middle, size, tree, source_normals, part) -> np.ndarray:
     """Of these faces turned inward, those lying on their own part's surface with another part pressed against it.
 
     Just behind such a face its own part's surface faces the same way; just in front another part's surface faces back
@@ -458,7 +488,6 @@ def touching_parts(ids, normal, middle, size, tree, source_normals, source_pad) 
     _a, behind, back_gap = tree.nearest(middle[ids] - step)
     _b, ahead, front_gap = tree.nearest(middle[ids] + step)
     behind, ahead = np.asarray(behind, dtype=np.int64), np.asarray(ahead, dtype=np.int64)
-    part = source_parts(source_pad)
     near = (np.asarray(back_gap) < TOUCH_NEAR * size[ids]) & (np.asarray(front_gap) < TOUCH_NEAR * size[ids])
     own = (source_normals[behind] * normal[ids]).sum(axis=1) > -FACING
     other = (source_normals[ahead] * normal[ids]).sum(axis=1) < FACING
@@ -497,16 +526,10 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
     inward, sunk, touching = empty.copy(), empty.copy(), empty.copy()
     edge = _edge_faces(pad)
     fold = (normal[edge[:, 0]] * normal[edge[:, 1]]).sum(axis=1) < FOLD
-    tree = None
-    if source_co is not None:
-        tree = _tree_of_source(source_co, source_faces)
-        source_co = np.asarray(source_co, dtype=np.float64)
-        source_faces = [tuple(f) for f in source_faces]
-    if tree is not None:
-        source_pad = corner_table(source_faces)
-        source_normals, _area, source_middle = _normals(source_co, source_pad)
-        source_sides = np.linalg.norm(source_co[source_pad] - source_co[np.roll(source_pad, -1, axis=1)], axis=2).max(axis=1)
-        stacked = _overlapping(source_co, source_faces, source_pad, source_normals, source_middle, source_sides)
+    src = _source_of(source_co, source_faces) if source_co is not None else None
+    tree = None if src is None else src.tree
+    if src is not None:
+        source_co, source_normals, source_middle, stacked = src.co, src.normals, src.middle, src.stacked
         at, hit, away = tree.nearest(middle)
         hit = np.asarray(hit, dtype=np.int64)
         source_normal = source_normals[hit]
@@ -519,25 +542,22 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
         votes = np.where(stacked[near][:, :, None], 0.0, source_normals[near]).sum(axis=1) + np.where(stacked[hit][:, None], 0.0, source_normal)
         length = np.linalg.norm(votes, axis=1)
         inward = (length > 0.0) & ((normal * votes).sum(axis=1) < FACING * np.maximum(length, 1e-300))
-        touching = touching_parts(np.flatnonzero(inward), normal, middle, size, tree, source_normals, source_pad)
+        touching = touching_parts(np.flatnonzero(inward), normal, middle, size, tree, source_normals, src.parts)
         inward &= ~touching
         depth = -((middle - at) * source_normal).sum(axis=1)
         deep = np.flatnonzero((depth > SUNK * size) & (np.asarray(away) > 0.99 * SUNK * size))
         deep = deep[np.argsort(-depth[deep] / size[deep])][:MOST_SUNK]
         if len(deep):
-            tris = np.asarray([(f[0], f[i], f[i + 1]) for f in source_faces for i in range(1, len(f) - 1)], dtype=np.int64)
             from .patch import inside_volume
 
-            sunk[deep] = inside_volume(middle[deep], source_co[tris])
+            sunk[deep] = inside_volume(middle[deep], source_co[src.tris])
         fold &= (source_normal[edge[:, 0]] * source_normal[edge[:, 1]]).sum(axis=1) > FACING  # a knife edge of the source folds so too
     folded_over = empty.copy()
     folded_over[edge[fold].ravel()] = True
     overlap = _overlapping(co, faces, pad, normal, middle, size) & ~duplicate
     overlap[original[duplicate]] = False  # the first of two duplicates is not also an overlap
     if tree is not None:  # where the source passes through itself or lies on itself, the result may too
-        old = stacked.copy()
-        if len(pairs) or overlap.any():  # only then is it worth finding where the source crosses itself
-            old[crossing_pairs(source_co, source_faces).ravel()] = True
+        old = src.crossed if len(pairs) or overlap.any() else stacked  # only then is it worth finding where the source crosses itself
         if old.any() and (len(pairs) or overlap.any()):
             _near, gap = PointTree(source_middle[old]).nearest(middle)
             new = np.asarray(gap) > 2.0 * size

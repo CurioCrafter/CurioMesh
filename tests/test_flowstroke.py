@@ -9,7 +9,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import flowstroke as F  # noqa: E402
+import _addon  # noqa: E402
+
+F = _addon.load("flowstroke")
 from triadq import loopscore as L  # noqa: E402
 
 

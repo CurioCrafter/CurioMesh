@@ -14,12 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
-try:  # inside the add-on, or on its own for the tests
-    from . import guides
-    from .triadq import patch
-except ImportError:
-    import guides
-    from triadq import patch
+from . import guides
+from .triadq import patch
 
 MARGIN = 0.75  # triangles this many gaps beyond the outer loop are cut away too; the gap they leave is zipped shut
 

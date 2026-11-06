@@ -10,10 +10,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import guides  # noqa: E402
-import symmetry  # noqa: E402
+import _addon  # noqa: E402
 from triadq import flatquad  # noqa: E402
 from triadq.budget import density_drop  # noqa: E402
 from triadq.types import Cancelled, MeshData  # noqa: E402
+
+symmetry = _addon.load("symmetry")
 
 
 def _sheet(n=12):

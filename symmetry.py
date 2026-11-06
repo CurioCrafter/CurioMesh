@@ -238,10 +238,7 @@ def _clean_seam(co: np.ndarray, faces: list, mat, on: np.ndarray):
 def seam_check(co: np.ndarray, faces, axis: int, offset: float, size: float) -> dict:
     """Issue counts along a mirror seam: open and non-manifold seam edges, faces crossing the plane, duplicate faces,
     and the Issue Finder's slivers, pinched and concave faces among those touching the seam."""
-    try:
-        from .triadq import issues
-    except ImportError:  # imported on its own, as the tests do
-        from triadq import issues
+    from .triadq import issues
     co = np.asarray(co, dtype=np.float64)
     d = co[:, axis] - offset
     tol = 1e-7 * size
