@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.8 - unreleased
+
+### Organize
+- **Organize** (a slider under the result, next to Quad Size and Organization): about the same faces, laid out tidier.
+  Moving it the first time works out four strengths in the background (a few seconds on a bust, under ten on a
+  15,000-face machine); after that dragging only swaps meshes. 0.25 redraws the messy patches around poles as plain
+  grids and spins edges to walk the poles left together; higher strengths then let the quads settle into even rows,
+  held on your mesh, with hard edges, borders and the mirror seam kept where they are. A mirrored result is organized
+  on one half and mirrored again, so the seam stays exact.
+- **A meter** under the slider: "Tidiness 38 -> 56, view changed 6.2% -> 7.6%, poles 1,077 -> 722, faces 2,607 ->
+  2,410". The Issue Finder and the red bad-face overlay follow the strength on screen, and Apply writes it.
+- **Most Detail Loss**: Organize goes no further than this much more of the view changed than at 0 (it says where it
+  was held).
+- **Loop Flow**: draws the edge loops of the result in a colour each, and its poles as dots (blue: three edges, red:
+  five or more).
+- Measured at Organize 1 on five free test models: Tidiness up by 12 to 18 points on the bust, lion, horse (with
+  Symmetrize) and barrier and by 4 on the compressor; poles down by a third on the organic ones; 4 to 13% fewer faces;
+  the view changed by 0.8 to 1.4 points more; Issue Finder totals down on all five, though 7 to 80 bent quads appear
+  where there were almost none.
+
 ## 0.9.7 - 2026-11-05
 
 ### Auto Segments
