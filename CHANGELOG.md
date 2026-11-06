@@ -93,6 +93,12 @@
 - **Tools** section between Adjust and Fix: Work on (Selection, Part, Whole Result), five groups that show only once
   they have a tool, and a Last line with Again and Undo. While a tool is open the Adjust sliders wait.
 - Smooth Corners is the small example tool that proves the system (shown with Blender's Developer Extras on).
+- **True Up Edges** (Hard Surface): finds the hard edges of the result and lays each on the crease of your original
+  mesh, straight ones on one line and curved ones smooth, evenly spaced, with the quads beside them following. Only
+  edges that end up nearer their crease are changed; the card shows how far off the creases they were and are.
+- **Press Panels Flat** (Hard Surface): finds the flat panels of your original mesh under the result and lays each
+  exactly flat; corners shared by two or three panels go to the point on all of them, so panel borders become clean
+  lines. The kept hard edges and panel borders are drawn in pink in the preview.
 
 ## 0.9.8 - 2026-11-06
 
