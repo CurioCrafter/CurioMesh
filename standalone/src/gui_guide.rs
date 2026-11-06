@@ -139,7 +139,9 @@ pub fn guide_window(ctx: &egui::Context, open: &mut bool, topic: &mut usize, rep
                         }
                         Bullets(lines) => {
                             for line in *lines {
-                                ui.label(format!("•  {line}"));
+                                // A numbered step carries its own number; anything else gets a bullet.
+                                let numbered = line.split_once(". ").is_some_and(|(n, _)| n.parse::<u32>().is_ok());
+                                ui.label(if numbered { line.to_string() } else { format!("•  {line}") });
                             }
                         }
                     }

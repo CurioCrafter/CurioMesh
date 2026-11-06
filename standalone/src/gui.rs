@@ -364,6 +364,42 @@ fn style(ctx: &egui::Context) {
     });
 }
 
+/// The add-on's panel icons (icons/, CC0, drawn for CurioMesh), so the app and the add-on look like one product.
+fn icon(ctx: &egui::Context, name: &str) -> egui::TextureHandle {
+    let bytes: &[u8] = match name {
+        "use_game" => include_bytes!("../../icons/use_game.png"),
+        "use_scan" => include_bytes!("../../icons/use_scan.png"),
+        "use_lowpoly" => include_bytes!("../../icons/use_lowpoly.png"),
+        "use_sculpt" => include_bytes!("../../icons/use_sculpt.png"),
+        "use_animation" => include_bytes!("../../icons/use_animation.png"),
+        "use_auto" => include_bytes!("../../icons/use_auto.png"),
+        "status_good" => include_bytes!("../../icons/status_good.png"),
+        "status_check" => include_bytes!("../../icons/status_check.png"),
+        _ => include_bytes!("../../icons/status_bad.png"),
+    };
+    let id = format!("icon:{name}");
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new(&id))) {
+        return texture;
+    }
+    let image = image::load_from_memory(bytes).map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::new(1, 1));
+    let color = egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw());
+    let texture = ctx.load_texture(&id, color, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(&id), texture.clone()));
+    texture
+}
+
+/// Which icon a use (a preset's key) shows.
+fn use_icon(key: &str) -> &'static str {
+    match key {
+        "game-asset" => "use_game",
+        "scan" => "use_scan",
+        "low-poly" => "use_lowpoly",
+        "sculpt-base" => "use_sculpt",
+        "animation" => "use_animation",
+        _ => "use_auto",
+    }
+}
+
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(14.0);
     ui.label(RichText::new(title).size(13.5).color(MUTED));
@@ -409,7 +445,7 @@ impl eframe::App for App {
         if replay {
             (self.tour, self.screen, self.guide_open) = (Some(0), Screen::Home, false);
         }
-        if let (Some(step), Screen::Home) = (self.tour, self.screen) {
+        if let (Some(step), Screen::Home, false) = (self.tour, self.screen, self.guide_open) {
             let mut step = step;
             let over = gui_guide::tour(ctx, &mut step, &mut self.tour_forget);
             self.tour = match over {
@@ -564,7 +600,11 @@ impl App {
                     }
                 }).response.on_hover_text("What the model is for. This sets how much of the view may change.");
                 let words = gui_prefs::uses().into_iter().find(|u| u.0 == c.preset).map_or("", |u| u.2);
-                ui.add(egui::Label::new(RichText::new(words).small().color(MUTED)).wrap());
+                let texture = icon(ui.ctx(), use_icon(&c.preset));
+                ui.horizontal(|ui| {
+                    ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(28.0)));
+                    ui.add(egui::Label::new(RichText::new(words).small().color(MUTED)).wrap());
+                });
             }
             for (key, label, words) in gui_prefs::uses().into_iter().filter(|_| !compact) {
                 let chosen = c.preset == key;
@@ -573,11 +613,18 @@ impl App {
                     .stroke(Stroke::new(if chosen { 1.5 } else { 1.0 }, if chosen { AMBER } else { LINE }))
                     .corner_radius(8.0)
                     .inner_margin(egui::Margin::symmetric(10, 6));
+                let texture = icon(ui.ctx(), use_icon(key));
                 let shown = frame.show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(RichText::new(label).strong().color(if chosen { AMBER } else { TEXT }));
-                    ui.add(egui::Label::new(RichText::new(words).small().color(MUTED)).wrap());
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(36.0)));
+                        ui.add_space(4.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new(label).strong().color(if chosen { AMBER } else { TEXT }));
+                            ui.add(egui::Label::new(RichText::new(words).small().color(MUTED)).wrap());
+                        });
+                    });
                 });
                 let response = ui.interact(shown.response.rect, ui.id().with(key), Sense::click());
                 if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{words}. Click to use it.")).clicked() {
@@ -598,6 +645,7 @@ impl App {
                 ui.label(RichText::new("A fixed face count suits one model, so a batch uses the limit above.").small().color(MUTED));
             }
             ui.checkbox(&mut c.rows, "Even rows on smooth parts").on_hover_text("Smooth parts are also tried as even rows of quads, and keep them when the view still holds and no bad faces come in.");
+            let more = |ui: &mut egui::Ui, c: &mut gui_prefs::Choices| {
             ui.horizontal(|ui| {
                 ui.label("Measuring detail");
                 egui::ComboBox::from_id_salt("pixels").selected_text(match c.pixels { 0..=160 => "Quick", 161..=224 => "Normal", _ => "Fine" }).show_ui(ui, |ui| {
@@ -627,6 +675,14 @@ impl App {
                 }).response.on_hover_text("The game engine the file is for. This sets the file type, triangles and size limits.");
             });
             ui.checkbox(&mut c.gpu, "Use the graphics card").on_hover_text("Draw the camera pictures on the graphics card. Faster. Turn it off if it fails on your computer.");
+            };
+            if compact {
+                // Beside a model these fold away, so Retopologize and the result stay in view.
+                let summary = format!("More options ({}, mirror {})", export::engines().iter().find(|e| e.0 == c.engine).map_or("plain OBJ", |e| e.1), match c.mirror { Mirror::Off => "off", Mirror::Auto => "auto", _ => "on" });
+                egui::CollapsingHeader::new(RichText::new(summary).color(MUTED)).id_salt("more_options").show(ui, |ui| more(ui, c));
+            } else {
+                more(ui, c);
+            }
         });
     }
 
@@ -724,6 +780,28 @@ impl App {
             (kinds.join(", "), s.score)
         }).collect();
         section(ui, "Result");
+        let use_name = gui_prefs::uses().into_iter().find(|u| u.0 == self.prefs.choices.preset).map_or("", |u| u.1);
+        let asked = (!self.prefs.choices.aim_for_count).then_some(limit);
+        let bad_spots = finished.check.spots.iter().filter(|s| s.kinds[0] + s.kinds[1] > 0).count();
+        let (level, title) = verdict(if self.prefs.choices.preset == CUSTOM { "" } else { use_name }, faces, loss, asked, bad, bad_spots);
+        let (status, color, next) = match level {
+            Level::Good => ("status_good", GREEN, "Save it, or drag the line across the model to compare first."),
+            Level::Check => ("status_check", AMBER, "Click a spot below to look at it before you save."),
+            Level::Bad => ("status_bad", RED, "Look at the spots below, or try Scan Cleanup or more faces."),
+        };
+        let texture = icon(ui.ctx(), status);
+        egui::Frame::new().fill(Color32::from_rgb(44, 46, 53)).stroke(Stroke::new(1.0, color)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(30.0)));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(&title).size(17.0).strong().color(color));
+                    ui.add(egui::Label::new(RichText::new(next).small().color(MUTED)).wrap());
+                });
+            });
+        });
+        ui.add_space(4.0);
         ui.label(RichText::new(format!("{} {}", thousands(faces), if quads == faces { "quads" } else { "faces" })).size(28.0).strong());
         ui.label(RichText::new(format!("from {} faces, {:.0}× fewer", thousands(source_faces), source_faces as f64 / faces.max(1) as f64)).color(MUTED));
         ui.add_space(6.0);
@@ -878,6 +956,39 @@ impl App {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Level {
+    Good,
+    Check,
+    Bad,
+}
+
+// The add-on's verdict (verdict.py), with its first-guess thresholds, so both say the same about the same result.
+const GOOD_CHANGE: f64 = 1.2; // view change up to this many times the detail asked is still good
+const CHECK_CHANGE: f64 = 2.0; // past this it is a real problem
+const CHECK_PER_1000: f64 = 5.0; // bad faces per 1,000 faces: below is "check", above a real problem
+
+/// (level, title) for a result: `asked` is the detail asked for (None for a face count), `bad` the bad faces and
+/// `bad_spots` the spots they sit in.
+fn verdict(use_name: &str, faces: usize, loss: f64, asked: Option<f64>, bad: usize, bad_spots: usize) -> (Level, String) {
+    let ratio = asked.map_or(0.0, |a| loss / a);
+    let rate = 1000.0 * bad as f64 / faces.max(1) as f64;
+    let where_ = format!("{bad_spots} spot{}", if bad_spots == 1 { "" } else { "s" });
+    if rate > CHECK_PER_1000 {
+        (Level::Bad, format!("{where_} with bad faces left"))
+    } else if ratio > CHECK_CHANGE {
+        (Level::Bad, "Changed far more than asked".into())
+    } else if bad > 0 {
+        (Level::Check, format!("Check {where_}"))
+    } else if ratio > GOOD_CHANGE {
+        (Level::Check, "Changed a little more than asked".into())
+    } else if use_name.is_empty() {
+        (Level::Good, "Good".into())
+    } else {
+        (Level::Good, format!("Good for {}", use_name.to_lowercase()))
+    }
+}
+
 fn plural(kind: &str, n: usize) -> String {
     let word = match kind {
         "broken" => "broken face",
@@ -979,4 +1090,18 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("CurioMesh", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verdicts_match_the_addon() {
+        assert_eq!(verdict("Animation", 6000, 1.5, Some(1.5), 0, 0), (Level::Good, "Good for animation".to_string()));
+        assert_eq!(verdict("Game Asset", 1000, 1.0, Some(6.0), 2, 1).0, Level::Check);
+        assert_eq!(verdict("Game Asset", 1000, 1.0, Some(6.0), 20, 4).0, Level::Bad);
+        assert_eq!(verdict("Game Asset", 5000, 13.0, Some(6.0), 0, 0).0, Level::Bad);
+        assert_eq!(verdict("Game Asset", 5000, 9.0, None, 0, 0).0, Level::Good); // a face count asks no detail
+    }
 }
