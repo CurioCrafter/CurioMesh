@@ -259,6 +259,9 @@ def draw_verdict(layout, gs) -> None:
         col.label(text=f"Shading {max(0.0, 100.0 - report['shading']):.0f}% the same")
     if report.get("asked") and asked is None:
         col.label(text=f"You asked for about {report['asked']:,}")
+        short = G.short_of_target(report["asked"], after)
+        if short:
+            overlay.wrap_label(col, short, icon="ERROR", width=WIDTH, limit=3)
     follows = report.get("guides")
     if follows:
         col.label(text=f"Guides: {follows['strokes']} strokes, nearest edge {100.0 * follows['mean']:.2f}% of the size away")

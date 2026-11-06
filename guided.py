@@ -1582,6 +1582,17 @@ def auto_target(gs, faces: int) -> int:
     return max(12, int(round(gs.auto_reduce_percent / 100.0 * faces)) if gs.auto_reduce_by == "PERCENT" else int(gs.auto_reduce_count))
 
 
+def short_of_target(asked: int, got: int) -> str:
+    """Words for a Reduce To / LOD size that landed well above the faces asked for, when loose pieces are why. "" otherwise."""
+    src = state.get("src")
+    if not asked or got <= asked * 1.25 or src is None:
+        return ""
+    pieces = loose_pieces(src)
+    if pieces < 20:
+        return ""
+    return f"Could not reach {asked:,} faces. This mesh is {pieces:,} loose pieces, and each piece keeps a few faces of its own"
+
+
 def _mirror_half(gs, src, codes):
     """(half, note): the half to solve as (co, faces, mat, mirror) or None, and what to tell the user about the symmetry."""
     if gs.sym_axis == "OFF":
@@ -2095,6 +2106,8 @@ def run_update(context, force: bool = False) -> bool:
                 return False
             res, extra = _whole_mesh(context, source, src, pts, gs, L0, project)
             notes = notes or extra
+            if res is not None and len(res["faces"]) > 1.5 * qe + 50 and loose_pieces(src) >= 20:
+                notes = (notes + " | " if notes else "") + f"Base Quads can't go this low: this mesh is {loose_pieces(src):,} loose pieces, and each keeps a few quads of its own"
     if res is None:
         state["message"] = notes or "Nothing could be remeshed"
         return False
@@ -3017,7 +3030,11 @@ def _lod_finished(context, source, report) -> None:
         return
     made = lod["made"]
     gs.enabled = False  # removes the preview, stops the timer
+    wanted = profiles.lod_targets((gs.lod0_percent, gs.lod1_percent, gs.lod2_percent), len(state["src"]["faces"])) if state.get("src") is not None else [0] * len(made)
+    notes = [short_of_target(want, faces) for want, (_n, faces, _l, _b) in zip(wanted, made)]
     state["lod_report"] = " | ".join(f"{name}: {faces:,} faces, view changed by {loss:.1f}%{bake}" for name, faces, loss, bake in made)
+    if any(notes):
+        state["lod_report"] += " | " + next(n for n in notes if n) + (" (the smaller sizes share this limit)" if sum(map(bool, notes)) > 1 else "")
     bpy.ops.object.select_all(action="DESELECT")
     first = bpy.data.objects[made[0][0]]
     first.select_set(True)
@@ -3226,7 +3243,7 @@ class CURIOMESH_OT_guided_auto_start(_AskFirst, bpy.types.Operator):
         remove_preview()
         state["auto_base"] = None
         state["region"] = None
-        if gs.region_use:
+        if gs.region_use and REGION_READY:
             picked = np.zeros(len(obj.data.polygons), dtype=bool)
             obj.data.polygons.foreach_get("select", picked)
             state["region"] = picked[_source_data(obj)["keep"]] if picked.any() else None
