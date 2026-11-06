@@ -930,8 +930,282 @@ fn uvseam_probe() -> usize {
     uvseam::probe()
 }
 
+struct UvseamSource<'a> {
+    points: &'a [f64],
+    indptr: &'a [i64],
+    flat: &'a [i64],
+    uv: &'a [f64],
+    material: &'a [i64],
+}
+
+fn uvseam_mesh<'a>(points: &'a [f64], indptr: &'a [i64], flat: &'a [i64]) -> PyResult<topo::Faces<'a>> {
+    check_faces(indptr, flat)?;
+    let n = points.len() / 3;
+    if points.len() % 3 != 0 || flat.iter().any(|&v| v < 0 || v as usize >= n) || points.iter().any(|x| !x.is_finite()) {
+        return Err(PyValueError::new_err("points or face vertex ids are invalid"));
+    }
+    Ok(topo::Faces { indptr, flat })
+}
+
+fn uvseam_source<'a>(src: &UvseamSource<'a>) -> PyResult<topo::Faces<'a>> {
+    let faces = uvseam_mesh(src.points, src.indptr, src.flat)?;
+    if src.uv.len() != 2 * src.flat.len() || !(src.material.is_empty() || src.material.len() == faces.count()) || src.uv.iter().any(|x| !x.is_finite()) {
+        return Err(PyValueError::new_err("corner UVs need 2 finite values per corner and materials one per face (or none)"));
+    }
+    Ok(faces)
+}
+
+fn uvseam_set(src: &UvseamSource, faces: &topo::Faces, repeat: &[bool], texture_px: f64, uv_tol_px: f64, cut_here: &[i64], classes: &[i64]) -> PyResult<uvseam::SeamSet> {
+    let mut set = uvseam::extract(src.points, faces, src.uv, src.material, repeat, texture_px, uv_tol_px);
+    if !cut_here.is_empty() {
+        uvseam::classify(&mut set, repeat, cut_here);
+    }
+    if !classes.is_empty() {
+        if classes.len() != set.chains() || classes.iter().any(|&c| !(0..=3).contains(&c)) {
+            return Err(PyValueError::new_err("chain classes need one code 0..3 per chain"));
+        }
+        uvseam::set_classes(&mut set, &classes.iter().map(|&c| c as u8).collect::<Vec<_>>());
+    }
+    Ok(set)
+}
+
+fn uvseam_put_set<'py>(py: Python<'py>, d: &Bound<'py, PyDict>, set: uvseam::SeamSet) -> PyResult<()> {
+    d.set_item("n_welded", set.n_welded)?;
+    d.set_item("n_islands", set.n_islands)?;
+    d.set_item("n_regions", set.n_regions)?;
+    d.set_item("texture_px", set.texture_px)?;
+    d.set_item("weld", set.weld.into_pyarray(py))?;
+    d.set_item("island", set.island.into_pyarray(py))?;
+    d.set_item("region", set.region.into_pyarray(py))?;
+    d.set_item("edge_a", set.edge_a.into_pyarray(py))?;
+    d.set_item("edge_b", set.edge_b.into_pyarray(py))?;
+    d.set_item("edge_chain", set.edge_chain.into_pyarray(py))?;
+    d.set_item("edge_face", set.edge_face.concat().into_pyarray(py))?;
+    d.set_item("corner", set.corner.into_pyarray(py))?;
+    d.set_item("run_indptr", set.run_indptr.into_pyarray(py))?;
+    d.set_item("run_vertex", set.run_vertex.into_pyarray(py))?;
+    d.set_item("uv_a", set.uv_a.into_pyarray(py))?;
+    d.set_item("uv_b", set.uv_b.into_pyarray(py))?;
+    d.set_item("gap_px", set.gap_px.into_pyarray(py))?;
+    d.set_item("class", set.class.iter().map(|&c| c as i64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("chain_island", set.chain_island.concat().into_pyarray(py))?;
+    d.set_item("chain_material", set.chain_material.concat().into_pyarray(py))?;
+    d.set_item("chain_length", set.chain_length.into_pyarray(py))?;
+    d.set_item("island_tile", set.island_tile.concat().into_pyarray(py))?;
+    Ok(())
+}
+
+fn uvseam_put_fold(d: &Bound<'_, PyDict>, fold: uvseam::FoldReport) -> PyResult<()> {
+    d.set_item("folded_before", fold.before)?;
+    d.set_item("folded_after", fold.after)?;
+    d.set_item("fold_rings", fold.rings)?;
+    d.set_item("fold_sweeps", fold.sweeps)?;
+    d.set_item("fold_stuck", fold.stuck)?;
+    d.set_item("fold_stalled", fold.stalled)?;
+    d.set_item("fold_stopped", fold.stopped)?;
+    Ok(())
+}
+
+/// Islands, side regions, seam chains and classes of a source (`uvseam::extract` + `classify`) as a dict of arrays
+/// (pairs flattened: edge_face, chain_island, chain_material, island_tile hold 2 values per row). `repeat` per
+/// material (missing: repeats); `cut_here` chain ids made Hard.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvseam_extract<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    corner_uv: PyReadonlyArray1<'py, f64>,
+    material: PyReadonlyArray1<'py, i64>,
+    repeat: PyReadonlyArray1<'py, bool>,
+    texture_px: f64,
+    uv_tol_px: f64,
+    cut_here: PyReadonlyArray1<'py, i64>,
+    stop: &StopFlag,
+) -> PyResult<Bound<'py, PyDict>> {
+    let src = UvseamSource { points: slice(&points, "points")?, indptr: slice(&indptr, "indptr")?, flat: slice(&flat, "flat")?, uv: slice(&corner_uv, "corner_uv")?, material: slice(&material, "material")? };
+    let (repeat, cut_here) = (slice(&repeat, "repeat")?, slice(&cut_here, "cut_here")?);
+    let faces = uvseam_source(&src)?;
+    let set = py.detach(|| uvseam_set(&src, &faces, repeat, texture_px, uv_tol_px, cut_here, &[]))?;
+    finished(!stop.0.load(std::sync::atomic::Ordering::Relaxed))?;
+    let d = PyDict::new(py);
+    uvseam_put_set(py, &d, set)?;
+    Ok(d)
+}
+
+/// Pre-search Hard choice (`uvseam::triage`): the extract dict (with the new classes) plus hard_islands, hard_cost,
+/// left_islands, left_cost, spent, budget, edge_est. `seen_face` per source face, or empty for "all seen".
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvseam_triage<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    corner_uv: PyReadonlyArray1<'py, f64>,
+    material: PyReadonlyArray1<'py, i64>,
+    repeat: PyReadonlyArray1<'py, bool>,
+    texture_px: f64,
+    uv_tol_px: f64,
+    cut_here: PyReadonlyArray1<'py, i64>,
+    f_target: f64,
+    allowance: f64,
+    seen_face: PyReadonlyArray1<'py, f64>,
+    cost_a: f64,
+    cost_b: f64,
+    stop: &StopFlag,
+) -> PyResult<Bound<'py, PyDict>> {
+    let src = UvseamSource { points: slice(&points, "points")?, indptr: slice(&indptr, "indptr")?, flat: slice(&flat, "flat")?, uv: slice(&corner_uv, "corner_uv")?, material: slice(&material, "material")? };
+    let (repeat, cut_here, seen) = (slice(&repeat, "repeat")?, slice(&cut_here, "cut_here")?, slice(&seen_face, "seen_face")?);
+    let faces = uvseam_source(&src)?;
+    if !(seen.is_empty() || seen.len() == faces.count()) {
+        return Err(PyValueError::new_err("seen_face needs one value per face (or none)"));
+    }
+    let (set, t) = py.detach(|| {
+        let mut set = uvseam_set(&src, &faces, repeat, texture_px, uv_tol_px, cut_here, &[])?;
+        let t = uvseam::triage(&mut set, src.points, &faces, f_target, allowance, if seen.is_empty() { None } else { Some(seen) }, cost_a, cost_b);
+        Ok::<_, PyErr>((set, t))
+    })?;
+    finished(!stop.0.load(std::sync::atomic::Ordering::Relaxed))?;
+    let d = PyDict::new(py);
+    uvseam_put_set(py, &d, set)?;
+    d.set_item("hard_islands", t.hard_islands.into_pyarray(py))?;
+    d.set_item("hard_cost", t.hard_cost.into_pyarray(py))?;
+    d.set_item("left_islands", t.left_islands.into_pyarray(py))?;
+    d.set_item("left_cost", t.left_cost.into_pyarray(py))?;
+    d.set_item("spent", t.spent)?;
+    d.set_item("budget", t.budget)?;
+    d.set_item("edge_est", t.edge_est)?;
+    Ok(d)
+}
+
+fn uvseam_put_lookup<'py>(py: Python<'py>, d: &Bound<'py, PyDict>, look: uvseam::Lookup) -> PyResult<()> {
+    d.set_item("done", look.done)?;
+    d.set_item("ids", look.ids.into_pyarray(py))?;
+    d.set_item("w", look.w.into_pyarray(py))?;
+    d.set_item("shift", look.shift.into_pyarray(py))?;
+    d.set_item("slid", look.slid.into_pyarray(py))?;
+    d.set_item("ref_ids", look.ref_ids.into_pyarray(py))?;
+    d.set_item("ref_w", look.ref_w.into_pyarray(py))?;
+    d.set_item("ref_face", look.ref_face.into_pyarray(py))?;
+    d.set_item("orient", look.orient.into_pyarray(py))?;
+    d.set_item("region", look.region.into_pyarray(py))?;
+    d.set_item("join", look.join.into_pyarray(py))?;
+    Ok(())
+}
+
+/// Per-side transfer (`uvseam::transfer`) of the source's corner UVs onto a result mesh: dict with uv (2 per result
+/// corner), expected (winding per face), the lookup arrays (for other layers) and the fold report. `classes` per chain
+/// (empty: as classified; e.g. after triage). A stop hands back done = False and the faces read so far (no error).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvseam_transfer<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    corner_uv: PyReadonlyArray1<'py, f64>,
+    material: PyReadonlyArray1<'py, i64>,
+    repeat: PyReadonlyArray1<'py, bool>,
+    texture_px: f64,
+    uv_tol_px: f64,
+    classes: PyReadonlyArray1<'py, i64>,
+    res_points: PyReadonlyArray1<'py, f64>,
+    res_indptr: PyReadonlyArray1<'py, i64>,
+    res_flat: PyReadonlyArray1<'py, i64>,
+    fix_folds: bool,
+    stop: &StopFlag,
+) -> PyResult<Bound<'py, PyDict>> {
+    let src = UvseamSource { points: slice(&points, "points")?, indptr: slice(&indptr, "indptr")?, flat: slice(&flat, "flat")?, uv: slice(&corner_uv, "corner_uv")?, material: slice(&material, "material")? };
+    let (repeat, classes) = (slice(&repeat, "repeat")?, slice(&classes, "classes")?);
+    let faces = uvseam_source(&src)?;
+    let (rp, ri, rf) = (slice(&res_points, "res_points")?, slice(&res_indptr, "res_indptr")?, slice(&res_flat, "res_flat")?);
+    let res = uvseam_mesh(rp, ri, rf)?;
+    let t = py.detach(|| {
+        let set = uvseam_set(&src, &faces, repeat, texture_px, uv_tol_px, &[], classes)?;
+        Ok::<_, PyErr>(uvseam::transfer(src.points, &faces, &set, src.uv, rp, &res, fix_folds, &stop.0))
+    })?;
+    let d = PyDict::new(py);
+    d.set_item("uv", t.uv.into_pyarray(py))?;
+    d.set_item("expected", t.expected.into_pyarray(py))?;
+    uvseam_put_lookup(py, &d, t.look)?;
+    uvseam_put_fold(&d, t.fold)?;
+    Ok(d)
+}
+
+fn uvseam_item<T: numpy::Element + Copy>(lookup: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<T>> {
+    let item = lookup.get_item(key)?.ok_or_else(|| PyValueError::new_err(format!("lookup misses {key}")))?;
+    let array = item.cast_into::<PyArray1<T>>().map_err(|_| PyValueError::new_err(format!("lookup {key} has the wrong type")))?;
+    let read = numpy::PyArrayMethods::readonly(&array);
+    Ok(slice(&read, key)?.to_vec())
+}
+
+/// Another UV layer through an existing lookup (`uvseam::evaluate` + fold fix): (uv, expected, fold dict).
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn uvseam_layer<'py>(
+    py: Python<'py>,
+    src_indptr: PyReadonlyArray1<'py, i64>,
+    src_flat: PyReadonlyArray1<'py, i64>,
+    layer: PyReadonlyArray1<'py, f64>,
+    res_points: PyReadonlyArray1<'py, f64>,
+    res_indptr: PyReadonlyArray1<'py, i64>,
+    res_flat: PyReadonlyArray1<'py, i64>,
+    lookup: &Bound<'py, PyDict>,
+    texture_px: f64,
+    fix_folds: bool,
+    stop: &StopFlag,
+) -> PyResult<(F64Array<'py>, F64Array<'py>, Bound<'py, PyDict>)> {
+    let (si, sf, layer) = (slice(&src_indptr, "src_indptr")?, slice(&src_flat, "src_flat")?, slice(&layer, "layer")?);
+    check_faces(si, sf)?;
+    let (rp, ri, rf) = (slice(&res_points, "res_points")?, slice(&res_indptr, "res_indptr")?, slice(&res_flat, "res_flat")?);
+    let res = uvseam_mesh(rp, ri, rf)?;
+    let look = uvseam::Lookup {
+        ids: uvseam_item(lookup, "ids")?,
+        w: uvseam_item(lookup, "w")?,
+        shift: uvseam_item(lookup, "shift")?,
+        slid: uvseam_item(lookup, "slid")?,
+        ref_ids: uvseam_item(lookup, "ref_ids")?,
+        ref_w: uvseam_item(lookup, "ref_w")?,
+        ref_face: uvseam_item(lookup, "ref_face")?,
+        orient: uvseam_item(lookup, "orient")?,
+        region: uvseam_item(lookup, "region")?,
+        join: uvseam_item(lookup, "join")?,
+        done: true,
+    };
+    let (nc, nf, n_src) = (rf.len(), res.count(), sf.len());
+    let ok = look.ids.len() == 3 * nc
+        && look.w.len() == 3 * nc
+        && look.shift.len() == nc
+        && look.ref_ids.len() == 3 * nf
+        && look.ref_w.len() == 3 * nf
+        && look.ref_face.len() == nf
+        && look.orient.len() == nf
+        && look.region.len() == nf
+        && layer.len() == 2 * n_src
+        && look.ids.iter().chain(&look.ref_ids).all(|&h| h >= 0 && (h as usize) < n_src.max(1))
+        && look.ref_face.iter().all(|&f| f < si.len() as i64 - 1);
+    if !ok {
+        return Err(PyValueError::new_err("lookup, layer and meshes do not match"));
+    }
+    let src_faces = topo::Faces { indptr: si, flat: sf };
+    let (uv, expected, fold) = py.detach(|| {
+        let (mut uv, expected) = uvseam::evaluate(&look, &src_faces, layer, &res);
+        let fold = if fix_folds { uvseam::fold_fix(rp, &res, &mut uv, &look.region, &expected, &look.join, texture_px, &stop.0) } else { uvseam::FoldReport::default() };
+        (uv, expected, fold)
+    });
+    let d = PyDict::new(py);
+    uvseam_put_fold(&d, fold)?;
+    Ok((uv.into_pyarray(py), expected.into_pyarray(py), d))
+}
+
 fn register_uvseam(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvseam_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(uvseam_extract, m)?)?;
+    m.add_function(wrap_pyfunction!(uvseam_triage, m)?)?;
+    m.add_function(wrap_pyfunction!(uvseam_transfer, m)?)?;
+    m.add_function(wrap_pyfunction!(uvseam_layer, m)?)?;
     Ok(())
 }
 // main-only: uv end seam

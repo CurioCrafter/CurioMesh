@@ -915,6 +915,60 @@ def uvseam_probe() -> "int | None":
     """1 when the compiled `uvseam` kernel is there and its compile probe passes; None for "use NumPy"."""
 
     return _uv_probe("uvseam_probe")
+
+
+def _uvseam_f64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
+
+
+def _uvseam_i64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.int64).ravel())
+
+
+def _uvseam_bool(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=bool).ravel())
+
+
+def _uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px) -> tuple:
+    return (_uvseam_f64(points), _uvseam_i64(indptr), _uvseam_i64(flat), _uvseam_f64(corner_uv), _uvseam_i64(material),
+            _uvseam_bool(repeat), float(texture_px), float(uv_tol_px))
+
+
+def uvseam_extract(points, indptr, flat, corner_uv, material=(), repeat=(), texture_px: float = 1024.0, uv_tol_px: float = 0.01,
+                   cut_here=()) -> "UvJob | None":
+    """Seams of a source as a worker-thread job: `result()` = dict (island, region, chains, classes...). None: use NumPy."""
+
+    return uv_job("uvseam_extract", *_uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px),
+                  _uvseam_i64(cut_here), name="CurioMeshUVSeams")
+
+
+def uvseam_triage(points, indptr, flat, corner_uv, f_target: float, allowance: float, material=(), repeat=(), texture_px: float = 1024.0,
+                  uv_tol_px: float = 0.01, cut_here=(), seen_face=(), cost_a: float = 1.0, cost_b: float = 4.0) -> "UvJob | None":
+    """Pre-search Hard choice as a job: `result()` = the extract dict with the new classes plus the triage numbers."""
+
+    return uv_job("uvseam_triage", *_uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px),
+                  _uvseam_i64(cut_here), float(f_target), float(allowance), _uvseam_f64(seen_face), float(cost_a), float(cost_b),
+                  name="CurioMeshUVTriage")
+
+
+def uvseam_transfer(points, indptr, flat, corner_uv, res_points, res_indptr, res_flat, material=(), repeat=(), texture_px: float = 1024.0,
+                    uv_tol_px: float = 0.01, classes=(), fix_folds: bool = True) -> "UvJob | None":
+    """Per-side transfer as a job: `result()` = dict with uv (2 per result corner), the lookup and the fold report."""
+
+    return uv_job("uvseam_transfer", *_uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px),
+                  _uvseam_i64(classes), _uvseam_f64(res_points), _uvseam_i64(res_indptr), _uvseam_i64(res_flat), bool(fix_folds),
+                  name="CurioMeshUVTransfer")
+
+
+def uvseam_layer(src_indptr, src_flat, layer, res_points, res_indptr, res_flat, lookup: dict, texture_px: float = 1024.0,
+                 fix_folds: bool = True) -> "UvJob | None":
+    """Another UV layer through a transfer's lookup as a job: `result()` = (uv, expected, fold dict)."""
+
+    keys = {"ids": _uvseam_i64, "w": _uvseam_f64, "shift": _uvseam_bool, "slid": _uvseam_bool, "ref_ids": _uvseam_i64, "ref_w": _uvseam_f64,
+            "ref_face": _uvseam_i64, "orient": _uvseam_f64, "region": _uvseam_i64, "join": _uvseam_f64}
+    look = {key: cast(lookup[key]) for key, cast in keys.items()}
+    return uv_job("uvseam_layer", _uvseam_i64(src_indptr), _uvseam_i64(src_flat), _uvseam_f64(layer), _uvseam_f64(res_points),
+                  _uvseam_i64(res_indptr), _uvseam_i64(res_flat), look, float(texture_px), bool(fix_folds), name="CurioMeshUVLayer")
 # main-only: uv end seam
 
 # main-only: uv begin snap
