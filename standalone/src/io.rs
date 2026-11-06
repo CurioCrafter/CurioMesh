@@ -7,7 +7,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-/// Polygons as CSR (`indptr`, `flat`), one material index per face into `materials`.
+/// Polygons as CSR (`indptr`, `flat`), one material index per face into `materials`. UVs are per corner (one per entry
+/// of `flat`, OBJ's way up: v grows upwards) so a vertex on a UV seam can have one UV per face; empty when there are none.
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
     pub points: Vec<f64>,
@@ -15,6 +16,33 @@ pub struct Mesh {
     pub flat: Vec<i64>,
     pub material: Vec<i64>,
     pub materials: Vec<String>,
+    pub uv: Vec<[f64; 2]>,
+    pub textures: Vec<Option<Texture>>, // per material, its colour image when the file names one
+}
+
+/// Where a material's colour image is: a file, or bytes inside a .glb.
+#[derive(Clone)]
+pub enum Texture {
+    File(std::path::PathBuf),
+    Bytes(std::sync::Arc<Vec<u8>>),
+}
+
+impl std::fmt::Debug for Texture {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Texture::File(p) => write!(f, "File({})", p.display()),
+            Texture::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
+        }
+    }
+}
+
+impl Texture {
+    pub fn load(&self) -> Result<image::RgbaImage, String> {
+        match self {
+            Texture::File(p) => image::open(p).map(|i| i.to_rgba8()).map_err(|e| format!("{}: {e}", p.display())),
+            Texture::Bytes(b) => image::load_from_memory(b).map(|i| i.to_rgba8()).map_err(|e| format!("texture in the model: {e}")),
+        }
+    }
 }
 
 impl Mesh {
@@ -49,6 +77,9 @@ pub fn read(path: &Path) -> Result<Mesh, String> {
     if mesh.faces() == 0 {
         return Err(format!("{}: no faces", path.display()));
     }
+    if !mesh.uv.is_empty() && mesh.uv.len() != mesh.flat.len() {
+        return Err(format!("{}: UVs don't match the faces", path.display()));
+    }
     Ok(mesh)
 }
 
@@ -56,7 +87,12 @@ fn read_obj(path: &Path) -> Result<Mesh, String> {
     let options = tobj::LoadOptions { single_index: false, triangulate: false, ignore_points: true, ignore_lines: true };
     let (models, materials) = tobj::load_obj(path, &options).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut mesh = Mesh::new();
-    mesh.materials = materials.map(|m| m.into_iter().map(|m| m.name).collect()).unwrap_or_default();
+    let folder = path.parent().unwrap_or(Path::new("."));
+    for m in materials.unwrap_or_default() {
+        mesh.textures.push(m.diffuse_texture.filter(|t| !t.trim().is_empty()).map(|t| Texture::File(folder.join(t.trim()))));
+        mesh.materials.push(m.name);
+    }
+    let mut every_uv = true;
     for model in models {
         let m = &model.mesh;
         let offset = (mesh.points.len() / 3) as i64;
@@ -64,22 +100,43 @@ fn read_obj(path: &Path) -> Result<Mesh, String> {
         let material = m.material_id.map_or(-1, |k| k as i64);
         let mut at = 0usize;
         let count = if m.face_arities.is_empty() { m.indices.len() / 3 } else { m.face_arities.len() };
+        let has_uv = m.texcoord_indices.len() == m.indices.len() && !m.texcoords.is_empty();
+        every_uv &= has_uv;
+        if has_uv {
+            mesh.uv.extend(m.texcoord_indices.iter().map(|&t| [m.texcoords[2 * t as usize] as f64, m.texcoords[2 * t as usize + 1] as f64]));
+        }
         for f in 0..count {
             let n = if m.face_arities.is_empty() { 3 } else { m.face_arities[f] as usize };
             mesh.push_face(m.indices[at..at + n].iter().map(|&v| v as i64 + offset), material);
             at += n;
         }
     }
+    if !every_uv {
+        mesh.uv.clear(); // UVs on some parts only: treated as none
+    }
     Ok(mesh)
 }
 
 fn read_gltf(path: &Path) -> Result<Mesh, String> {
     let err = |e: gltf::Error| format!("{}: {e}", path.display());
-    // Only the geometry: textures are never loaded, so a model whose texture files are missing still opens.
+    // Textures are only located here (a bake loads them), so a model whose texture files are missing still opens.
     let gltf::Gltf { document: doc, blob } = gltf::Gltf::open(path).map_err(err)?;
     let buffers = gltf::import_buffers(&doc, path.parent(), blob).map_err(err)?;
     let mut mesh = Mesh::new();
     mesh.materials = doc.materials().map(|m| m.name().map_or_else(|| format!("material{}", m.index().unwrap_or(0)), str::to_string)).collect();
+    let folder = path.parent().unwrap_or(Path::new("."));
+    mesh.textures = doc.materials().map(|m| {
+        let image = m.pbr_metallic_roughness().base_color_texture()?.texture().source();
+        match image.source() {
+            gltf::image::Source::Uri { uri, .. } if !uri.starts_with("data:") => Some(Texture::File(folder.join(uri.replace("%20", " ")))),
+            gltf::image::Source::View { view, .. } => {
+                let bytes = buffers[view.buffer().index()].get(view.offset()..view.offset() + view.length())?;
+                Some(Texture::Bytes(std::sync::Arc::new(bytes.to_vec())))
+            }
+            _ => None, // ponytail: data: URIs are skipped; decode their base64 here if such files turn up
+        }
+    }).collect();
+    let mut every_uv = true;
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or_else(|| format!("{}: no scene", path.display()))?;
     let mut stack: Vec<(gltf::Node, [[f32; 4]; 4])> = scene.nodes().map(|n| (n, IDENTITY)).collect();
     while let Some((node, parent)) = stack.pop() {
@@ -106,10 +163,20 @@ fn read_gltf(path: &Path) -> Result<Mesh, String> {
                 None => (0..count).collect(),
             };
             let material = prim.material().index().map_or(-1, |k| k as i64);
+            // glTF's v grows downwards; here it grows upwards, as in OBJ.
+            let uvs: Option<Vec<[f64; 2]>> = reader.read_tex_coords(0).map(|t| t.into_f32().map(|[u, v]| [u as f64, 1.0 - v as f64]).collect());
+            let uvs = uvs.filter(|t| t.len() == count as usize);
+            every_uv &= uvs.is_some();
             for tri in indices.chunks_exact(3) {
                 mesh.push_face(tri.iter().map(|&v| v + offset), material);
+                if let Some(t) = &uvs {
+                    mesh.uv.extend(tri.iter().map(|&v| t[v as usize]));
+                }
             }
         }
+    }
+    if !every_uv {
+        mesh.uv.clear();
     }
     Ok(mesh)
 }
@@ -227,10 +294,16 @@ fn read_ply(path: &Path) -> Result<Mesh, String> {
         Ok(binary_value(bytes, kind, format == Format::Big))
     };
     let mut mesh = Mesh::new();
+    let mut vertex_uv: Vec<[f64; 2]> = Vec::new();
     for e in &elements {
-        let xyz: Vec<Option<usize>> = ["x", "y", "z"].iter().map(|c| e.props.iter().position(|p| p.name == *c)).collect();
+        // x, y, z, then u, v when the vertices have them (as u v, s t or texture_u texture_v).
+        let mut xyz: Vec<Option<usize>> = ["x", "y", "z"].iter().map(|c| e.props.iter().position(|p| p.name == *c)).collect();
+        let named = |a: &str, b: &str| e.props.iter().position(|p| p.name == a).zip(e.props.iter().position(|p| p.name == b));
+        if let (true, Some((u, v))) = (e.name == "vertex", named("u", "v").or_else(|| named("s", "t")).or_else(|| named("texture_u", "texture_v"))) {
+            xyz.extend([Some(u), Some(v)]);
+        }
         for _ in 0..e.count {
-            let mut point = [0.0; 3];
+            let mut point = [0.0; 5];
             for (k, p) in e.props.iter().enumerate() {
                 match &p.list {
                     Some(count_kind) => {
@@ -254,9 +327,15 @@ fn read_ply(path: &Path) -> Result<Mesh, String> {
                 }
             }
             if e.name == "vertex" {
-                mesh.points.extend(point);
+                mesh.points.extend(&point[..3]);
+                if xyz.len() == 5 {
+                    vertex_uv.push([point[3], point[4]]);
+                }
             }
         }
+    }
+    if !vertex_uv.is_empty() && vertex_uv.len() == mesh.points.len() / 3 {
+        mesh.uv = mesh.flat.iter().map(|&v| vertex_uv.get(v as usize).copied().unwrap_or_default()).collect();
     }
     Ok(mesh)
 }
@@ -264,19 +343,64 @@ fn read_ply(path: &Path) -> Result<Mesh, String> {
 // ------------------------------------------------------------------------------------------------------------ OBJ out
 
 pub fn write_obj(mesh: &Mesh, path: &Path) -> Result<(), String> {
-    write_obj_pieces(mesh, &[], path)
+    write_obj_pieces(mesh, &[], path, &[])
 }
 
 /// OBJ with each face in the object `piece[face]` (`o name_01`, ...). An empty or all-zero `piece` writes one object.
-pub fn write_obj_pieces(mesh: &Mesh, piece: &[usize], path: &Path) -> Result<(), String> {
+/// With UVs it also writes `vt` and smooth `vn` (`f v/vt/vn`), and with `maps` a .mtl next to it that names each
+/// material's colour (`map_Kd`) and normal map (`norm` and `map_Bump`).
+pub fn write_obj_pieces(mesh: &Mesh, piece: &[usize], path: &Path, maps: &[crate::export::Maps]) -> Result<(), String> {
     let pieces = piece.iter().max().map_or(1, |m| m + 1);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
+    let w = |e: std::io::Error| e.to_string();
+    let has_uv = !mesh.uv.is_empty();
+    let maps_used = has_uv && maps.iter().any(|m| m.color.is_some() || m.normal.is_some());
+    if maps_used {
+        let folder = path.parent().unwrap_or(Path::new(""));
+        // A file next to the OBJ by its name, anything else by its full path; images inside a .glb can't be named.
+        let name = |t: &Option<Texture>| match t {
+            Some(Texture::File(p)) if p.parent() == Some(folder) => p.file_name().map(|n| n.to_string_lossy().to_string()),
+            Some(Texture::File(p)) => Some(std::path::absolute(p).unwrap_or(p.clone()).display().to_string()),
+            _ => None,
+        };
+        let mut text = String::from("# CurioMesh standalone\n");
+        for (m, material) in mesh.materials.iter().enumerate() {
+            text += &format!("\nnewmtl {material}\nKd 1 1 1\n");
+            let found = maps.get(m).cloned().unwrap_or_default();
+            if let Some(file) = name(&found.color) {
+                text += &format!("map_Kd {file}\n");
+            }
+            if let Some(file) = name(&found.normal) {
+                text += &format!("norm {file}\nmap_Bump {file}\n");
+            }
+        }
+        let mtl = path.with_extension("mtl");
+        fs::write(&mtl, text).map_err(|e| format!("{}: {e}", mtl.display()))?;
+    }
     let file = fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out = BufWriter::new(file);
-    let w = |e: std::io::Error| e.to_string();
     writeln!(out, "# CurioMesh standalone").map_err(w)?;
+    if maps_used {
+        writeln!(out, "mtllib {stem}.mtl").map_err(w)?;
+    }
     for p in mesh.points.chunks_exact(3) {
         writeln!(out, "v {} {} {}", p[0], p[1], p[2]).map_err(w)?;
+    }
+    // One vt per different UV, numbered per corner.
+    let mut uv_number: Vec<usize> = Vec::with_capacity(mesh.uv.len());
+    if has_uv {
+        let mut seen: HashMap<[u64; 2], usize> = HashMap::new();
+        for uv in &mesh.uv {
+            let next = seen.len() + 1;
+            let n = *seen.entry(uv.map(f64::to_bits)).or_insert_with(|| {
+                let _ = writeln!(out, "vt {} {}", uv[0], uv[1]);
+                next
+            });
+            uv_number.push(n);
+        }
+        for n in crate::export::vertex_normals(mesh) {
+            writeln!(out, "vn {:.6} {:.6} {:.6}", n[0], n[1], n[2]).map_err(w)?;
+        }
     }
     for k in 0..pieces {
         if pieces > 1 {
@@ -291,8 +415,13 @@ pub fn write_obj_pieces(mesh: &Mesh, piece: &[usize], path: &Path) -> Result<(),
             }
             last = m;
             write!(out, "f").map_err(w)?;
-            for v in mesh.face(f) {
-                write!(out, " {}", v + 1).map_err(w)?;
+            for c in mesh.indptr[f] as usize..mesh.indptr[f + 1] as usize {
+                let v = mesh.flat[c] + 1;
+                if has_uv {
+                    write!(out, " {v}/{}/{v}", uv_number[c]).map_err(w)?;
+                } else {
+                    write!(out, " {v}").map_err(w)?;
+                }
             }
             writeln!(out).map_err(w)?;
         }
@@ -365,8 +494,21 @@ mod tests {
     }
 
     #[test]
+    fn obj_uvs_are_per_corner_and_survive_weld() {
+        let dir = std::env::temp_dir().join("curiomesh_test_uv_read");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("m.mtl"), "newmtl skin\nmap_Kd tex/skin.png\n").unwrap();
+        // Two triangles sharing an edge whose UVs differ on each side (a seam), and vertex 4 a copy of vertex 2.
+        fs::write(dir.join("m.obj"), "mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvt 0.5 0.5\nvt 0.75 0.75\nusemtl skin\nf 1/1 2/2 3/3\nf 2/4 4/5 5/3\n").unwrap();
+        let mesh = weld(&read(&dir.join("m.obj")).unwrap());
+        assert_eq!(mesh.flat, vec![0, 1, 2, 1, 3, 2]);
+        assert_eq!(mesh.uv, vec![[0., 0.], [1., 0.], [0., 1.], [0.5, 0.5], [0.75, 0.75], [0., 1.]]);
+        assert!(matches!(&mesh.textures[0], Some(Texture::File(p)) if p.ends_with("tex/skin.png")));
+    }
+
+    #[test]
     fn weld_joins_split_vertices() {
-        let mesh = Mesh { points: vec![0., 0., 0., 1., 0., 0., 0., 1., 0., 1., 0., 0., 0., 1., 0., 1., 1., 0.], indptr: vec![0, 3, 6], flat: vec![0, 1, 2, 3, 5, 4], material: vec![0, 0], materials: vec![] };
+        let mesh = Mesh { points: vec![0., 0., 0., 1., 0., 0., 0., 1., 0., 1., 0., 0., 0., 1., 0., 1., 1., 0.], indptr: vec![0, 3, 6], flat: vec![0, 1, 2, 3, 5, 4], material: vec![0, 0], ..Default::default() };
         let welded = weld(&mesh);
         assert_eq!(welded.points.len(), 12);
         assert_eq!(welded.flat, vec![0, 1, 2, 1, 3, 2]);

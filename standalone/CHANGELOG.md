@@ -7,6 +7,17 @@
   surface far from the original and shading still wrong over a few pixels do. Scan Cleanup turns it on; the app has
   it under More options, the command line as `--baked`. Game Asset with it on: a boulder scan 97,964 -> 1,847 quads
   (was 116,974), a cliff scan 1.5 million -> 991, a lion head 47,214 -> 1,708, all 0 bad faces.
+- **Keeps the source's UVs.** `--keep-uvs` (app: More options, Keep the UVs) gives the result the UVs of the model
+  it came from, so the model's own textures fit it. UVs are read from OBJ, glTF/.glb (`TEXCOORD_0`) and PLY; OBJ
+  results get `vt`, smooth `vn` and a .mtl naming the colour textures, .glb results get UVs, normals and the
+  textures inside. A face that lands across a UV seam takes the island under its centre, so seams stay clean.
+- **Bakes normal and colour maps.** `--bake normal,color` and `--bake-size N` (default 2048) bake a tangent-space
+  normal map of the source's surface and its colour texture into the result's UVs, as PNGs next to the result,
+  named in the .mtl and packed into the .glb. Islands are padded so mip-maps don't bleed.
+- A model without UVs says that UVs and baking need a source with UVs; CurioMesh doesn't unwrap.
+- Settings files gain `keep_uvs`, `bake` and `bake_size`.
+- Measured on two free test models (Game Asset): a marble bust, 7,038 faces, 0.4% of faces with UV area over 4x
+  off, maps baked in 0.7 s; a drill press with many small UV islands, 20,822 faces, 3.3% over 4x off, 1.9 s.
 
 ## 0.3.0
 

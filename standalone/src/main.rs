@@ -50,6 +50,12 @@ Writing (for game engines):
   --max-tris N      cut meshes into pieces of at most N triangles (0: no limit)
   --scale S         multiply every coordinate by S
   --up z            OBJ only: write Z up instead of Y up
+Textures (the source needs UVs; there is no unwrapping):
+  --keep-uvs        give the result the source's UVs and colour textures
+  --bake MAPS       normal, color or normal,color: bake these maps into the result's UVs as PNGs next to OUT
+                    (normal: the source's surface detail as a tangent-space map; color: from the source's textures).
+                    Implies --keep-uvs
+  --bake-size N     the maps' size in pixels per side (default 2048)
 Other:
   --jobs N          batch: models worked on at once (default 1; at most half the processor cores)
   --report FILE     write the numbers and the issue spots as JSON
@@ -91,6 +97,9 @@ fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
             "--engine" => s.export = export::engine(&value("--engine")?)?,
             "--format" => s.export.format = export::Format::parse(&value("--format")?)?,
             "--triangulate" => s.export.triangulate = true,
+            "--keep-uvs" => s.keep_uvs = true,
+            "--bake" => s.set_bake(&value("--bake")?.split(',').collect::<Vec<_>>())?,
+            "--bake-size" => s.bake_size = (number(value("--bake-size")?, "--bake-size")? as usize).clamp(16, 16384),
             "--max-tris" => s.export.max_tris = number(value("--max-tris")?, "--max-tris")? as usize,
             "--scale" => s.export.scale = Some(number(value("--scale")?, "--scale")?).filter(|x| *x > 0.0).ok_or("--scale must be above 0")?,
             "--up" => s.export.z_up = match value("--up")?.to_ascii_lowercase().as_str() {
@@ -213,7 +222,7 @@ fn sizes(a: &Args) -> Result<ExitCode, String> {
         let mut saved = None;
         if let (Some(dir), true) = (&a.out, useful) {
             let path = dir.join(format!("{stem}_detail{}.{}", r.detail, a.settings.export.format.ext()));
-            export::write(&r.outcome.mesh, &path, &a.settings.export)?;
+            settings::write(&source, &r.outcome.mesh, &path, &a.settings, &mut |line| println!("  {line}"))?;
             saved = Some(path.display().to_string());
         }
         if useful {
@@ -233,7 +242,7 @@ fn single(mut a: Args) -> Result<ExitCode, String> {
     let source = load(input)?;
     println!("{}: {} faces, {} vertices", input.display(), source.faces(), source.points.len() / 3);
     let done = settings::run(&source, &a.settings, |line| println!("{line}"))?;
-    let pieces = export::write(&done.mesh, &out, &a.settings.export)?;
+    let pieces = settings::write(&source, &done.mesh, &out, &a.settings, &mut |line| println!("{line}"))?;
     let check = issues::check(&done.mesh);
     let split = if pieces > 1 { format!(" as {pieces} pieces") } else { String::new() };
     println!("{} faces ({} quads, {} triangles), {:.2}% of the view changed, {} looks, {:.1} s -> {}{split}", check.faces, check.quads, check.tris, done.loss, done.looks, done.seconds, out.display());

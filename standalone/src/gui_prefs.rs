@@ -33,11 +33,15 @@ pub struct Choices {
     pub engine: String, // an engine's key, or "" for a plain OBJ
     pub gpu: bool,
     pub pixels: usize,
+    pub keep_uvs: bool,
+    pub bake_normal: bool,
+    pub bake_color: bool,
+    pub bake_size: usize,
 }
 
 impl Default for Choices {
     fn default() -> Self {
-        Choices { preset: "game-asset".into(), custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, baked: false, triangulate: false, mirror: Mirror::Off, engine: String::new(), gpu: true, pixels: 192 }
+        Choices { preset: "game-asset".into(), custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, baked: false, triangulate: false, mirror: Mirror::Off, engine: String::new(), gpu: true, pixels: 192, keep_uvs: false, bake_normal: false, bake_color: false, bake_size: 2048 }
     }
 }
 
@@ -75,6 +79,10 @@ impl Choices {
             baked: self.baked,
             mirror: self.mirror,
             export,
+            keep_uvs: self.keep_uvs,
+            bake_normal: self.bake_normal,
+            bake_color: self.bake_color,
+            bake_size: self.bake_size,
         }
     }
 }
@@ -125,6 +133,10 @@ impl Prefs {
         c.baked = v["baked"].as_bool().unwrap_or(c.baked);
         c.gpu = v["gpu"].as_bool().unwrap_or(true);
         c.pixels = v["pixels"].as_u64().map_or(192, |n| (n as usize).clamp(64, 512));
+        c.keep_uvs = v["keep_uvs"].as_bool().unwrap_or(false);
+        c.bake_normal = v["bake_normal"].as_bool().unwrap_or(false);
+        c.bake_color = v["bake_color"].as_bool().unwrap_or(false);
+        c.bake_size = v["bake_size"].as_u64().map_or(2048, |n| (n as usize).clamp(256, 8192));
         p.recent = v["recent"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(PathBuf::from)).take(MOST_RECENT).collect()).unwrap_or_default();
         p.tour_done = v["tour_done"].as_bool().unwrap_or(false);
         p
@@ -135,6 +147,7 @@ impl Prefs {
         json!({
             "preset": c.preset, "triangulate": c.triangulate, "mirror": c.mirror.word(), "engine": c.engine, "custom_detail": c.custom_detail, "aim_for_count": c.aim_for_count, "count": c.count,
             "rows": c.rows, "baked": c.baked, "gpu": c.gpu, "pixels": c.pixels, "tour_done": self.tour_done,
+            "keep_uvs": c.keep_uvs, "bake_normal": c.bake_normal, "bake_color": c.bake_color, "bake_size": c.bake_size,
             "recent": self.recent.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
         })
     }
@@ -165,6 +178,7 @@ mod tests {
         p.choices.pick("low-poly");
         p.choices.engine = "godot".into();
         p.choices.pixels = 256;
+        (p.choices.keep_uvs, p.choices.bake_normal, p.choices.bake_size) = (true, true, 1024);
         p.remember(std::path::Path::new("a.obj"));
         p.tour_done = true;
         let back = Prefs::from_json(&p.to_json());

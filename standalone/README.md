@@ -128,7 +128,10 @@ settings file looks like this:
   "gpu": true,
   "rows": true,
   "mirror": "off",
-  "export": { "format": "obj", "triangulate": false, "max_tris": 0, "scale": 1.0, "up": "y" }
+  "export": { "format": "obj", "triangulate": false, "max_tris": 0, "scale": 1.0, "up": "y" },
+  "keep_uvs": false,
+  "bake": [],
+  "bake_size": 2048
 }
 ```
 
@@ -147,7 +150,32 @@ settings file looks like this:
 | `--up z` | OBJ only: Z up instead of Y up. A .glb is always Y up, as glTF requires. |
 | `--format obj` or `glb` | The file type for `batch` and `sizes`. |
 
-Pieces are separate objects in one file. No textures or UVs are written: the standalone doesn't bake.
+Pieces are separate objects in one file.
+
+### UVs and baked maps
+
+| Option | What it does |
+|---|---|
+| `--keep-uvs` | Give the result the source's UVs, so the source's own textures fit it. The OBJ gets a .mtl naming each material's colour texture; the .glb carries the textures inside. |
+| `--bake normal`, `color` or `normal,color` | Bake maps into the result's UVs, as PNGs next to the result (`NAME_normal.png`, `NAME_color.png`; with several materials, one pair per material). Implies `--keep-uvs`. |
+| `--bake-size N` | Pixels per side of the maps. Default 2048. |
+
+In the app: More options, Keep the UVs and Bake.
+
+- **The source needs UVs.** They are read from OBJ (`vt`), glTF and .glb (`TEXCOORD_0`) and PLY (`u v` or `s t`).
+  CurioMesh doesn't unwrap: a model without UVs gets a result without them, and says so.
+- **How UVs are carried over.** Each corner of the result takes the UV of the nearest point on the source. A face
+  that lands across a UV seam takes the UV island under its centre, and its other corners are looked up again on
+  that island only. A corner on a seam has one UV per face, as in the source.
+- **The normal map** holds the source's smooth surface where the result is flatter: a game engine shows that detail
+  on the result. Each texel looks along the result's normal for the source surface (both ways, within a distance a
+  bit larger than the gap between the two), or takes the nearest source point. It is tangent-space, OpenGL style
+  (green up), with tangents worked out per triangle from the UVs and averaged where the UVs are shared: close to the
+  MikkTSpace tangents engines use, not identical, so a faint line can show along a UV seam. The result is written
+  with the smooth normals the bake used.
+- **The colour map** is the source's colour texture sampled through the source's UVs.
+- Islands are padded by a few pixels so mip-maps don't bleed the background in.
+- UVs that repeat outside the 0-1 square (a tiling texture) can't be baked in full: the maps cover the square only.
 
 ### Check any retopology: `measure`
 
@@ -173,8 +201,9 @@ results here have 5-9% more faces.
 
 ## Known limits
 
-- The Blender add-on still does more: part-by-part sizing, guided edge loops, UVs, baking, repair, Redo Rough
-  Spots and Tidy Up. The standalone writes OBJ and .glb without UVs or textures, and no FBX.
+- The Blender add-on still does more: part-by-part sizing, guided edge loops, new UVs (unwrapping), repair, Redo
+  Rough Spots and Tidy Up. The standalone keeps the source's UVs and bakes normal and colour maps, but can't unwrap a
+  model that has none, and writes no FBX.
 - A rough scan judged as it is can keep nearly all its faces at a small limit: the camera sees every bump turn. If you
   will bake a normal map, turn on **Judge as baked** (More options, or `--baked`; Scan Cleanup has it on): the bumps
   then don't count, and a scan drops to a few thousand faces.

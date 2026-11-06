@@ -288,7 +288,7 @@ mod tests {
             indptr: vec![0, 4, 8],
             flat: vec![0, 1, 4, 3, 1, 2, 5, 4],
             material: vec![0, 0],
-            materials: vec![],
+            ..Default::default()
         };
         let plane = &find_plane(&mesh, &[0])[0];
         assert!(plane.offset.abs() < 1e-9 && plane.ok(false), "{}", plane.text());
@@ -301,7 +301,7 @@ mod tests {
     /// A quad crossing the plane is clipped at it.
     #[test]
     fn cut_clips_a_crossing_face() {
-        let mesh = Mesh { points: vec![-1., 0., 0., 1., 0., 0., 1., 1., 0., -1., 1., 0.], indptr: vec![0, 4], flat: vec![0, 1, 2, 3], material: vec![0], materials: vec![] };
+        let mesh = Mesh { points: vec![-1., 0., 0., 1., 0., 0., 1., 1., 0., -1., 1., 0.], indptr: vec![0, 4], flat: vec![0, 1, 2, 3], material: vec![0], ..Default::default() };
         let half = cut_half(&mesh, 0, 0.0, 1.0);
         assert_eq!(half.face(0).len(), 4);
         assert!(half.points.chunks_exact(3).all(|p| p[0] >= 0.0));

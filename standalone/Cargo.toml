@@ -3,7 +3,7 @@
 
 [package]
 name = "curiomesh"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "CurioMesh automatic quad retopology as a standalone program, no Blender needed"
@@ -34,7 +34,7 @@ serde_json = "1.0"
 # pull in a second wgpu next to the pinned one above.
 eframe = "=0.33.3"
 rfd = "=0.15.4" # native open and save dialogs
-image = { version = "0.25", default-features = false, features = ["png"] } # the window icon and screenshots
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] } # the window icon, screenshots, and textures read and baked
 
 [build-dependencies]
 embed-resource = "3.0" # the icon in the Windows .exe files
