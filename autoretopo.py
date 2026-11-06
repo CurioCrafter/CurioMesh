@@ -2043,6 +2043,12 @@ class AutoJob:
             return same
         return moved, kept, seen, now, count
 
+    def _serious(self, points, faces, after):
+        """Generator: per face, turned inward, folded over or crossing (the Issue Finder's serious kinds). Kept for reuse."""
+        found = yield from self._background(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        self._defects = (points, faces, found)
+        return found.inward | found.folded_over | found.crossing
+
     def _affordable(self, bad: list[int], start_faces: int) -> list[int]:
         """As many of these parts as can go one size up inside REPAIR_GROWTH, so one big part does not stop the small ones."""
         room = (REPAIR_GROWTH - 1.0) * start_faces
@@ -2058,7 +2064,6 @@ class AutoJob:
     def _check(self, points, faces, mats, piece, view):
         """Generator: measure the result against the source, repair the parts that got new problems, say what happened."""
         began = time.perf_counter()
-        self._repair_until = began + REPAIR_SECONDS
         self.stage = "Checking for broken topology"
         yield
         if self._src_check is None:
@@ -2071,13 +2076,21 @@ class AutoJob:
         after = yield from self._inspected(points, faces, piece)
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
         first = {k: getattr(after, k) for k in keys}
+        self._repair_until = time.perf_counter() + REPAIR_SECONDS  # from here: checking the source first must not use it up
         start_faces = len(faces)
         points, faces, view, after, _turned = yield from self._untangle(points, faces, piece, view, after)
-        points, faces, mats, piece, view, after, fixed = yield from self._fix_locally(points, faces, mats, piece, view, after)
+        # Parts one size up first, then the crossings left filled spot by spot. A size up costs a pairing and a look, a
+        # filled spot about a second, and the fills used to eat the whole time before any part was remade: the chess
+        # knight's crossings took 30 s of fills and stayed, one size up cleared them. Parts still turned inward or
+        # folded over after untangling go too: their size is too coarse for how thin they are.
+        fixed, stuck, serious = 0, set(), None
         for attempt in range(0 if self.chunks else FIX_TRIES):  # a cut piece's parts are one surface: they can't be remade alone
             spots = checks.new_spots(before, after)
             bent = set(np.unique(piece[after.bent]).tolist()) if len(after.bent) == len(piece) else set()
             spots = sorted(spots, key=lambda p: p not in bent)  # folded quads first: small thin parts, cheap to remake a size up
+            if serious is None:
+                serious = yield from self._serious(points, faces, after)
+            spots += [p for p in checks.worst_parts(piece, serious) if p not in stuck and p not in spots]
             bad = self._affordable([p for p in spots[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES and not self._cut(self.pieces[p])], start_faces)
             if not bad or self._stopped or time.perf_counter() > self._repair_until:
                 break
@@ -2090,12 +2103,21 @@ class AutoJob:
             if seen[0] > max(1.1 * self.detail, 1.02 * view[0]) or len(tried[1]) > REPAIR_GROWTH * start_faces:  # worse than what it repairs
                 self.picked, self.tuned = picked, tuned
                 break
+            now = yield from self._inspected(tried[0], tried[1], tried[3])
+            better = yield from self._serious(tried[0], tried[1], now)
+            if better.sum() > serious.sum():  # a size up that leaves more broken faces is no repair
+                self.picked, self.tuned = picked, tuned
+                stuck |= set(bad)
+                continue
+            stuck |= {p for p in bad if better[tried[3] == p].sum() >= serious[piece == p].sum()}  # one size up didn't help: try others next
+            fixed += max(0, len(checks.new_spots(before, after)) - len(checks.new_spots(before, now)))
             points, faces, mats, piece = tried
-            view = seen
-            after = yield from self._inspected(points, faces, piece)
-            fixed += len(bad) - len(checks.new_spots(before, after))
-            points, faces, mats, piece, view, after, spots = yield from self._fix_locally(points, faces, mats, piece, view, after)
-            fixed += spots
+            view, after, serious = seen, now, better
+        # The fills get their own time. More does not help: at 55 to 86 s instead of 30 they cleared no more parts on three
+        # test models, as the spots left are ones a fill can't clear.
+        self._repair_until = time.perf_counter() + REPAIR_SECONDS
+        points, faces, mats, piece, view, after, spots = yield from self._fix_locally(points, faces, mats, piece, view, after)
+        fixed += spots
         points, faces, mats, piece, view, after = yield from self._redo_rough(points, faces, mats, piece, view, after)
         left = checks.new_spots(before, after)
         flag = np.zeros(len(faces), bool)

@@ -246,6 +246,12 @@ def new_spots(before: Inspect, after: Inspect) -> list[int]:
     return sorted(bad, key=lambda p: (-bad[p], p))
 
 
+def worst_parts(piece: np.ndarray, marked: np.ndarray) -> list[int]:
+    """Pieces holding marked faces, the most first (ties by number)."""
+    ids, counts = np.unique(np.asarray(piece)[np.asarray(marked, bool)], return_counts=True)
+    return [int(p) for p in ids[np.lexsort((ids, -counts))]]
+
+
 def describe(before: Inspect, after: Inspect, fixed: int, left: int) -> str:
     """The outcome in plain words. Only what the result added counts."""
     new = {

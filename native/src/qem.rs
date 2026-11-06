@@ -61,6 +61,108 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+#[derive(Default)]
+struct Mix(u64); // a small multiply-rotate hash for grid cells: the std one is many times slower on three integers
+
+impl std::hash::Hasher for Mix {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_i64(&mut self, n: i64) {
+        self.write_u64(n as u64);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+}
+
+type Cells = std::collections::HashMap<[i64; 3], Vec<u32>, std::hash::BuildHasherDefault<Mix>>;
+
+/// The live triangles by where they are, so a collapse can ask which ones its new triangles might pass through. A
+/// loose grid in levels: a triangle sits in one cell, at its lowest corner, of the level whose cells are at least as big
+/// as it, so it reaches at most into the next cell along each axis. Triangles grow as the piece shrinks and move up.
+struct Grid {
+    base: f64,
+    levels: Vec<Cells>,
+    home: Vec<(usize, [i64; 3])>,
+}
+
+impl Grid {
+    const NOWHERE: usize = usize::MAX;
+
+    fn insert(&mut self, t: u32, low: [f64; 3], high: [f64; 3]) {
+        let extent = (0..3).map(|k| high[k] - low[k]).fold(0.0, f64::max);
+        let (mut level, mut size) = (0, self.base);
+        while size < extent && level < 60 {
+            size *= 2.0;
+            level += 1;
+        }
+        let key = [(low[0] / size).floor() as i64, (low[1] / size).floor() as i64, (low[2] / size).floor() as i64];
+        while self.levels.len() <= level {
+            self.levels.push(Cells::default());
+        }
+        self.levels[level].entry(key).or_default().push(t);
+        self.home[t as usize] = (level, key);
+    }
+
+    fn remove(&mut self, t: u32) {
+        let (level, key) = self.home[t as usize];
+        if level == Self::NOWHERE {
+            return;
+        }
+        let cells = &mut self.levels[level];
+        if let Some(cell) = cells.get_mut(&key) {
+            if let Some(at) = cell.iter().position(|&x| x == t) {
+                cell.swap_remove(at);
+            }
+            if cell.is_empty() {
+                cells.remove(&key);
+            }
+        }
+        self.home[t as usize] = (Self::NOWHERE, key);
+    }
+
+    /// Calls `each` with every triangle that may reach into this box.
+    fn visit(&self, low: [f64; 3], high: [f64; 3], mut each: impl FnMut(u32)) {
+        let mut size = self.base;
+        for cells in &self.levels {
+            if !cells.is_empty() {
+                let from = [(low[0] / size).floor() as i64 - 1, (low[1] / size).floor() as i64 - 1, (low[2] / size).floor() as i64 - 1];
+                let to = [(high[0] / size).floor() as i64, (high[1] / size).floor() as i64, (high[2] / size).floor() as i64];
+                let span = (0..3).map(|k| (to[k] - from[k] + 1) as f64).product::<f64>();
+                if span > cells.len() as f64 {
+                    for (key, cell) in cells {
+                        if (0..3).all(|k| from[k] <= key[k] && key[k] <= to[k]) {
+                            cell.iter().for_each(|&t| each(t));
+                        }
+                    }
+                } else {
+                    for x in from[0]..=to[0] {
+                        for y in from[1]..=to[1] {
+                            for z in from[2]..=to[2] {
+                                if let Some(cell) = cells.get(&[x, y, z]) {
+                                    cell.iter().for_each(|&t| each(t));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            size *= 2.0;
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Entry {
     cost: f64,
@@ -120,6 +222,8 @@ struct State {
     scale: f64,
     mark: Vec<u32>, // scratch: neighbour marks by generation
     generation: u32,
+    grid: Grid,          // the live triangles by place, for the crossing test
+    tri_mark: Vec<u32>,  // scratch: the triangles a collapse changes, by generation
 }
 
 impl State {
@@ -263,9 +367,108 @@ impl State {
         })
     }
 
+    fn bounds(corners: &[[f64; 3]; 3]) -> ([f64; 3], [f64; 3]) {
+        let mut low = corners[0];
+        let mut high = corners[0];
+        for c in &corners[1..] {
+            for k in 0..3 {
+                low[k] = low[k].min(c[k]);
+                high[k] = high[k].max(c[k]);
+            }
+        }
+        (low, high)
+    }
+
+    fn corners(&self, t: u32) -> [[f64; 3]; 3] {
+        let tri = self.tris[t as usize];
+        [self.p[tri[0] as usize], self.p[tri[1] as usize], self.p[tri[2] as usize]]
+    }
+
+    /// How many of the `near` triangles this one passes through, leaving out those sharing a corner with it.
+    fn crossings(&self, corners: &[[f64; 3]; 3], ends: [u32; 2], near: &[u32]) -> usize {
+        let (low, high) = Self::bounds(corners);
+        let small = corners.map(|c| c.map(|x| x as f32));
+        let mut found = 0;
+        for &t in near {
+            let tri = self.tris[t as usize];
+            if tri.contains(&ends[0]) || tri.contains(&ends[1]) {
+                continue;
+            }
+            let other = self.corners(t);
+            let (o_low, o_high) = Self::bounds(&other);
+            if (0..3).all(|k| low[k] <= o_high[k] && o_low[k] <= high[k]) && crate::near::triangles_cross(&small, &other.map(|c| c.map(|x| x as f32))) {
+                found += 1;
+            }
+        }
+        found
+    }
+
+    /// The triangles around a and b, with a moved to `at` (or left, for None), as (corners, far ends), and the box round them.
+    fn fan(&self, a: u32, b: u32, at: Option<[f64; 3]>) -> (Vec<([[f64; 3]; 3], [u32; 2])>, [f64; 3], [f64; 3]) {
+        let mut out = Vec::with_capacity(self.around[a as usize].len() + self.around[b as usize].len());
+        let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for (v, other) in [(a, b), (b, a)] {
+            for &t in &self.around[v as usize] {
+                let tri = self.tris[t as usize];
+                if tri.contains(&other) && (at.is_some() || v == b) {
+                    continue; // moved, it goes away; left, it counts once
+                }
+                let k = tri.iter().position(|&x| x == v).unwrap();
+                let mut corners = self.corners(t);
+                if let Some(p) = at {
+                    corners[k] = p;
+                }
+                let (l, h) = Self::bounds(&corners);
+                for c in 0..3 {
+                    low[c] = low[c].min(l[c]);
+                    high[c] = high[c].max(h[c]);
+                }
+                out.push((corners, [tri[(k + 1) % 3], tri[(k + 2) % 3]]));
+            }
+        }
+        (out, low, high)
+    }
+
+    /// Would moving these two to `at` make more crossings with the rest of the piece than their triangles have now? QEM
+    /// alone collapses a thin ring or flange right through the tube it sits on, and the repair later spends its whole
+    /// time limit on those spots (the crane's ringed posts, the drill press flange).
+    fn crosses(&mut self, a: u32, b: u32, at: [f64; 3]) -> bool {
+        self.generation += 1;
+        let now = self.generation;
+        for v in [a, b] {
+            for &t in &self.around[v as usize] {
+                self.tri_mark[t as usize] = now;
+            }
+        }
+        let count = |s: &Self, fan: &[([[f64; 3]; 3], [u32; 2])], low: [f64; 3], high: [f64; 3]| -> usize {
+            let mut near = Vec::new();
+            s.grid.visit(low, high, |t| {
+                if s.tri_mark[t as usize] != now {
+                    near.push(t);
+                }
+            });
+            if near.is_empty() {
+                return 0;
+            }
+            fan.iter().map(|(corners, ends)| s.crossings(corners, *ends, &near)).sum()
+        };
+        let (moved, low, high) = self.fan(a, b, Some(at));
+        let after = count(self, &moved, low, high);
+        if after == 0 {
+            return false;
+        }
+        let (left, low, high) = self.fan(a, b, None); // only asked when needed: most collapses cross nothing
+        after > count(self, &left, low, high)
+    }
+
     fn apply(&mut self, a: u32, b: u32, at: [f64; 3], collapses: &mut Vec<Collapse>, alive: &mut u32, shared: usize) {
         let (au, bu) = (a as usize, b as usize);
         let held = self.locked[au]; // a locked vertex stays exactly where it was, to the last digit: chunks join on them
+        for v in [au, bu] {
+            for &t in &self.around[v] {
+                self.grid.remove(t);
+            }
+        }
         let moved = std::mem::take(&mut self.around[bu]);
         let mut gone: [u32; 2] = [u32::MAX; 2];
         let mut count = 0;
@@ -302,6 +505,11 @@ impl State {
         self.dead[bu] = true;
         self.stamp[au] += 1;
         self.stamp[bu] += 1;
+        for i in 0..self.around[au].len() {
+            let t = self.around[au][i];
+            let (low, high) = Self::bounds(&self.corners(t));
+            self.grid.insert(t, low, high);
+        }
         collapses.push(Collapse {
             keep: a,
             drop: b,
@@ -374,7 +582,16 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         scale: 1.0,
         mark: vec![0; nv],
         generation: 0,
+        grid: Grid { base: 1.0, levels: Vec::new(), home: vec![(Grid::NOWHERE, [0; 3]); nf] },
+        tri_mark: vec![0; nf],
     };
+    // Cells about as big as the piece's triangles are at the start.
+    let edge: f64 = s.tris.iter().map(|t| dot(sub(s.p[t[1] as usize], s.p[t[0] as usize]), sub(s.p[t[1] as usize], s.p[t[0] as usize])).sqrt()).sum::<f64>() / nf.max(1) as f64;
+    s.grid.base = edge.max(1e-9);
+    for t in 0..nf as u32 {
+        let (low, high) = State::bounds(&s.corners(t));
+        s.grid.insert(t, low, high);
+    }
     s.facing = s
         .tris
         .iter()
@@ -469,7 +686,7 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         let Some(at) = s.target(a, b, entry.way) else {
             continue;
         };
-        if s.flips(a, b, at) {
+        if s.flips(a, b, at) || s.crosses(a, b, at) {
             match s.entry(a, b, entry.way + 1) {
                 Some(next) if entry.way < 3 => s.heap.push(next),
                 _ => {

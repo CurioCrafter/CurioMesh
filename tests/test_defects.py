@@ -60,6 +60,13 @@ class DefectTests(unittest.TestCase):
         self.assertEqual(found(result, "overlap"), [0, 2])
 
 
+class WorstPartsTests(unittest.TestCase):
+    def test_parts_with_most_marked_faces_come_first(self):
+        piece = np.array([3, 3, 1, 1, 1, 2, 0])
+        marked = np.array([True, True, True, False, False, False, True])
+        self.assertEqual(checks.worst_parts(piece, marked), [3, 0, 1])
+
+
 class UntangleTests(unittest.TestCase):
     def test_a_corner_pulled_over_its_neighbours_goes_back(self):
         co = np.array([(i, j, 0.0) for j in range(5) for i in range(5)])
