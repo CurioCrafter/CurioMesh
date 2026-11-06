@@ -85,6 +85,25 @@ class TrueUpEdgesTest(unittest.TestCase):
         self.assertEqual(sorted(chains[0][0]), sorted(crease))
 
 
+class EdgesTest(unittest.TestCase):
+    def test_edge_table_matches_a_plain_count(self):
+        points, faces, _ = _fold()
+        faces = faces + [(0, 1, 2)]  # a triangle on top: three faces on some edges
+        ed = hardtidy.Edges(faces, len(points))
+        users: dict = {}
+        for i, f in enumerate(faces):
+            for k in range(len(f)):
+                a, b = sorted((f[k], f[(k + 1) % len(f)]))
+                users.setdefault((a, b), []).append(i)
+        self.assertEqual(len(ed.ab), len(users))
+        for e, (a, b) in enumerate(ed.ab.tolist()):
+            fs = users[(a, b)]
+            self.assertEqual(ed.count[e], len(fs))
+            self.assertEqual(ed.f0[e], fs[0])
+            self.assertEqual(ed.f1[e], fs[1] if len(fs) > 1 else -1)
+        self.assertEqual(ed.find([1, 5], [0, 999]).tolist(), [ed.find([0], [1])[0], -1])
+
+
 class PressPanelsFlatTest(unittest.TestCase):
     def test_bumpy_plate_goes_flat(self):
         n = 6
