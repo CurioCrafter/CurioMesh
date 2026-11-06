@@ -57,7 +57,45 @@ def _working() -> bool:
 
 # Registered by hand and not "enabled" as a Blender add-on: wm.read_factory_settings (used to start each check from an empty scene)
 # would switch an enabled add-on off again.
-addon = importlib.import_module(PKG)
+INSTALL = "--install" in ARGV
+EXT_MODULE = "bl_ext.user_default.curiomesh"
+
+
+def install_extension() -> str:
+    """Build the extension zip from the add-on folder and install it into a clean profile, as a user would. Returns the module name."""
+    import addon_utils
+    import zipfile
+
+    res = os.environ.get("BLENDER_USER_RESOURCES", "")
+    if not res or not os.path.isdir(res) or os.listdir(res):
+        print("TOUR ABORT --install needs BLENDER_USER_RESOURCES set to an empty folder (a clean profile)", flush=True)
+        sys.exit(2)
+    sys.path.insert(0, ADDON)
+    from scripts.build_release import build_archives
+
+    zips = os.path.join(OUT, "zip")
+    os.makedirs(zips, exist_ok=True)
+    _legacy, extension = build_archives(__import__("pathlib").Path(ADDON), __import__("pathlib").Path(zips))
+    print("TOUR built", extension, os.path.getsize(extension), "bytes", flush=True)
+    try:
+        r = bpy.ops.extensions.package_install_files(filepath=str(extension), repo="user_default", enable_on_install=True)
+        print("TOUR package_install_files ->", r, flush=True)
+    except Exception as e:  # background Blender may lack the repo: unpack where Blender looks for installed extensions
+        print("TOUR package_install_files failed, unpacking by hand:", e, flush=True)
+        target = os.path.join(bpy.utils.user_resource("EXTENSIONS"), "user_default", "curiomesh")
+        os.makedirs(target, exist_ok=True)
+        with zipfile.ZipFile(extension) as z:
+            z.extractall(target)
+    addon_utils.modules_refresh()
+    addon_utils.enable(EXT_MODULE, default_set=True, persistent=False)
+    return EXT_MODULE
+
+
+if INSTALL:
+    PKG = install_extension()
+    addon = sys.modules.get(PKG) or importlib.import_module(PKG)
+else:
+    addon = importlib.import_module(PKG)
 if not _working():
     addon.register()
 if not _working():
@@ -215,6 +253,10 @@ def reset_state():
 
 def new_scene():
     bpy.ops.wm.read_factory_settings(use_empty=True)
+    if INSTALL and not _working():  # reading factory settings switches an enabled add-on off again
+        import addon_utils
+
+        addon_utils.enable(PKG, default_set=True, persistent=False)
     reset_state()
 
 
@@ -360,6 +402,9 @@ def all_ops():
 # --------------------------------------------------------------------------- a layout that records what a panel asks of it
 
 
+SEEN: list = []  # (kind, name) of everything the recording layout was asked to draw; the UI checks clear it
+
+
 class Rec:
     """Stands in for a UILayout: every call is accepted, and prop()/operator() are checked against the real names."""
 
@@ -399,6 +444,7 @@ class Rec:
         errors = self._errors
 
         def prop(data, prop_name, *a, **k):
+            SEEN.append(("prop", prop_name))
             if not self._has(data, prop_name):
                 self._bad(f"prop({type(data).__name__}, {prop_name!r}) - no such property")
             return Rec(errors)
@@ -414,6 +460,7 @@ class Rec:
                 self._bad(f"props_enum({prop_name!r}) - no such property")
 
         def operator(idname, *a, **k):
+            SEEN.append(("operator", idname))
             if idname.startswith("curiomesh.") and idname.split(".", 1)[1] not in dir(bpy.ops.curiomesh):
                 self._bad(f"operator({idname!r}) - not registered")
             return Rec(errors)
@@ -429,10 +476,14 @@ class Rec:
                 self._bad(f"template_list active {k['active_propname']!r} - no such property")
             return None
 
+        def popover(*a, **k):
+            SEEN.append(("popover", k.get("panel") or (a[0] if a else "")))
+            return Rec(errors)
+
         def pair(*a, **k):
             return Rec(errors), Rec(errors)
 
-        table = {"prop": prop, "prop_search": prop_search, "props_enum": props_enum, "operator": operator, "template_list": template_list, "panel_prop": pair, "panel": pair, "operator_menu_enum": operator}
+        table = {"prop": prop, "prop_search": prop_search, "props_enum": props_enum, "operator": operator, "template_list": template_list, "panel_prop": pair, "panel": pair, "popover": popover, "operator_menu_enum": operator}
         if name in table:
             return table[name]
         return lambda *a, **k: Rec(errors, f"{self._path}.{name}")
@@ -453,7 +504,7 @@ def draw_class(cls, ctx):
                 setattr(fake, a, value.__get__(fake))  # the panel's own helper methods
         except Exception:
             pass
-    for method in ("draw_header", "draw"):
+    for method in ("draw_header", "draw_header_preset", "draw"):
         fn = getattr(cls, method, None)
         if fn is None or getattr(fn, "__module__", "").startswith("bpy"):
             continue
@@ -1902,6 +1953,192 @@ def _():
     draw_sweep("after Start")
     manual("Real panel drawing (layout, icons, fold-outs), the dashboard HUD and the viewport overlays", "need a window; only property and operator names are checked here")
     return "scopes, uses, fold-outs, Edit Mode and result states drawn"
+
+
+# =========================================================================== UI states: polls and the buttons a user needs
+
+STATE_NEEDS = {
+    # state: (panels that must poll True, panels that must poll False, operators that must be drawn, properties that must be drawn)
+    "none": (["guided"], ["guided_adjust", "guided_parts"], [], []),
+    "ready": (["guided", "guided_apply"], ["guided_adjust", "guided_parts"], ["curiomesh.guided_auto_start"], []),
+    "working": (["guided"], ["guided_adjust", "guided_parts"], ["curiomesh.guided_stop_work"], []),
+    "result": (["guided", "guided_adjust", "guided_parts", "guided_apply"], [], ["curiomesh.guided_apply", "curiomesh.guided_stop"],
+               ["quad_size", "quad_order", "organize", "bake_detail", "apply_mode"]),
+    "spot": (["guided_parts"], [], ["curiomesh.issue_redo", "curiomesh.issue_keep_original", "curiomesh.issue_view", "curiomesh.issue_step"], []),
+    "original": (["guided_parts"], [], ["curiomesh.issue_put_back"], []),
+    "applied": (["guided_apply"], ["guided_adjust", "guided_parts"], ["curiomesh.export_game"], []),
+}
+
+
+def ui_state(label):
+    """Draw every main panel, popover and Pro panel in the current state; return (poll results, drawn set, problems)."""
+    pnl = mod("panel")
+    ctx = bpy.context
+    polls, drawn, problems = {}, set(), []
+    for cls in (*pnl.MAIN_PANELS, *pnl.POPOVERS, *pnl.PRO_PANELS):
+        short = cls.bl_idname.replace("CURIOMESH_PT_", "")
+        try:
+            polls[short] = bool(cls.poll(ctx)) if hasattr(cls, "poll") else True
+        except Exception as e:
+            problems.append(f"{short}.poll raised {type(e).__name__}: {e}")
+            continue
+        if not polls[short] and cls in pnl.MAIN_PANELS:
+            continue
+        SEEN.clear()
+        for e in draw_class(cls, ctx):
+            if not e.startswith("NEEDS-UI"):
+                problems.append(f"[{label}] {e}")
+        drawn |= set(SEEN)
+    return polls, drawn, problems
+
+
+def ui_expect(label):
+    polls, drawn, problems = ui_state(label)
+    yes, no, ops, props = STATE_NEEDS[label]
+    for name in yes:
+        if not polls.get(name):
+            problems.append(f"[{label}] panel {name} should show but its poll is False")
+    for name in no:
+        if polls.get(name):
+            problems.append(f"[{label}] panel {name} should be hidden but its poll is True")
+    for op in ops:
+        if ("operator", op) not in drawn:
+            problems.append(f"[{label}] button {op} is not drawn in any panel or popover")
+    for pr in props:
+        if ("prop", pr) not in drawn:
+            problems.append(f"[{label}] control {pr} is not drawn in any panel or popover")
+    prefs = get_prefs()
+    tab = getattr(prefs, "panel_tab", "CurioMesh") if prefs is not None else "CurioMesh"
+    for cls in mod("panel").MAIN_PANELS:
+        if cls.bl_category != tab:
+            problems.append(f"[{label}] {cls.bl_idname} sits in tab {cls.bl_category!r}, the Sidebar Tab preference says {tab!r}")
+    ok(not problems, f"{len(problems)} problem(s): " + " | ".join(problems[:8]))
+    return polls
+
+
+@check("registration", "every_class_registered_and_removed_cleanly")
+def _():
+    names = addon_classes()
+    missing = [n for n, c in names.items() if not getattr(c, "is_registered", False)]
+    ok(not missing, f"defined but not registered: {missing}")
+    panels = [c for n, c in names.items() if "_PT_" in n]
+    orphans = [c.__name__ for c in panels if getattr(c, "bl_parent_id", "") and not hasattr(bpy.types, c.bl_parent_id)]
+    ok(not orphans, f"panels whose parent is not registered: {orphans}")
+    for must in ("CURIOMESH_PT_guided", "CURIOMESH_PT_guided_apply", "CURIOMESH_PT_guided_adjust", "CURIOMESH_PT_guided_parts"):
+        ok(hasattr(bpy.types, must), f"{must} missing")
+    addon.unregister()
+    left = [n for n, c in names.items() if getattr(c, "is_registered", False)]
+    addon.register()
+    ok(not left, f"still registered after unregister: {left}")
+    return f"{len(names)} classes, {len(panels)} panels"
+
+
+@check("ui", "state_none_no_mesh")
+def _():
+    new_scene()
+    ui_expect("none")
+
+
+@check("ui", "state_ready_start_is_there", needs="main")
+def _():
+    select_only(main_obj())
+    g = gs()
+    g.scope = "AUTO"
+    polls = ui_expect("ready")
+    g.use_auto = True
+    ui_state("ready/auto")
+    g.use_auto = False
+    for pick in g.bl_rna.properties["detail_pick"].enum_items:
+        g.detail_pick = pick.identifier
+        _p, _d, problems = ui_state("ready/" + pick.identifier)
+        ok(not problems, "; ".join(problems[:3]))
+    g.detail_pick = "BALANCED"
+    return f"polls {polls}"
+
+
+@check("ui", "state_working_stop_is_there", needs="main")
+def _():
+    src = main_obj()
+    select_only(src)
+    reset_state()
+    g = gs()
+    g.scope, g.auto_update, g.auto_detail = "AUTO", False, 12.0
+    ok(bpy.ops.curiomesh.guided_auto_start() == {"FINISHED"})
+    try:
+        ui_expect("working")
+    finally:
+        finish()
+
+
+@check("ui", "state_result_apply_discard_sliders", needs="main")
+def _():
+    src = main_obj()
+    fresh_auto(src, auto_detail=12.0)
+    segments.ensure()
+    ui_expect("result")
+    ok(mod("panel").result_ready(), "result_ready() is False with a result on screen")
+    prefs = get_prefs()
+    if prefs is not None:  # the Pro tab: every panel draws with Pro on
+        prefs.pro_mode = True
+        _p, _d, problems = ui_state("result/pro")
+        prefs.pro_mode = False
+        ok(not problems, "; ".join(problems[:4]))
+
+
+@check("ui", "state_spot_redo_keep_original_put_back", needs="main")
+def _():
+    src = main_obj()
+    res = fresh_auto(src, auto_detail=12.0)
+    segments.ensure()
+    res["issue_spots"] = [{"kinds": {"folded_over": 3, "sliver": 2}, "faces": [0, 1, 2], "part": 0, "center": [0.0, 0.0, 0.0], "radius": 0.1}]
+    res["issues"] = {"totals": {"folded_over": 3, "sliver": 2}}
+    issue_panel.ui.update(res=res, cur=0)
+    segments.select([0])
+    pnl = mod("panel")
+    keep = pnl.CURIOMESH_PT_guided_parts.bl_options
+    pnl.CURIOMESH_PT_guided_parts.bl_options = set()
+    try:
+        ui_expect("spot")
+        for name in ("issue_redo", "issue_keep_original", "issue_put_back"):
+            ok(name in dir(bpy.ops.curiomesh), f"operator curiomesh.{name} is not registered")
+        r = bpy.ops.curiomesh.issue_keep_original(index=0)
+        ok(r == {"FINISHED"}, f"issue_keep_original returned {r}")
+        finish()
+        issue_panel.ui.update(res=guided.state["res"], cur=0)
+        ui_expect("original")
+        r = bpy.ops.curiomesh.issue_put_back(part=-1)
+        ok(r == {"FINISHED"}, f"issue_put_back returned {r}")
+        finish()
+        r = bpy.ops.curiomesh.issue_redo(index=0)
+        ok(r in ({"FINISHED"}, {"CANCELLED"}), f"issue_redo returned {r}")
+        finish()
+    finally:
+        pnl.CURIOMESH_PT_guided_parts.bl_options = keep
+
+
+@check("ui", "state_applied_export_button", needs="main")
+def _():
+    src = main_obj()
+    fresh_auto(src, auto_detail=12.0)
+    apply_result()
+    ui_expect("applied")
+    ok(bpy.ops.curiomesh.pick_use(use="GAME") in ({"FINISHED"}, {"CANCELLED"}), "pick_use failed")
+
+
+@check("ui", "tidy_up_organize_slider", needs="main")
+def _():
+    src = main_obj()
+    fresh_auto(src, auto_detail=12.0)
+    org = mod("organize")
+    base = len(guided.state["res"]["faces"])
+    gs().organize = 0.5
+    t = time.time()
+    while time.time() - t < 180:
+        org._tick()
+        time.sleep(0.1)
+        if not org.active():
+            break
+    return f"faces {base} -> {len(guided.state['res']['faces'])} after Tidy Up 0.5"
 
 
 @check("tour", "every_operator_is_covered_by_this_tour")
