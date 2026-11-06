@@ -990,8 +990,141 @@ fn uvsight_probe() -> usize {
     uvsight::probe()
 }
 
+/// Pictures of one mesh from many directions, held between passes. Methods never wait for a running kernel: while
+/// `uvsight_fill` or `uvsight_seen` works on it they raise RuntimeError("busy"); the counters are always readable.
+#[pyclass(frozen)]
+struct SightPictures {
+    inner: std::sync::Mutex<uvsight::Pictures>,
+    drawn: std::sync::atomic::AtomicUsize,
+    renders: std::sync::atomic::AtomicUsize,
+}
+
+impl SightPictures {
+    fn busy<T>(&self, work: impl FnOnce(&mut uvsight::Pictures) -> T) -> PyResult<T> {
+        match self.inner.try_lock() {
+            Ok(mut guard) => Ok(work(&mut guard)),
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err("busy")),
+        }
+    }
+    fn counts(&self, p: &uvsight::Pictures) {
+        self.drawn.store(p.drawn(), std::sync::atomic::Ordering::Relaxed);
+        self.renders.store(p.renders, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[pymethods]
+impl SightPictures {
+    /// `pixels` 0 = about 4 px across the median edge, at least 512. Draws nothing yet.
+    #[new]
+    #[pyo3(signature = (points, indptr, flat, views=6, pixels=0, all_sides=true))]
+    fn new<'py>(points: PyReadonlyArray1<'py, f64>, indptr: PyReadonlyArray1<'py, i64>, flat: PyReadonlyArray1<'py, i64>, views: usize, pixels: usize, all_sides: bool) -> PyResult<Self> {
+        let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+        check_faces(indptr, flat)?;
+        if flat.iter().any(|&v| v < 0 || v as usize * 3 + 3 > points.len()) {
+            return Err(PyValueError::new_err("sight faces use a missing vertex"));
+        }
+        let pixels = if pixels == 0 { uvsight::default_pixels(points, &topo::Faces { indptr, flat }) } else { pixels };
+        let dirs = uvsight::view_dirs(views);
+        let weights = uvsight::view_weights(&dirs, all_sides);
+        let pictures = uvsight::Pictures::new(points, indptr, flat, dirs, weights, pixels).map_err(PyValueError::new_err)?;
+        Ok(SightPictures { inner: std::sync::Mutex::new(pictures), drawn: 0.into(), renders: 0.into() })
+    }
+
+    #[getter]
+    fn drawn(&self) -> usize {
+        self.drawn.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Views drawn since creation (stays put when `uvsight_seen` runs again).
+    #[getter]
+    fn renders(&self) -> usize {
+        self.renders.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Make the view count `views` (new views are drawn by the next fill; drawn ones are kept) and set the weights.
+    fn set_views(&self, views: usize, all_sides: bool) -> PyResult<()> {
+        self.busy(|p| {
+            let dirs = uvsight::view_dirs(views);
+            let weights = uvsight::view_weights(&dirs, all_sides);
+            if views < p.views() {
+                p.dirs.truncate(views);
+                p.weights.truncate(views);
+                p.face.truncate(views);
+                p.depth.truncate(views);
+            } else {
+                let at = p.views();
+                p.extend(&dirs[at..], &weights[at..]).map_err(PyValueError::new_err)?;
+            }
+            p.set_weights(&weights);
+            self.counts(p);
+            Ok(())
+        })?
+    }
+
+    fn set_all_sides(&self, all_sides: bool) -> PyResult<()> {
+        self.busy(|p| {
+            let weights = uvsight::view_weights(&p.dirs, all_sides);
+            p.set_weights(&weights);
+        })
+    }
+
+    /// (pixels, center xyz, half): the picture frame.
+    fn frame(&self) -> PyResult<(usize, [f64; 3], f64)> {
+        self.busy(|p| (p.pixels, p.center, p.half))
+    }
+
+    /// (directions flat xyz, weights).
+    fn views<'py>(&self, py: Python<'py>) -> PyResult<(F64Array<'py>, F64Array<'py>)> {
+        self.busy(|p| (p.dirs.iter().flatten().copied().collect::<Vec<f64>>().into_pyarray(py), p.weights.clone().into_pyarray(py)))
+    }
+
+    /// Face id per cell of one view (-1 empty); a view that is not drawn gives an empty array.
+    fn face<'py>(&self, py: Python<'py>, view: usize) -> PyResult<I64Array<'py>> {
+        let out = self.busy(|p| p.face.get(view).map(|f| f.iter().map(|&v| if v == u32::MAX { -1 } else { v as i64 }).collect::<Vec<i64>>()))?;
+        out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
+    }
+
+    /// Depth per cell of one view (smaller = nearer; 2 half minus the distance toward the camera).
+    fn depth<'py>(&self, py: Python<'py>, view: usize) -> PyResult<F64Array<'py>> {
+        let out = self.busy(|p| p.depth.get(view).map(|f| f.iter().map(|&v| v as f64).collect::<Vec<f64>>()))?;
+        out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
+    }
+}
+
+/// Draw the views that are not drawn yet. A stop ends it with InterruptedError; what is drawn stays for the next call.
+#[pyfunction]
+fn uvsight_fill(py: Python<'_>, pictures: &SightPictures, stop: &StopFlag) -> PyResult<()> {
+    let done = py.detach(|| {
+        let mut p = pictures.inner.lock().map_err(|_| "poisoned")?;
+        let ok = p.fill(&stop.0);
+        pictures.counts(&p);
+        Ok::<bool, &str>(ok)
+    });
+    finished(done.map_err(pyo3::exceptions::PyRuntimeError::new_err)?)
+}
+
+/// (seen per face, inside px per edge, outline px per edge) from the drawn pictures, with no drawing.
+#[pyfunction]
+fn uvsight_seen<'py>(py: Python<'py>, pictures: &SightPictures, stop: &StopFlag) -> PyResult<(F64Array<'py>, F64Array<'py>, F64Array<'py>)> {
+    let found = py.detach(|| pictures.inner.lock().map(|p| p.sight(&stop.0)).map_err(|_| "poisoned"));
+    let sight = found.map_err(pyo3::exceptions::PyRuntimeError::new_err)?.ok_or_else(|| pyo3::exceptions::PyInterruptedError::new_err("stopped"))?;
+    Ok((sight.seen.seen_face.into_pyarray(py), sight.seen.seen_edge_px.into_pyarray(py), sight.outline_px.into_pyarray(py)))
+}
+
+/// The first `count` view directions (flat xyz) and their weights.
+#[pyfunction]
+fn uvsight_dirs<'py>(py: Python<'py>, count: usize, all_sides: bool) -> (F64Array<'py>, F64Array<'py>) {
+    let dirs = uvsight::view_dirs(count);
+    let weights = uvsight::view_weights(&dirs, all_sides);
+    (dirs.iter().flatten().copied().collect::<Vec<f64>>().into_pyarray(py), weights.into_pyarray(py))
+}
+
 fn register_uvsight(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvsight_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(uvsight_fill, m)?)?;
+    m.add_function(wrap_pyfunction!(uvsight_seen, m)?)?;
+    m.add_function(wrap_pyfunction!(uvsight_dirs, m)?)?;
+    m.add_class::<SightPictures>()?;
     Ok(())
 }
 // main-only: uv end sight

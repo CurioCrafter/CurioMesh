@@ -943,6 +943,41 @@ def uvsight_probe() -> "int | None":
     """1 when the compiled `uvsight` kernel is there and its compile probe passes; None for "use NumPy"."""
 
     return _uv_probe("uvsight_probe")
+
+
+def uvsight_pictures(points, polys, views: int = 6, pixels: int = 0, all_sides: bool = True):
+    """Pictures held between passes (nothing drawn yet; cheap): the native object, or None for "use NumPy".
+
+    `views` is any count (6 axes, then 8 corners, 12 edge middles, then a spiral); `pixels` 0 = about 4 px across the
+    median edge, at least 512. `all_sides` False lowers the view from below. Raises ValueError for arrays that
+    disagree or pictures that would not fit in memory.
+    """
+
+    module = native()
+    if module is None or not hasattr(module, "SightPictures"):
+        return None
+    indptr, flat = polys if isinstance(polys, tuple) and len(polys) == 2 and isinstance(polys[0], np.ndarray) else _csr(polys)
+    return module.SightPictures(
+        np.ascontiguousarray(points, dtype=np.float64).reshape(-1),
+        np.ascontiguousarray(indptr, dtype=np.int64),
+        np.ascontiguousarray(flat, dtype=np.int64),
+        int(views),
+        int(pixels),
+        bool(all_sides),
+    )
+
+
+def uvsight_fill(pictures) -> "UvJob | None":
+    """Draw the views not drawn yet, on a worker thread; `result()` is None. Stopped: drawn views stay, call again."""
+
+    return uv_job("uvsight_fill", pictures, name="CurioMeshSight")
+
+
+def uvsight_seen(pictures) -> "UvJob | None":
+    """Read the drawn pictures on a worker thread, drawing nothing: `result()` is (seen per face, inside px per edge,
+    outline px per edge)."""
+
+    return uv_job("uvsight_seen", pictures, name="CurioMeshSight")
 # main-only: uv end sight
 
 # main-only: uv begin flat

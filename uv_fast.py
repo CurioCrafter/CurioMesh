@@ -33,8 +33,32 @@ def _install_score() -> None:
 # main-only: uv end score
 
 # main-only: uv begin sight
+class _DrawJob:
+    """Draws the pictures with the compiled kernel on a worker thread and hands them to the NumPy reader."""
+
+    def __init__(self, points, polys, views, pixels, weights):
+        self._pictures = turbo.uvsight_pictures(points, polys, views, pixels)
+        self._job = turbo.uvsight_fill(self._pictures)
+
+    def done(self) -> bool:
+        return self._job.done()
+
+    def stop(self) -> None:
+        self._job.stop()
+
+    def result(self):
+        self._job.result()
+        import numpy as np
+
+        n = self._pictures.frame()[0]
+        count = int(self._pictures.drawn)
+        faces = [self._pictures.face(k).reshape(n, n) for k in range(count)]
+        depths = [self._pictures.depth(k).astype(np.float32).reshape(n, n) for k in range(count)]
+        return faces, depths
+
+
 def _install_sight() -> None:
-    uvsight.set_fast(probe=turbo.uvsight_probe)
+    uvsight.set_fast(probe=turbo.uvsight_probe, draw_job=_DrawJob)
 # main-only: uv end sight
 
 # main-only: uv begin flat
