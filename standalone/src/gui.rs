@@ -646,6 +646,7 @@ impl App {
                 ui.label(RichText::new("A fixed face count suits one model, so a batch uses the limit above.").small().color(MUTED));
             }
             ui.horizontal(|ui| {
+                ui.label("Tidy Up");
                 ui.label(RichText::new("More detail").small().color(MUTED));
                 ui.add(egui::Slider::new(&mut c.tidy, 0.0..=1.0).step_by(0.5).show_value(false)).on_hover_text("Tidy Up: fewer poles at about the same faces. Messy patches round poles are redrawn as plain grids, and kept only if the view changes at most 1 point more. Off at the left, one round in the middle, two rounds and spun edges at the right.");
                 ui.label(RichText::new("Tidier").small().color(MUTED));
