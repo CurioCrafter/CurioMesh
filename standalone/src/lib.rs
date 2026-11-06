@@ -30,6 +30,7 @@ pub mod qem;
 #[path = "../../native/src/topo.rs"]
 pub mod topo;
 
+pub mod bake;
 pub mod batch;
 pub mod export;
 pub mod io;
@@ -40,3 +41,4 @@ pub mod mirror;
 pub mod retopo;
 pub mod rows;
 pub mod settings;
+pub mod uv;

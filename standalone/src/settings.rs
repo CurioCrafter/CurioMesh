@@ -45,11 +45,15 @@ pub struct Settings {
     pub rows: bool,
     pub mirror: Mirror,
     pub export: Target,
+    pub keep_uvs: bool, // give the result the source's UVs (a bake does too)
+    pub bake_normal: bool,
+    pub bake_color: bool,
+    pub bake_size: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, mirror: Mirror::Off, export: Target::default() }
+        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, mirror: Mirror::Off, export: Target::default(), keep_uvs: false, bake_normal: false, bake_color: false, bake_size: 2048 }
     }
 }
 
@@ -141,7 +145,33 @@ impl Settings {
             "rows": self.rows,
             "mirror": self.mirror.word(),
             "export": self.export.to_json(),
+            "keep_uvs": self.keep_uvs,
+            "bake": self.bake_words(),
+            "bake_size": self.bake_size,
         })
+    }
+
+    /// Does the result get UVs?
+    pub fn wants_uvs(&self) -> bool {
+        self.keep_uvs || self.bake_normal || self.bake_color
+    }
+
+    pub fn bake_words(&self) -> Vec<&'static str> {
+        [(self.bake_normal, "normal"), (self.bake_color, "color")].into_iter().filter(|w| w.0).map(|w| w.1).collect()
+    }
+
+    /// Maps to bake from words: normal, color (or colour), both comma-separated, or none.
+    pub fn set_bake(&mut self, words: &[&str]) -> Result<(), String> {
+        (self.bake_normal, self.bake_color) = (false, false);
+        for w in words.iter().map(|w| w.trim().to_ascii_lowercase()).filter(|w| !w.is_empty()) {
+            match w.as_str() {
+                "normal" | "normals" => self.bake_normal = true,
+                "color" | "colour" => self.bake_color = true,
+                "none" | "off" => {}
+                other => return Err(format!("bake: {other}? Use normal, color, or both")),
+            }
+        }
+        Ok(())
     }
 
     /// Settings from JSON: any key left out keeps its default, an unknown key is an error (it is likely a typo).
@@ -167,6 +197,17 @@ impl Settings {
                 "rows" => self.rows = flag(k, v)?,
                 "mirror" => self.mirror = Mirror::parse(v.as_str().ok_or("settings: mirror must be off, auto, x, y or z")?)?,
                 "export" => self.export.apply(v.as_object().unwrap_or(&empty))?,
+                "keep_uvs" => self.keep_uvs = flag(k, v)?,
+                "bake" => {
+                    let words: Option<Vec<&str>> = match v {
+                        Value::String(s) => Some(s.split(',').collect()),
+                        Value::Array(a) => a.iter().map(Value::as_str).collect(),
+                        Value::Null => Some(vec![]),
+                        _ => None,
+                    };
+                    self.set_bake(&words.ok_or("settings: bake must be a list such as [\"normal\", \"color\"]")?)?;
+                }
+                "bake_size" => self.bake_size = (number(k, v)? as usize).clamp(16, 16384),
                 other => return Err(format!("settings: unknown key {other}")),
             }
         }
@@ -214,7 +255,34 @@ pub fn finish(source: &Mesh, settings: &Settings, work: &Work, mut out: retopo::
         log(&format!("  Mirrored: {} faces, {seam} corners on the seam, {:.2}% of the view changed", whole.faces(), out.loss));
         out.mesh = whole;
     }
+    if settings.wants_uvs() {
+        if source.uv.is_empty() {
+            log(NO_UVS);
+        } else {
+            let report = crate::uv::transfer(source, &mut out.mesh);
+            log(&format!("  {}", report.text()));
+        }
+    }
     out
+}
+
+pub const NO_UVS: &str = "The source has no UVs, so the result has none and nothing is baked: UVs and baking need a source with UVs.";
+
+/// Write a result as `settings.export` says. With UVs the source's colour textures are named for it, and the maps
+/// asked for are baked first (PNGs next to `path`). Returns how many pieces were written.
+pub fn write(source: &Mesh, mesh: &Mesh, path: &Path, settings: &Settings, log: &mut dyn FnMut(&str)) -> Result<usize, String> {
+    let mut maps = vec![crate::export::Maps::default(); mesh.materials.len()];
+    if !mesh.uv.is_empty() {
+        for (m, texture) in source.textures.iter().enumerate().take(maps.len()) {
+            maps[m].color = texture.clone();
+        }
+        let baked = crate::bake::bake(source, mesh, settings.bake_size, settings.bake_normal, settings.bake_color, path, log)?;
+        for (m, b) in baked.into_iter().enumerate() {
+            maps[m].normal = b.normal.or(maps[m].normal.take());
+            maps[m].color = b.color.or(maps[m].color.take());
+        }
+    }
+    crate::export::write_maps(mesh, path, &settings.export, &maps)
 }
 
 /// One whole run: mirror when asked, retopologize, and mirror back.

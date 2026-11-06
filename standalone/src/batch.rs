@@ -80,8 +80,8 @@ pub fn outputs(inputs: &[PathBuf], out_dir: &Path, format: export::Format) -> Ve
 fn one(input: &Path, output: &Path, settings: &Settings, log: &mut dyn FnMut(&str)) -> Result<FileReport, String> {
     let started = std::time::Instant::now();
     let source = io::weld(&io::read(input)?);
-    let done = settings::run(&source, settings, log)?;
-    let pieces = export::write(&done.mesh, output, &settings.export)?;
+    let done = settings::run(&source, settings, &mut *log)?;
+    let pieces = settings::write(&source, &done.mesh, output, settings, log)?;
     let check = issues::check(&done.mesh);
     Ok(FileReport {
         input: input.into(), output: output.into(), status: Status::Ok, source_faces: source.faces(), faces: check.faces, quads: check.quads, tris: check.tris,

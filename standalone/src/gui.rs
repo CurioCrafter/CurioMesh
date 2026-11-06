@@ -9,7 +9,7 @@ mod gui_batch;
 mod gui_guide;
 mod gui_prefs;
 
-use curiomesh::settings::Mirror;
+use curiomesh::settings::{self, Mirror};
 use curiomesh::{export, io, issues};
 use gui_batch::Batch;
 use gui_prefs::{Prefs, CUSTOM};
@@ -306,16 +306,21 @@ impl App {
     fn save(&mut self) {
         let (Some(model), Some((finished, _))) = (&self.model, &self.result) else { return };
         let stem = model.path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-        let target = self.prefs.choices.settings(true).export;
+        let settings = self.prefs.choices.settings(true);
+        let target = settings.export.clone();
         let ext = target.format.ext();
         let mut dialog = rfd::FileDialog::new().add_filter(ext, &[ext]).set_file_name(format!("{stem}_curiomesh.{ext}"));
         if let Some(folder) = model.path.parent() {
             dialog = dialog.set_directory(folder);
         }
         if let Some(path) = dialog.save_file() {
-            self.note = Some(match export::write(&finished.mesh, &path, &target) {
-                Ok(1) | Ok(0) => (format!("Saved {}", path.display()), false),
-                Ok(n) => (format!("Saved {n} pieces next to {}", path.display()), false),
+            // ponytail: a bake runs here on the window's thread (a few seconds at 2048); move it to a worker if that's too long.
+            let mut said = Vec::new();
+            let saved = settings::write(&model.mesh, &finished.mesh, &path, &settings, &mut |line| said.push(line.trim().to_string()));
+            let extra = said.iter().map(|l| format!(" {l}")).collect::<String>();
+            self.note = Some(match saved {
+                Ok(1) | Ok(0) => (format!("Saved {}.{extra}", path.display()), false),
+                Ok(n) => (format!("Saved {n} pieces next to {}.{extra}", path.display()), false),
                 Err(e) => (format!("Couldn't save: {e}"), true),
             });
         }
@@ -588,6 +593,7 @@ impl App {
     /// The settings every run uses, on the start screen, beside a model and beside a batch. `count_ok` is false in a
     /// batch, where one face count can't suit every model.
     fn settings_ui(&mut self, ui: &mut egui::Ui, enabled: bool, count_ok: bool, compact: bool) {
+        let no_uvs = self.model.as_ref().is_some_and(|m| m.mesh.uv.is_empty());
         let c = &mut self.prefs.choices;
         ui.add_enabled_ui(enabled, |ui| {
             if compact {
@@ -674,6 +680,25 @@ impl App {
                     }
                 }).response.on_hover_text("The game engine the file is for. This sets the file type, triangles and size limits.");
             });
+            ui.checkbox(&mut c.keep_uvs, "Keep the UVs").on_hover_text("Give the result the model's own UVs, so its textures fit the result too.");
+            ui.horizontal(|ui| {
+                ui.label("Bake");
+                ui.checkbox(&mut c.bake_normal, "Normal map").on_hover_text("The model's surface detail as a normal map on the result's UVs, saved as a PNG next to the result.");
+                ui.checkbox(&mut c.bake_color, "Colour").on_hover_text("The model's colour texture painted onto the result's UVs, saved as a PNG next to the result.");
+            });
+            if c.bake_normal || c.bake_color {
+                ui.horizontal(|ui| {
+                    ui.label("Map size");
+                    egui::ComboBox::from_id_salt("bake_size").selected_text(format!("{0} x {0}", c.bake_size)).show_ui(ui, |ui| {
+                        for size in [1024, 2048, 4096] {
+                            ui.selectable_value(&mut c.bake_size, size, format!("{size} x {size}"));
+                        }
+                    }).response.on_hover_text("Pixels per side of the baked maps.");
+                });
+            }
+            if no_uvs && (c.keep_uvs || c.bake_normal || c.bake_color) {
+                ui.label(RichText::new("This model has no UVs. UVs and baking need a source with UVs.").small().color(MUTED));
+            }
             ui.checkbox(&mut c.gpu, "Use the graphics card").on_hover_text("Draw the camera pictures on the graphics card. Faster. Turn it off if it fails on your computer.");
             };
             if compact {
