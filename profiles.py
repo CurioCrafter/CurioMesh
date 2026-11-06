@@ -62,8 +62,18 @@ def multires_words(base_faces: int, levels: int) -> str:
 
 
 def free_memory_gb() -> float:
-    """Free memory on this computer, or a modest guess (8 GB) where Python can't read it (Windows, macOS)."""
+    """Free memory on this computer, or a modest guess (8 GB) where it can't be read."""
     try:
+        if os.name == "nt":
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in ("total", "free", "pagefile", "free_pagefile", "virtual", "free_virtual", "extended")]
+
+            status = Status()
+            status.length = ctypes.sizeof(Status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return status.free / 2**30
         return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 2**30
     except (AttributeError, OSError, ValueError):
         return 8.0
