@@ -56,12 +56,12 @@ def _changed(self, context) -> None:
 class CURIOMESH_PG_segsettings(bpy.types.PropertyGroup):
     """Kept on each mesh, so every mesh has its own segments."""
 
-    detail: bpy.props.FloatProperty(name="Segment Detail", description="How many segments the mesh splits into. Left finds only the big parts, right also the smaller ones. The colours follow while you drag; locked segments stay as they are", default=0.65, min=0.0, max=1.0, subtype="FACTOR", update=_changed)
-    largest: bpy.props.FloatProperty(name="Largest Segment", description="No segment grows past this share of its loose piece. 100% leaves the size to Segment Detail", default=100.0, min=2.0, max=100.0, subtype="PERCENTAGE", update=_changed)
-    smallest: bpy.props.FloatProperty(name="Smallest Segment", description="A segment smaller than this share of its loose piece joins its neighbour", default=0.4, min=0.0, max=10.0, subtype="PERCENTAGE", update=_changed)
-    creases: bpy.props.FloatProperty(name="Crease Strength", description="How strongly sharp edges and creases cut segments apart. Left: segments run over soft creases. Right: creases become borders", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_changed)
-    smooth: bpy.props.FloatProperty(name="Border Smoothness", description="How much a border is rounded off where no crease holds it. Left: borders follow the faces closely. Right: smoother, rounder borders. Shows when the segments are kept, a moment after you stop", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_changed)
-    size_paint: bpy.props.BoolProperty(name="Paint Size", description=f"Use the '{SIZE_GROUP}' vertex group: red makes smaller segments there, blue larger ones, green leaves the size to the sliders", default=False, update=_changed)
+    detail: bpy.props.FloatProperty(name="Part Detail", description="How many parts the mesh is cut into. Left finds only the big parts, right also the small ones; locked parts stay", default=0.65, min=0.0, max=1.0, subtype="FACTOR", update=_changed)
+    largest: bpy.props.FloatProperty(name="Largest Part", description="No part grows past this share of its loose piece. 100% leaves the size to Part Detail", default=100.0, min=2.0, max=100.0, subtype="PERCENTAGE", update=_changed)
+    smallest: bpy.props.FloatProperty(name="Smallest Part", description="A part smaller than this share of its loose piece joins its neighbour", default=0.4, min=0.0, max=10.0, subtype="PERCENTAGE", update=_changed)
+    creases: bpy.props.FloatProperty(name="Crease Strength", description="How much sharp edges split the mesh into parts. More: every crease becomes a part border", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_changed)
+    smooth: bpy.props.FloatProperty(name="Border Smoothness", description="How much part borders are rounded off where no crease holds them. Right: smoother, rounder borders", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_changed)
+    size_paint: bpy.props.BoolProperty(name="Paint Size", description=f"Use the '{SIZE_GROUP}' vertex group: red makes smaller parts there, blue larger ones, green leaves it to the sliders", default=False, update=_changed)
 
 
 def snapshot(source) -> dict:
@@ -270,7 +270,7 @@ def draw(layout, source) -> None:
     col = layout.column(align=True)
     count = view.seg.get("live_count") if view.seg.get("live") is not None else len(view.seg["parts"])
     busy = live["thread"] is not None or live["preview"].asked is not None or live["keep"].asked is not None
-    text = f"{count:,} segments" + (f"  ({live['ms']:.0f} ms)" if live["ms"] is not None and view.seg.get("live") is not None else "") + ("  ..." if busy else "")
+    text = f"{count:,} parts" + (f"  ({live['ms']:.0f} ms)" if live["ms"] is not None and view.seg.get("live") is not None else "") + ("  ..." if busy else "")
     col.label(text=text, icon="MESH_GRID")
     col.prop(st, "detail", slider=True)
     col.prop(st, "largest", slider=True)
