@@ -1,13 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 //! Writing a result for a game engine: OBJ or binary glTF (.glb), triangulated if asked, cut into pieces under a
-//! triangle limit, scaled and turned. The engine presets follow the add-on's `game_export.py`; textures and FBX are
-//! left out here (the standalone bakes nothing, and has no well-trusted FBX writer).
+//! triangle limit, scaled and turned. The engine presets follow the add-on's `game_export.py`. With UVs, both files
+//! also get smooth normals (the ones the bake used) and each material's colour and normal images. FBX is left out (no
+//! well-trusted FBX writer).
 
-use crate::io::Mesh;
+use crate::io::{Mesh, Texture};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::Path;
+
+/// One material's images for the writers: its colour (a baked map, or the source's own texture) and a baked normal map.
+#[derive(Clone, Debug, Default)]
+pub struct Maps {
+    pub color: Option<Texture>,
+    pub normal: Option<Texture>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Format {
@@ -88,24 +97,52 @@ impl Target {
 }
 
 /// Every face as triangles. A quad is cut along its shorter diagonal; larger faces are fanned from their first corner.
+/// UVs (when there are) go with their corners.
 pub fn triangulate(mesh: &Mesh) -> Mesh {
-    let mut out = Mesh { points: mesh.points.clone(), indptr: vec![0], materials: mesh.materials.clone(), ..Default::default() };
+    let mut out = Mesh { points: mesh.points.clone(), indptr: vec![0], materials: mesh.materials.clone(), textures: mesh.textures.clone(), ..Default::default() };
     let gap = |a: i64, b: i64| (0..3).map(|c| (mesh.points[a as usize * 3 + c] - mesh.points[b as usize * 3 + c]).powi(2)).sum::<f64>();
-    let push = |out: &mut Mesh, t: [i64; 3], m: i64| {
-        out.flat.extend_from_slice(&t);
+    let push = |out: &mut Mesh, f: usize, t: [usize; 3]| {
+        let s = mesh.indptr[f] as usize;
+        out.flat.extend(t.map(|c| mesh.flat[s + c]));
+        if !mesh.uv.is_empty() {
+            out.uv.extend(t.map(|c| mesh.uv[s + c]));
+        }
         out.indptr.push(out.flat.len() as i64);
-        out.material.push(m);
+        out.material.push(mesh.material[f]);
     };
     for f in 0..mesh.faces() {
-        let (face, m) = (mesh.face(f), mesh.material[f]);
+        let face = mesh.face(f);
         if face.len() == 4 && gap(face[1], face[3]) < gap(face[0], face[2]) {
-            push(&mut out, [face[0], face[1], face[3]], m);
-            push(&mut out, [face[1], face[2], face[3]], m);
+            push(&mut out, f, [0, 1, 3]);
+            push(&mut out, f, [1, 2, 3]);
             continue;
         }
         for k in 1..face.len().saturating_sub(1) {
-            push(&mut out, [face[0], face[k], face[k + 1]], m);
+            push(&mut out, f, [0, k, k + 1]);
         }
+    }
+    out
+}
+
+/// Smooth normals per vertex: the triangles around it, weighted by their area. The writers save these with UVs and the
+/// bake measures against the same ones, so a baked normal map matches the shading an engine shows.
+pub fn vertex_normals(mesh: &Mesh) -> Vec<[f64; 3]> {
+    let tris = triangulate(mesh);
+    let p = |v: i64| [mesh.points[v as usize * 3], mesh.points[v as usize * 3 + 1], mesh.points[v as usize * 3 + 2]];
+    let mut out = vec![[0.0f64; 3]; mesh.points.len() / 3];
+    for t in tris.flat.chunks_exact(3) {
+        let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+        let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        for &v in t {
+            for k in 0..3 {
+                out[v as usize][k] += n[k];
+            }
+        }
+    }
+    for n in &mut out {
+        let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        *n = if length > 0.0 { n.map(|x| x / length) } else { [0.0, 0.0, 1.0] };
     }
     out
 }
@@ -181,6 +218,11 @@ pub fn split_under(mesh: &Mesh, limit: usize) -> Vec<usize> {
 
 /// Write `mesh` to `path` as `target` says. Returns how many pieces were written.
 pub fn write(mesh: &Mesh, path: &Path, target: &Target) -> Result<usize, String> {
+    write_maps(mesh, path, target, &[])
+}
+
+/// `write`, with each material's images (`maps[material]`) named in the .mtl or put inside the .glb.
+pub fn write_maps(mesh: &Mesh, path: &Path, target: &Target, maps: &[Maps]) -> Result<usize, String> {
     let mut mesh = if target.triangulate { triangulate(mesh) } else { mesh.clone() };
     for p in mesh.points.chunks_exact_mut(3) {
         let [x, y, z] = [p[0], p[1], p[2]].map(|c| c * target.scale);
@@ -190,78 +232,153 @@ pub fn write(mesh: &Mesh, path: &Path, target: &Target) -> Result<usize, String>
     let piece = split_under(&mesh, target.max_tris);
     let pieces = piece.iter().max().map_or(0, |m| m + 1);
     match target.format {
-        Format::Obj => crate::io::write_obj_pieces(&mesh, &piece, path)?,
-        Format::Glb => write_glb(&mesh, &piece, pieces, path)?,
+        Format::Obj => crate::io::write_obj_pieces(&mesh, &piece, path, maps)?,
+        Format::Glb => write_glb(&mesh, &piece, pieces, path, maps)?,
     }
     Ok(pieces.max(1))
 }
 
-/// A binary glTF 2.0 file: one node and mesh per piece, positions and triangle indices, one named material per piece.
-fn write_glb(mesh: &Mesh, piece: &[usize], pieces: usize, path: &Path) -> Result<(), String> {
+/// Bytes and glTF MIME type of an image.
+fn image_bytes(texture: &Texture) -> Result<(Vec<u8>, &'static str), String> {
+    let bytes = match texture {
+        Texture::File(p) => std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?,
+        Texture::Bytes(b) => b.to_vec(),
+    };
+    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) { "image/png" } else { "image/jpeg" };
+    Ok((bytes, mime))
+}
+
+/// A binary glTF 2.0 file: one node and mesh per piece, one primitive per material in it, with positions and triangle
+/// indices, and with UVs also normals and texture coordinates (a vertex is split where its corners' UVs differ). Each
+/// material's images go inside the file.
+fn write_glb(mesh: &Mesh, piece: &[usize], pieces: usize, path: &Path, maps: &[Maps]) -> Result<(), String> {
     let tris = triangulate(mesh); // glTF holds triangles; a no-op when already triangulated
+    let has_uv = !tris.uv.is_empty();
+    let normals = if has_uv { vertex_normals(&tris) } else { vec![] };
     let mut bin: Vec<u8> = Vec::new();
-    let (mut nodes, mut meshes, mut accessors, mut views, mut materials) = (vec![], vec![], vec![], vec![], vec![]);
+    let (mut nodes, mut meshes, mut accessors, mut views) = (vec![], vec![], vec![], vec![]);
+    let (mut materials, mut images, mut textures) = (vec![], vec![], vec![]);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
+    let view = |bin: &mut Vec<u8>, views: &mut Vec<Value>, bytes: &[u8], target: Option<u32>| {
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let start = bin.len();
+        bin.extend_from_slice(bytes);
+        let mut v = json!({"buffer": 0, "byteOffset": start, "byteLength": bytes.len()});
+        if let Some(t) = target {
+            v["target"] = json!(t);
+        }
+        views.push(v);
+        views.len() - 1
+    };
+    // One glTF material per material the triangles use.
+    let mut gl_material: HashMap<i64, usize> = HashMap::new();
+    let mut used: Vec<i64> = tris.material.clone();
+    used.sort_unstable();
+    used.dedup();
+    for m in used {
+        let name = usize::try_from(m).ok().and_then(|m| mesh.materials.get(m).cloned()).unwrap_or_else(|| "material".into());
+        let mut pbr = json!({"metallicFactor": 0.0, "roughnessFactor": 0.8});
+        let mut material = json!({"name": name});
+        if let Some(found) = usize::try_from(m).ok().and_then(|m| maps.get(m)).filter(|_| has_uv) {
+            for (texture, key) in [(&found.color, "baseColorTexture"), (&found.normal, "normalTexture")] {
+                if let Some(t) = texture {
+                    let (bytes, mime) = image_bytes(t)?;
+                    let at = view(&mut bin, &mut views, &bytes, None);
+                    images.push(json!({"bufferView": at, "mimeType": mime}));
+                    textures.push(json!({"source": images.len() - 1, "sampler": 0}));
+                    if key == "baseColorTexture" {
+                        pbr[key] = json!({"index": textures.len() - 1});
+                    } else {
+                        material[key] = json!({"index": textures.len() - 1});
+                    }
+                }
+            }
+        }
+        material["pbrMetallicRoughness"] = pbr;
+        materials.push(material);
+        gl_material.insert(m, materials.len() - 1);
+    }
     // tris keeps the source face order, so each triangle's piece is its face's piece.
     let mut face_of = Vec::with_capacity(tris.faces());
     for f in 0..mesh.faces() {
         face_of.extend(std::iter::repeat(f).take(mesh.face(f).len().saturating_sub(2)));
     }
     for k in 0..pieces.max(1) {
-        let mut number = vec![u32::MAX; tris.points.len() / 3];
-        let (mut positions, mut indices): (Vec<f32>, Vec<u32>) = (vec![], vec![]);
-        let mut material = -1;
-        for t in 0..tris.faces() {
-            if piece.get(face_of[t]).copied().unwrap_or(0) != k {
-                continue;
-            }
-            material = tris.material[t];
-            for &v in tris.face(t) {
-                if number[v as usize] == u32::MAX {
-                    number[v as usize] = (positions.len() / 3) as u32;
-                    positions.extend(tris.points[v as usize * 3..v as usize * 3 + 3].iter().map(|&c| c as f32));
-                }
-                indices.push(number[v as usize]);
-            }
+        let mut by_material: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for t in (0..tris.faces()).filter(|&t| piece.get(face_of[t]).copied().unwrap_or(0) == k) {
+            by_material.entry(tris.material[t]).or_default().push(t);
         }
-        if indices.is_empty() {
+        let mut primitives = vec![];
+        for (m, list) in by_material {
+            let mut number: HashMap<(i64, [u64; 2]), u32> = HashMap::new();
+            let (mut positions, mut normal, mut uvs, mut indices): (Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) = (vec![], vec![], vec![], vec![]);
+            for t in list {
+                for c in 3 * t..3 * t + 3 {
+                    let v = tris.flat[c];
+                    let uv = if has_uv { tris.uv[c] } else { [0.0; 2] };
+                    let next = number.len() as u32;
+                    let i = *number.entry((v, uv.map(f64::to_bits))).or_insert_with(|| {
+                        positions.extend(tris.points[v as usize * 3..v as usize * 3 + 3].iter().map(|&c| c as f32));
+                        if has_uv {
+                            normal.extend(normals[v as usize].map(|c| c as f32));
+                            uvs.extend([uv[0] as f32, 1.0 - uv[1] as f32]); // glTF's v grows downwards
+                        }
+                        next
+                    });
+                    indices.push(i);
+                }
+            }
+            let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+            for p in positions.chunks_exact(3) {
+                for c in 0..3 {
+                    lo[c] = lo[c].min(p[c]);
+                    hi[c] = hi[c].max(p[c]);
+                }
+            }
+            let floats = |v: &[f32]| v.iter().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>();
+            let count = positions.len() / 3;
+            let at = view(&mut bin, &mut views, &floats(&positions), Some(34962));
+            accessors.push(json!({"bufferView": at, "componentType": 5126, "count": count, "type": "VEC3", "min": lo, "max": hi}));
+            let mut attributes = json!({"POSITION": accessors.len() - 1});
+            if has_uv {
+                let at = view(&mut bin, &mut views, &floats(&normal), Some(34962));
+                accessors.push(json!({"bufferView": at, "componentType": 5126, "count": count, "type": "VEC3"}));
+                attributes["NORMAL"] = json!(accessors.len() - 1);
+                let at = view(&mut bin, &mut views, &floats(&uvs), Some(34962));
+                accessors.push(json!({"bufferView": at, "componentType": 5126, "count": count, "type": "VEC2"}));
+                attributes["TEXCOORD_0"] = json!(accessors.len() - 1);
+            }
+            let at = view(&mut bin, &mut views, &indices.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<u8>>(), Some(34963));
+            accessors.push(json!({"bufferView": at, "componentType": 5125, "count": indices.len(), "type": "SCALAR"}));
+            primitives.push(json!({"attributes": attributes, "indices": accessors.len() - 1, "material": gl_material[&m], "mode": 4}));
+        }
+        if primitives.is_empty() {
             continue;
         }
-        let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
-        for p in positions.chunks_exact(3) {
-            for c in 0..3 {
-                lo[c] = lo[c].min(p[c]);
-                hi[c] = hi[c].max(p[c]);
-            }
-        }
-        let start = bin.len();
-        bin.extend(positions.iter().flat_map(|c| c.to_le_bytes()));
-        let middle = bin.len();
-        bin.extend(indices.iter().flat_map(|i| i.to_le_bytes()));
-        let (pos_view, idx_view) = (views.len(), views.len() + 1);
-        views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": middle - start, "target": 34962}));
-        views.push(json!({"buffer": 0, "byteOffset": middle, "byteLength": bin.len() - middle, "target": 34963}));
-        accessors.push(json!({"bufferView": pos_view, "componentType": 5126, "count": positions.len() / 3, "type": "VEC3", "min": lo, "max": hi}));
-        accessors.push(json!({"bufferView": idx_view, "componentType": 5125, "count": indices.len(), "type": "SCALAR"}));
         let name = if pieces > 1 { format!("{stem}_{:02}", k + 1) } else { stem.to_string() };
-        let material_name = usize::try_from(material).ok().and_then(|m| mesh.materials.get(m).cloned()).unwrap_or_else(|| "material".into());
-        materials.push(json!({"name": material_name, "pbrMetallicRoughness": {"metallicFactor": 0.0, "roughnessFactor": 0.8}}));
-        meshes.push(json!({"name": name, "primitives": [{"attributes": {"POSITION": accessors.len() - 2}, "indices": accessors.len() - 1, "material": materials.len() - 1, "mode": 4}]}));
+        meshes.push(json!({"name": name, "primitives": primitives}));
         nodes.push(json!({"name": name, "mesh": meshes.len() - 1}));
     }
-    let doc = json!({
+    while bin.len() % 4 != 0 {
+        bin.push(0);
+    }
+    let mut doc = json!({
         "asset": {"version": "2.0", "generator": concat!("CurioMesh standalone ", env!("CARGO_PKG_VERSION"))},
         "scene": 0,
         "scenes": [{"nodes": (0..nodes.len()).collect::<Vec<_>>()}],
         "nodes": nodes, "meshes": meshes, "materials": materials, "accessors": accessors, "bufferViews": views,
         "buffers": [{"byteLength": bin.len()}],
     });
+    if !images.is_empty() {
+        doc["images"] = json!(images);
+        doc["textures"] = json!(textures);
+        doc["samplers"] = json!([{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}]);
+    }
     let mut text = serde_json::to_vec(&doc).unwrap();
     while text.len() % 4 != 0 {
         text.push(b' ');
-    }
-    while bin.len() % 4 != 0 {
-        bin.push(0);
     }
     let total = 12 + 8 + text.len() + 8 + bin.len();
     let mut file = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?);
@@ -308,6 +425,29 @@ mod tests {
         assert!(pieces >= 6);
         for k in 0..pieces {
             assert!(piece.iter().filter(|&&p| p == k).count() <= 150);
+        }
+    }
+
+    #[test]
+    fn uvs_round_trip_through_obj_and_glb() {
+        // Every quad has its own UVs (a seam on every edge), so the GLB must split its vertices.
+        let mut m = grid(3);
+        m.materials = vec!["skin".into()];
+        m.uv = (0..m.flat.len()).map(|c| [(c / 4) as f64 * 0.1 + [0.0, 0.05, 0.05, 0.0][c % 4], [0.0, 0.0, 0.5, 0.5][c % 4]]).collect();
+        let dir = std::env::temp_dir().join("curiomesh_test_uv_out");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("skin.png");
+        image::RgbImage::new(4, 4).save(&image).unwrap();
+        let maps = [Maps { color: Some(Texture::File(image)), normal: None }];
+        for (name, target) in [("m.obj", Target::default()), ("m.glb", Target { format: Format::Glb, ..Target::default() })] {
+            write_maps(&m, &dir.join(name), &target, &maps).unwrap();
+            let back = crate::io::weld(&crate::io::read(&dir.join(name)).unwrap());
+            let expected = if name.ends_with("glb") { triangulate(&m) } else { m.clone() };
+            assert_eq!(back.flat.len(), expected.uv.len());
+            for (a, b) in back.uv.iter().zip(&expected.uv) {
+                assert!((a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6, "{name}: {a:?} vs {b:?}");
+            }
+            assert!(back.textures[0].is_some(), "{name} names its texture");
         }
     }
 

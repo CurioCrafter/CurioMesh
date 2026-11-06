@@ -191,7 +191,7 @@ mod tests {
             indptr: vec![0, 4, 8],
             flat: vec![0, 1, 2, 3, 1, 4, 2, 5], // the second quad crosses itself
             material: vec![0, 0],
-            materials: vec![],
+            ..Default::default()
         };
         let c = check(&mesh);
         assert_eq!(c.bad, 1);

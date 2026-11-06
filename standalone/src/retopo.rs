@@ -291,6 +291,7 @@ pub fn close_polygons(points: &[f64], indptr: &[i64], flat: &[i64], material: &[
         indptr: closed.indptr,
         flat: closed.flat,
         materials: materials.to_vec(),
+        ..Default::default()
     })
 }
 
@@ -513,7 +514,7 @@ fn rows_where_they_hold(mesh: &mut Mesh, change: &mut f64, limit: f64, source: &
         }
         let (grid_points, grid_indptr, grid_flat) = made?;
         let tag = tags[source_tris[p][0]];
-        let quads = Mesh { material: vec![tag; grid_indptr.len() - 1], points: grid_points, indptr: grid_indptr, flat: grid_flat, materials: source.materials.clone() };
+        let quads = Mesh { material: vec![tag; grid_indptr.len() - 1], points: grid_points, indptr: grid_indptr, flat: grid_flat, materials: source.materials.clone(), ..Default::default() };
         // Rows must not bring in faces the checks call bad: compare with the part as it is.
         let bad_now = crate::issues::check(&sub_mesh(mesh, mine)).bad;
         let bad_rows = crate::issues::check(&quads).bad;
