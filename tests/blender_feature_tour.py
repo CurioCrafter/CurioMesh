@@ -1330,7 +1330,7 @@ def _try_groups(src, groups, **common):
 def _():
     groups = [
         {"auto_rough": True, "auto_drop_hidden": True, "auto_redo_rough": True, "auto_baked": True},
-        {"auto_chords": True, "auto_tidy": True, "auto_gpu": False, "auto_effort": "LIGHT", "auto_parallel": True},
+        {"auto_chords": True, "auto_tidy": True, "auto_effort": "LIGHT", "auto_parallel": True},
         {"pure_quads": False, "fit_iterations": 0, "feature_angle": 70.0, "auto_instances": True},
     ]
     return _try_groups(main_obj(), groups, auto_detail=12.0)
