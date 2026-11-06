@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import bpy
 
 from . import history, icons, overlay, tidylive
+from .triadq import loopspoles as LP
 from .triadq import tidytools as T
 
 WIDTH = 36
@@ -42,6 +43,9 @@ GROUPS = (
 )
 TOOLS: list[Tool] = [
     Tool("RELAX", "curiomesh.tool_smooth_corners", "Smooth Corners", "tt_relax", "MOD_SMOOTH", developer=True),
+    Tool("LOOPS", "curiomesh.tool_even_band", "Even the Band", "tt_even_band", "ALIGN_JUSTIFY"),
+    Tool("POLES", "curiomesh.tool_cancel_pole_pair", "Cancel Pole Pair", "tt_cancel_pair", "UNLINKED"),
+    Tool("POLES", "curiomesh.tool_open_poles", "Open Up Poles", "tt_open_poles", "PROP_ON"),
 ]
 FIRST_RUN = ""  # the tool "Even out the roughest patch" opens: Source Relax's idname once it exists
 
@@ -125,6 +129,45 @@ class CURIOMESH_OT_tool_smooth_corners(_Tool, bpy.types.Operator):
 
     strength: bpy.props.FloatProperty(name="Strength", description="How far each corner slides toward the middle of its neighbours. 0 leaves the result as it is", default=0.6, min=0.0, max=1.0, subtype="FACTOR")
     steps: bpy.props.IntProperty(name="Steps", description="How many small slides in a row. More evens out a wider area; higher can take longer", default=6, min=1, soft_max=50)
+
+
+PICK = {"SKIP_SAVE"}  # a pick is for this run only: the next time the tool opens, you click again
+
+
+class CURIOMESH_OT_tool_even_band(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_even_band"
+    bl_label = "Even the Band"
+    bl_description = "Gives the picked strip and its neighbours, out to the next pole or border, the same width. Use it on a patch whose strips are bunched together"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = LP.EvenTheBand
+
+    strength: bpy.props.FloatProperty(name="Strength", description="How far the strips go toward the same width. 1 makes them equal, 0 leaves them as they are", default=1.0, min=0.0, max=1.0, subtype="FACTOR")
+    strip: bpy.props.IntProperty(name="Strip", description="The strip you clicked, as a number. -1 asks you to click one in the viewport", default=-1, min=-1, options=PICK)
+
+
+class CURIOMESH_OT_tool_cancel_pole_pair(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_cancel_pole_pair"
+    bl_label = "Cancel Pole Pair"
+    bl_description = "Click a pole, then one of its lit-up partners, and both poles go away with the same face count. Use it on stray poles in places you care about"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = LP.CancelPolePair
+
+    pole: bpy.props.IntProperty(name="Pole", description="The pole you clicked, as a corner number. -1 asks you to click one in the viewport", default=-1, min=-1, options=PICK)
+    partner: bpy.props.IntProperty(name="Partner", description="The partner you clicked, as a corner number. -1 asks you to click one of the numbered poles", default=-1, min=-1, options=PICK)
+    reach: bpy.props.IntProperty(name="Reach", description="How many rings of quads round the pole are searched for partners. Higher finds partners further away and can take longer", default=6, min=1, soft_max=20, max=100000)
+    steps: bpy.props.IntProperty(name="Steps", description="Most edge spins in one walk between the two poles. Higher reaches further and can take longer", default=6, min=1, soft_max=12, max=100000)
+    tries: bpy.props.IntProperty(name="Tries", description="How many spins the walk may try before it says it found no way. Higher can take longer", default=400, min=1, soft_max=5000, max=100000000)
+
+
+class CURIOMESH_OT_tool_open_poles(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_open_poles"
+    bl_label = "Open Up Poles"
+    bl_description = "Spreads the edges round each pole to even angles, so the thin quads round it open up. Use it where poles cause dents in the shading"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = LP.OpenUpPoles
+
+    strength: bpy.props.FloatProperty(name="Strength", description="How far the edges round each pole turn toward even angles. 1 goes as far as it can, 0 leaves them as they are", default=0.8, min=0.0, max=1.0, subtype="FACTOR")
+    rings: bpy.props.IntProperty(name="Rings", description="How many rings of quads round each pole share the change. More spreads it wider and moves more corners", default=2, min=1, soft_max=3, max=100000)
 
 
 # --------------------------------------------------------------------------- panel operators
@@ -313,7 +356,7 @@ def _popover(key, label, tip):
 
 POPOVERS = tuple(_popover(key, label, tip) for key, label, _icon, _stock, tip in GROUPS)
 PANELS = (CURIOMESH_PT_guided_tools, CURIOMESH_PT_guided_history)  # registered by panel.py, in the main tab's order
-CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
+CLASSES = (CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_even_band, CURIOMESH_OT_tool_cancel_pole_pair, CURIOMESH_OT_tool_open_poles, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
 
 
 def register() -> None:

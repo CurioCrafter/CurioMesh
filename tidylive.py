@@ -82,6 +82,8 @@ WASH = np.array([(0.267, 0.005, 0.329), (0.230, 0.322, 0.546), (0.128, 0.567, 0.
 NAVIGATION = {"MIDDLEMOUSE", "WHEELUPMOUSE", "WHEELDOWNMOUSE", "WHEELINMOUSE", "WHEELOUTMOUSE", "TRACKPADPAN", "TRACKPADZOOM", "MOUSEROTATE", "MOUSESMARTZOOM", "LEFT_ALT", "RIGHT_ALT", "LEFT_SHIFT", "RIGHT_SHIFT", "LEFT_CTRL", "RIGHT_CTRL", "HOME"}
 HINT = "{name}: drag the ring for {handle}. Enter keeps it, Esc cancels, B shows before/after."
 HINT_NONE = "{name}: Enter keeps it, Esc cancels, B shows before/after."
+HINT_PICK = "{name}: {ask}. Enter keeps it, Esc goes back a step, B shows before/after."
+PICK_PX = 24.0  # a click this close to a target dot picks it
 
 live = {"session": None, "handles": [], "note": ""}
 
@@ -221,6 +223,9 @@ class Session:
         self.ran_for = None  # the handle value the last run started with
         self.area = self.region = None
         self.region_ptr = 0
+        self.hover, self.hover_lines = None, None  # (kind, value) under the mouse, and its outline
+        self._tree = None  # BVH of the result, for clicks on it (built on the first one)
+        self._targets = (None, None, None)  # (key, corner ids, labels) of the clickable dots
         if self.res is None:
             self.error = "Make a result first with Start. Tools work on the result before you apply it."
             return
@@ -247,6 +252,9 @@ class Session:
         if refusal:
             self.cand = self.shown = T.Candidate(None, refusal=refusal)
             self.status = ""
+            return
+        if self.waiting():
+            self.status = self.ask()
             return
         yield from self._exact(rough=self.big())
 
@@ -293,7 +301,7 @@ class Session:
             close("The result changed, so this preview was closed. Open the tool again.")
             return True
         now = time.perf_counter()
-        if self.work is None and self.base is not None and not self.dragging and not self.refused():
+        if self.work is None and self.base is not None and not self.dragging and not self.refused() and not self.waiting():
             rested = now - self.moved_at
             if self.stale():
                 if rested >= REST or self.applying:
@@ -325,6 +333,10 @@ class Session:
     def finish(self) -> None:
         """Run everything to the end now (F9, scripts): the exact candidate at the settings."""
         self.applying = True
+        while self.base is None and not (self.error or self.closed) and self.work is not None:
+            self.pump(1.0)
+        if self.waiting():
+            return
         while not (self.error or self.closed or self.refused() or self.ready_to_keep()):
             self.pump(1.0)
             if self.work is None and not (self.ready_to_keep() or self.refused() or self.stale() or (self.cand is not None and not self.cand.exact)):
@@ -346,11 +358,102 @@ class Session:
 
     def ready_to_keep(self) -> bool:
         c = self.cand
-        return c is not None and not c.refusal and c.exact and self.work is None and self.shown is c and not self.stale()
+        return not self.waiting() and c is not None and not c.refusal and c.exact and self.work is None and self.shown is c and not self.stale()
 
     def apply(self) -> None:
         self.applying = True
         self.moved_at = -1e9
+
+    # ---- picks: what a tool needs clicked before it can run (a strip, a pole, its partner)
+
+    def waiting(self) -> str:
+        """The pick still to be made, or ""."""
+        return self.trial.waiting(self.settings) if self.trial.picks else ""
+
+    def ask(self) -> str:
+        kind = self.waiting()
+        return self.trial.asks.get(kind, f"click a {kind}") if kind else ""
+
+    def pick_kind(self) -> str:
+        """What a click picks now: the pick still to be made, else the last one again (another strip, another partner)."""
+        return self.waiting() or (self.trial.picks[-1] if self.trial.picks else "")
+
+    def targets(self, kind: str):
+        """(corner ids, labels) of the dots a click can pick for `kind`, or (None, None) to click anywhere."""
+        key = (kind, tuple(int(self.settings.get(k, -1)) for k in self.trial.picks))
+        if self._targets[0] != key and self.base is not None:
+            found = self.trial.targets(self.base, self.settings, kind)
+            self._targets = (key, *(found if found is not None else (None, None)))
+        return self._targets[1], self._targets[2]
+
+    def choose(self, kind: str, value: int) -> None:
+        """A pick was clicked: the picks after it are cleared and the tool runs again."""
+        self.settings[kind] = int(value)
+        for later in self.trial.picks[self.trial.picks.index(kind) + 1 :]:
+            self.settings[later] = -1
+        self._again()
+
+    def back(self) -> bool:
+        """Esc with picks made: undo the last one. False when there was none."""
+        made = [k for k in self.trial.picks if int(self.settings.get(k, -1)) >= 0]
+        if not made:
+            return False
+        self.settings[made[-1]] = -1
+        self._again()
+        return True
+
+    def _again(self) -> None:
+        self.work, self.full, self.cand, self.shown, self.ran_for = None, None, None, None, None
+        self.applying, self.moved_at, self.batch_key = False, -1e9, None
+        self.hover, self.hover_lines = None, None
+        self.status = self.ask() or "..."
+
+    def ray_hit(self, region, rv3d, matrix, x, y):
+        """(face, point) of the result under a screen point (object space), or None."""
+        from bpy_extras import view3d_utils
+        from mathutils import Matrix, Vector
+        from mathutils.bvhtree import BVHTree
+
+        if self._tree is None:
+            self._tree = BVHTree.FromPolygons(self.base.co.tolist(), [list(f) for f in self.base.faces], all_triangles=False, epsilon=0.0)
+        inv = Matrix(matrix).inverted()
+        origin = inv @ view3d_utils.region_2d_to_origin_3d(region, rv3d, (x, y))
+        ray = (inv.to_3x3() @ view3d_utils.region_2d_to_vector_3d(region, rv3d, (x, y))).normalized()
+        loc, _n, face, _d = self._tree.ray_cast(Vector(origin), Vector(ray))
+        return None if face is None else (int(face), np.asarray(loc, dtype=np.float64))
+
+    def pick_under(self, region, rv3d, matrix, x, y):
+        """(kind, value, corner for the ring) a click at this screen point would pick, or None."""
+        kind = self.pick_kind()
+        if not kind or self.base is None:
+            return None
+        ids, _labels = self.targets(kind)
+        if ids is not None:
+            if not len(ids):
+                return None
+            px, front = _to_screen(region, rv3d, matrix, self.base.co[ids])
+            far = np.where(front, np.hypot(px[:, 0] - x, px[:, 1] - y), np.inf)
+            best = int(np.argmin(far))
+            return (kind, int(ids[best]), int(ids[best])) if far[best] <= PICK_PX * _ui_scale() else None
+        hit = self.ray_hit(region, rv3d, matrix, x, y)
+        if hit is None:
+            return None
+        face, point = hit
+        value = self.trial.pick_at(self.base, self.settings, kind, face, point)
+        if value < 0:
+            return None
+        corners = list(self.base.faces[face])
+        return kind, int(value), int(corners[int(np.argmin(np.linalg.norm(self.base.co[corners] - point, axis=1)))])
+
+    def set_hover(self, found) -> bool:
+        """The thing under the mouse: its outline (white) for picks without dots. True when it changed."""
+        key = None if found is None else found[:2]
+        if key == self.hover:
+            return False
+        self.hover, self.hover_lines = key, None
+        if key is not None and self.targets(key[0])[0] is None:
+            self.hover_lines = self.trial.picked_lines(self.base, dict(self.settings, **{key[0]: key[1]}))
+        return True
 
     # ---- drawing data
 
@@ -360,7 +463,8 @@ class Session:
         from gpu_extras.batch import batch_for_shader
 
         guided = _g()
-        key = (id(self.shown), self.before, tuple(round(x, 5) for row in matrix for x in row))
+        picks = tuple(int(self.settings.get(k, -1)) for k in self.trial.picks)
+        key = (id(self.shown), self.before, picks, self.hover, tuple(round(x, 5) for row in matrix for x in row))
         if key == self.batch_key:
             return self.batches
         base, cand = self.base, self.shown
@@ -372,6 +476,13 @@ class Session:
         border = _scope_edge(scope_faces_)
         if len(border):
             out["scope"] = _lines(flat, batch_for_shader, world(base.co[border.ravel()]), ORANGE)
+        if any(v >= 0 for v in picks):  # what is picked, orange, and what the mouse is over, white
+            seg = np.asarray(self.trial.picked_lines(base, self.settings), dtype=np.float64).reshape(-1, 3)
+            if len(seg):
+                out["picks"] = _lines(flat, batch_for_shader, world(seg + 0.02 * base.edge * _lift_of(base, seg)), ORANGE)
+        if self.hover_lines is not None and len(self.hover_lines):
+            seg = np.asarray(self.hover_lines, dtype=np.float64).reshape(-1, 3)
+            out["hover"] = _lines(flat, batch_for_shader, world(seg + 0.02 * base.edge * _lift_of(base, seg)), (1.0, 1.0, 1.0, 0.6))
         if cand is not None and cand.co is not None and not cand.refusal:
             co = np.asarray(cand.co, dtype=np.float64)
             faces = scope_faces_ if cand.faces is None else ([cand.faces[i] for i in range(len(cand.faces)) if cand.parent is None or base.scope[cand.parent[i]]])
@@ -390,6 +501,22 @@ class Session:
                 out["arrows"] = _lines(flat, batch_for_shader, world(cand.arrows.reshape(-1, 3)), WHITE)
         self.batch_key, self.batches = key, out
         return out
+
+
+def _lift_of(base, points) -> np.ndarray:
+    """Unit normals of the result at the corners nearest to `points` (to lift drawn lines off the surface)."""
+    if "normals" not in base.cache:
+        base.cache["normals"] = _vertex_normals(base.co, base.faces)
+    if "lift_tree" not in base.cache:
+        from mathutils.kdtree import KDTree
+
+        tree = KDTree(len(base.co))
+        for i, p in enumerate(base.co.tolist()):
+            tree.insert(p, i)
+        tree.balance()
+        base.cache["lift_tree"] = tree
+    tree = base.cache["lift_tree"]
+    return base.cache["normals"][[tree.find(p)[1] for p in points.tolist()]]
 
 
 def _lines(shader, batch_for_shader, points, colour):
@@ -477,8 +604,8 @@ def _draw_view() -> None:
                 gpu.state.line_width_set(1.0)
                 flat.bind()
                 out["wire"].draw(flat)
-        for name, width in (("scope", 2.0), ("ghost", 2.0), ("arrows", 1.5)):
-            if name not in out or (name == "ghost" and s.before) or (name == "arrows" and not arrows) or (name not in layers and name != "scope"):
+        for name, width in (("scope", 2.0), ("ghost", 2.0), ("arrows", 1.5), ("picks", 3.0), ("hover", 3.0)):
+            if name not in out or (name == "ghost" and s.before) or (name == "arrows" and not arrows) or (name not in layers and name not in ("scope", "picks", "hover")):
                 continue
             # the dark halo: the same lines wider, so teal, white and orange read on a light surface too
             gpu.state.line_width_set(width + 2.0)
@@ -554,14 +681,44 @@ def _draw_pixel() -> None:
             for (x, y), ok in zip(px.tolist(), front.tolist()):
                 if ok:
                     _poly(shader, [(x - r, y - r), (x + r, y + r), (x - r, y + r), (x + r, y - r)], HELD, 2.0, "LINES")
+        _draw_targets(shader, s, region, rv3d, obj.matrix_world, scale)
         dial = _dial_point(s, region, rv3d, obj.matrix_world)
-        if dial is not None and s.handle:
+        if dial is not None and s.handle and not s.waiting():
             _draw_dial(shader, s, dial, scale)
         _draw_card(shader, s, region, dial, scale)
         gpu.state.line_width_set(1.0)
         gpu.state.blend_set("NONE")
     except Exception as exc:
         overlay.LAST_DRAW_ERROR = repr(exc)
+
+
+def _draw_targets(shader, s, region, rv3d, matrix, scale) -> None:
+    """The dots a click can pick (poles with their edge count, partners numbered nearest first) and the picked
+    corners. Size and number tell them apart, never colour alone."""
+    kind = s.pick_kind()
+    ids, labels = s.targets(kind) if kind else (None, None)
+    size = max(11, int(11 * scale))
+    if ids is not None and len(ids):
+        px, front = _to_screen(region, rv3d, matrix, s.base.co[ids[:POLES_MOST]])
+        hovered = s.hover[1] if s.hover is not None and s.hover[0] == kind else -1
+        for v, (x, y), ok, label in zip(ids.tolist(), px.tolist(), front.tolist(), labels):
+            if not ok or not (0 <= x <= region.width and 0 <= y <= region.height):
+                continue
+            r = 4.5 * scale * (1.45 if kind == "pole" and label.isdigit() and int(label) >= 5 else 1.0)
+            if v == hovered:
+                r *= 1.5
+            _poly(shader, _circle(x, y, r), ORANGE if v == hovered else WHITE, 1.5)
+            if kind != "pole" or v == hovered:
+                overlay._text(x + r + 2 * scale, y + r, size, (1, 1, 1, 0.95), label)
+    for k in s.trial.picks:  # picked corners: a filled orange dot
+        v = int(s.settings.get(k, -1))
+        if v < 0 or s.targets(k)[0] is None:
+            continue
+        px, front = _to_screen(region, rv3d, matrix, s.base.co[v])
+        if front[0]:
+            x, y = px[0]
+            overlay._fill(shader, _circle(x, y, 5.0 * scale, 16), HALO, "TRI_FAN")
+            overlay._fill(shader, _circle(x, y, 3.5 * scale, 16), ORANGE, "TRI_FAN")
 
 
 def _dial_point(s, region, rv3d, matrix):
@@ -764,8 +921,8 @@ class LiveTool:
         self._s = s
         _add_handlers()
         self._timer = context.window_manager.event_timer_add(1.0 / 60.0, window=context.window)
-        words = HINT if s.handle else HINT_NONE
-        area.header_text_set(words.format(name=s.trial.name, handle=s.handle))
+        words = HINT_PICK if s.trial.picks else HINT if s.handle else HINT_NONE
+        area.header_text_set(words.format(name=s.trial.name, handle=s.handle, ask=s.trial.asks.get(s.trial.picks[0], "click on the result") if s.trial.picks else ""))
         context.window_manager.modal_handler_add(self)
         overlay.tag_redraw()
         return {"RUNNING_MODAL"}
@@ -807,7 +964,7 @@ class LiveTool:
             close("")
             self._finish(context)
             return {"CANCELLED"}
-        _remember(context, self.bl_idname, name, numbers, s.settings)
+        _remember(context, self.bl_idname, name, numbers, {k: v for k, v in s.settings.items() if k not in s.trial.picks})
         close("")
         self._finish(context)
         return {"FINISHED"}
@@ -851,6 +1008,9 @@ class LiveTool:
         if event.value == "PRESS" and event.type in {"RET", "NUMPAD_ENTER"}:
             s.apply()
             return {"RUNNING_MODAL"}
+        if event.value == "PRESS" and event.type in {"ESC", "RIGHTMOUSE"} and s.back():
+            s.area.tag_redraw()
+            return {"RUNNING_MODAL"}
         if event.value == "PRESS" and (event.type in {"ESC", "RIGHTMOUSE"} or (event.type == "Z" and (event.ctrl or event.oskey))):
             close("")
             self._finish(context)
@@ -878,16 +1038,29 @@ class LiveTool:
             if obj is not None and s.base is not None:
                 dial = _dial_point(s, s.region, s.region.data, obj.matrix_world)
                 r = DIAL_PX * _ui_scale()
-                if s.handle and dial is not None and abs(math.hypot(x - dial[0], y - dial[1]) - r) < 0.45 * r + 6:
+                if s.handle and not s.waiting() and dial is not None and abs(math.hypot(x - dial[0], y - dial[1]) - r) < 0.45 * r + 6:
                     s.dragging = True
                     s.drag_from = (x, float(s.settings.get(s.handle, 0.0)))
                     return {"RUNNING_MODAL"}
+                if s.trial.picks and (s.waiting() or not s.handle or dial is None or abs(math.hypot(x - dial[0], y - dial[1]) - r) >= 0.45 * r + 6):
+                    found = s.pick_under(s.region, s.region.data, obj.matrix_world, x, y)
+                    if found is not None:
+                        s.choose(found[0], found[1])
+                        s.anchor = found[2]
+                        s.area.tag_redraw()
+                        return {"RUNNING_MODAL"}
+                    if s.waiting():
+                        return {"RUNNING_MODAL"}
                 moved = _anchor_near(s, s.region, s.region.data, obj.matrix_world, x, y, most=40.0 * _ui_scale())
                 if moved is not None:
                     s.anchor = moved  # clicking the result puts the ring where you are looking
                     s.area.tag_redraw()
                     return {"RUNNING_MODAL"}
             return {"RUNNING_MODAL"}
+        if event.type == "MOUSEMOVE" and s.trial.picks and s.base is not None:
+            obj = _preview()
+            if obj is not None and s.set_hover(s.pick_under(s.region, s.region.data, obj.matrix_world, x, y)):
+                s.area.tag_redraw()
         if event.type == "MOUSEMOVE" or event.type.startswith(("TIMER", "WINDOW", "EVT")):
             return {"PASS_THROUGH"}
         return {"RUNNING_MODAL"}  # other keys would edit the scene under the preview
@@ -899,6 +1072,9 @@ class LiveTool:
             self.report({"WARNING"}, s.error)
             return {"CANCELLED"}
         s.finish()
+        if s.waiting():
+            self.report({"WARNING"}, f"{s.trial.name}: {s.ask()} first (or set it in the redo panel)")
+            return {"CANCELLED"}
         if s.cand is not None and s.cand.refusal:
             self.report({"WARNING"}, s.cand.refusal)
             return {"CANCELLED"}
@@ -908,7 +1084,7 @@ class LiveTool:
         numbers = numbers_text(s.cand, s.trial, s.cap)
         if not commit(context, s.cand, s.trial.name, numbers):
             return {"CANCELLED"}
-        _remember(context, self.bl_idname, s.trial.name, numbers, s.settings)
+        _remember(context, self.bl_idname, s.trial.name, numbers, {k: v for k, v in s.settings.items() if k not in s.trial.picks})
         return {"FINISHED"}
 
 
