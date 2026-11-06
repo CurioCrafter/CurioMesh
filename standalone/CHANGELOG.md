@@ -1,5 +1,20 @@
 # CurioMesh Standalone changelog
 
+## 0.3.0
+
+The first full release (0.1 and 0.2 were previews).
+
+- **Up to date with CurioMesh 0.9.8.** The add-on's verdict on every result (green, amber or red: "Good for game
+  asset", "Check 2 spots", "5 spots with bad faces left") with what to do next, the add-on's own icons for each use,
+  and the rarely changed options folded under More options, so Retopologize and the result stay in view.
+- **One Mac download.** A single universal app runs on Apple silicon and Intel Macs.
+- **Honest about rough scans.** A result that kept nearly every face says so ("Kept nearly every face") with what
+  to try instead, on screen and on the command line, instead of calling it good.
+- **Checked on 22 free test models** (props, machines, statues, rocks, scans, up to 1.5 million faces) with the Game
+  Asset preset: no crashes, 0 bad faces on every one, each within its 6% limit.
+- Fixes: the first-run tour no longer sits on top of the open guide; numbered steps in the guide lose their extra
+  bullet; "1× fewer" is gone when a result has about as many faces as the model.
+
 ## 0.2.0
 
 - **Batch.** `curiomesh batch FILES-OR-FOLDERS -o FOLDER` retopologizes many models with the same settings. A model

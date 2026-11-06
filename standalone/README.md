@@ -6,8 +6,8 @@ still needs a look.
 
 ![CurioMesh: the original model and its new quads side by side](https://raw.githubusercontent.com/CurioCrafter/CurioMesh/standalone/docs/images/standalone_app.png)
 
-This is a preview of the standalone version of [CurioMesh](https://github.com/CurioCrafter/CurioMesh), the free
-retopology add-on for Blender. It runs the add-on's own Rust core.
+This is the standalone version of [CurioMesh](https://github.com/CurioCrafter/CurioMesh), the free retopology
+add-on for Blender. It runs the add-on's own Rust core, and gives the same verdict on a result as the add-on's panel.
 
 ## Get it
 
@@ -16,8 +16,9 @@ Download the zip for your system from the
 **curiomesh-gui**. Nothing to install.
 
 - **Windows:** `curiomesh-gui.exe`. Windows may warn about an unknown publisher the first time, because the
-  preview isn't code-signed. Choose More info, then Run anyway.
-- **macOS:** right-click `curiomesh-gui`, choose Open, then Open again (the preview isn't notarized).
+  programs aren't code-signed yet. Choose More info, then Run anyway.
+- **macOS (Apple silicon and Intel, one download):** right-click `curiomesh-gui`, choose Open, then Open again (the
+  app isn't notarized yet).
 - **Linux:** `./curiomesh-gui`. Needs OpenGL and X11 or Wayland.
 
 ## Use the app
@@ -170,10 +171,12 @@ AutoRemesher's quads are more even: on smooth, organic models its rows of quads 
 rows only on smooth parts where they keep the view, and keeps the shape-preserving reduction elsewhere. CurioMesh's
 results here have 5-9% more faces.
 
-## Known limits of the preview
+## Known limits
 
-- The Blender add-on still does more: part-by-part sizing, guided edge loops, UVs, baking, repair and Redo Rough
-  Spots. The standalone writes OBJ and .glb without UVs or textures, and no FBX.
+- The Blender add-on still does more: part-by-part sizing, guided edge loops, UVs, baking, repair, Redo Rough
+  Spots and Tidy Up. The standalone writes OBJ and .glb without UVs or textures, and no FBX.
+- A rough scan can keep nearly all its faces at a small limit: the camera sees every bump turn. The result then says
+  "Kept nearly every face"; Low Poly, a higher limit or a face count reduce it.
 - Quad flow on organic models is less even than a field-aligned remesher's.
 - Large models draw thinned out in the viewport; the saved result is complete.
 

@@ -107,8 +107,10 @@ jobs:
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: CurioMesh Standalone ${{ steps.version.outputs.number }} (preview)
-          prerelease: true
+          name: CurioMesh Standalone ${{ steps.version.outputs.number }}
+          prerelease: false
+          # Never "Latest": the add-on's README sends people to /releases/latest for the Blender add-on.
+          make_latest: "false"
           body_path: standalone/RELEASE_NOTES.md
           files: |
             dist/*.zip
