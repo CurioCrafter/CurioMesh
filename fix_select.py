@@ -14,6 +14,7 @@ import bpy
 import numpy as np
 from mathutils.bvhtree import BVHTree
 
+from . import overlay
 from .triadq import checks, repair
 
 KIND_WORDS = {"inward": "inward", "sunk": "sunk", "crossing": "crossing", "folded_over": "folded over", "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping", "touching": "touching parts"}
@@ -238,9 +239,7 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        from . import guided
-
-        if context.edit_object is not None and context.edit_object.name == guided.PREVIEW_NAME:  # the preview is rebuilt from the result: a fix there is lost on Apply
+        if context.edit_object is not None and overlay.is_preview(context.edit_object, overlay.GUIDED):  # the preview is rebuilt from the result: a fix there is lost on Apply
             cls.poll_message_set("Apply first, then fix the result. Find Bad Faces works on the preview")
             return False
         return super().poll(context)

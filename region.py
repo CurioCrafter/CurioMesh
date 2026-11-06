@@ -333,7 +333,7 @@ def write_patches(obj, cache) -> int:
 
 
 def _preview_object():
-    return bpy.data.objects.get(PREVIEW_NAME)
+    return overlay.preview_object(overlay.REGION)
 
 
 def remove_preview(restore_source: bool = True) -> None:
@@ -374,6 +374,7 @@ def _build_preview(context, source, cache) -> None:
         mesh.materials.append(material)
     if obj is None:
         obj = bpy.data.objects.new(PREVIEW_NAME, mesh)
+        overlay.tag_preview(obj, overlay.REGION)
         collection = source.users_collection[0] if source.users_collection else context.scene.collection
         collection.objects.link(obj)
     else:
@@ -381,6 +382,7 @@ def _build_preview(context, source, cache) -> None:
         obj.data = mesh
         if old.users == 0:
             bpy.data.meshes.remove(old)
+    obj["curiomesh_hid"] = source.name  # read after a load: the source this preview hid is shown again
     obj.matrix_world = source.matrix_world.copy()
     obj.show_wire = True
     obj.show_all_edges = True
@@ -444,7 +446,7 @@ def run_preview(context, obj=None) -> bool:
 
     settings = context.scene.curiomesh_region
     obj = obj or bpy.data.objects.get(state["source"])
-    if obj is None or obj.type != "MESH" or obj.name == PREVIEW_NAME:
+    if obj is None or obj.type != "MESH" or overlay.is_preview(obj):
         state["message"] = "Select a mesh"
         return False
     if obj.mode == "EDIT":
@@ -542,7 +544,7 @@ def _draw() -> None:
 
 
 def _volume_poll(self, obj) -> bool:
-    return obj.type in {"EMPTY", "LATTICE", "MESH"} and obj.name != PREVIEW_NAME
+    return obj.type in {"EMPTY", "LATTICE", "MESH"} and not overlay.is_preview(obj)
 
 
 class CURIOMESH_PG_region_volume(bpy.types.PropertyGroup):
@@ -615,7 +617,7 @@ class CURIOMESH_PG_region(bpy.types.PropertyGroup):
 
 def _active_mesh(context):
     obj = context.object
-    if obj is not None and obj.type == "MESH" and obj.name != PREVIEW_NAME:
+    if obj is not None and obj.type == "MESH" and not overlay.is_preview(obj):
         return obj
     return None
 
@@ -1036,7 +1038,7 @@ class CURIOMESH_PT_regions(bpy.types.Panel):
         settings = context.scene.curiomesh_region
         compact = bool(overlay.get_prefs().compact_mode)
         obj = context.object
-        has_mesh = obj is not None and obj.type == "MESH" and obj.name != PREVIEW_NAME
+        has_mesh = obj is not None and obj.type == "MESH" and not overlay.is_preview(obj)
         previewing = _preview_object() is not None
 
         if not has_mesh and not previewing:
@@ -1152,6 +1154,13 @@ def register() -> None:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_region = bpy.props.PointerProperty(type=CURIOMESH_PG_region)
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_VIEW"))
+
+
+def on_load() -> None:
+    """After a file loads (its saved preview is already gone, see overlay.remove_saved_previews): forget this session's."""
+    if bpy.app.timers.is_registered(_poll):
+        bpy.app.timers.unregister(_poll)
+    state.update(source="", sig=None, message="", cache=None, draw=None, batches=None)
 
 
 def unregister() -> None:

@@ -81,8 +81,9 @@ def stop_more() -> None:
 
 
 def drop_spares(prefix: str) -> None:
-    """Remove the spare preview meshes named `prefix`... that nothing shows, also ones a file saved with a fake user."""
-    for mesh in [m for m in bpy.data.meshes if m.name.startswith(prefix)]:
+    """Remove the spare preview meshes of kind `prefix` (made by `_make_mesh`) that nothing shows, also ones a file saved
+    with a fake user. Meshes without the add-on's mark are never touched."""
+    for mesh in [m for m in bpy.data.meshes if m.get(overlay.PREVIEW_TAG) == prefix]:
         mesh.use_fake_user = False
         if mesh.users == 0:
             bpy.data.meshes.remove(mesh)
@@ -185,10 +186,13 @@ def _tick():
     if (work_ is not None and work_["runner"].busy) or time.perf_counter() - drag["moved"] < QUIET:
         return WAIT  # yours first, and nothing while a slider moves
     finished = len(lad["rungs"]) + len(lad["failed"])
+    started = time.perf_counter()
     work(SLICE)
+    spent = time.perf_counter() - started
     if not (lad["job"] is not None or lad["plan"]):
         return None
-    return REST if len(lad["rungs"]) + len(lad["failed"]) > finished else GAP
+    # Idle at least as long as this tick took: after a long step Blender is left free for as long again
+    return max(REST if len(lad["rungs"]) + len(lad["failed"]) > finished else GAP, spent)
 
 
 # --------------------------------------------------------------------------- picking rungs
@@ -274,6 +278,7 @@ def _make_mesh(name, out, source):
     sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
     flat = np.fromiter(chain.from_iterable(faces), dtype=np.int32, count=int(sizes.sum()))
     mesh = bpy.data.meshes.new(name)
+    mesh[overlay.PREVIEW_TAG] = name  # a spare: found and removed by this mark, never by its name
     mesh.vertices.add(len(out["co"]))
     mesh.vertices.foreach_set("co", np.asarray(out["co"], dtype=np.float32).ravel())
     mesh.loops.add(len(flat))
@@ -444,10 +449,10 @@ def status() -> str:
     if not left:
         return ""
     if not bpy.app.timers.is_registered(_tick):
-        return "Move a slider to work out the other sizes. Blender can pause for a few seconds during each"
+        return "Move a slider to work out the other sizes. Blender can pause for up to about 7 seconds at a time while they are made"
     doing = lad["doing"]
     words = f" ({STYLE_WORDS.get(doing[0], doing[0])}, {doing[1]:g}%)" if doing else ""
-    return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for a few seconds during each"
+    return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for up to about 7 seconds at a time"
 
 
 def draw(layout, gs) -> None:

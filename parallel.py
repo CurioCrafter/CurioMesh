@@ -40,7 +40,7 @@ TYPES = {"Settings": "hardware", "Level": "triadq.budget", "FlatFaces": "triadq.
 def _type(name: str):
     if name not in TYPES:
         raise ValueError(f"{name} is not something a helper sends")
-    return getattr(importlib.import_module((PACKAGE + "." + TYPES[name]).lstrip(".")), name)
+    return getattr(importlib.import_module("." + TYPES[name], __package__), name)
 
 
 def _encode(value, arrays: list):
@@ -262,9 +262,9 @@ def setup_of(job) -> dict:
     }
 
 
-def worker_job(job_class, context, setup: dict):
+def worker_job(job_class, setup: dict):
     """The job a helper measures parts of: built like the one in the user's Blender, already cut into its parts."""
-    job = job_class(context, setup["co"], setup["faces"], setup["materials"], setup["detail"], setup["target_faces"], mirror=setup["mirror"], drop=setup["drop"], method=setup["method"], output=setup["output"], methods=setup["methods"], style=setup["style"], settings=setup["settings"], rough=setup["rough"], baked=setup["baked"], hard=setup.get("hard"))
+    job = job_class(setup["co"], setup["faces"], setup["materials"], setup["detail"], setup["target_faces"], mirror=setup["mirror"], drop=setup["drop"], method=setup["method"], output=setup["output"], methods=setup["methods"], style=setup["style"], settings=setup["settings"], rough=setup["rough"], baked=setup["baked"], hard=setup.get("hard"))
     for name in ("pieces", "locked", "chunks", "names", "picture_sizes"):
         setattr(job, name, setup[name])
     job.spot_copies = False  # the job that sent the part already knows it is no copy
@@ -325,15 +325,15 @@ def apply_result(job, part: int, result: dict) -> None:
 
 def worker_main(argv: list[str]) -> None:
     """The loop of a helper process (see `helper_command`): rebuild the job, then measure each part it is handed."""
-    import bpy
-
     folder = Path(argv[argv.index("--") + 1])
     from . import autoretopo, hardware
-    job = worker_job(autoretopo.AutoJob, bpy.context, _read(folder / "job.npz"))
+    job = worker_job(autoretopo.AutoJob, _read(folder / "job.npz"))
     while True:
         line = sys.stdin.readline()
         if not line:
-            os._exit(0)  # the job stopped, or the Blender that started this one is gone
+            # The job stopped, or the Blender that started this one is gone. os._exit ends this helper at once: it has
+            # nothing to save, and the exit handlers of the job it rebuilt (folder clean-ups) must not run in it
+            os._exit(0)
         name, kind, part, number = line.split()
         started = time.perf_counter()
         if kind == "measure":

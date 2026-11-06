@@ -54,7 +54,7 @@ def summary(kinds: dict) -> str:
 def _frame(context, spot) -> bool:
     guided = _g()
     rv3d = getattr(context.space_data, "region_3d", None) or context.region_data
-    preview = bpy.data.objects.get(guided.PREVIEW_NAME)
+    preview = guided.preview_object()
     if rv3d is None or preview is None:
         return False
     centre = guided._world(preview.matrix_world, np.asarray([spot["center"]]))[0]
@@ -67,7 +67,7 @@ def _frame(context, spot) -> bool:
 def _select(context, spot) -> bool:
     import bmesh
 
-    preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+    preview = _g().preview_object()
     if preview is None:
         return False
     if preview.mode != "EDIT":  # leaves any other mode first, and makes the preview (unselectable otherwise) active, faces mode

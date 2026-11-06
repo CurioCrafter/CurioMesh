@@ -239,6 +239,9 @@ def listing_overrides(root: Path) -> dict[str, bytes]:
     init, found = re.subn(r"(?ms)^bl_info = \{\n.*?^\}\n\n", "", init, count=1)  # extensions use the manifest; bl_info is ignored
     if not found:
         raise ValueError("bl_info block not found in __init__.py")
+    init, found = re.subn(r"(?m)^# ruff: noqa: E402\n\n", "", init, count=1)  # only bl_info above the imports needed it
+    if not found:
+        raise ValueError("the E402 note for bl_info is not in __init__.py; update the listing build")
     return {
         "__init__.py": init.encode("utf-8"),
         "blender_manifest.toml": manifest.encode("utf-8"),

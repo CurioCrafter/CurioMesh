@@ -262,7 +262,7 @@ def _on_undo(*_args) -> None:
 class CURIOMESH_OT_seg_paint_size(bpy.types.Operator):
     bl_idname = "curiomesh.seg_paint_size"
     bl_label = "Paint Size"
-    bl_description = f"Go to Weight Paint on your mesh with the '{SIZE_GROUP}' group: red makes smaller segments there, blue larger ones. The colours follow each stroke. Tab back when done. Sets the paint weight to 1"
+    bl_description = f"Go to Weight Paint on your mesh with the '{SIZE_GROUP}' group: red makes smaller segments there, blue larger ones. The colours follow each stroke. Tab back when done. Turns on unified weight in the tool settings and sets the brush weight to 1"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Andrew Rainsberger and CurioMesh contributors
 
+import ast
+import inspect
 import os
 import sys
 import tempfile
@@ -14,8 +16,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import hardware  # noqa: E402
-import parallel  # noqa: E402
+import _addon  # noqa: E402
+
+hardware = _addon.load("hardware")
+parallel = _addon.load("parallel")  # in a package, as in Blender: its types are found by relative imports
 
 BIG = {"cores": 24, "ram_gb": 64.0, "free_gb": 40.0}
 
@@ -93,8 +97,8 @@ class PoolTests(unittest.TestCase):
     def test_files_round_trip_exactly_and_other_code_is_refused(self):
         import tempfile
 
-        from triadq.budget import Level
-        from triadq.types import FlatFaces
+        Level = _addon.load("triadq.budget").Level
+        FlatFaces = _addon.load("triadq.types").FlatFaces
 
         faces = FlatFaces(np.array([0, 3, 7]), np.arange(7))
         value = {
@@ -128,6 +132,35 @@ class PoolTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(command[4]) and command[4].endswith("helper_entry.py"))  # a shipped script, no code string
         self.assertEqual(command[5:], ["--", parallel.PACKAGE, "rows_worker", "main", "folder"])
         self.assertEqual(env, dict(os.environ))  # the child's environment is not changed
+
+
+def _autojob_signature() -> inspect.Signature:
+    """AutoJob.__init__'s parameters, read from autoretopo.py (it needs bpy, so it can't be imported here)."""
+    source = (Path(__file__).resolve().parents[1] / "autoretopo.py").read_text(encoding="utf-8")
+    cls = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == "AutoJob")
+    args = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__").args
+    first_default = len(args.args) - len(args.defaults)
+    params = [inspect.Parameter(a.arg, inspect.Parameter.POSITIONAL_OR_KEYWORD, **({"default": None} if k >= first_default else {})) for k, a in enumerate(args.args)]
+    params += [inspect.Parameter(a.arg, inspect.Parameter.KEYWORD_ONLY, default=None) for a in args.kwonlyargs]
+    return inspect.Signature(params)
+
+
+class WorkerJobTests(unittest.TestCase):
+    def test_a_helper_builds_the_job_with_autojobs_own_arguments(self):
+        signature = _autojob_signature()
+
+        class Job:
+            def __init__(self, *args, **kwargs):
+                self.given = signature.bind(self, *args, **kwargs).arguments  # TypeError when the call doesn't fit
+
+        sent = SimpleNamespace(
+            co=np.zeros((4, 3)), faces=[(0, 1, 2, 3)], materials=[0], detail=0.5, target_faces=100, mirror=None, drop=None, method="AUTO", output_kind="QUADS",
+            methods={}, style="DETAIL", cfg=hardware.EFFORTS["LIGHT"], rough=False, baked=False, hard=None, pieces=[[0]], locked=[], chunks=[], names=["a"], picture_sizes=[64],
+        )
+        job = parallel.worker_job(Job, parallel.setup_of(sent))
+        self.assertIs(job.given["co"], sent.co)
+        self.assertEqual((job.given["detail"], job.given["target_faces"], job.given["output"]), (0.5, 100, "QUADS"))
+        self.assertEqual((job.pieces, job.names, job.spot_copies), ([[0]], ["a"], False))
 
 
 class MergeTests(unittest.TestCase):

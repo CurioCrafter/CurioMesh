@@ -34,7 +34,7 @@ def batch_targets(context) -> list[str]:
     return [
         o.name
         for o in context.selected_objects
-        if o.type == "MESH" and o.name != overlay.PREVIEW_NAME
+        if o.type == "MESH" and not overlay.is_preview(o)
     ]
 
 

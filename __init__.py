@@ -292,7 +292,7 @@ class CURIOMESH_OT_reset_preferences(bpy.types.Operator):
         for name in D:
             try:
                 prefs.property_unset(name)
-            except Exception:
+            except TypeError:  # not a property of these preferences
                 pass
         apply_category()
         overlay.tag_redraw()

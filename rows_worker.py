@@ -52,7 +52,9 @@ def main(argv: list[str]) -> None:
     while True:
         line = sys.stdin.readline()
         if not line:
-            os._exit(0)  # the job no longer needs it, or the Blender that started this one is gone
+            # The job no longer needs it, or the Blender that started this one is gone. os._exit ends this helper at
+            # once: it has nothing to save, and no exit handler of the add-on may run in it (they belong to the job's Blender)
+            os._exit(0)
         k = int(line)
         path = os.path.join(folder, f"in_{k}.npz")
         if not os.path.exists(path):

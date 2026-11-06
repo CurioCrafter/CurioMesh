@@ -12,8 +12,47 @@ from types import SimpleNamespace
 import bpy
 import numpy as np
 
-PREVIEW_NAME = "CurioMesh_Preview"
+PREVIEW_NAME = "CurioMesh_Preview"  # the name a new preview object gets; it is found by its tag, never by its name
 REGION_PREVIEW_NAME = "CurioMesh_RegionPreview"
+PREVIEW_TAG = "curiomesh_preview"  # on objects (and spare meshes) the add-on made itself: which tool made them
+LIVE, REGION, GUIDED = "LIVE", "REGION", "GUIDED"
+_previews: dict[str, str] = {}  # tool -> the name Blender gave the preview object it made this session
+
+
+def tag_preview(obj, kind: str) -> None:
+    """Mark `obj` as the preview `kind` made, so it is found (and removed) by that mark, not by its name."""
+    obj[PREVIEW_TAG] = kind
+    _previews[kind] = obj.name
+
+
+def preview_object(kind: str):
+    """The preview object `kind` made, or None. Only an object carrying that tool's mark counts."""
+    obj = bpy.data.objects.get(_previews.get(kind, ""))
+    return obj if obj is not None and obj.get(PREVIEW_TAG) == kind else None
+
+
+def is_preview(obj, kind: str | None = None) -> bool:
+    if obj is None:
+        return False
+    tag = obj.get(PREVIEW_TAG)
+    return tag is not None if kind is None else tag == kind
+
+
+def remove_saved_previews() -> None:
+    """After a file loads: previews saved in it can't be applied any more, so the ones the add-on made go (a source
+    the Region preview hid is shown again). Objects without the add-on's mark are never touched."""
+    _previews.clear()
+    for obj in [o for o in bpy.data.objects if o.get(PREVIEW_TAG) is not None]:
+        source = bpy.data.objects.get(str(obj.get("curiomesh_hid", ""))) if obj.get(PREVIEW_TAG) == REGION else None
+        mesh = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh is not None and mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+        if source is not None:
+            try:
+                source.hide_set(False)
+            except RuntimeError:  # not in this view layer
+                pass
 HEATMAP_MAX_FACES = 300_000
 HEATMAP_MAX_POLE_POINTS = 60_000
 
@@ -210,7 +249,8 @@ def invalidate(name: str | None = None) -> None:
 
 
 def get_prefs():
-    """The add-on preferences, or the built-in defaults when the add-on is not enabled."""
+    """The add-on preferences, or the built-in defaults in a helper Blender (it imports the add-on without enabling it
+    in its preferences) and while the add-on is being enabled or disabled."""
     try:
         addon = bpy.context.preferences.addons.get(__package__)
         if addon is not None and addon.preferences is not None:
@@ -270,7 +310,7 @@ def next_step_hint(obj, stats: MeshStats | None, settings) -> str:
     """One-line guidance, from plain data (no drawing)."""
     if obj is None or obj.type != "MESH":
         return "Select a mesh"
-    if obj.name == REGION_PREVIEW_NAME:
+    if is_preview(obj, REGION):
         return "Region preview - press Apply in Regions"
     if obj.mode == "EDIT":
         return "Exit Edit Mode to refresh stats"
@@ -390,7 +430,7 @@ def heatmap_targets(context, settings) -> list[bpy.types.Object]:
     if settings.heatmap_enabled and obj is not None and obj.type == "MESH" and obj.mode == "OBJECT":
         targets.append(obj)
     if settings.live_enabled:
-        preview = bpy.data.objects.get(PREVIEW_NAME)
+        preview = preview_object(LIVE)
         if preview is not None and preview not in targets and preview.visible_get():
             targets.append(preview)
     return targets
@@ -521,9 +561,9 @@ def hud_object(context):
     obj = context.object
     if obj is None or obj.type != "MESH":
         # Working on a region (the source is hidden and a cage is active): report the preview instead.
-        obj = bpy.data.objects.get(REGION_PREVIEW_NAME) or guided.state_source() or obj  # a job can leave nothing active for a moment
+        obj = preview_object(REGION) or guided.state_source() or obj  # a job can leave nothing active for a moment
     # While an Auto Segments result waits for Apply, the HUD reports the result, not the original it came from.
-    preview = bpy.data.objects.get(guided.PREVIEW_NAME)
+    preview = preview_object(GUIDED)
     showing_result = preview is not None and preview.type == "MESH" and obj is not None and obj in (guided.state_source(), preview)
     if showing_result:
         obj = preview
@@ -542,7 +582,7 @@ def hud_model(context) -> dict:
     too_big = is_mesh and len(obj.data.polygons) > HEATMAP_MAX_FACES
     stats = cached_stats(obj) if is_mesh and not too_big else None
     if is_mesh:
-        model["name"] = "Region preview" if obj.name == REGION_PREVIEW_NAME else "Result preview" if showing_result else obj.name
+        model["name"] = "Region preview" if is_preview(obj, REGION) else "Result preview" if showing_result else obj.name
     if too_big:
         model.update(faces=len(obj.data.polygons), hint=f"Over {HEATMAP_MAX_FACES:,} faces - live stats off")
         return model
@@ -564,7 +604,7 @@ def hud_model(context) -> dict:
     else:
         model["hint"] = next_step_hint(obj, stats, settings)
     # A mesh CurioMesh has not touched yet is the starting point, not a failure: no red, no NEEDS WORK
-    model["original"] = is_mesh and not showing_result and obj.name != REGION_PREVIEW_NAME and "curiomesh_engine" not in obj.keys()
+    model["original"] = is_mesh and not showing_result and not is_preview(obj, REGION) and "curiomesh_engine" not in obj.keys()
     return model
 
 

@@ -51,9 +51,10 @@ This is the extensions.blender.org build. It contains Python code only.
   a part, pairing, the topology check) can still hold Blender for up to about 3.5 seconds on a mid-size mesh; the wait
   cursor shows while they run, and **Stop** takes effect after them. **Apply** is available once the job has finished,
   or after **Stop**. The first time you move Quad Size or Rows after a result, the other sizes for those sliders are
-  worked out the same way, and the panel says so while it happens; single steps there can hold Blender for a few
-  seconds, and **Stop Working Out Sizes** under the sliders ends it (the sizes already made stay). Auto alone does not
-  start this.
+  worked out the same way, and the panel says so while it happens; single steps there can hold Blender for up to
+  about 7 seconds at a time on a 50,000-60,000-face mesh, and Blender is then left idle at least as long before the
+  next step. Working out all the sizes can take several minutes; **Stop Working Out Sizes** under the sliders ends it
+  at any time (the sizes already made stay). Auto alone does not start this.
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
 - Remembered fixes and resume points are kept in the extension's user folder. **Remember This Fix** also saves the fix

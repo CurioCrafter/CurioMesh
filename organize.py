@@ -347,7 +347,7 @@ def _draw_flow() -> None:
     try:
         guided = _g()
         gs = getattr(bpy.context.scene, "curiomesh_guided", None)
-        res, preview = guided.state["res"], bpy.data.objects.get(guided.PREVIEW_NAME)
+        res, preview = guided.state["res"], guided.preview_object()
         if gs is None or not gs.organize_flow or res is None or preview is None:
             return
         import gpu
