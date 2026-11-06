@@ -155,6 +155,10 @@ def work(seconds: float) -> None:
             rung = lad["doing"]
             _mesh_for((rung, rung, ()), compose(rung, rung, ()))  # made now, while nobody drags, so showing it is a swap
             overlay.tag_redraw()
+            shown = lad["shown"]
+            if len(_g().state["res"]["faces"]) > (job.report.get("before") or 10**9) and shown[0] != rung:  # on screen is heavier than your mesh: take the lighter size
+                if preview(bpy.context):
+                    settle(bpy.context)
         else:
             lad["failed"].append(lad["doing"])
         lad["job"] = lad["doing"] = None
@@ -187,7 +191,8 @@ def finish(timeout: float | None = None, styles=None) -> bool:
 def ready(style: str) -> list[float]:
     """Details of the finished rungs of this style worth showing (none another one beats on faces and change)."""
     mine = [(d, j.report["faces"], j.report["loss"]) for (s, d), j in lad["rungs"].items() if s == style]
-    return sorted(L.useful(mine))
+    source = min((j.report.get("before") or 10**9 for j in lad["rungs"].values()), default=10**9)  # never heavier than your mesh
+    return sorted(L.useful([r for r in mine if r[0] in L.within(mine, source)]))
 
 
 def _pick(style: str, wanted: float):
