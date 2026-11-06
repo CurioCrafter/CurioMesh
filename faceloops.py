@@ -18,7 +18,7 @@ from mathutils.bvhtree import BVHTree
 
 from . import autoretopo, icons, overlay, region, segments
 from . import organize as ORG
-from .triadq import loopscore
+from .triadq import loopscore, patch, segment
 from .triadq import organize as O
 from .triadq import strips as S
 from .triadq.patterns import Topology
@@ -29,6 +29,7 @@ SHORT = 3  # quads: Fix This takes away an open strip this short (a dead end bet
 VIEW_COST = 1.0  # points of view change Fix Every Strip may spend
 SHARP_DEG = 60.0  # an edge folding more than this holds its vertices: Tidy Up's 35 held 40% of a coarse bust's face
 RING_REACH = 2.5  # quad widths round a ring that are redone: the Flow Editor's 6 took the nose with an eye on a coarse result
+LASSO_FACING = 0.25  # a lasso takes faces turned at least this much toward the view (cosine): not the sides it only grazes
 POLE_PIXELS = 14  # how near the mouse has to be to a pole dot to drag it
 DRAG_PIXELS = 250.0  # mouse travel that slides a strip a whole quad over
 SEL_COLOUR = (1.0, 0.55, 0.1, 0.4)
@@ -48,6 +49,7 @@ fl = {
     "hist": {},  # strip_step -> (result, selected element)
     "batch": None,
     "note": "",
+    "lasso": None,  # region pixels of the Redraw in Rows lasso while it is drawn
     "look": None,  # (source signature, its pictures, centre, reach) for the camera check  # the last Fix Every Strip's Loop Quality change
 }
 
@@ -59,7 +61,7 @@ def _g():
 
 
 def cancel() -> None:
-    fl.update(res=None, strips=None, tree=None, stay=None, go=None, walks={}, hover=None, sel=None, live=None, base=None, hist={}, batch=None, note="")
+    fl.update(res=None, strips=None, tree=None, stay=None, go=None, walks={}, hover=None, sel=None, live=None, base=None, hist={}, batch=None, note="", lasso=None)
 
 
 def _cache(res) -> None:
@@ -246,6 +248,76 @@ def fix_all(context, rounds: int = 3, bend: float = 40.0, most: float = 0.75) ->
     keep = fl["sel"][1] if fl["sel"] is not None and fl["sel"][0] is res else None
     commit(context, dict(res, co=co), keep)
     fl["note"] = f"Fix Every Strip: Loop Quality {before:.0f} -> {after:.0f}"
+    return ""
+
+
+def lasso_faces(res, poly, to_screen, toward) -> np.ndarray:
+    """Faces of the result inside a lasso drawn over it: their middles fall inside `poly` (screen points) as
+    `to_screen(points)` places them, and they face the viewer and are not hidden, `toward(points)` being the way the
+    view looks at each point. Faces seen nearly edge on are left out: rows can't be laid flat over them."""
+    co = np.asarray(res["co"], dtype=np.float64)
+    middle = np.asarray([co[list(f)].mean(axis=0) for f in res["faces"]])
+    normal = np.asarray([np.cross(co[f[2]] - co[f[0]], co[f[-1]] - co[f[1]]) for f in res["faces"]])
+    look = np.asarray(toward(middle), dtype=np.float64)
+    facing = -(normal * look).sum(axis=1) > LASSO_FACING * np.linalg.norm(normal, axis=1) * np.linalg.norm(look, axis=1)
+    keep = np.flatnonzero(facing & patch._inside_polygon(np.asarray(to_screen(middle), dtype=np.float64), np.asarray(poly, dtype=np.float64)))
+    size = float(np.linalg.norm(np.ptp(co, axis=0))) or 1.0
+    seen = []
+    for i in keep.tolist():  # only what the viewer sees: the first face along the view through its middle
+        found = hit(res, middle[i] - look[i] * size, look[i])
+        if found is not None and (found[1] == i or np.linalg.norm(found[0] - middle[i]) < 0.02 * size):
+            seen.append(i)
+    return np.asarray(seen, dtype=np.int64)
+
+
+def _strokes_in(context, res, ids):
+    """The Flow Editor strokes that run over the area: they steer its rows."""
+    from . import flowedit
+
+    gs = context.scene.curiomesh_guided
+    co = np.asarray(res["co"], dtype=np.float64)
+    middle = np.asarray([co[list(res["faces"][i])].mean(axis=0) for i in ids])
+    edge = float(np.sqrt(np.mean([np.linalg.norm(np.cross(co[f[2]] - co[f[0]], co[f[-1]] - co[f[1]])) for f in (res["faces"][i] for i in ids)]) / 2.0))
+    out = []
+    for s in flowedit.strokes(context, gs):
+        d = np.linalg.norm(s["points"][:, None, :] - middle[None], axis=2).min(axis=1)
+        if np.median(d) < 2.0 * edge:
+            out.append(s)
+    return out
+
+
+def redraw_rows(context, ids) -> str:
+    """Remake the faces `ids` of the result on screen as rows of quads at their own size, tied to the faces round them
+    (`triadq.rowfill`), as one Undo step. Returns an error in words, or ""."""
+    from . import flowstroke as F
+
+    sync(context)
+    res = _g().state["res"]
+    if res is None:
+        return "No result yet"
+    ids = np.asarray(ids, dtype=np.int64)
+    if len(ids) < 8:
+        return "Mark a bigger area: rows need at least a few quads each way"
+    try:
+        co, faces, mat, new, area, bad = F.rows(res["co"], res["faces"], res["mat"], ids, _strokes_in(context, res, ids), _project())
+    except ValueError as exc:
+        return f"Can't redraw this area in rows: {exc}"
+    if segment.open_edges(faces) > segment.open_edges(res["faces"]):
+        return "The rows did not close on the faces round them, so the result stays as it was"
+    old = np.asarray([np.asarray(res["co"])[list(res["faces"][i])].mean(axis=0) for i in area])
+    kept = np.setdiff1d(np.arange(len(res["faces"])), area)
+    born = np.asarray([co[list(f)].mean(axis=0) for f, n in zip(faces, new) if n]).reshape(-1, 3)
+    parent = np.empty(len(faces), dtype=np.int64)
+    parent[~new] = kept
+    parent[new] = area[np.argmin(np.linalg.norm(born[:, None] - old[None], axis=2), axis=1)] if len(born) else 0
+    out = _faces_changed(res, co, faces, parent)
+    out["mat"], out["new"] = np.asarray(mat), new
+    before = loopscore.loop_quality(res["co"], res["faces"])["quality"]
+    after = loopscore.loop_quality(out["co"], out["faces"])["quality"]
+    commit(context, out, None, parent)
+    poles = Topology(out["co"], out["faces"]).poles
+    inside = np.unique([v for f, n in zip(faces, new) if n for v in f])
+    fl["note"] = f"Redraw in Rows: {len(area)} faces -> {int(new.sum())}, poles there {100.0 * poles[inside].mean():.0f}%. Loop Quality {before:.0f} -> {after:.0f}" + (f". {bad} folded faces to check" if bad else "")
     return ""
 
 
@@ -584,6 +656,114 @@ class CURIOMESH_OT_strip_ring(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
 
+def _view_mappers(context, preview):
+    """(to_screen, toward) for `lasso_faces`: result-space points to region pixels, and the way the view looks at them."""
+    region, rv3d = context.region, context.space_data.region_3d
+    matrix = np.asarray(rv3d.perspective_matrix @ preview.matrix_world)
+    inv = preview.matrix_world.inverted()
+    size = np.array((region.width, region.height), dtype=np.float64)
+
+    def to_screen(points):
+        clip = np.c_[points, np.ones(len(points))] @ matrix.T
+        return (clip[:, :2] / np.maximum(np.abs(clip[:, 3:]), 1e-30) * np.sign(clip[:, 3:]) + 1.0) * 0.5 * size
+
+    if rv3d.is_perspective:
+        eye = np.asarray(inv @ rv3d.view_matrix.inverted().translation)
+        return to_screen, lambda points: (points - eye) / np.maximum(np.linalg.norm(points - eye, axis=1, keepdims=True), 1e-30)
+    look = np.asarray(inv.to_3x3() @ (rv3d.view_rotation @ Vector((0.0, 0.0, -1.0))))
+    look /= max(float(np.linalg.norm(look)), 1e-30)
+    return to_screen, lambda points: np.tile(look, (len(points), 1))
+
+
+def _edit_selection(context):
+    """Faces of the result selected in Edit Mode on the preview, or None (back in Object Mode either way)."""
+    preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+    res = _g().state["res"]
+    if preview is None or res is None or context.mode != "EDIT_MESH" or context.edit_object is not preview:
+        return None
+    bpy.ops.object.mode_set(mode="OBJECT")
+    picked = np.zeros(len(preview.data.polygons), dtype=bool)
+    preview.data.polygons.foreach_get("select", picked)
+    return np.flatnonzero(picked) if len(picked) == len(res["faces"]) and picked.any() else None
+
+
+def _part_at(res, face: int) -> np.ndarray:
+    """The faces of the part a face is on (the result's parts, else its loose piece)."""
+    piece = segments.seg.get("piece")
+    if piece is not None and len(piece) == len(res["faces"]):
+        return np.flatnonzero(np.asarray(piece) == piece[face])
+    return next(c for c in patch.mask_components(res["faces"], np.ones(len(res["faces"]), dtype=bool)) if face in c)
+
+
+class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
+    bl_idname = "curiomesh.redraw_rows"
+    bl_label = "Redraw in Rows"
+    bl_description = "Draw round an area of the result (or click a part, or select faces in Edit Mode first) and its quads are laid out again as long straight rows at the same size. The rows follow the surface's bends and any lines you drew, and the faces round it stay as they are"
+    bl_options = {"REGISTER", "UNDO"}
+    HINT = "Drag round the area to redraw in rows, or click a part for all of it. Right-click or Esc: cancel"
+
+    @classmethod
+    def poll(cls, context):
+        return _has_result(context) or (context.mode == "EDIT_MESH" and context.edit_object is bpy.data.objects.get(_g().PREVIEW_NAME))
+
+    def _run(self, context, ids):
+        fl["lasso"] = None
+        context.workspace.status_text_set(None)
+        overlay.tag_redraw()
+        error = redraw_rows(context, ids)
+        if error:
+            self.report({"WARNING"}, error)
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+    def execute(self, context):
+        """From a script or the redo panel: the faces selected in Edit Mode."""
+        ids = _edit_selection(context)
+        if ids is None:
+            self.report({"WARNING"}, "Select the faces to redraw in Edit Mode on the result first")
+            return {"CANCELLED"}
+        return self._run(context, ids)
+
+    def invoke(self, context, event):
+        ids = _edit_selection(context)
+        if ids is not None:
+            return self._run(context, ids)
+        sync(context)
+        fl["lasso"] = []
+        context.window_manager.modal_handler_add(self)
+        context.workspace.status_text_set(self.HINT)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
+            fl["lasso"] = None
+            context.workspace.status_text_set(None)
+            overlay.tag_redraw()
+            return {"CANCELLED"}
+        if fl["lasso"] is None:
+            return {"CANCELLED"}
+        if _navigation(event) and not fl["lasso"]:
+            return {"PASS_THROUGH"}
+        here = (event.mouse_region_x, event.mouse_region_y)
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            fl["lasso"] = [here]
+        elif event.type == "MOUSEMOVE" and fl["lasso"]:
+            fl["lasso"].append(here)
+            overlay.tag_redraw()
+        elif event.type == "LEFTMOUSE" and event.value == "RELEASE" and fl["lasso"]:
+            res, preview = _g().state["res"], bpy.data.objects[_g().PREVIEW_NAME]
+            path = np.asarray(fl["lasso"], dtype=np.float64)
+            if float(np.ptp(path, axis=0).max()) < 8.0:  # a click: the whole part under it
+                ray = _ray(context, event)
+                found = hit(res, *ray) if ray is not None else None
+                if found is None:
+                    fl["lasso"] = []
+                    return {"RUNNING_MODAL"}
+                return self._run(context, _part_at(res, found[1]))
+            return self._run(context, lasso_faces(res, path, *_view_mappers(context, preview)))
+        return {"RUNNING_MODAL"}
+
+
 class _Edit:
     bl_options = {"REGISTER", "UNDO"}
     KIND = ""
@@ -713,7 +893,7 @@ class CURIOMESH_OT_strip_remove(_Edit, bpy.types.Operator):
     KIND = "remove"
 
 
-CLASSES = (CURIOMESH_OT_strip_pick, CURIOMESH_OT_strip_ring, CURIOMESH_OT_strip_fix, CURIOMESH_OT_strip_fix_all, CURIOMESH_OT_strip_slide, CURIOMESH_OT_strip_straighten, CURIOMESH_OT_strip_even, CURIOMESH_OT_strip_add, CURIOMESH_OT_strip_remove)
+CLASSES = (CURIOMESH_OT_strip_pick, CURIOMESH_OT_strip_ring, CURIOMESH_OT_redraw_rows, CURIOMESH_OT_strip_fix, CURIOMESH_OT_strip_fix_all, CURIOMESH_OT_strip_slide, CURIOMESH_OT_strip_straighten, CURIOMESH_OT_strip_even, CURIOMESH_OT_strip_add, CURIOMESH_OT_strip_remove)
 
 
 def draw(layout, gs) -> None:
@@ -723,7 +903,9 @@ def draw(layout, gs) -> None:
     row = col.row(align=True)
     row.operator("curiomesh.strip_pick", icon="RESTRICT_SELECT_OFF")
     row.operator("curiomesh.strip_ring", **icons.kw("tool_ring", "MESH_CIRCLE"))
-    col.operator("curiomesh.strip_fix_all", icon="SHADERFX")
+    row = col.row(align=True)
+    row.operator("curiomesh.strip_fix_all", icon="SHADERFX")
+    row.operator("curiomesh.redraw_rows", icon="MOD_LATTICE")
     if fl["note"]:
         overlay.wrap_label(col, fl["note"], width=36, limit=1)
     found = selected()
@@ -805,11 +987,31 @@ def _draw() -> None:
         overlay.LAST_DRAW_ERROR = repr(exc)
 
 
+def _draw_lasso() -> None:
+    try:
+        path = fl["lasso"]
+        if not path or len(path) < 2:
+            return
+        import gpu
+        from gpu_extras.batch import batch_for_shader
+
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        line = [(float(x), float(y)) for x, y in path + path[:1]]
+        gpu.state.line_width_set(2.0)
+        shader.bind()
+        shader.uniform_float("color", SEL_COLOUR[:3] + (1.0,))
+        batch_for_shader(shader, "LINE_STRIP", {"pos": line}).draw(shader)
+        gpu.state.line_width_set(1.0)
+    except Exception as exc:
+        overlay.LAST_DRAW_ERROR = repr(exc)
+
+
 _handles: list = []
 
 
 def register() -> None:
     _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_VIEW"))
+    _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_lasso, (), "WINDOW", "POST_PIXEL"))
 
 
 def unregister() -> None:

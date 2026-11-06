@@ -22,6 +22,13 @@
   on the marble bust after Tidy Up, Loop Quality 29 -> 33 for 0.8 points.
 - **Ring Round This**: press on the middle of an eye, mouth or hole and drag out to its edge; the quads there are
   redone as closed rings round it (the Flow Editor's Ring, over a narrower area than a drawn Ring).
+- **Redraw in Rows**: drag round an area of the result (or click a part, or select faces in Edit Mode on the result
+  first) and its quads are laid out again as long straight rows at the same size, tied to the faces round it with the
+  same edge count, all quads. The rows run along the surface's bends, the area's long side and any Flow Editor lines
+  over it; quads stay finer where they were finer. On the marble bust's face, poles inside the area 37% -> 8% of its
+  vertices and a quad's strip runs 20 quads between poles (was 2). It can leave a few folded faces where a lasso cuts
+  across the side of the head; the note under the buttons counts them, and Ctrl+Z undoes it. One step, one Undo; other
+  tools call `curiomesh.redraw_rows` or `faceloops.redraw_rows(context, face ids)`.
 
 ## 0.9.8 - 2026-11-06
 
