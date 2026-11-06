@@ -546,8 +546,8 @@ def _volume_poll(self, obj) -> bool:
 
 
 class CURIOMESH_PG_region_volume(bpy.types.PropertyGroup):
-    obj: bpy.props.PointerProperty(name="Volume", type=bpy.types.Object, poll=_volume_poll)
-    operation: bpy.props.EnumProperty(name="Operation", items=OPERATION_ITEMS, default="UNION")
+    obj: bpy.props.PointerProperty(name="Volume", description="The box, lattice or closed mesh that marks part of the region to redo", type=bpy.types.Object, poll=_volume_poll)
+    operation: bpy.props.EnumProperty(name="Operation", description="How this volume joins the ones above it. Union adds its faces, Subtract takes them out, Intersect keeps only the overlap", items=OPERATION_ITEMS, default="UNION")
 
 
 FIELD_ITEMS = (

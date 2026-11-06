@@ -32,16 +32,16 @@ def _redraw_update(self, context):
 
 class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     target_faces: bpy.props.IntProperty(name="Target Faces", description="Roughly how many faces the new mesh should have (a quad counts as one face)", default=8000, min=4, soft_max=250000, update=_live_update)
-    engine: bpy.props.EnumProperty(name="Method", description="How the new quads are built. Smart (Atlas-Q) measures the mesh, then tries several solvers and keeps the best", items=ENGINE_ITEMS, default="ATLAS_Q")
+    engine: bpy.props.EnumProperty(name="Method", description="How the new quads are made. Smart looks at your mesh, tries several ways and keeps the best result", items=ENGINE_ITEMS, default="ATLAS_Q")
     quality: bpy.props.EnumProperty(name="Quality", description="Draft is fast with light cleanup; Hero spends more time on cleanup and checks", items=QUALITY_ITEMS, default="BALANCED")
     seed: bpy.props.IntProperty(name="Random Seed", description="Change this for a different but repeatable result", default=0, min=0, soft_max=100000)
-    triad_seed_count: bpy.props.IntProperty(name="PairClosure Starts", description="How many starting points PairClosure tries. More is slower and usually cleaner", default=6, min=1, max=32, update=_live_update)
+    triad_seed_count: bpy.props.IntProperty(name="PairClosure Starts", description="How many different starting places PairClosure tries. More is slower and usually tidier", default=6, min=1, max=32, update=_live_update)
     triad_feature_angle: bpy.props.FloatProperty(name="Feature Angle", description="Edges sharper than this angle (in degrees) count as creases and are kept", default=35.0, min=0.0, max=180.0, update=_live_update)
     triad_force_quads: bpy.props.BoolProperty(name="PairClosure Pure Quads", description="Force every face to be a quad, even if shape accuracy suffers", default=False)
-    triad_flow_mode: bpy.props.EnumProperty(name="PairClosure Style", description="Tune PairClosure for the kind of model: organic, hard-surface, messy scan or textured", items=FLOW_ITEMS, default="AUTO", update=_live_update)
+    triad_flow_mode: bpy.props.EnumProperty(name="PairClosure Style", description="Match the settings to your mesh: organic, hard-surface, messy scan or textured. Auto decides for you", items=FLOW_ITEMS, default="AUTO", update=_live_update)
     flat_tolerance: bpy.props.FloatProperty(name="Flatness", description="How far a surface may bump away from flat and still become one big quad, as a percent of the mesh size. Higher gives fewer faces and less detail", default=0.1, min=0.0, soft_max=2.0, precision=3, subtype="PERCENTAGE", update=_live_update)
     triad_field_mode: bpy.props.EnumProperty(name="Flow", description="Direction the quads follow: smoothed flow, or also the surface curvature (about 1.5x slower)", items=(("SMOOTH", "Smooth", "Smoothed flow pinned to sharp edges and borders"), ("CURVATURE", "Follow Curvature", "Also line up with the main bending directions of the surface")), default="SMOOTH", update=_live_update)
-    atlas_strategy: bpy.props.EnumProperty(name="Scan Type", description="Which plan Smart (Atlas-Q) follows. Auto picks one from the measured mesh", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
+    atlas_strategy: bpy.props.EnumProperty(name="Scan Type", description="What kind of mesh this is, so Smart can pick the right approach. Auto decides from the measurements", items=ATLAS_STRATEGY_ITEMS, default="AUTO")
     atlas_candidate_count: bpy.props.IntProperty(name="Attempts", description="How many candidate results are built and compared; the best one wins. More is slower", default=3, min=1, max=8)
     topology_policy: bpy.props.EnumProperty(name="Holes & Shells", description="Preserve keeps holes, open borders and separate parts as they are. Repair may close holes and drop thin sheets", items=TOPOLOGY_ITEMS, default="PRESERVE")
     require_quads: bpy.props.BoolProperty(name="Pure Quads", description="Reject results that still contain triangles or badly shaped quads. Turn off to keep the best attempt even with a few triangles", default=True, update=_live_update)
@@ -53,20 +53,20 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     )
     preserve_sharp: bpy.props.BoolProperty(name="Keep Sharp Edges", description="Keep marked sharp edges and hard creases as quad edge lines", default=True)
     preserve_boundary: bpy.props.BoolProperty(name="Keep Open Borders", description="Keep the outline of open surfaces in place", default=True)
-    preserve_seams: bpy.props.BoolProperty(name="Keep UV Seams", description="Treat UV seams as edges to preserve so textures stay clean", default=True)
+    preserve_seams: bpy.props.BoolProperty(name="Keep UV Seams", description="Keep the edges where your UV map is cut, so textures still line up. Turn off to let the quads cross them", default=True)
     use_symmetry: bpy.props.BoolProperty(name="Mirror Symmetry", description="Use the mesh's symmetry so both halves match", default=False)
     preserve_attributes: bpy.props.BoolProperty(name="Keep Attributes", description="Carry colours, weights and other mesh data over to the new mesh", default=True)
     smooth_normals: bpy.props.BoolProperty(name="Smooth Shading", description="Shade the result smooth", default=True)
     cleanup_strength: bpy.props.FloatProperty(name="Cleanup", description="How hard to tidy leftover triangles, n-gons and bad corners (0 = off, 1 = strongest)", default=0.25, min=0.0, max=1.0)
-    voxel_repair: bpy.props.BoolProperty(name="Voxel Repair Fallback", description="If the mesh is too broken to remesh, rebuild it through voxels first (can close small holes)", default=True)
+    voxel_repair: bpy.props.BoolProperty(name="Voxel Repair Fallback", description="If the mesh is too damaged to remesh, rebuild it as a solid shape first. This can close small holes", default=True)
     shrinkwrap_project: bpy.props.BoolProperty(name="Snap to Original", description="Project the new vertices back onto the original surface to keep fine detail", default=True)
     texture_mode: bpy.props.EnumProperty(name="Textures", description="How UVs and textures are carried over to the new mesh", items=TEXTURE_ITEMS, default="PROJECT")
     bake_fallback: bpy.props.BoolProperty(name="Bake If UVs Fail", description="If UV transfer fails, bake the colour into a new texture instead", default=False)
     bake_resolution: bpy.props.IntProperty(name="Bake Size", description="Texture size in pixels used when baking", default=2048, min=64, soft_max=8192)
-    bake_margin: bpy.props.IntProperty(name="Bake Margin", description="Pixels of padding around UV islands when baking", default=8, min=0, max=64)
+    bake_margin: bpy.props.IntProperty(name="Bake Margin", description="Extra pixels painted around each piece of the UV map when baking. This stops gaps showing at the edges", default=8, min=0, max=64)
     output_mode: bpy.props.EnumProperty(name="Result", description="New Object keeps your original; Replace overwrites its mesh", items=OUTPUT_ITEMS, default="NEW")
     apply_source_modifiers: bpy.props.BoolProperty(name="Apply Modifiers First", description="Bake the source's modifiers into the mesh before remeshing", default=True)
-    keep_debug_objects: bpy.props.BoolProperty(name="Keep Debug Objects", description="Keep the intermediate meshes the solver creates, for troubleshooting", default=False)
+    keep_debug_objects: bpy.props.BoolProperty(name="Keep Debug Objects", description="Keep the in-between meshes made on the way, for finding a problem. Leave off normally", default=False)
     debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", description="Print step-by-step details to the system console", default=False)
 
     hud_enabled: bpy.props.BoolProperty(
@@ -74,13 +74,13 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     )
     heatmap_enabled: bpy.props.BoolProperty(
         name="Heatmap",
-        description="Colour triangles and n-gons on the active mesh and mark poles with dots (colours: add-on Preferences)",
+        description="Colour triangles and faces with 5 or more sides on the active mesh, and mark points where 3 or 5+ edges meet with dots. Colours are set in the add-on Preferences",
         default=False,
         update=_redraw_update,
     )
     live_enabled: bpy.props.BoolProperty(
         name="Live",
-        description=f"Keep a PairClosure quad preview beside the source that updates as you change settings (meshes up to {live.LIVE_FACE_CAP:,} faces)",
+        description=f"Show a quick quad preview next to your mesh that updates as you change settings. Only for small meshes, up to {live.LIVE_FACE_CAP:,} faces",
         default=False,
         update=_live_toggle_update,
     )
