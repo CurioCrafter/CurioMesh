@@ -42,4 +42,5 @@ pub mod mirror;
 pub mod retopo;
 pub mod rows;
 pub mod settings;
+pub mod strokes;
 pub mod uv;

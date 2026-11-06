@@ -27,6 +27,7 @@ const AMBER: Color32 = Color32::from_rgb(242, 163, 58);
 const BLUE: Color32 = Color32::from_rgb(108, 182, 255);
 const RED: Color32 = Color32::from_rgb(229, 72, 77);
 const GREEN: Color32 = Color32::from_rgb(124, 201, 138);
+const STROKE: Color32 = Color32::from_rgb(64, 224, 208); // drawn loops: a colour nothing else on screen uses
 
 const MOST_DRAWN: usize = 600_000; // triangles drawn per view: a bigger model is thinned out on screen, not in the work
 
@@ -102,6 +103,33 @@ impl Camera {
         let scale = 0.45 * rect.width().min(rect.height()) * self.zoom / self.radius;
         (Pos2::new(rect.center().x + x * scale, rect.center().y - y * scale), depth)
     }
+
+    /// The nearest point of the model under a screen position, if the model is there: every triangle is projected and
+    /// the one covering the position nearest the eye wins (the view is orthographic, so this is the ray test).
+    /// ponytail: every triangle per call; a tree over screen boxes if picking on huge models gets slow.
+    fn pick(&self, d: &Drawable, at: Pos2, rect: Rect) -> Option<[f64; 3]> {
+        let screen: Vec<(Pos2, f32)> = d.points.iter().map(|&p| self.project(p, rect)).collect();
+        let mut best: Option<(f32, [f32; 3])> = None;
+        for t in &d.tris {
+            let [a, b, c] = t.map(|v| screen[v as usize]);
+            let area = (b.0 - a.0).x * (c.0 - a.0).y - (b.0 - a.0).y * (c.0 - a.0).x;
+            if area.abs() < 1e-9 {
+                continue;
+            }
+            let wb = ((at - a.0).x * (c.0 - a.0).y - (at - a.0).y * (c.0 - a.0).x) / area;
+            let wc = ((b.0 - a.0).x * (at - a.0).y - (b.0 - a.0).y * (at - a.0).x) / area;
+            let wa = 1.0 - wb - wc;
+            if wa < 0.0 || wb < 0.0 || wc < 0.0 {
+                continue;
+            }
+            let depth = wa * a.1 + wb * b.1 + wc * c.1;
+            if best.is_none_or(|(d0, _)| depth > d0) {
+                let [pa, pb, pc] = t.map(|v| d.points[v as usize]);
+                best = Some((depth, [0, 1, 2].map(|k| wa * pa[k] + wb * pb[k] + wc * pc[k])));
+            }
+        }
+        best.map(|(_, p)| p.map(|x| x as f64))
+    }
 }
 
 enum Message {
@@ -115,6 +143,8 @@ struct Finished {
     seconds: f64,
     check: issues::Check,
     tidy: Option<String>, // what Tidy Up did
+    follow: Option<(f64, f64)>, // how closely the drawn loops were followed
+    stroke_notes: Vec<String>,
 }
 
 struct Loaded {
@@ -153,6 +183,9 @@ struct App {
     shot_asked: bool,
     frames: u32,
     batch_demo: bool,
+    strokes: Vec<Vec<[f64; 3]>>, // guided edge loops drawn on the model
+    drawing: bool,               // the Draw loops tool is on
+    drawing_now: bool,           // a stroke is being drawn
 }
 
 impl App {
@@ -182,10 +215,16 @@ impl App {
             shot_asked: false,
             frames: 0,
             batch_demo: false,
+            strokes: Vec::new(),
+            drawing: false,
+            drawing_now: false,
         };
         let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
         if files.len() == 1 && !files[0].is_dir() {
             app.open(files[0].clone(), &cc.egui_ctx); // a model dropped onto the program's icon
+            if let Some(path) = std::env::var_os("CURIOMESH_STROKES") {
+                app.strokes = settings::load_strokes(&PathBuf::from(path)).unwrap_or_default();
+            }
             if app.shot.is_some() {
                 app.start(&cc.egui_ctx);
             }
@@ -229,6 +268,8 @@ impl App {
                 self.picked_spot = None;
                 self.note = None;
                 self.show = Show::Split;
+                self.strokes.clear(); // strokes belong to the model they were drawn on
+                self.drawing_now = false;
                 self.screen = Screen::Model;
             }
             Err(e) => self.note = Some((format!("Couldn't open that file. {e}"), true)),
@@ -256,7 +297,7 @@ impl App {
         match io::read(&row.output) {
             Ok(mesh) => {
                 let drawable = Drawable::of(&mesh);
-                self.result = Some((Finished { check: issues::check(&mesh), mesh, loss: row.loss, seconds: row.seconds, tidy: None }, drawable));
+                self.result = Some((Finished { check: issues::check(&mesh), mesh, loss: row.loss, seconds: row.seconds, tidy: None, follow: None, stroke_notes: vec![] }, drawable));
             }
             Err(e) => self.note = Some((format!("Couldn't read the result. {e}"), true)),
         }
@@ -265,7 +306,8 @@ impl App {
     fn start(&mut self, ctx: &egui::Context) {
         let Some(model) = &self.model else { return };
         let source = model.mesh.clone();
-        let settings = self.prefs.choices.settings(true);
+        let mut settings = self.prefs.choices.settings(true);
+        settings.strokes = self.strokes.clone();
         let (send, receive) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -273,7 +315,7 @@ impl App {
                 let _ = send.send(Message::Log(line.trim().to_string()));
                 ctx.request_repaint();
             };
-            let done = gui_batch::retopo_checked(&source, &settings, log).map(|(out, check)| Finished { check, mesh: out.mesh, loss: out.loss, seconds: out.seconds, tidy: out.tidy });
+            let done = gui_batch::retopo_checked(&source, &settings, log).map(|(out, check)| Finished { check, mesh: out.mesh, loss: out.loss, seconds: out.seconds, tidy: out.tidy, follow: out.follow, stroke_notes: out.stroke_notes });
             let _ = send.send(Message::Done(done));
             ctx.request_repaint();
         });
@@ -729,6 +771,7 @@ impl App {
                     section(ui, "What it's for");
                     let idle = self.running.is_none();
                     self.settings_ui(ui, idle, true, true);
+                    self.loops_section(ui, idle);
                     ui.add_space(12.0);
                     if idle {
                         let button = egui::Button::new(RichText::new("Retopologize").size(16.0).strong().color(SLATE)).fill(AMBER).corner_radius(8.0);
@@ -749,6 +792,31 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Guided edge loops: draw strokes on the model; the result gets an edge loop along each one.
+    fn loops_section(&mut self, ui: &mut egui::Ui, idle: bool) {
+        section(ui, "Edge loops");
+        ui.add_enabled_ui(idle, |ui| {
+            ui.horizontal(|ui| {
+                let label = if self.drawing { "Drawing loops" } else { "Draw loops" };
+                if ui.selectable_label(self.drawing, label).on_hover_text("Drag on the model to draw where an edge loop must run: round an eye or the mouth, along a joint, across a panel. Right-drag turns the view while this is on. Click again to stop drawing.").clicked() {
+                    self.drawing = !self.drawing;
+                }
+                if ui.add_enabled(!self.strokes.is_empty(), egui::Button::new("Undo")).on_hover_text("Take the last stroke away.").clicked() {
+                    self.strokes.pop();
+                }
+                if ui.add_enabled(!self.strokes.is_empty(), egui::Button::new("Clear")).on_hover_text("Take every stroke away.").clicked() {
+                    self.strokes.clear();
+                }
+            });
+        });
+        let words = match self.strokes.len() {
+            0 => "None drawn. Retopologize follows the strokes you draw.".to_string(),
+            1 => "1 stroke: the result gets an edge loop along it.".to_string(),
+            n => format!("{n} strokes: the result gets an edge loop along each."),
+        };
+        ui.label(RichText::new(words).small().color(MUTED));
     }
 
     fn model_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -859,6 +927,12 @@ impl App {
         if let Some(line) = &finished.tidy {
             ui.label(RichText::new(line).small().color(MUTED));
         }
+        if let Some(f) = finished.follow {
+            ui.label(RichText::new(curiomesh::strokes::follow_text(f)).small().color(STROKE)).on_hover_text("How far, along each stroke, the nearest edge of the result is: on average and at the worst point.");
+        }
+        for note in &finished.stroke_notes {
+            ui.label(RichText::new(note).small().color(AMBER));
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.add(egui::Button::new(RichText::new("Save model").strong()).stroke(Stroke::new(1.0, AMBER))).on_hover_text("Save the new mesh as a file for the engine you chose (OBJ, or GLB for Unreal, Godot and glTF).").clicked() {
@@ -905,8 +979,29 @@ impl App {
             let split_x = rect.left() + self.split * rect.width();
             let handle = Rect::from_center_size(Pos2::new(split_x, rect.center().y), Vec2::new(16.0, rect.height()));
             let on_handle = self.result.is_some() && self.show == Show::Split && response.hover_pos().is_some_and(|p| handle.contains(p));
-            if response.dragged() {
-                let started_on_handle = self.result.is_some() && self.show == Show::Split && ui.input(|i| i.pointer.press_origin()).is_some_and(|p| handle.contains(p));
+            // Draw loops: the left button draws on the model, the right one turns the view.
+            let started_on_handle = self.result.is_some() && self.show == Show::Split && ui.input(|i| i.pointer.press_origin()).is_some_and(|p| handle.contains(p));
+            let draws = self.drawing && self.running.is_none() && !started_on_handle;
+            if draws && response.drag_started_by(egui::PointerButton::Primary) && !self.drawing_now {
+                self.strokes.push(Vec::new());
+                self.drawing_now = true;
+            }
+            if self.drawing_now {
+                if let (Some(at), Some(stroke)) = (response.interact_pointer_pos(), self.strokes.last_mut()) {
+                    if let Some(p) = camera.pick(&model.drawable, at, rect) {
+                        let gap = 0.004 * camera.radius as f64 / camera.zoom as f64; // about a pixel or two apart
+                        if stroke.last().is_none_or(|q| (0..3).map(|k| (p[k] - q[k]).powi(2)).sum::<f64>().sqrt() > gap) {
+                            stroke.push(p);
+                        }
+                    }
+                }
+                if !response.dragged_by(egui::PointerButton::Primary) {
+                    self.drawing_now = false;
+                    if self.strokes.last().is_some_and(|s| s.len() < 2) {
+                        self.strokes.pop();
+                    }
+                }
+            } else if response.dragged() && !(draws && response.dragged_by(egui::PointerButton::Primary)) {
                 if started_on_handle {
                     self.split = ((response.interact_pointer_pos().map_or(split_x, |p| p.x) - rect.left()) / rect.width()).clamp(0.02, 0.98);
                 } else {
@@ -948,7 +1043,12 @@ impl App {
                     painter.add(draw(&model.drawable, camera, rect, None, None));
                 }
             }
-            painter.text(rect.left_bottom() + Vec2::new(18.0, -16.0), Align2::LEFT_BOTTOM, "Drag to turn, scroll to zoom, double-click to frame the model", FontId::proportional(12.5), MUTED);
+            for stroke in &self.strokes {
+                let line: Vec<Pos2> = stroke.iter().map(|p| camera.project(p.map(|x| x as f32), rect).0).collect();
+                painter.add(Shape::line(line, Stroke::new(3.0, STROKE)));
+            }
+            let hint = if self.drawing { "Drag on the model to draw a loop, right-drag to turn, scroll to zoom" } else { "Drag to turn, scroll to zoom, double-click to frame the model" };
+            painter.text(rect.left_bottom() + Vec2::new(18.0, -16.0), Align2::LEFT_BOTTOM, hint, FontId::proportional(12.5), MUTED);
             let mut show = self.show;
             let mut turn = false;
             let has_result = self.result.is_some();
@@ -1153,5 +1253,26 @@ mod tests {
         assert_eq!(verdict("Game Asset", 1000, 1.0, Some(6.0), 20, 4).0, Level::Bad);
         assert_eq!(verdict("Game Asset", 5000, 13.0, Some(6.0), 0, 0).0, Level::Bad);
         assert_eq!(verdict("Game Asset", 5000, 9.0, None, 0, 0).0, Level::Good); // a face count asks no detail
+    }
+
+    #[test]
+    fn picking_finds_the_front_surface_under_the_pointer() {
+        // Two squares one behind the other: the pick lands on the one nearer the eye, at the point under the pointer.
+        let mut mesh = io::Mesh { indptr: vec![0], ..Default::default() };
+        for z in [0.0, 1.0] {
+            mesh.points.extend([-1.0, -1.0, z, 1.0, -1.0, z, 1.0, 1.0, z, -1.0, 1.0, z]);
+            let base = if z == 0.0 { 0 } else { 4 };
+            mesh.flat.extend([base, base + 1, base + 2, base + 3]);
+            mesh.indptr.push(mesh.flat.len() as i64);
+            mesh.material.push(0);
+        }
+        let mut camera = Camera::framing(&mesh.points);
+        (camera.yaw, camera.pitch, camera.z_up) = (0.0, 0.0, false);
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(400.0));
+        let target = [0.3f32, -0.2, 1.0];
+        let at = camera.project(target, rect).0;
+        let p = camera.pick(&Drawable::of(&mesh), at, rect).unwrap();
+        assert!((0..3).all(|k| (p[k] - target[k] as f64).abs() < 1e-4), "{p:?}");
+        assert!(camera.pick(&Drawable::of(&mesh), Pos2::new(1.0, 1.0), rect).is_none(), "off the model");
     }
 }

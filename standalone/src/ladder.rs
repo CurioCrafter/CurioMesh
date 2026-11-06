@@ -50,7 +50,7 @@ pub fn run(source: &Mesh, settings: &Settings, details: &[f64], mut on_rung: imp
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let mut one = settings.retopo();
+        let mut one = settings.retopo_on(&work);
         (one.detail, one.reduce_to) = (detail, None);
         log(&format!("Quad size at detail {detail}%"));
         let out = prepared.solve(&one, &mut log)?;

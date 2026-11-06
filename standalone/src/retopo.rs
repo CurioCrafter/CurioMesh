@@ -6,7 +6,7 @@
 
 use crate::io::Mesh;
 use crate::{close, geom, gpu, near, pairing, qem, topo};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 pub const TURNED_DEG: f64 = 20.0; // a pixel whose surface turned more than this counts as changed
@@ -28,6 +28,7 @@ pub struct Settings {
     pub rows: bool,                // offer even rows of quads to smooth parts
     pub baked: bool,               // judge the result as it will look with a normal map baked from the source
     pub tidy: f64,                 // Tidy Up: 0 off, 0.5 one round of redrawing patches round poles, 1 two rounds + spinning
+    pub strokes: Vec<Vec<[f64; 3]>>, // guided edge loops: polylines on the surface the result must carry as edge loops
 }
 
 pub struct Outcome {
@@ -36,6 +37,8 @@ pub struct Outcome {
     pub looks: usize,
     pub seconds: f64,
     pub tidy: Option<String>, // what Tidy Up did, for the line under the result
+    pub follow: Option<(f64, f64)>, // with strokes: mean and worst distance from them to the result's edges, shares of the size
+    pub stroke_notes: Vec<String>,  // strokes left out, and why
 }
 
 // ------------------------------------------------------------------------------------------------------ the camera
@@ -169,7 +172,7 @@ fn min_scaled_jacobian(p: &[V3; 4]) -> f64 {
 /// `engine._pair_candidates` + `_pair_scores` with the default weights: (face_a, face_b, quads 4 per row, scores).
 /// ponytail: the cross-field term aligns quad sides with face_a's longest edge, not the add-on's smoothed cross field
 /// (`engine._estimate_field`); port that when quad rows on curved parts need to line up better.
-fn candidates(points: &[f64], tris: &[i64], material: &[i64]) -> (Vec<i64>, Vec<i64>, Vec<i64>, Vec<f64>) {
+fn candidates(points: &[f64], tris: &[i64], material: &[i64], guide: &HashSet<(i64, i64)>) -> (Vec<i64>, Vec<i64>, Vec<i64>, Vec<f64>) {
     let (w_normal, w_field, w_material, w_aspect, w_diagonal) = (2.2, 0.90, 0.15, 0.90, 0.35);
     let p = |v: i64| [points[v as usize * 3], points[v as usize * 3 + 1], points[v as usize * 3 + 2]];
     let nf = tris.len() / 3;
@@ -200,7 +203,7 @@ fn candidates(points: &[f64], tris: &[i64], material: &[i64]) -> (Vec<i64>, Vec<
         if a == b || tris[b * 3 + cb] != y || tris[b * 3 + (cb + 1) % 3] != x {
             continue; // the shared edge must run opposite ways (consistent winding)
         }
-        if material[a] != material[b] || dot(normals[a], normals[b]) < sharp {
+        if material[a] != material[b] || dot(normals[a], normals[b]) < sharp || guide.contains(&(x.min(y), x.max(y))) {
             continue;
         }
         let quad = [tris[a * 3 + (ca + 2) % 3], x, tris[b * 3 + (cb + 2) % 3], y];
@@ -241,13 +244,22 @@ fn candidates(points: &[f64], tris: &[i64], material: &[i64]) -> (Vec<i64>, Vec<
 
 /// `flatquad.pair_and_close` for triangles: repair, pair into quads, then close every piece to all quads.
 pub fn pair_and_close(points: &[f64], tris: &[i64], material: &[i64], materials: &[String]) -> Result<Mesh, String> {
+    pair_and_close_guided(points, tris, material, materials, &HashSet::new())
+}
+
+/// The same, with guide edges no quad may be paired across (`flatquad.pair_and_close(..., guide_edges=...)`).
+pub fn pair_and_close_guided(points: &[f64], tris: &[i64], material: &[i64], materials: &[String], guide: &HashSet<(i64, i64)>) -> Result<Mesh, String> {
     let indptr: Vec<i64> = (0..=(tris.len() / 3) as i64).map(|f| f * 3).collect();
-    close_polygons(points, &indptr, tris, material, materials)
+    close_guided(points, &indptr, tris, material, materials, guide)
 }
 
 /// The same for polygons, with `keep_quads`: quads stay whole, larger faces are cut into triangles from their first
 /// corner, and only the triangles are paired before every piece is closed to all quads.
 pub fn close_polygons(points: &[f64], indptr: &[i64], flat: &[i64], material: &[i64], materials: &[String]) -> Result<Mesh, String> {
+    close_guided(points, indptr, flat, material, materials, &HashSet::new())
+}
+
+fn close_guided(points: &[f64], indptr: &[i64], flat: &[i64], material: &[i64], materials: &[String], guide: &HashSet<(i64, i64)>) -> Result<Mesh, String> {
     let span = 2.0 * view_of(points, 1, false).half / 0.55 * 3f64.sqrt();
     let source = close::Mesh { vertices: points.to_vec(), indptr: indptr.to_vec(), flat: flat.to_vec(), origin: material.to_vec() };
     let (fixed, _added) = close::make_closable(&source, span);
@@ -274,7 +286,7 @@ pub fn close_polygons(points: &[f64], indptr: &[i64], flat: &[i64], material: &[
         out_indptr.push(out_indptr.last().unwrap() + 4);
     }
     if !tris.is_empty() {
-        let (fa, fb, quads, scores) = candidates(&fixed.vertices, &tris, &tri_tag);
+        let (fa, fb, quads, scores) = candidates(&fixed.vertices, &tris, &tri_tag, guide);
         let graph = pairing::allowed(tri_tag.len(), &fa, &fb, &scores, None);
         // One order is enough: the augmenting search pairs as many as can be, so other orders leave as many triangles.
         let paired = pairing::pair(&graph, &quads, 0, &near::Watch::now()).ok_or("pairing was stopped")?;
@@ -359,10 +371,20 @@ impl<'a> Prepared<'a> {
         let total = tris.len() / 3;
         let smallest = (run.smallest() as usize).max(12);
         let mut looks = 0;
+        // Guided edge loops: the strokes laid on the surface; each level gets them cut in before pairing.
+        let size = crate::strokes::size_of(&source.points);
+        let (lines, mut stroke_notes) = crate::strokes::lay(&settings.strokes, &self.source_tree, size);
+        let mut missed = 0;
         let mut make = |wanted: usize| -> Result<(Mesh, f64), String> {
             let (points, level_tris, from) = run.level(wanted as u32);
             let material: Vec<i64> = from.iter().map(|&t| tags[t as usize]).collect();
-            let out = pair_and_close(&points, &level_tris, &material, &source.materials)?;
+            let out = if lines.is_empty() {
+                pair_and_close(&points, &level_tris, &material, &source.materials)?
+            } else {
+                let (points, level_tris, material, guide, lost) = crate::strokes::cut_in(points, level_tris, material, &lines, &self.source_tree);
+                missed = lost;
+                pair_and_close_guided(&points, &level_tris, &material, &source.materials, &guide)?
+            };
             looks += 1;
             let change = self.look(&out);
             Ok((out, change))
@@ -413,10 +435,30 @@ impl<'a> Prepared<'a> {
             }
         };
         let (mut mesh, mut change) = (mesh, change);
+        if missed > 0 {
+            stroke_notes.push(format!("{missed} stroke piece(s) found no edges to follow and were left out"));
+        }
+        for note in &stroke_notes {
+            log(&format!("  {note}"));
+        }
+        // With strokes, a later step is kept only if the loops stay about as close to them (0.1% of the size on average,
+        // 0.2% at worst): rows rebuild parts from scratch, so they are left out.
+        let mut followed = (!lines.is_empty()).then(|| crate::strokes::follow(&lines, &mesh, size));
+        let mut holds = |m: &Mesh| -> bool {
+            let Some(now) = followed else { return true };
+            let after = crate::strokes::follow(&lines, m, size);
+            let ok = after.0 <= now.0 + 0.001 && after.1 <= now.1 + 0.002;
+            if ok {
+                followed = Some(after);
+            }
+            ok
+        };
         // Rows and evening out together may add at most TURN_LOSS points, and stay within 110% of the detail asked for
         // unless the search result was already over (the add-on's rule for spinning edges at poles).
         let limit = if settings.reduce_to.is_some() { change + TURN_LOSS } else { (change + TURN_LOSS).min(change.max(1.1 * settings.detail)) };
-        if settings.rows {
+        if settings.rows && !lines.is_empty() {
+            log("  Rows of quads left out: they would not keep the drawn loops");
+        } else if settings.rows {
             let mut look = |m: &Mesh| {
                 looks += 1;
                 self.look(m)
@@ -435,7 +477,7 @@ impl<'a> Prepared<'a> {
             }
             let after = self.look(&tried);
             looks += 1;
-            let keep = after <= limit;
+            let keep = after <= limit && holds(&tried);
             log(&format!("  {name}: {:.2}% of the view changed, {}", after, if keep { "kept" } else { "not kept" }));
             if keep {
                 (mesh, change) = (tried, after);
@@ -454,20 +496,26 @@ impl<'a> Prepared<'a> {
                 }
                 let after = self.look(&tried);
                 looks += 1;
-                let line = if after <= change + TIDY_LOSS {
+                let fits = after <= change + TIDY_LOSS && holds(&tried);
+                let line = if fits {
                     format!("Tidy Up: poles {} -> {}, view changed {:.1}% -> {:.1}%", thousands(crate::tidy::poles(&mesh)), thousands(crate::tidy::poles(&tried)), change, after)
+                } else if after <= change + TIDY_LOSS {
+                    "Tidy Up: not kept, it would move the drawn loops".to_string()
                 } else {
                     format!("Tidy Up: not kept, the view would change {:.1}% -> {:.1}%", change, after)
                 };
                 log(&format!("  {line}"));
-                if after <= change + TIDY_LOSS {
+                if fits {
                     (mesh, change) = (tried, after);
                 }
                 tidied = Some(line);
             }
         }
         mesh.material = mesh.material.iter().map(|&t| unpack(t).0).collect();
-        Ok(Outcome { mesh: crate::io::compact(&mesh), loss: change, looks, seconds: started.elapsed().as_secs_f64(), tidy: tidied })
+        if let Some(f) = followed {
+            log(&format!("  {}", crate::strokes::follow_text(f)));
+        }
+        Ok(Outcome { mesh: crate::io::compact(&mesh), loss: change, looks, seconds: started.elapsed().as_secs_f64(), tidy: tidied, follow: followed, stroke_notes })
     }
 }
 
@@ -791,12 +839,67 @@ mod tests {
     #[test]
     fn a_box_comes_out_all_quads_and_unchanged_in_view() {
         let source = cube();
-        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true, baked: false, tidy: 1.0 };
+        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true, baked: false, tidy: 1.0, strokes: vec![] };
         let out = retopo(&source, &settings, |_| {}).unwrap();
         assert!(out.mesh.faces() > 0);
         assert!((0..out.mesh.faces()).all(|f| out.mesh.face(f).len() == 4), "all quads");
         assert!(out.loss <= 6.0, "loss {}", out.loss);
         assert!(out.mesh.faces() < 24, "fewer faces than the 24 source quads: {}", out.mesh.faces());
+    }
+
+    /// A round ball of triangles: `rings` bands from pole to pole, `around` corners per ring.
+    fn ball(rings: usize, around: usize) -> Mesh {
+        let mut mesh = Mesh { indptr: vec![0], ..Default::default() };
+        let pi = std::f64::consts::PI;
+        mesh.points.extend([0.0, 0.0, 1.0]);
+        for r in 1..rings {
+            let t = pi * r as f64 / rings as f64;
+            for k in 0..around {
+                let a = 2.0 * pi * k as f64 / around as f64;
+                mesh.points.extend([t.sin() * a.cos(), t.sin() * a.sin(), t.cos()]);
+            }
+        }
+        mesh.points.extend([0.0, 0.0, -1.0]);
+        let last = (mesh.points.len() / 3 - 1) as i64;
+        let v = |r: usize, k: usize| (1 + (r - 1) * around + k % around) as i64;
+        let add = |t: [i64; 3], mesh: &mut Mesh| {
+            mesh.flat.extend(t);
+            mesh.indptr.push(mesh.flat.len() as i64);
+            mesh.material.push(0);
+        };
+        for k in 0..around {
+            add([0, v(1, k), v(1, k + 1)], &mut mesh);
+            add([last, v(rings - 1, k + 1), v(rings - 1, k)], &mut mesh);
+            for r in 1..rings - 1 {
+                add([v(r, k), v(r + 1, k), v(r + 1, k + 1)], &mut mesh);
+                add([v(r, k), v(r + 1, k + 1), v(r, k + 1)], &mut mesh);
+            }
+        }
+        mesh
+    }
+
+    #[test]
+    fn a_stroke_round_a_ball_becomes_an_edge_loop_and_one_off_it_is_left_out() {
+        let source = ball(31, 48);
+        // A great circle tilted 30 degrees, so no ring of the source runs along it.
+        let tilt = 30f64.to_radians();
+        let circle: Vec<[f64; 3]> = (0..=64).map(|k| {
+            let a = 2.0 * std::f64::consts::PI * k as f64 / 64.0;
+            [a.cos(), a.sin() * tilt.cos(), a.sin() * tilt.sin()]
+        }).collect();
+        let away = vec![[0.0, 0.0, 5.0], [1.0, 0.0, 5.0], [2.0, 0.0, 5.0]];
+        let mut settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true, baked: false, tidy: 0.0, strokes: vec![] };
+        let plain = retopo(&source, &settings, |_| {}).unwrap();
+        settings.strokes = vec![circle.clone(), away];
+        let out = retopo(&source, &settings, |_| {}).unwrap();
+        assert!((0..out.mesh.faces()).all(|f| out.mesh.face(f).len() == 4), "all quads");
+        assert_eq!(crate::issues::check(&out.mesh).bad, 0);
+        assert_eq!(out.stroke_notes.len(), 1, "{:?}", out.stroke_notes);
+        let (mean, worst) = out.follow.unwrap();
+        let size = crate::strokes::size_of(&source.points);
+        let (plain_mean, plain_worst) = crate::strokes::follow(&[circle], &plain.mesh, size);
+        assert!(mean < 0.004 && worst < 0.015, "followed: mean {mean}, worst {worst} (without the stroke {plain_mean}, {plain_worst})");
+        assert!(mean < plain_mean, "the stroke made it follow better: {mean} vs {plain_mean}");
     }
 
     #[test]
