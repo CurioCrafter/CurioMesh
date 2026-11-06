@@ -14,14 +14,13 @@ Loop Flow draws the edge loops of the result in a colour each, and its poles as 
 from __future__ import annotations
 
 import colorsys
-import threading
 
 import bpy
 import numpy as np
 from mathutils.bvhtree import BVHTree
 
 from . import autoretopo, overlay, segments, symmetry, turbo
-from .triadq import checks, issues, patterns
+from .triadq import checks, issues, patterns, tasks
 from .triadq import organize as O
 from .triadq.chords import PictureJudge
 
@@ -97,7 +96,7 @@ def start(context) -> bool:
     seg_piece = segments.seg.get("piece")
     org.update(base=base, origin=out, report=dict(base["report"]), box=box, seg_piece=seg_piece)
     org["meshes"][0.0] = _mesh_for(out)
-    threading.Thread(target=_work, args=(box, out, job.co, job.faces, job.mirror, tree, seg_piece), daemon=True, name="CurioMeshOrganize").start()
+    tasks.start(lambda: _work(box, out, job.co, job.faces, job.mirror, tree, seg_piece), "CurioMeshOrganize")
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=GAP)
     return True
@@ -374,4 +373,6 @@ def unregister() -> None:
         except Exception:
             pass
     cancel()
+    if bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.unregister(_tick)
 

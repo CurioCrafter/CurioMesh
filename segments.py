@@ -14,7 +14,6 @@ the Method setting and this view agree on the names. Everything here works on `g
 
 from __future__ import annotations
 
-import threading
 import time
 
 import bpy
@@ -23,7 +22,7 @@ from mathutils import Vector
 from mathutils.kdtree import KDTree
 
 from . import autoretopo, overlay
-from .triadq import checks, issues
+from .triadq import checks, issues, tasks
 from .triadq import parts as P
 from .triadq import segment as S
 
@@ -270,22 +269,7 @@ def _faces_for(job, method: str, co, polys, kinds):
 
 def _threaded(work):
     """Generator: `work()` on a worker thread, yielding so Blender stays responsive. Returns its result."""
-    out, failed = [], []
-
-    def run():
-        try:
-            out.append(work())
-        except BaseException as exc:  # raised again on the main thread
-            failed.append(exc)
-
-    thread = threading.Thread(target=run, daemon=True, name="CurioMeshCheck")
-    thread.start()
-    while thread.is_alive():
-        thread.join(0.02)
-        yield
-    if failed:
-        raise failed[0]
-    return out[0]
+    return (yield from tasks.run(work, "CurioMeshCheck"))
 
 
 class PartJob:

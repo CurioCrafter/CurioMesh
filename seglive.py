@@ -4,19 +4,19 @@
 """Live segments: each mesh's own segment settings, and a coloured preview that follows them while you drag.
 
 A change asks for a preview. When the asking has been quiet for a moment (or every tenth of a second during a long
-drag), a thread cuts the merge tree kept from the last find at the new settings (Crease Strength merges it again
+drag), a task (`triadq.tasks`) cuts the merge tree kept from the last find at the new settings (Crease Strength merges it again
 first) and marks the result's faces through a map of the nearest face of your mesh, worked out once per result. That
 is all a preview needs, so it lands in well under a second; one preview runs at a time, and the newest change is
 always the next one shown. When the changes have stopped for longer,
 `FindJob` finds the segments for real (borders settled on the creases, seams laid on the result) and keeps them.
 
-Paint Size is the `CM_SegmentSize` vertex group: red makes smaller segments there, blue larger. Strokes in Weight
-Paint ask for a preview through the depsgraph handler, after a longer pause so painting stays smooth.
+Paint Size is the `CM_SegmentSize` vertex group: red makes smaller segments there, blue larger. While your mesh is in
+Weight Paint, a timer compares a sample of its paint every quarter second; a stroke asks for a preview after a longer
+pause so painting stays smooth. The timer starts from the viewport's redraw and ends when you leave Weight Paint.
 """
 
 from __future__ import annotations
 
-import threading
 import time
 
 import bmesh
@@ -26,6 +26,7 @@ import numpy as np
 from . import overlay, parallel
 from . import segments as view
 from .triadq import segment as S
+from .triadq import tasks
 
 SIZE_GROUP = "CM_SegmentSize"
 PREVIEW_WAIT = 0.03  # quiet before a preview: a drag sends many changes a second
@@ -33,11 +34,14 @@ PREVIEW_MOST = 0.1  # a drag that never pauses still gets a preview this often
 PAINT_WAIT = 0.3  # after a stroke: reading the paint of a big mesh takes a moment, so not after every dab
 KEEP_WAIT = 0.8  # quiet before the segments are found for real and kept
 TICK = 0.02
+PAINT_POLL = 0.25  # how often the paint is compared while in Weight Paint
+PAINT_SAMPLES = 20_000  # corners whose paint is compared: enough for any stroke to touch some
 
 live = {
     "preview": parallel.Debounce(PREVIEW_WAIT, PREVIEW_MOST),
     "keep": parallel.Debounce(KEEP_WAIT),
-    "thread": None,
+    "task": None,
+    "paint_sig": None,  # the sampled paint last seen in Weight Paint
     "box": None,
     "poked": 0.0,  # when the newest change came
     "ms": None,  # from the last change to its preview on screen
@@ -158,8 +162,7 @@ def _start() -> None:
                 box["error"] = str(exc)[:100]
 
     live["box"] = box
-    live["thread"] = threading.Thread(target=work, daemon=True, name="CurioMeshLiveSegments")
-    live["thread"].start()
+    live["task"] = tasks.start(work, "CurioMeshLiveSegments")
 
 
 def _finished(box) -> None:
@@ -179,12 +182,12 @@ def _finished(box) -> None:
 
 def _tick():
     try:
-        thread = live["thread"]
-        if thread is not None and not thread.is_alive():
-            live["thread"] = None
+        task = live["task"]
+        if task is not None and task.done():
+            live["task"] = None
             _finished(live["box"])
         now = time.perf_counter()
-        if live["thread"] is None:
+        if live["task"] is None:
             if live["preview"].due(now):
                 _start()
             elif live["keep"].due(now) and live["preview"].asked is None:
@@ -193,7 +196,7 @@ def _tick():
                 # the same settings, found for real; locked segments stay. A redo still running is never stopped for it: ask again later
                 if not view.segment_goals.start_find(bpy.context, fresh=True) and work is not None and work["runner"].busy:
                     live["keep"].poke(now)
-        busy = live["thread"] is not None or live["preview"].asked is not None or live["keep"].asked is not None
+        busy = live["task"] is not None or live["preview"].asked is not None or live["keep"].asked is not None
         return TICK if busy else None
     except Exception as exc:  # a timer has nobody above it to report to
         live["error"] = str(exc)[:100]
@@ -205,23 +208,53 @@ def clear() -> None:
     view.seg.update(live=None, live_count=None, batch_key=None)
 
 
-@bpy.app.handlers.persistent
-def _on_depsgraph(scene, depsgraph) -> None:
-    """A stroke in Weight Paint on the mesh with Paint Size on: preview the new sizes after the stroke."""
+def _painting():
+    """Your mesh, when it is in Weight Paint with Paint Size on and segments to preview; else None."""
+    source = view._g().state_source()
+    if source is None or source.mode != "WEIGHT_PAINT" or not source.curiomesh_seg.size_paint or view.seg.get("src") is None:
+        return None
+    return source
+
+
+def _paint_sig(source) -> float | None:
+    """A sum over a sample of the Paint Size weights, weighted by corner: a stroke changes it."""
+    group = source.vertex_groups.get(SIZE_GROUP)
+    if group is None:
+        return None
+    verts, index, total = source.data.vertices, group.index, 0.0
+    for i in range(0, len(verts), max(1, len(verts) // PAINT_SAMPLES)):
+        for g in verts[i].groups:
+            if g.group == index:
+                total += (i + 1) * g.weight
+    return total
+
+
+def _paint_tick():
+    """While you paint: a changed sample asks for a preview. Ends when you leave Weight Paint."""
     try:
-        source = view._g().state_source()
-        if source is None or source.mode != "WEIGHT_PAINT" or not source.curiomesh_seg.size_paint or view.seg.get("src") is None:
-            return
-        mesh = source.data
-        for update in depsgraph.updates:
-            if update.id.original in (source, mesh):
-                request(paint=True)
-                return
+        source = _painting()
+        if source is None:
+            live["paint_sig"] = None
+            return None
+        sig = _paint_sig(source)
+        if live["paint_sig"] is not None and sig != live["paint_sig"]:
+            request(paint=True)
+        live["paint_sig"] = sig
+        return PAINT_POLL
+    except (ReferenceError, AttributeError):
+        live["paint_sig"] = None
+        return None
+
+
+def _watch() -> None:
+    """From the viewport's redraw: start watching the paint once your mesh is in Weight Paint."""
+    try:
+        if not bpy.app.timers.is_registered(_paint_tick) and _painting() is not None:
+            bpy.app.timers.register(_paint_tick, first_interval=PAINT_POLL)
     except (ReferenceError, AttributeError):
         pass
 
 
-@bpy.app.handlers.persistent
 def _on_undo(*_args) -> None:
     """Undo and Redo bring back the segments saved on the mesh at that step."""
     try:
@@ -269,7 +302,7 @@ def draw(layout, source) -> None:
     st = source.curiomesh_seg
     col = layout.column(align=True)
     count = view.seg.get("live_count") if view.seg.get("live") is not None else len(view.seg["parts"])
-    busy = live["thread"] is not None or live["preview"].asked is not None or live["keep"].asked is not None
+    busy = live["task"] is not None or live["preview"].asked is not None or live["keep"].asked is not None
     text = f"{count:,} parts" + (f"  ({live['ms']:.0f} ms)" if live["ms"] is not None and view.seg.get("live") is not None else "") + ("  ..." if busy else "")
     col.label(text=text, icon="MESH_GRID")
     col.prop(st, "detail", slider=True)
@@ -290,17 +323,25 @@ CLASSES = (CURIOMESH_OT_seg_paint_size,)
 
 def register() -> None:
     bpy.types.Object.curiomesh_seg = bpy.props.PointerProperty(type=CURIOMESH_PG_segsettings)
-    bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
-    bpy.app.handlers.undo_post.append(_on_undo)
-    bpy.app.handlers.redo_post.append(_on_undo)
+    overlay.add_geometry_hook(_watch)
+    add_handlers()
+
+
+def add_handlers() -> None:
+    """Undo and Redo handlers. Not kept over a file load by Blender: the add-on's load handler puts them back."""
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _on_undo not in handlers:
+            handlers.append(_on_undo)
 
 
 def unregister() -> None:
-    for handlers, fn in ((bpy.app.handlers.depsgraph_update_post, _on_depsgraph), (bpy.app.handlers.undo_post, _on_undo), (bpy.app.handlers.redo_post, _on_undo)):
+    overlay.remove_geometry_hook(_watch)
+    for handlers, fn in ((bpy.app.handlers.undo_post, _on_undo), (bpy.app.handlers.redo_post, _on_undo)):
         if fn in handlers:
             handlers.remove(fn)
-    if bpy.app.timers.is_registered(_tick):
-        bpy.app.timers.unregister(_tick)
-    live.update(thread=None, box=None, ms=None, count=None, paint=None)
+    for timer in (_tick, _paint_tick):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
+    live.update(task=None, paint_sig=None, box=None, ms=None, count=None, paint=None)
     if hasattr(bpy.types.Object, "curiomesh_seg"):
         del bpy.types.Object.curiomesh_seg

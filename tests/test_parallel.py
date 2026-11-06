@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
+import os
 import sys
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -17,10 +20,9 @@ BIG = {"cores": 24, "ram_gb": 64.0, "free_gb": 40.0}
 # A stand-in helper: plain Python, same protocol. Part 3 fails, part 5 kills the helper, the rest are measured.
 FAKE = r"""
 import sys, time
-sys.path.insert(0, sys.argv[1])
 import parallel
 from pathlib import Path
-folder = Path(sys.argv[2])
+folder = Path(sys.argv[1])
 for line in sys.stdin:
     name, kind, part, spent = line.split()
     part = int(part)
@@ -28,7 +30,7 @@ for line in sys.stdin:
         raise SystemExit(1)
     time.sleep(0.05 * (part % 3))  # finish out of order
     result = {"error": "no"} if part == 3 else {"sizes": [part], "levels": [], "ready": [], "seen": float(spent), "looks": 1, "field": 0.5, "notes": [f"n{part}"], "case": None, "timings": {"pictures": 1.0}, "peak_mb": 10.0 + part}
-    parallel._write(folder / f"{name}.pkl", result)
+    parallel._write(folder / f"{name}.npz", result)
 """
 
 
@@ -56,7 +58,8 @@ class WorkerCountTests(unittest.TestCase):
 class PoolTests(unittest.TestCase):
     def test_parts_come_back_out_of_order_failures_are_reported_and_close_kills_every_helper(self):
         code = Path(__file__).resolve().parents[1]
-        pool = parallel.Pool([sys.executable, "-c", FAKE, str(code)], 2, {"anything": 1})
+        env = dict(os.environ, PYTHONPATH=str(code))  # how real helpers find the add-on too: no sys.path edits
+        pool = parallel.Pool([sys.executable, "-c", FAKE], 2, {"anything": 1}, env)
         try:
             todo, got = [0, 1, 2, 3, 4, 5, 6], {}
             ends = time.perf_counter() + 30.0
@@ -85,17 +88,44 @@ class PoolTests(unittest.TestCase):
         self.assertTrue(all(p.poll() is not None for p in procs))
         self.assertFalse(folder.exists())
 
-    def test_a_file_naming_other_code_is_refused(self):
-        import pickle
+    def test_files_round_trip_exactly_and_other_code_is_refused(self):
         import tempfile
 
+        from triadq.budget import Level
+        from triadq.types import FlatFaces
+
+        faces = FlatFaces(np.array([0, 3, 7]), np.arange(7))
+        value = {
+            "co": np.arange(6.0).reshape(2, 3), "n": np.int32(3), "f": np.float64(0.5), 2: "two", "t": (1, [2.0, None], "x"),
+            "s": {1, 2}, "fs": frozenset({"a"}), "faces": faces, "levels": [Level(4, 0.25)], "cfg": hardware.EFFORTS["LIGHT"],
+            "nan": float("nan"), "ok": True,
+        }
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "x.pkl"
-            with open(path, "wb") as handle:
-                pickle.dump("somepackage", handle)
-                pickle.dump(SimpleNamespace(a=1), handle)  # types.SimpleNamespace: not NumPy and not the add-on's
-            with self.assertRaises(pickle.UnpicklingError):
+            path = Path(tmp) / "x.npz"
+            parallel._write(path, value)
+            back = parallel._read(path)
+            self.assertEqual(list(Path(tmp).iterdir()), [path])  # no temporary left
+            self.assertTrue(np.array_equal(back["co"], value["co"]))
+            self.assertIs(type(back["n"]), np.int32)
+            self.assertIs(type(back["f"]), np.float64)
+            self.assertEqual((back[2], back["t"], back["s"], back["fs"], back["levels"], back["cfg"], back["ok"]), ("two", (1, [2.0, None], "x"), {1, 2}, frozenset({"a"}), [Level(4, 0.25)], hardware.EFFORTS["LIGHT"], True))
+            self.assertIsInstance(back["faces"], FlatFaces)
+            self.assertEqual(list(back["faces"]), list(faces))
+            self.assertTrue(np.isnan(back["nan"]))
+            with self.assertRaises(TypeError):
+                parallel._write(path, SimpleNamespace(a=1))  # not NumPy, not plain Python, not the add-on's
+            np.savez(path, tree=np.asarray('{"$c": "SimpleNamespace", "f": {}}'))
+            with self.assertRaises(ValueError):
                 parallel._read(path)
+
+    def test_helper_command_runs_blender_with_the_addon_on_its_path(self):
+        command, env = parallel.helper_command("rows_worker.main", ["folder", "0", "3"], binary="blender")
+        code = Path(__file__).resolve().parents[1]
+        self.assertEqual(command[:5], ["blender", "--background", "--factory-startup", "--python-use-system-env", "--python-expr"])
+        self.assertIn(f"importlib.import_module('{code.name}.rows_worker').main(sys.argv)", command[5])
+        self.assertEqual(command[6:], ["--", "folder", "0", "3"])
+        self.assertEqual((env["PYTHONPATH"], env["PYTHONNOUSERSITE"]), (str(code.parent), "1"))
+        self.assertNotIn("PYTHONHOME", env)
 
 
 class MergeTests(unittest.TestCase):

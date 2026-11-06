@@ -16,7 +16,6 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-import subprocess
 import sys
 import tempfile
 import time
@@ -59,8 +58,11 @@ EFFORTS = {
 # --------------------------------------------------------------------------- the machine
 
 
+GUESS_RAM_GB = 16.0  # when the memory can't be read, a modest guess
+
+
 def _memory() -> tuple[float | None, float | None]:
-    """(total GB, free GB) of RAM, or None where it can't be read."""
+    """(total GB, free GB) of RAM; a guess of `GUESS_RAM_GB`, half of it free, where it can't be read."""
     try:
         if sys.platform == "win32":
             import ctypes
@@ -70,8 +72,8 @@ def _memory() -> tuple[float | None, float | None]:
 
             status = Status()
             status.length = ctypes.sizeof(status)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-            return status.total / 2**30, status.free / 2**30
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return status.total / 2**30, status.free / 2**30
         if sys.platform.startswith("linux"):
             info = {}
             for line in Path("/proc/meminfo").read_text().splitlines():
@@ -79,40 +81,20 @@ def _memory() -> tuple[float | None, float | None]:
                 info[key] = float(rest.split()[0]) / 2**20  # kB -> GB
             return info["MemTotal"], info.get("MemAvailable", info["MemFree"])
         if sys.platform == "darwin":
-            total = float(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=3).stdout) / 2**30
+            total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 2**30
             return total, total * 0.5  # no cheap exact figure: assume half is free
-    except Exception:
-        pass
-    return None, None
-
-
-def _on_path(name: str) -> str | None:
-    """`name` from the absolute folders on PATH only, never the current folder.
-
-    shutil.which on Python 3.11 and older (Blender 3.6 - 4.x) looks in the current folder first on Windows, and that
-    can be the folder of a .blend somebody sent, so a planted nvidia-smi.exe there would run. Only .exe on Windows.
-    """
-    suffix = ".exe" if sys.platform == "win32" else ""
-    for folder in os.environ.get("PATH", "").split(os.pathsep):
-        folder = folder.strip().strip('"')
-        if not folder or not os.path.isabs(folder):
-            continue
-        candidate = os.path.join(folder, name + suffix)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    except (OSError, ValueError, KeyError, IndexError):
+        return None, None
+    return GUESS_RAM_GB, GUESS_RAM_GB * 0.5
 
 
 def _gpu() -> dict:
-    """The NVIDIA card as nvidia-smi sees it. Empty when there is none or the tool is missing."""
-    exe = _on_path("nvidia-smi")
-    if exe is None:
-        return {}
+    """The graphics card Blender draws with (its own gpu module). Empty outside Blender or in background mode."""
     try:
-        out = subprocess.run([exe, "--query-gpu=name,memory.total,memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=4).stdout
-        name, total, used = [x.strip() for x in out.strip().splitlines()[0].split(",")]
-        return {"gpu": name, "vram_gb": float(total) / 1024.0, "vram_free_gb": (float(total) - float(used)) / 1024.0, "cuda": True}
-    except Exception:
+        import gpu
+
+        return {"gpu": gpu.platform.renderer_get().strip(), "gpu_vendor": gpu.platform.vendor_get().strip()}
+    except Exception:  # no bpy (tests), or no drawing context (background mode)
         return {}
 
 
@@ -132,6 +114,8 @@ def detect() -> dict:
     """Read the computer. Never raises; unknown things are left out."""
     total, free = _memory()
     machine = {"os": {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, "Linux" if sys.platform.startswith("linux") else sys.platform), "cores": os.cpu_count() or 1, "ram_gb": total, "free_gb": free}
+    if total == GUESS_RAM_GB and free == GUESS_RAM_GB * 0.5:
+        machine["ram_guessed"] = True
     machine.update(_gpu())
     machine["cycles"] = _cycles_devices()
     return machine
@@ -140,12 +124,14 @@ def detect() -> dict:
 def describe(machine: dict, turbo: str = "") -> list[str]:
     """The machine in plain words, one short line each."""
     lines = [f"{machine['os']}, {machine['cores']} cores"]
-    if machine.get("ram_gb"):
+    if machine.get("ram_guessed"):
+        lines.append(f"Memory: not read on Windows, assumed {machine['ram_gb']:.0f} GB")
+    elif machine.get("ram_gb"):
         lines.append(f"Memory: {machine['ram_gb']:.0f} GB, {machine['free_gb']:.0f} GB free")
-    if machine.get("gpu"):
-        lines.append(f"Graphics: {machine['gpu']}, {machine['vram_gb']:.0f} GB, CUDA available")
-    elif machine.get("cycles"):
+    if machine.get("cycles"):
         lines.append("Graphics: " + ", ".join(machine["cycles"][:2]))
+    elif machine.get("gpu"):
+        lines.append(f"Graphics: {machine['gpu']}")
     else:
         lines.append("Graphics: no supported card found")
     if machine.get("picture_card"):
@@ -410,7 +396,7 @@ def weak_pc(machine: dict | None) -> str:
         small.append(f"{machine['cores']} cores")
     if (machine.get("ram_gb") or 99) <= 8:
         small.append(f"{machine['ram_gb']:.0f} GB of memory")
-    card = bool(machine.get("gpu") or machine.get("cycles"))
+    card = bool(machine.get("cycles"))
     if not small and card:
         return ""
     why = ", ".join(small) if small else "no graphics card Cycles can use, so bakes run on the processor"
@@ -510,17 +496,33 @@ def _private_dir(folder: Path) -> bool:
         return False
 
 
+def user_folder(sub: str = "") -> Path | None:
+    """The add-on's own folder for files it keeps (Blender's extension user folder), None outside Blender.
+
+    The legacy add-on (Blender before 4.2) has no such folder and uses curiomesh/ in Blender's config folder.
+    """
+    package = __package__ or ""
+    try:
+        import bpy
+
+        try:
+            return Path(bpy.utils.extension_path_user(package, path=sub, create=True))
+        except (AttributeError, ValueError):  # Blender before 4.2, or loaded as a legacy add-on
+            folder = Path(bpy.utils.user_resource("CONFIG", path="curiomesh"), sub)
+            folder.mkdir(parents=True, exist_ok=True)
+            return folder
+    except Exception:  # no bpy (tests), or the folder can't be made
+        return None
+
+
 def checkpoint_dir(co: np.ndarray, face_count: int, root: str | None = None) -> Path | None:
     """The folder that holds the saved parts of the job on this very mesh: private to this user, or None if none is safe."""
     if root:
         base = Path(root)
     else:
-        try:
-            import bpy
-
-            base = Path(bpy.utils.user_resource("CONFIG"))
-        except Exception:
-            base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache")
+        base = user_folder()
+        if base is None:
+            return None
     digest = hashlib.sha1(np.ascontiguousarray(co).tobytes() + str(face_count).encode()).hexdigest()[:16]
     folder = base / "curiomesh_resume"
     if not (_private_dir(folder) and _private_dir(folder / digest)):

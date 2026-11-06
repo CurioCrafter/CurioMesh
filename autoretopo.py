@@ -22,7 +22,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -32,6 +31,7 @@ from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
+from .triadq import tasks
 from .triadq import bakescore, cases, checks, detail, issues, parts, patch, patterns, redo, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
@@ -778,7 +778,6 @@ class AutoJob:
         self.started = time.perf_counter()
         self.shown_at = 0.0
         self._stopped = False
-        self._pair_thread: threading.Thread | None = None
         self._runs: dict = {}  # huge piece -> its native reduction, which holds every size of it
         self._paired = None
         self._labels = None
@@ -867,8 +866,6 @@ class AutoJob:
         ends = None if timeout is None else time.perf_counter() + timeout
         while self.busy and (ends is None or time.perf_counter() < ends):
             self.step(1.0)
-            if self._pair_thread is not None and self._pair_thread.is_alive():
-                self._pair_thread.join(0.05)
         return not self.busy
 
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
@@ -1236,8 +1233,8 @@ class AutoJob:
         if not count:
             return
         threads = max(machine["cores"] // (count + 1), 1)  # the native steps of all helpers together use the cores once
-        env = dict(os.environ, RAYON_NUM_THREADS=str(threads), OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
-        command = [bpy.app.binary_path, "--background", "--factory-startup", "--python", os.path.join(os.path.dirname(__file__), "parts_worker.py"), "--"]
+        command, env = parallel.helper_command("parallel.worker_main", [])
+        env.update(RAYON_NUM_THREADS=str(threads), OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")  # the child's only
         setup = yield from self._off(lambda: parallel.setup_of(self))
         self._pool = parallel.Pool(command, count, setup, env)
         self._copy_plan = {}
@@ -1650,23 +1647,7 @@ class AutoJob:
 
     def _background(self, work):
         """Generator: run this on a worker thread, so a very large mesh can't hold up Blender. Returns its result."""
-        out, failed = [], []
-
-        def run():
-            try:
-                out.append(work())
-            except BaseException as exc:  # handed to the job on the main thread, which reports it
-                failed.append(exc)
-
-        thread = threading.Thread(target=run, daemon=True, name="CurioMeshReduce")
-        thread.start()
-        while thread.is_alive():
-            thread.join(0.02)
-            self._feed()
-            yield
-        if failed:
-            raise failed[0]
-        return out[0]
+        return (yield from tasks.run(work, "CurioMeshReduce", tick=self._feed))
 
     def _off(self, work):
         """Generator: `work()`, on a worker thread when this job is big enough for it to hold up Blender. Returns its result."""
@@ -1876,14 +1857,8 @@ class AutoJob:
                 self.notes.append(f"{method.title()} did not work on a part ({str(exc)[:60]}): Auto was used there")
                 method = "AUTO"
         self._paired = None
-        self._pair_thread = threading.Thread(target=self._pair, args=(co, faces, kinds, method), daemon=True, name="CurioMeshPair")
-        self._pair_thread.start()
-        while self._pair_thread.is_alive():
-            if self._stopped:
-                return None
-            self._pair_thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the pairing thread (shared GIL)
-            yield
-        return self._paired
+        yield from tasks.run(lambda: self._pair(co, faces, kinds, method), "CurioMeshPair", stopped=lambda: self._stopped)
+        return None if self._stopped else self._paired
 
     def _method(self, piece: int) -> str:
         return self.methods.get(piece, self.method)
@@ -2258,8 +2233,9 @@ class AutoJob:
                 yield
             at = 0
             while at < len(jobs):
+                command, env = parallel.helper_command("rows_worker.main", [folder, str(jobs[at]), str(jobs[-1] + 1)])
                 self._worker = subprocess.Popen(
-                    [bpy.app.binary_path, "--background", "--factory-startup", "--python", os.path.join(os.path.dirname(__file__), "rows_worker.py"), "--", folder, str(jobs[at]), str(jobs[-1] + 1)],
+                    command, env=env,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 since = time.perf_counter()
@@ -2445,21 +2421,11 @@ class AutoJob:
     def _in_thread(self, work):
         """Generator: run plain NumPy work on a worker thread, so the timer's slices stay short. Returns its result, or None if it failed."""
 
-        box = []
-
-        def run():
-            try:
-                box.append(work())
-            except Exception as exc:  # a thread has nobody above it to report to
-                self.warnings = [f"Clean Rows: {exc}"]
-
-        thread = threading.Thread(target=run, daemon=True, name="CurioMeshRows")
-        thread.start()
-        while thread.is_alive():
-            if self._stopped:
-                return None
-            yield
-        return box[0] if box else None
+        try:
+            return (yield from tasks.run(work, "CurioMeshRows", stopped=lambda: self._stopped))
+        except Exception as exc:
+            self.warnings = [f"Clean Rows: {exc}"]
+            return None
 
     def _drop_hidden_pieces(self):
         """Generator: leave out the loose pieces no camera outside can see. A piece with a big share of the faces always stays."""
@@ -2710,13 +2676,9 @@ class AutoJob:
         for level in POLISH_LEVELS if self.tidy and self.output_kind != "TRIS" else ():  # an option: it is slow and the loss goes up a little
             self.stage = "Tidying the quads..."
             self._paired = None
-            self._pair_thread = threading.Thread(target=self._polish, args=(points, out_faces, materials, level), daemon=True, name="CurioMeshPolish")
-            self._pair_thread.start()
-            while self._pair_thread.is_alive():
-                if self._stopped:
-                    return
-                self._pair_thread.join(0.02)  # this is many small Python steps: give it the interpreter
-                yield
+            yield from tasks.run(lambda: self._polish(points, out_faces, materials, level), "CurioMeshPolish", stopped=lambda: self._stopped)
+            if self._stopped:
+                return
             if self._paired is None:
                 continue
             tidied = self._paired
@@ -2733,13 +2695,9 @@ class AutoJob:
             self.instances = None
         self.stage = "Scoring the quads"
         if any(len(face) == 4 for face in out_faces):
-            self._pair_thread = threading.Thread(target=self._score, args=(points, out_faces), daemon=True, name="CurioMeshScore")
-            self._pair_thread.start()
-            while self._pair_thread.is_alive():
-                if self._stopped:
-                    return
-                self._pair_thread.join(0.02)
-                yield
+            yield from tasks.run(lambda: self._score(points, out_faces), "CurioMeshScore", stopped=lambda: self._stopped)
+            if self._stopped:
+                return
         def last_look():
             out_fa, out_fb = patch.face_adjacency(out_faces)
             self._show((points, out_faces, materials, np.unique(patch._labels(len(out_faces), out_fa, out_fb), return_inverse=True)[1]))

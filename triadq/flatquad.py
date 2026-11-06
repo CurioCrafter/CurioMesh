@@ -18,7 +18,6 @@ The result is a conforming coarse mesh that TRIAD-Q pairs and closes as usual.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 import math
 
@@ -28,6 +27,7 @@ from .engine import RemeshOptions, RemeshReport, remesh_mesh
 from .quadreduce import collapse_loose_triangles, join_loose_triangles
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
 from .topology import MAX_QUAD_WARP_DEGREES, _turbo, parity_path_closure_unpairing, quad_only_closure, topology_summary
+from . import tasks
 from .types import FlatFaces, MeshData, cancel_with, check_cancelled
 
 
@@ -778,10 +778,9 @@ def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[Me
 
     workers = min(_turbo.thread_count() if _turbo is not None else 1, PAIR_WORKERS)
     parts = []
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="CurioMeshPair") as pool:
-        for done in pool.map(one, regions):
-            parts.append(done)
-            check_cancelled()
+    for done in tasks.each(one, regions, workers):
+        parts.append(done)
+        check_cancelled()
     counts = np.concatenate([part[0] for part in parts]).astype(np.int64)
     indptr = np.zeros(len(counts) + 1, dtype=np.int64)
     np.cumsum(counts, out=indptr[1:])

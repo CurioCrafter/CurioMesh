@@ -12,7 +12,7 @@ from .io import read_obj, write_obj
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="TRIAD-Q Lite standalone remesher")
+    parser = argparse.ArgumentParser(description="TRIAD-Q standalone remesher")
     parser.add_argument("input", type=Path, help="Input OBJ file")
     parser.add_argument("output", type=Path, help="Output OBJ file")
     parser.add_argument("--target-faces", type=int, default=4000)

@@ -18,7 +18,6 @@ Animation segment is ranked by its topology score, since that is what it is for.
 from __future__ import annotations
 
 import json
-import threading
 import time
 
 import bpy
@@ -28,7 +27,7 @@ from mathutils import Vector
 from . import autoretopo, guides, loops, overlay, parallel, region
 from . import segments as view
 from .triadq import parts as P
-from .triadq import patch
+from .triadq import patch, tasks
 from .triadq import segment as S
 from .triadq.flatquad import flat_quad_remesh
 from .triadq.types import MeshData
@@ -473,13 +472,9 @@ class FindJob(view.PartJob):
             except Exception as exc:  # a thread has nobody above it to report to
                 box["error"] = str(exc)[:100]
 
-        thread = threading.Thread(target=work, daemon=True, name="CurioMeshSegments")
-        thread.start()
-        while thread.is_alive():
-            if self._stopped:
-                return
-            thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
-            yield
+        yield from tasks.run(work, "CurioMeshSegments", stopped=lambda: self._stopped)
+        if self._stopped:
+            return
         if "tree" in box:
             view.seg.update(tree=box["tree"], tree_job=job)
         if "labels" not in box:
@@ -552,11 +547,7 @@ class GoalJob(view.PartJob):
             except Exception as exc:  # a thread has nobody above it to report to
                 box["error"] = str(exc)[:100]
 
-        thread = threading.Thread(target=work, daemon=True, name="CurioMeshSegment")
-        thread.start()
-        while thread.is_alive():
-            thread.join(0.02)  # sleep instead of spinning: a busy main thread slows the worker (shared GIL)
-            yield
+        yield from tasks.run(work, "CurioMeshSegment")
         if "out" not in box and box.get("error") != "cancelled":
             self.warnings = [box.get("error", "no result")]
         return box.get("out")
@@ -1723,7 +1714,7 @@ def _outlines(res, piece):
                 seg["outline"] = (u[across], v[across], piece[fa[across]], piece[fb[across]])
                 overlay.tag_redraw()
 
-        threading.Thread(target=work, daemon=True, name="CurioMeshOutlines").start()
+        tasks.start(work, "CurioMeshOutlines")
     return seg["outline"]
 
 
