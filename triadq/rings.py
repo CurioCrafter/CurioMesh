@@ -25,7 +25,7 @@ import math
 import numpy as np
 
 from .patch import boundary_loops, coons_grid, face_adjacency, mask_components
-from .rowfill import untangle
+from .rowfill import folded, untangle
 
 BAND = 2.5  # quad widths round the rim whose faces are redone, by default (the user drags this)
 FANS = 6  # most corner quads (poles) in the band: past this the rings get more quads instead
@@ -486,6 +486,13 @@ def build(co, faces, centre, normal, right, rx: float, ry: float, band: float = 
     out_faces = [faces[f] for f in kept.tolist()] + new_faces
     fresh = np.arange(len(co) + len(points)) >= base
     every = untangle(np.vstack((co, points)), out_faces, fresh, project)
+    still = np.flatnonzero(folded(every, out_faces))
+    if len(still):  # still folded: the rim points of those faces may move too (never so a face round turns bad)
+        rim_free = np.zeros(len(every), dtype=bool)
+        rim_free[np.intersect1d(np.asarray(loop, dtype=np.int64), [v for i in still.tolist() for v in out_faces[i]])] = True
+        tried = untangle(every, out_faces, rim_free | fresh, project)
+        if folded(tried, out_faces).sum() < len(still):  # kept only where it opens a fold out
+            every = tried
     used = np.zeros(len(every), dtype=bool)
     for f in out_faces:
         used[list(f)] = True

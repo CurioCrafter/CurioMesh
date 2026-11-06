@@ -57,7 +57,7 @@ class RingsTest(unittest.TestCase):
     def test_faces_past_the_band_stay(self):
         co, faces = self.sheet()
         out = RG.build(co, faces, (12, 12, 0.8), (0, 0, 1), (1, 0, 0), 2.0, 1.2, band=1.5)
-        reach = 2.0 + 1.5 * out["size"] + 1.5
+        reach = 2.0 + 2.5 * out["size"] + 1.5  # a quad more: a rim point may move to open a fold beside it
         far = [f for f in faces if np.hypot(*(co[list(f)].mean(axis=0)[:2] - 12)) > reach]
         kept = {tuple(np.round(out["co"][list(f)], 9).ravel()) for f in out["faces"]}
         self.assertTrue(all(tuple(np.round(co[list(f)], 9).ravel()) in kept for f in far))
