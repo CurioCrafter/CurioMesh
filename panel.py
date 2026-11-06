@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 from . import guided as G
-from . import hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
+from . import flowedit, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry
 from . import verdict as V
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
@@ -359,10 +359,11 @@ def draw_shape_flow(layout, context, gs) -> None:
     obj = G._source_mesh(context)
     col = layout.column(align=True)
     col.enabled = G.progress_info("AUTO") is None
-    if hasattr(bpy.types, FLOW_EDITOR_OP[0]):
+    if hasattr(bpy.types, FLOW_EDITOR_OP[0]) and getattr(overlay.get_prefs(), "flow_editor", False):  # experimental for 0.9.8
         row = col.row()
         row.scale_y = 1.4
         row.operator(FLOW_EDITOR_OP[1], text="Draw on the mesh", **icons.kw("tool_pen", "GREASEPENCIL"))
+        flowedit.draw_tools(col, gs)
         col.separator()
     if G.REGION_READY:
         col.prop(gs, "region_use", text="Selected Faces Only", toggle=True, icon="FACESEL")

@@ -29,7 +29,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
+from . import autoretopo, blockout, flowedit, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -402,6 +402,9 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     organize_cap_use: bpy.props.BoolProperty(name="Most Detail Loss", description="Stops Tidy Up before the look changes by more than the amount next to it", default=False, update=organize.on_cap)
     organize_cap: bpy.props.FloatProperty(name="Most Detail Loss", description="How much more of the look Tidy Up may change, in percent, on top of the result as it was", default=1.0, min=0.1, max=20.0, precision=1, subtype="NONE", update=organize.on_cap)
     organize_flow: bpy.props.BoolProperty(name="Loop Flow", description="Draws each edge loop of the result in its own colour, and its poles (points where 3 or 5+ edges meet) as dots", default=False, update=_redraw_update)
+    flow_live: bpy.props.BoolProperty(name="Live", description="Flow Editor: redo the quads around each stroke as soon as you draw, move or erase it. Off: strokes are only kept for the next Start", default=True)
+    flow_size: bpy.props.FloatProperty(name="Shape Size", description="Flow Editor: how wide a clicked eye ring, mouth ring or nose-to-mouth shape is. 0 picks a size from your mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
+    flow_pair: bpy.props.BoolProperty(name="Both Sides", description="Flow Editor: a clicked eye ring also goes on the other side, mirrored across the middle of your mesh (always on when the result is mirrored)", default=True)
     bool_detail: bpy.props.FloatProperty(name="Organized / Detailed", description="Inside the shapes: left makes fewer, bigger, tidier quads; the middle keeps the quad size; right makes smaller quads with more detail", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_redraw_update)
     show_cage: bpy.props.BoolProperty(name="Show Cage", description="Classic Guided: draws each point's reach and the outline of the area it covers", default=True, update=_redraw_update)
     blockout_sides: bpy.props.IntProperty(name="Primitive Sides", description="How many sides each cylinder and ball has (small parts get half). More sides look rounder and cost faces", default=12, min=4, max=32, step=2)
@@ -3460,6 +3463,27 @@ class CURIOMESH_OT_guided_remove_guide(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def new_curve(context, source, kind: str, points, normals=None, name: str | None = None):
+    """A curve object of a stroke laid on `source` (points in its own space, lifted a hair along `normals` so it shows)."""
+    matrix = source.matrix_world
+    lift = 0.002 * max(max(source.dimensions), 1e-6)
+    name = name or {"GUIDE": "CM_Guide", "LOOP": "CM_Loop", "BEND": "CM_Bend"}[kind]
+    curve = bpy.data.curves.new(name, "CURVE")
+    curve.dimensions = "3D"
+    spline = curve.splines.new("POLY")
+    spline.points.add(len(points) - 1)
+    for k, p in enumerate(spline.points):
+        co = np.asarray(points[k], dtype=np.float64)
+        if normals is not None:
+            co = co + np.asarray(normals[k], dtype=np.float64) * lift
+        w = matrix @ Vector(co)
+        p.co = (w.x, w.y, w.z, 1.0)
+    obj = bpy.data.objects.new(name, curve)
+    obj.show_in_front = True
+    (context.collection or context.scene.collection).objects.link(obj)
+    return obj
+
+
 class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
     bl_idname = "curiomesh.guided_draw_guide"
     bl_label = "Draw Guide"
@@ -3490,19 +3514,7 @@ class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
         if points is None or len(points) < 2:
             return
         gs = _gs(context)
-        matrix = self.obj.matrix_world
-        lift = 0.002 * max(max(self.obj.dimensions), 1e-6)  # a hair above the surface, so it shows
-        name = {"GUIDE": "CM_Guide", "LOOP": "CM_Loop", "BEND": "CM_Bend"}[self.kind]
-        curve = bpy.data.curves.new(name, "CURVE")
-        curve.dimensions = "3D"
-        spline = curve.splines.new("POLY")
-        spline.points.add(len(points) - 1)
-        for p, (co, nrm) in zip(spline.points, points):
-            w = matrix @ Vector(co + nrm * lift)
-            p.co = (w.x, w.y, w.z, 1.0)
-        obj = bpy.data.objects.new(name, curve)
-        obj.show_in_front = True
-        (context.collection or context.scene.collection).objects.link(obj)
+        obj = new_curve(context, self.obj, self.kind, [co for co, _n in points], [n for _c, n in points])
         if self.replace and 0 <= gs.guide_index < len(gs.guide_curves):
             item = gs.guide_curves[gs.guide_index]
             old = item.obj
@@ -3913,6 +3925,7 @@ def _on_load_post(*_args):
     stop_work()
     ladder.cancel()
     segments.reset()
+    flowedit.cancel()
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None, curve_sig=None, region=None, found=[])
     for sc in bpy.data.scenes:
         gs = getattr(sc, "curiomesh_guided", None)
@@ -3921,7 +3934,7 @@ def _on_load_post(*_args):
 
 
 def register() -> None:
-    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES):
+    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes()):
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_guided = bpy.props.PointerProperty(type=CURIOMESH_PG_guided)
     bpy.types.Object.curiomesh_points = bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_point)
@@ -3929,6 +3942,7 @@ def register() -> None:
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_VIEW"))
     segments.register()
     organize.register()
+    flowedit.register()
     bpy.app.handlers.load_post.append(_on_load_post)
 
 
@@ -3940,6 +3954,7 @@ def unregister() -> None:
             pass
     segments.unregister()
     organize.unregister()
+    flowedit.unregister()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     for timer in (_poll, _auto_slice):
@@ -3956,5 +3971,5 @@ def unregister() -> None:
     for owner, name in ((bpy.types.Scene, "curiomesh_guided"), (bpy.types.Object, "curiomesh_points"), (bpy.types.Object, "curiomesh_point_index")):
         if hasattr(owner, name):
             delattr(owner, name)
-    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES)):
+    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes())):
         bpy.utils.unregister_class(cls)

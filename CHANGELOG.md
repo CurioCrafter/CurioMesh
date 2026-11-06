@@ -52,6 +52,27 @@
   Symmetrize) and barrier and by 4 on the compressor; poles down by a third on the organic ones; 4 to 13% fewer faces;
   the view changed by 0.8 to 1.4 points more; Issue Finder totals down on all five, though 7 to 80 bent quads appear
   where there were almost none.
+- **Loop Quality**: a 0-100 score of the edge loops the way an artist reads them (straight rows, no zig-zags, evenly
+  stacked loops, even quad widths, square corners, few and spread-out poles, few loops that die after a few quads),
+  shown in the Tidy Up line: "Loop Quality 16 -> 32 (straight 0 -> 17, even spacing 39 -> 56)" on the bust.
+- **Straighter rows at the top of the slider**: 0.5 now settles the quads fully and 0.75 and 1 straighten the loops
+  (each corner moves onto the smooth curve through its loop and to the middle of its neighbours along it, held on
+  your mesh, with the same guards). Drawn guide curves and edge loops stay where they are. Honest limit: on the bust
+  this adds only about 3 Loop Quality points over the settle; with about a third of the corners being poles the loops
+  are three or four quads long, so the rows cannot get much straighter without fewer poles.
+
+### Flow Editor (experimental, off by default)
+- Turn on **Flow Editor (Experimental)** in the add-on preferences and **Draw on the mesh** appears under Shape the
+  flow. Draw on a finished result and the quads around the stroke are redone on their seams; the rest stays as it is.
+- **Draw** recognises what you drew: a closed loop becomes a **Ring** (a clean closed edge loop with rows round it),
+  a line along a sharp crease an **Edge**, any other line a **Flow** line the rows follow. Change it with one click
+  (or F, R, E while drawing). On a test set of 57 drawn shapes (clean and shaky circles, ellipses, open arcs, loops
+  with a 5-15% gap, zig-zags, figure-eights, strokes along and across a crease) it was right on all 57.
+- **Flow**, **Ring** and **Edge** force a kind; **Place Circle** (drag to size, Shift for an ellipse); **Eye**,
+  **Mouth** and **Nose-Mouth** place those shapes where you click; **Erase** and **Erase All**. Strokes are curves in
+  the guide list, saved with the .blend and used by Start too; with a mirrored result they work on both sides.
+- Not yet measured inside Blender: on the bust outside Blender, a ring round the forehead redid 268 faces into 417 in
+  1.6 s with five closed loops round it, and a flow line redid 79 faces in 0.5 s, both with clean seams.
 
 ## 0.9.7 - 2026-11-05
 
