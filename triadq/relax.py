@@ -124,7 +124,8 @@ def square_pull(co: np.ndarray, quads: np.ndarray) -> tuple[np.ndarray, np.ndarr
 
 
 def outline_edges(co: np.ndarray, faces: list, views: int = 2) -> np.ndarray:
-    """Edges on the outline (one face toward the camera, the other away) in at least `views` of the camera's sides."""
+    """Edges on the outline (one face toward the camera, the other away) seen along at least `views` of the camera's
+    lines of sight (a side and its opposite are one line of sight)."""
     from .views import SIDES
 
     users: dict = {}
@@ -141,7 +142,10 @@ def outline_edges(co: np.ndarray, faces: list, views: int = 2) -> np.ndarray:
         normal[i] = np.cross(q, np.roll(q, -1, axis=0)).sum(axis=0)
     edges = np.asarray([e for e, _u in pairs], dtype=np.int64)
     f0, f1 = np.asarray([u[0] for _e, u in pairs]), np.asarray([u[1] for _e, u in pairs])
-    look = _unit(np.asarray(SIDES, dtype=np.float64))
+    look = np.asarray(SIDES, dtype=np.float64)
+    # a flip seen from one side is also seen from the opposite side: count each line of sight once
+    first = look[np.arange(len(look)), np.argmax(look != 0.0, axis=1)]
+    look = _unit(look[first > 0.0])
     count = ((normal[f0] @ look.T > 0.0) != (normal[f1] @ look.T > 0.0)).sum(axis=1)
     return edges[count >= views]
 

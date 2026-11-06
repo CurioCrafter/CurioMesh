@@ -168,6 +168,12 @@ class KeepLinesRelaxTest(unittest.TestCase):
         np.testing.assert_allclose(cand.co, same.co)
         self.assertEqual(cand.note, R.NO_LINES)
 
+    def test_outline_counts_each_line_of_sight_once(self):
+        co, faces = ball(8)
+        co = co / np.linalg.norm(co, axis=1, keepdims=True)
+        # a smooth ball: only where two outlines cross, not every edge any single view flips (264 of 768 before)
+        self.assertLess(len(R.outline_edges(co, faces)), 0.05 * len(T.edges_of(faces)))
+
     def test_part_borders(self):
         co, faces = grid(6)
         piece = np.array([0 if co[list(f)].mean(axis=0)[0] < 0 else 1 for f in faces])
