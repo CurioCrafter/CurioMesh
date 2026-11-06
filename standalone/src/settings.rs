@@ -43,13 +43,14 @@ pub struct Settings {
     pub pixels: usize,
     pub gpu: bool,
     pub rows: bool,
+    pub baked: bool, // judge as it will look with a normal map baked from the source (scans)
     pub mirror: Mirror,
     pub export: Target,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, mirror: Mirror::Off, export: Target::default() }
+        Settings { detail: 6.0, reduce_to: None, pixels: 192, gpu: true, rows: true, baked: false, mirror: Mirror::Off, export: Target::default() }
     }
 }
 
@@ -70,7 +71,7 @@ pub fn presets() -> Vec<Preset> {
     };
     vec![
         Preset { key: "game-asset", label: "Game Asset", words: "All quads, few faces, for a game model: up to 6% of the view may change. The default", settings: with(6.0, true, Mirror::Off, false) },
-        Preset { key: "scan", label: "Scan Cleanup", words: "Keeps more of the detail of a dirty scan: up to 2% of the view may change", settings: with(2.0, true, Mirror::Off, false) },
+        Preset { key: "scan", label: "Scan Cleanup", words: "Keeps more of the detail of a dirty scan, judged as it will look with its normal map baked: up to 2% of the view may change", settings: Settings { baked: true, ..with(2.0, true, Mirror::Off, false) } },
         Preset { key: "low-poly", label: "Low Poly", words: "Fewest faces for a prop or background, written as triangles: up to 10% may change. Small parts may vanish", settings: with(10.0, false, Mirror::Off, true) },
         Preset { key: "sculpt-base", label: "Sculpt Base", words: "Even quads to sculpt on, mirrored when the model is symmetric: up to 6% may change", settings: with(6.0, true, Mirror::Auto, false) },
         Preset { key: "animation", label: "Animation", words: "More, evener quads so the mesh bends cleanly, mirrored when symmetric: up to 1.5% may change. Check eyes, mouth and joints by hand", settings: with(1.5, true, Mirror::Auto, false) },
@@ -128,7 +129,7 @@ pub fn save_preset(name: &str, settings: &Settings) -> Result<PathBuf, String> {
 
 impl Settings {
     pub fn retopo(&self) -> retopo::Settings {
-        retopo::Settings { detail: self.detail, reduce_to: self.reduce_to, pixels: self.pixels, gpu: self.gpu, rows: self.rows }
+        retopo::Settings { detail: self.detail, reduce_to: self.reduce_to, pixels: self.pixels, gpu: self.gpu, rows: self.rows, baked: self.baked }
     }
 
     pub fn to_json(&self) -> Value {
@@ -139,6 +140,7 @@ impl Settings {
             "pixels": self.pixels,
             "gpu": self.gpu,
             "rows": self.rows,
+            "baked": self.baked,
             "mirror": self.mirror.word(),
             "export": self.export.to_json(),
         })
@@ -165,6 +167,7 @@ impl Settings {
                 "pixels" => self.pixels = (number(k, v)? as usize).clamp(16, 2048),
                 "gpu" => self.gpu = flag(k, v)?,
                 "rows" => self.rows = flag(k, v)?,
+                "baked" => self.baked = flag(k, v)?,
                 "mirror" => self.mirror = Mirror::parse(v.as_str().ok_or("settings: mirror must be off, auto, x, y or z")?)?,
                 "export" => self.export.apply(v.as_object().unwrap_or(&empty))?,
                 other => return Err(format!("settings: unknown key {other}")),
@@ -209,7 +212,7 @@ pub fn work_on(source: &Mesh, settings: &Settings, log: &mut dyn FnMut(&str)) ->
 pub fn finish(source: &Mesh, settings: &Settings, work: &Work, mut out: retopo::Outcome, log: &mut dyn FnMut(&str)) -> retopo::Outcome {
     if let Some(plane) = &work.plane {
         let (whole, seam) = mirror::mirror_result(&out.mesh, plane.axis, plane.offset, 1.0);
-        out.loss = retopo::measure(source, &whole, settings.pixels, settings.gpu);
+        out.loss = retopo::measure(source, &whole, settings.pixels, settings.gpu, settings.baked);
         out.looks += 1;
         log(&format!("  Mirrored: {} faces, {seam} corners on the seam, {:.2}% of the view changed", whole.faces(), out.loss));
         out.mesh = whole;

@@ -175,8 +175,9 @@ results here have 5-9% more faces.
 
 - The Blender add-on still does more: part-by-part sizing, guided edge loops, UVs, baking, repair, Redo Rough
   Spots and Tidy Up. The standalone writes OBJ and .glb without UVs or textures, and no FBX.
-- A rough scan can keep nearly all its faces at a small limit: the camera sees every bump turn. The result then says
-  "Kept nearly every face"; Low Poly, a higher limit or a face count reduce it.
+- A rough scan judged as it is can keep nearly all its faces at a small limit: the camera sees every bump turn. If you
+  will bake a normal map, turn on **Judge as baked** (More options, or `--baked`; Scan Cleanup has it on): the bumps
+  then don't count, and a scan drops to a few thousand faces.
 - Quad flow on organic models is less even than a field-aligned remesher's.
 - Large models draw thinned out in the viewport; the saved result is complete.
 

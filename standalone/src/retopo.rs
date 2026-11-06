@@ -25,6 +25,7 @@ pub struct Settings {
     pub pixels: usize,             // a side of one picture (the add-on's Normal setting: 192)
     pub gpu: bool,
     pub rows: bool,                // offer even rows of quads to smooth parts
+    pub baked: bool,               // judge the result as it will look with a normal map baked from the source
 }
 
 pub struct Outcome {
@@ -298,7 +299,7 @@ pub fn close_polygons(points: &[f64], indptr: &[i64], flat: &[i64], material: &[
 
 pub fn retopo(source: &Mesh, settings: &Settings, mut log: impl FnMut(&str)) -> Result<Outcome, String> {
     let started = Instant::now();
-    let prepared = Prepared::new(source, settings.pixels, settings.gpu, &mut log);
+    let prepared = Prepared::new(source, settings.pixels, settings.gpu, settings.baked, &mut log);
     let mut out = prepared.solve(settings, log)?;
     out.seconds = started.elapsed().as_secs_f64();
     Ok(out)
@@ -315,10 +316,12 @@ pub struct Prepared<'a> {
     reference: Pictures,
     run: qem::Run,
     source_tree: near::FaceTree,
+    baked: bool,
+    source_normals: Vec<[f64; 3]>, // per source face, for what a bake paints
 }
 
 impl<'a> Prepared<'a> {
-    pub fn new(source: &'a Mesh, pixels: usize, gpu: bool, log: &mut dyn FnMut(&str)) -> Prepared<'a> {
+    pub fn new(source: &'a Mesh, pixels: usize, gpu: bool, baked: bool, log: &mut dyn FnMut(&str)) -> Prepared<'a> {
         let (tris, owner) = triangles(source);
         let tri_material: Vec<i64> = owner.iter().map(|&f| source.material[f as usize]).collect();
         let tri_piece = pieces(&tris, source.points.len() / 3);
@@ -331,18 +334,24 @@ impl<'a> Prepared<'a> {
         let tris_u32: Vec<u32> = tris.iter().map(|&v| v as u32).collect();
         let run = qem::run(&source.points, &tris_u32, &[], 4);
         let source_tree = near::FaceTree::new(&source.points, &source.indptr, &source.flat);
-        Prepared { source, tris, tri_piece, tags, view, reference, run, source_tree }
+        let source_normals = face_normals_of(source);
+        Prepared { source, tris, tri_piece, tags, view, reference, run, source_tree, baked, source_normals }
     }
 
-    /// The view change of `mesh` against the source, in percent.
+    /// The view change of `mesh` against the source, in percent: as it is, or as it will look once baked.
     pub fn look(&self, mesh: &Mesh) -> f64 {
-        loss(&self.reference, &pictures(&mesh.points, &triangles(mesh).0, &self.view), &self.view)
+        let seen = pictures(&mesh.points, &triangles(mesh).0, &self.view);
+        if self.baked {
+            loss_baked(&self.reference, &painted(seen, &self.view, &self.source_tree, &self.source_normals), &self.view)
+        } else {
+            loss(&self.reference, &seen, &self.view)
+        }
     }
 
     /// One search. `settings.pixels` and `settings.gpu` were fixed by `new`; the rest is used.
     pub fn solve(&self, settings: &Settings, mut log: impl FnMut(&str)) -> Result<Outcome, String> {
         let started = Instant::now();
-        let (source, tris, tri_piece, tags, view, reference, run) = (self.source, &self.tris, &self.tri_piece, &self.tags, &self.view, &self.reference, &self.run);
+        let (source, tris, tri_piece, tags, run) = (self.source, &self.tris, &self.tri_piece, &self.tags, &self.run);
         let total = tris.len() / 3;
         let smallest = (run.smallest() as usize).max(12);
         let mut looks = 0;
@@ -350,9 +359,9 @@ impl<'a> Prepared<'a> {
             let (points, level_tris, from) = run.level(wanted as u32);
             let material: Vec<i64> = from.iter().map(|&t| tags[t as usize]).collect();
             let out = pair_and_close(&points, &level_tris, &material, &source.materials)?;
-            let seen = pictures(&out.points, &triangles(&out).0, view);
             looks += 1;
-            Ok((out, loss(reference, &seen, view)))
+            let change = self.look(&out);
+            Ok((out, change))
         };
         let (mesh, change) = if let Some(goal) = settings.reduce_to {
             let mut wanted = ((goal as f64 / PAIRED_SHARE) as usize).clamp(smallest, total);
@@ -406,7 +415,7 @@ impl<'a> Prepared<'a> {
         if settings.rows {
             let mut look = |m: &Mesh| {
                 looks += 1;
-                loss(reference, &pictures(&m.points, &triangles(m).0, view), view)
+                self.look(m)
             };
             let swapped = rows_where_they_hold(&mut mesh, &mut change, limit, source, tris, tri_piece, tags, &mut look, &mut log);
             if swapped > 0 {
@@ -420,7 +429,7 @@ impl<'a> Prepared<'a> {
             if step(&mut tried) == 0 {
                 continue;
             }
-            let after = loss(reference, &pictures(&tried.points, &triangles(&tried).0, view), view);
+            let after = self.look(&tried);
             looks += 1;
             let keep = after <= limit;
             log(&format!("  {name}: {:.2}% of the view changed, {}", after, if keep { "kept" } else { "not kept" }));
@@ -575,12 +584,126 @@ fn replace_faces(mesh: &Mesh, gone: &[usize], added: &Mesh) -> Mesh {
     out
 }
 
-/// The view change of `result` against `source`, with the same camera as `retopo`.
-pub fn measure(source: &Mesh, result: &Mesh, pixels: usize, gpu: bool) -> f64 {
+/// The view change of `result` against `source`, with the same camera as `retopo`; `baked`: as it will look once a
+/// normal map is baked onto it from the source.
+pub fn measure(source: &Mesh, result: &Mesh, pixels: usize, gpu: bool, baked: bool) -> f64 {
     let view = view_of(&source.points, pixels, gpu);
     let reference = pictures(&source.points, &triangles(source).0, &view);
     let seen = pictures(&result.points, &triangles(result).0, &view);
-    loss(&reference, &seen, &view)
+    if baked {
+        let tree = near::FaceTree::new(&source.points, &source.indptr, &source.flat);
+        loss_baked(&reference, &painted(seen, &view, &tree, &face_normals_of(source)), &view)
+    } else {
+        loss(&reference, &seen, &view)
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ judged after baking
+
+// The add-on's bakescore.py: a bake repaints the normals but moves nothing, so fine bumps don't count. What counts is an
+// outline that moved, a surface far enough from the source that the map's detail slides as the view turns, and shading
+// still wrong over a few pixels once the source's normals are painted on.
+const BAKED_DEPTH_PIXELS: f64 = 3.0;
+const BAKED_OUTLINE_PIXELS: usize = 1;
+const BAKED_BLOCK: usize = 4; // shading compared over squares of this many pixels: shifted fine bumps cancel out there
+const BAKED_TURNED_DEG: f64 = 30.0;
+const BAKED_OUTLINE_WEIGHT: f64 = 0.5; // every outline pixel moved: half the view counts as changed (thin parts)
+
+fn face_normals_of(mesh: &Mesh) -> Vec<[f64; 3]> {
+    (0..mesh.faces()).map(|f| {
+        let face = mesh.face(f);
+        let p = |k: usize| { let v = face[k % face.len()] as usize; [mesh.points[v * 3], mesh.points[v * 3 + 1], mesh.points[v * 3 + 2]] };
+        let mut n = [0.0; 3];
+        for k in 0..face.len() {
+            let (a, b) = (p(k), p(k + 1));
+            n = [n[0] + (a[1] - b[1]) * (a[2] + b[2]), n[1] + (a[2] - b[2]) * (a[0] + b[0]), n[2] + (a[0] - b[0]) * (a[1] + b[1])];
+        }
+        unit(n)
+    }).collect()
+}
+
+/// The pictures with each hit's normal replaced by the source's nearest face normal: about what a bake paints there.
+fn painted(mut seen: Pictures, view: &View, tree: &near::FaceTree, normals: &[[f64; 3]]) -> Pictures {
+    let cells = view.pixels * view.pixels;
+    let scale = view.pixels as f64 / (2.0 * view.half);
+    let hits: Vec<usize> = (0..seen.hit.len()).filter(|&i| seen.hit[i]).collect();
+    let mut asks = Vec::with_capacity(hits.len() * 3);
+    for &i in &hits {
+        // Views run +x, -x, +y, -y, +z, -z; a pixel's row runs along the next axis, its column along the one after.
+        let (picture, cell) = (i / cells, i % cells);
+        let (axis, back) = (picture / 2, picture % 2 == 1);
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        let (row, col) = ((cell / view.pixels) as f64, (cell % view.pixels) as f64);
+        let mut p = [0.0; 3];
+        p[u] = view.center[u] - view.half + (row + 0.5) / scale;
+        p[v] = view.center[v] - view.half + (col + 0.5) / scale;
+        p[axis] = if back { view.center[axis] - 2.0 * view.half + seen.depth[i] } else { view.center[axis] + 2.0 * view.half - seen.depth[i] };
+        asks.extend(p);
+    }
+    let (_, found) = near::nearest_faces(tree, &asks, &std::sync::atomic::AtomicBool::new(false));
+    for (&i, hit) in hits.iter().zip(found) {
+        seen.normal[i * 3..i * 3 + 3].copy_from_slice(&normals[hit.1 as usize]);
+    }
+    seen
+}
+
+fn grow(mask: &[bool], pixels: usize, steps: usize) -> Vec<bool> {
+    let mut out = mask.to_vec();
+    for _ in 0..steps {
+        let was = out.clone();
+        for r in 0..pixels {
+            for c in 0..pixels {
+                let i = r * pixels + c;
+                out[i] = was[i] || (r > 0 && was[i - pixels]) || (r + 1 < pixels && was[i + pixels]) || (c > 0 && was[i - 1]) || (c + 1 < pixels && was[i + 1]);
+            }
+        }
+    }
+    out
+}
+
+/// `bakescore.picture_counts` as a percent of the pixels showing either mesh.
+fn loss_baked(reference: &Pictures, other: &Pictures, view: &View) -> f64 {
+    let (n, cells) = (view.pixels, view.pixels * view.pixels);
+    let limit = BAKED_TURNED_DEG.to_radians().cos();
+    let (mut wrong, mut total, mut moved, mut outline) = (0usize, 0usize, 0usize, 0usize);
+    for picture in 0..6 {
+        let at = picture * cells;
+        let a: &[bool] = &reference.hit[at..at + cells];
+        let b: &[bool] = &other.hit[at..at + cells];
+        let normal = |pics: &Pictures, i: usize| [pics.normal[(at + i) * 3], pics.normal[(at + i) * 3 + 1], pics.normal[(at + i) * 3 + 2]];
+        let mut changed: Vec<bool> = (0..cells).map(|i| a[i] && b[i] && (reference.depth[at + i] - other.depth[at + i]).abs() > BAKED_DEPTH_PIXELS * view.pixel).collect();
+        for br in 0..n / BAKED_BLOCK {
+            for bc in 0..n / BAKED_BLOCK {
+                let (mut sa, mut sb) = ([0.0; 3], [0.0; 3]);
+                let cells_here: Vec<usize> = (0..BAKED_BLOCK * BAKED_BLOCK).map(|k| (br * BAKED_BLOCK + k / BAKED_BLOCK) * n + bc * BAKED_BLOCK + k % BAKED_BLOCK).collect();
+                for &i in &cells_here {
+                    if a[i] && b[i] {
+                        let (na, mut nb) = (normal(reference, i), normal(other, i));
+                        if na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2] < 0.0 {
+                            nb = [-nb[0], -nb[1], -nb[2]]; // winding isn't shape
+                        }
+                        sa = [sa[0] + na[0], sa[1] + na[1], sa[2] + na[2]];
+                        sb = [sb[0] + nb[0], sb[1] + nb[1], sb[2] + nb[2]];
+                    }
+                }
+                let size = (sa[0] * sa[0] + sa[1] * sa[1] + sa[2] * sa[2]).sqrt() * (sb[0] * sb[0] + sb[1] * sb[1] + sb[2] * sb[2]).sqrt();
+                if sa[0] * sb[0] + sa[1] * sb[1] + sa[2] * sb[2] < limit * size {
+                    for &i in &cells_here {
+                        changed[i] |= a[i] && b[i];
+                    }
+                }
+            }
+        }
+        wrong += changed.iter().filter(|&&c| c).count();
+        total += (0..cells).filter(|&i| a[i] || b[i]).count();
+        let (wide_a, wide_b) = (grow(a, n, BAKED_OUTLINE_PIXELS), grow(b, n, BAKED_OUTLINE_PIXELS));
+        moved += (0..cells).filter(|&i| (a[i] && !wide_b[i]) || (b[i] && !wide_a[i])).count();
+        let outside: Vec<bool> = a.iter().map(|&x| !x).collect();
+        let edge = grow(&outside, n, 1);
+        outline += (0..cells).filter(|&i| a[i] && edge[i]).count();
+    }
+    let counted = wrong as f64 + BAKED_OUTLINE_WEIGHT * total as f64 * moved as f64 / outline.max(1) as f64;
+    100.0 * counted / total.max(1) as f64
 }
 
 #[cfg(test)]
@@ -626,7 +749,7 @@ mod tests {
     #[test]
     fn a_box_comes_out_all_quads_and_unchanged_in_view() {
         let source = cube();
-        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true };
+        let settings = Settings { detail: 6.0, reduce_to: None, pixels: 64, gpu: false, rows: true, baked: false };
         let out = retopo(&source, &settings, |_| {}).unwrap();
         assert!(out.mesh.faces() > 0);
         assert!((0..out.mesh.faces()).all(|f| out.mesh.face(f).len() == 4), "all quads");
@@ -637,6 +760,7 @@ mod tests {
     #[test]
     fn the_same_mesh_measures_no_change() {
         let source = cube();
-        assert_eq!(measure(&source, &source, 64, false), 0.0);
+        assert_eq!(measure(&source, &source, 64, false, false), 0.0);
+        assert_eq!(measure(&source, &source, 64, false, true), 0.0);
     }
 }

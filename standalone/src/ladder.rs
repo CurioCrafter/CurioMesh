@@ -42,7 +42,7 @@ pub fn useful(rungs: &[(usize, f64)]) -> Vec<usize> {
 /// Returns the rungs sorted by Detail.
 pub fn run(source: &Mesh, settings: &Settings, details: &[f64], mut on_rung: impl FnMut(&Rung), mut log: impl FnMut(&str), cancel: &AtomicBool) -> Result<Vec<Rung>, String> {
     let work = settings::work_on(source, settings, &mut log);
-    let prepared = Prepared::new(&work.mesh, settings.pixels, settings.gpu, &mut log);
+    let prepared = Prepared::new(&work.mesh, settings.pixels, settings.gpu, settings.baked, &mut log);
     let mut order = details.to_vec();
     order.sort_by(|a, b| (a / settings.detail).ln().abs().total_cmp(&(b / settings.detail).ln().abs()));
     let mut rungs = Vec::new();

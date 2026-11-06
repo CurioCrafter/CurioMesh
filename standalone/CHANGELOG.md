@@ -1,5 +1,13 @@
 # CurioMesh Standalone changelog
 
+## 0.4.0 (in progress)
+
+- **Judge as baked**, the add-on's Judge After Baking: a model that will get a normal map baked from the original
+  (a scan, a sculpt) is judged as it will look then. Fine bumps the map paints back don't count; moved outlines, a
+  surface far from the original and shading still wrong over a few pixels do. Scan Cleanup turns it on; the app has
+  it under More options, the command line as `--baked`. Game Asset with it on: a boulder scan 97,964 -> 1,847 quads
+  (was 116,974), a cliff scan 1.5 million -> 991, a lion head 47,214 -> 1,708, all 0 bad faces.
+
 ## 0.3.0
 
 The first full release (0.1 and 0.2 were previews).

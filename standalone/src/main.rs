@@ -39,6 +39,8 @@ Settings (later ones win, so --use game-asset --detail 4 is Game Asset with deta
                     and close the seam, so both sides are the same
   --no-rows         keep every part as reduced: don't offer even rows of quads to smooth parts
   --rows            offer them (the default)
+  --baked           judge the result as it will look with a normal map baked from the source: fine bumps don't count,
+                    moved outlines and shading do (scans; Scan Cleanup turns it on). --not-baked turns it off
   --pixels N        camera picture size per side (default 192)
   --cpu             make the camera pictures on the processor, not the graphics card
 Writing (for game engines):
@@ -80,6 +82,8 @@ fn parse(mut words: impl Iterator<Item = String>) -> Result<Args, String> {
             "--jobs" => a.jobs = (number(value("--jobs")?, "--jobs")? as usize).max(1),
             "--cpu" => s.gpu = false,
             "--no-rows" => s.rows = false,
+            "--baked" => s.baked = true,
+            "--not-baked" => s.baked = false,
             "--rows" => s.rows = true,
             "--mirror" => s.mirror = Mirror::parse(&value("--mirror")?)?,
             "--use" => *s = settings::preset(&value("--use")?)?,
@@ -125,7 +129,7 @@ fn print_check(check: &issues::Check) {
 fn measure(a: &Args) -> Result<ExitCode, String> {
     let [_, source, result] = a.files.as_slice() else { return Err("measure needs SOURCE and RESULT".into()) };
     let (source, result) = (load(source)?, load(result)?);
-    let change = retopo::measure(&source, &result, a.settings.pixels, a.settings.gpu);
+    let change = retopo::measure(&source, &result, a.settings.pixels, a.settings.gpu, a.settings.baked);
     let check = issues::check(&result);
     println!("{} faces ({} quads, {} triangles) from {} source faces", check.faces, check.quads, check.tris, source.faces());
     println!("View change: {change:.2}%");
@@ -234,7 +238,7 @@ fn single(mut a: Args) -> Result<ExitCode, String> {
     let split = if pieces > 1 { format!(" as {pieces} pieces") } else { String::new() };
     println!("{} faces ({} quads, {} triangles), {:.2}% of the view changed, {} looks, {:.1} s -> {}{split}", check.faces, check.quads, check.tris, done.loss, done.looks, done.seconds, out.display());
     if check.faces as f64 >= 0.9 * source.faces() as f64 {
-        println!("Note: this kept nearly every face. A rough surface (a scan) needs most of its faces to change this little; --use low-poly, a higher --detail or --reduce-to reduce it.");
+        println!("Note: this kept nearly every face. A rough surface (a scan) needs most of its faces to change this little; --baked (if you will bake a normal map), --use low-poly, a higher --detail or --reduce-to reduce it.");
     }
     print_check(&check);
     let s = &a.settings;

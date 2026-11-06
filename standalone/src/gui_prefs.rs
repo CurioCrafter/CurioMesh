@@ -27,6 +27,7 @@ pub struct Choices {
     pub aim_for_count: bool,
     pub count: usize,
     pub rows: bool,
+    pub baked: bool,
     pub triangulate: bool, // from the preset (Low Poly writes triangles)
     pub mirror: Mirror,
     pub engine: String, // an engine's key, or "" for a plain OBJ
@@ -36,7 +37,7 @@ pub struct Choices {
 
 impl Default for Choices {
     fn default() -> Self {
-        Choices { preset: "game-asset".into(), custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, triangulate: false, mirror: Mirror::Off, engine: String::new(), gpu: true, pixels: 192 }
+        Choices { preset: "game-asset".into(), custom_detail: 4.0, aim_for_count: false, count: 5000, rows: true, baked: false, triangulate: false, mirror: Mirror::Off, engine: String::new(), gpu: true, pixels: 192 }
     }
 }
 
@@ -53,7 +54,7 @@ impl Choices {
     pub fn pick(&mut self, key: &str) {
         self.preset = key.to_string();
         if let Some(s) = self.base() {
-            (self.rows, self.mirror, self.triangulate) = (s.rows, s.mirror, s.export.triangulate);
+            (self.rows, self.mirror, self.triangulate, self.baked) = (s.rows, s.mirror, s.export.triangulate, s.baked);
         }
     }
 
@@ -71,6 +72,7 @@ impl Choices {
             pixels: self.pixels,
             gpu: self.gpu,
             rows: self.rows,
+            baked: self.baked,
             mirror: self.mirror,
             export,
         }
@@ -120,6 +122,7 @@ impl Prefs {
         c.aim_for_count = v["aim_for_count"].as_bool().unwrap_or(false);
         c.count = v["count"].as_u64().map_or(c.count, |n| (n as usize).clamp(24, 5_000_000));
         c.rows = v["rows"].as_bool().unwrap_or(c.rows);
+        c.baked = v["baked"].as_bool().unwrap_or(c.baked);
         c.gpu = v["gpu"].as_bool().unwrap_or(true);
         c.pixels = v["pixels"].as_u64().map_or(192, |n| (n as usize).clamp(64, 512));
         p.recent = v["recent"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(PathBuf::from)).take(MOST_RECENT).collect()).unwrap_or_default();
@@ -131,7 +134,7 @@ impl Prefs {
         let c = &self.choices;
         json!({
             "preset": c.preset, "triangulate": c.triangulate, "mirror": c.mirror.word(), "engine": c.engine, "custom_detail": c.custom_detail, "aim_for_count": c.aim_for_count, "count": c.count,
-            "rows": c.rows, "gpu": c.gpu, "pixels": c.pixels, "tour_done": self.tour_done,
+            "rows": c.rows, "baked": c.baked, "gpu": c.gpu, "pixels": c.pixels, "tour_done": self.tour_done,
             "recent": self.recent.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
         })
     }

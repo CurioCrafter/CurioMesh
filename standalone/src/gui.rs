@@ -674,6 +674,7 @@ impl App {
                     }
                 }).response.on_hover_text("The game engine the file is for. This sets the file type, triangles and size limits.");
             });
+            ui.checkbox(&mut c.baked, "Judge as baked (normal map)").on_hover_text("For a model that will get a normal map baked from the original, such as a scan: fine bumps the map will paint back don't count, moved outlines and shading do. Far fewer faces on rough surfaces. Scan Cleanup turns it on.");
             ui.checkbox(&mut c.gpu, "Use the graphics card").on_hover_text("Draw the camera pictures on the graphics card. Faster. Turn it off if it fails on your computer.");
             };
             if compact {
@@ -997,7 +998,7 @@ fn verdict(use_name: &str, faces: usize, loss: f64, asked: Option<f64>, bad: usi
 
 /// A result with this share of the source's faces or more reduced nothing worth having.
 const NEARLY_ALL: f64 = 0.9;
-const KEPT_NEARLY_ALL: &str = "Its rough surface needs most of its faces to change this little. Low Poly, a higher limit or a face count reduce it.";
+const KEPT_NEARLY_ALL: &str = "Its rough surface needs most of its faces to change this little. If you will bake a normal map, turn on Judge as baked under More options; Low Poly, a higher limit or a face count also reduce it.";
 
 fn kept_nearly_all(faces: usize, source_faces: usize) -> bool {
     faces as f64 >= NEARLY_ALL * source_faces as f64
