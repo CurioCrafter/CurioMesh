@@ -47,8 +47,8 @@ pub const SLIDE_EDGE: f64 = 0.02;
 pub const CENTRE_WEIGHT: f64 = 0.5;
 /// A result face reads through a reference face turned at most this far from it (cosine of 60 deg). A coarse face
 /// across a crease often has its centre nearest a wall turned away from it; that wall's winding, taken as the face's
-/// expected winding, makes the fold fix fold the face. Such a face takes the nearest walked face turned at most 60 deg
-/// from it as its reference instead, and is read again from there.
+/// expected winding, makes the fold fix fold the face. Such a face takes the nearest source face turned at most 60 deg
+/// from it (within the walk's reach) as its reference instead when that face is nearer its centre, and is read from there.
 pub const REF_ALIGN_COS: f64 = 0.5;
 /// Fold fix stop rule (SPEC 3): no UV moves more than this share of a texel in one sweep.
 pub const STOP_TEXEL_SHARE: f64 = 0.02;
@@ -843,6 +843,63 @@ fn walk(src: &Source, rf: usize, rt: usize, rw: [f64; 3], c: V3, reach: f64) -> 
     order
 }
 
+/// -1, 0 or 1 by the sign of x (NaN stays NaN; `f64::signum` gives 1 for 0).
+fn sgn(x: f64) -> f64 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else if x.is_nan() {
+        x
+    } else {
+        0.0
+    }
+}
+
+/// Twice the signed UV area of source face f in `layer` (shoelace over its corners).
+fn uv_area(layer: &[f64], faces: &Faces, f: usize) -> f64 {
+    let (s, e) = (faces.indptr[f] as usize, faces.indptr[f + 1] as usize);
+    let mut area = 0.0;
+    for i in s..e {
+        let j = if i + 1 == e { s } else { i + 1 };
+        area += layer[2 * i] * layer[2 * j + 1] - layer[2 * j] * layer[2 * i + 1];
+    }
+    area
+}
+
+/// A result face's orientation sign against its reference face `rf`, from the source under each of its fan
+/// triangles: each triangle (0, i, i+1) asks the source face nearest its centre which way it winds, the way a
+/// texture shows on it (that face's UV winding times whether it faces the triangle), relative to the reference's
+/// UV winding. All agreeing: that sign. A face whose triangles disagree (folded in 3D, or across a crease with one
+/// triangle leaning into a wall) gets 0: no single winding shows the texture on all of it, so its reads stay as read
+/// and the fold fix leaves it. Triangles on a face with no UV area, or edge-on to their face, have no say; when no
+/// triangle has a say, `fallback` (the face's own sign against the reference).
+fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], rf: usize, fallback: f64) -> f64 {
+    let ref_wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, rf)));
+    if ref_wind == 0.0 {
+        return fallback;
+    }
+    let mut vote = 0.0;
+    for i in 1..face.len().saturating_sub(1) {
+        let t = [face[0], face[i], face[i + 1]];
+        let (a, b, cc) = (p3(res_points, t[0]), p3(res_points, t[1]), p3(res_points, t[2]));
+        let q = [(a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0];
+        let Some(g) = tree.nearest(q).map(|h| h.1 as usize) else { continue };
+        let facing = sgn(dot(newell(res_points, &t), src.normal[g]));
+        let wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, g)));
+        let w = facing * wind * ref_wind;
+        if w == 0.0 || w.is_nan() {
+            continue;
+        }
+        if vote == 0.0 {
+            vote = w;
+        } else if vote != w {
+            return 0.0;
+        }
+    }
+    if vote == 0.0 { fallback } else { vote }
+}
+
 fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], face: &[i64]) -> FaceRead {
     let n = face.len();
     let corners: Vec<V3> = face.iter().map(|&v| p3(res_points, v)).collect();
@@ -888,16 +945,38 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
     }
     let ref_sample = if set.region[hits[n].0] == win.0 { n } else { (0..n).find(|&s| set.region[hits[s].0] == win.0).unwrap_or(n) };
     let (mut rf, mut rd, mut rt, mut rw) = hits[ref_sample];
-    let mut order = walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd);
-    // A reference turned away from the face (REF_ALIGN_COS): the nearest walked face that is not, read again from it.
+    let mut region = win.0;
+    // A reference turned away from the face (REF_ALIGN_COS): the nearest source face within the walk's reach that is
+    // not, found across every edge (seams too: the vote may have picked the wall's side on a tie of the corners on the
+    // crease), becomes the reference and gives the face its side region when it is nearer the centre.
     let nr = newell(res_points, face);
     let aligned = |g: usize| {
         let (a, b) = (dot(nr, nr).sqrt(), dot(src.normal[g], src.normal[g]).sqrt());
         a > 0.0 && b > 0.0 && dot(nr, src.normal[g]) >= REF_ALIGN_COS * a * b
     };
     if !aligned(rf) {
+        let reach = WALK_REACH * diameter + rd;
+        let mut near: Vec<usize> = Vec::new();
+        let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
+        for f in std::iter::once(rf).chain(hits.iter().map(|h| h.0)) {
+            if seen.insert(f, ()).is_none() {
+                near.push(f);
+            }
+        }
+        let mut at = 0;
+        while at < near.len() {
+            let f = near[at];
+            at += 1;
+            for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
+                let g = src.across[h];
+                if g >= 0 && !seen.contains_key(&(g as usize)) && dist(src.centre[g as usize], c) <= reach {
+                    seen.insert(g as usize, ());
+                    near.push(g as usize);
+                }
+            }
+        }
         let mut best: Option<(f64, usize, usize, [f64; 3])> = None;
-        for &(g, _) in &order {
+        for &g in &near {
             if !aligned(g) {
                 continue;
             }
@@ -906,11 +985,14 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
                 best = Some((d2, g, t, w));
             }
         }
-        if let Some((d2, g, t, w)) = best {
+        // Only a face nearer the centre than the reference: a reference that is the nearest face is the surface the
+        // face lies on, however it is turned (a thin part's far side seen from a coarse face).
+        if let Some((d2, g, t, w)) = best.filter(|b| b.0 < src.on_face(rf, c).0) {
             (rf, rd, rt, rw) = (g, d2.sqrt(), t, w);
-            order = walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd);
+            region = set.region[g];
         }
     }
+    let order = walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd);
     let mut out = FaceRead {
         ids: Vec::with_capacity(3 * n),
         w: Vec::with_capacity(3 * n),
@@ -919,8 +1001,8 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
         ref_ids: src.tri[rt].map(|h| h as i64),
         ref_w: rw,
         ref_face: rf as i64,
-        orient: if dot(nr, src.normal[rf]) < 0.0 { -1.0 } else { 1.0 },
-        region: win.0,
+        orient: fan_orient(src, tree, res_points, face, rf, if dot(nr, src.normal[rf]) < 0.0 { -1.0 } else { 1.0 }),
+        region,
     };
     for (i, &q) in corners.iter().enumerate() {
         let mut best = (f64::INFINITY, 0usize, [0.0; 3], false);

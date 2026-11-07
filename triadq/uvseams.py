@@ -39,7 +39,7 @@ WALK_REACH = 2.0
 WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
-REF_ALIGN_COS = 0.5  # a reference face turned more than 60 deg from the result face is swapped (see _read_face)
+REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
 STALL_WINDOW = 50
 STALL_DROP = 0.01
@@ -942,6 +942,54 @@ def _walk(src: _Source, rf, rt, rw, c, reach):
     return order
 
 
+def _sign(x: float) -> float:
+    return 1.0 if x > 0.0 else (-1.0 if x < 0.0 else (x if x != x else 0.0))
+
+
+def _uv_area(uv, indptr, f) -> float:
+    """Twice the signed UV area of source face f (shoelace over its corners; `uv` is 2 per source corner)."""
+
+    s, e = int(indptr[f]), int(indptr[f + 1])
+    area = 0.0
+    for i in range(s, e):
+        j = s if i + 1 == e else i + 1
+        area += float(uv[i][0]) * float(uv[j][1]) - float(uv[j][0]) * float(uv[i][1])
+    return area
+
+
+def _fan_orient(src, Pr, face, rf, fallback) -> float:
+    """A result face's orientation sign against its reference face `rf`, from the source under each of its fan
+    triangles: each triangle (0, i, i+1) asks the source face nearest its centre which way it winds, the way a texture
+    shows on it (that face's UV winding times whether it faces the triangle), relative to the reference's UV winding.
+    All agreeing: that sign. Triangles that disagree (a face folded in 3D, or across a crease with one triangle leaning
+    into a wall): 0, so its reads stay as read and the fold fix leaves it. Triangles over a face with no UV area or edge-on
+    to it have no say; with no say at all, `fallback`."""
+
+    ref_wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, rf))
+    if ref_wind == 0.0:
+        return fallback
+    tris = [[face[0], face[i], face[i + 1]] for i in range(1, len(face) - 1)]
+    qs = []
+    for t in tris:
+        a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
+        qs.append(((a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0))
+    near = src.grid.nearest_many(qs) if qs else []
+    vote = 0.0
+    for t, g in zip(tris, near):
+        if g < 0:
+            continue
+        facing = _sign(_dot(_newell(Pr, t), src.normal[g]))
+        wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, g))
+        w = facing * wind * ref_wind
+        if w == 0.0 or w != w:
+            continue
+        if vote == 0.0:
+            vote = w
+        elif vote != w:
+            return 0.0
+    return fallback if vote == 0.0 else vote
+
+
 def _read_face(src: _Source, region, Pr, face):
     n = len(face)
     corners = [tuple(Pr[v]) for v in face]
@@ -975,10 +1023,12 @@ def _read_face(src: _Source, region, Pr, face):
             win = v
     ref = n if region[hits[n][0]] == win[0] else next((s for s in range(n) if region[hits[s][0]] == win[0]), n)
     rf, rd, rt, rw = hits[ref]
-    order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
+    reg = win[0]
     # A reference turned away from the face (REF_ALIGN_COS): a coarse face across a crease often has its centre nearest
-    # a wall turned away from it, whose winding would make the fold fix fold it. The nearest walked face turned at most
-    # 60 deg from it becomes the reference, and the face is read again from there.
+    # a wall turned away from it, whose winding would make the fold fix fold it. The nearest source face within the
+    # walk's reach turned at most 60 deg from it, found across every edge (seams too: the vote may have picked the
+    # wall's side on a tie of the corners on the crease), becomes the reference and gives the face its side region when
+    # it is nearer the centre.
     nr = _newell(Pr, face)
     na = math.sqrt(_dot(nr, nr))
 
@@ -987,14 +1037,33 @@ def _read_face(src: _Source, region, Pr, face):
         nb = math.sqrt(_dot(ng, ng))
         return na > 0.0 and nb > 0.0 and _dot(nr, ng) >= REF_ALIGN_COS * na * nb
     if not aligned(rf):
-        cands = [g for g, _ in order if aligned(g)]
+        reach = WALK_REACH * diameter + rd
+        near, seen = [], set()
+        for f in [rf] + [h[0] for h in hits]:
+            if f not in seen:
+                seen.add(f)
+                near.append(f)
+        at = 0
+        while at < len(near):
+            f = near[at]
+            at += 1
+            for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
+                g = int(src.across[h])
+                if g >= 0 and g not in seen and _dist(src.centre[g], c) <= reach:
+                    seen.add(g)
+                    near.append(g)
+        cands = [g for g in near if aligned(g)]
+        # Only a face nearer the centre than the reference: a reference that is the nearest face is the surface the
+        # face lies on, however it is turned (a thin part's far side seen from a coarse face).
         if cands:
-            d2, rt, rw, which = src.on_faces(cands, c)
-            rf, rd = cands[which], math.sqrt(d2)
-            order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
+            d2, t2, w2, which = src.on_faces(cands, c)
+            if d2 < src.on_faces([rf], c)[0]:
+                rf, rd, rt, rw = cands[which], math.sqrt(d2), t2, w2
+                reg = int(region[rf])
+    order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
     reached = [f for f, _ in order]
     out = dict(ids=[], w=[], shift=[], slid=[], ref_ids=[int(x) for x in src.tri[rt]], ref_w=list(rw), ref_face=rf,
-               orient=-1.0 if _dot(nr, src.normal[rf]) < 0.0 else 1.0, region=win[0])
+               orient=_fan_orient(src, Pr, face, rf, -1.0 if _dot(nr, src.normal[rf]) < 0.0 else 1.0), region=reg)
     for i, (q, (d2, t, w, which)) in enumerate(zip(corners, src.on_each([reached] * n, corners))):
         tri = src.tri[t]
         slid = math.sqrt(d2) > hits[i][1] + SLIDE_EDGE * edge
