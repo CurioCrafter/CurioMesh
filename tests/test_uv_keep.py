@@ -184,5 +184,27 @@ class AfterApply(unittest.TestCase):
         self.assertTrue(any("not run" in m for m in self.hooks.LAST["messages"]))
 
 
+class ViewLimit(unittest.TestCase):
+    def test_camera_check_holds_moves_past_most_detail_loss(self):
+        p, ip, fl = grid(4)
+        moved = p.copy()
+        moved[12, 2] = 0.3  # the middle vertex lifted off the surface: its faces get wrong pixels
+        moved[4, 1] += 0.01  # a far corner slid along the surface: no wrong pixels
+
+        class Judge:
+            total = 1000
+
+            def wrong(self, corners):
+                return 100.0 * sum(abs(c[2]) for c in corners)
+
+        out = {}
+        for _ in uvkeep.view_limit(Judge(), p, moved, ip, fl, np.full(len(p), 0.25), 0.0, out):
+            pass
+        self.assertEqual((out["limit"][12], out["limit"][4], out["held"]), (0.0, 0.25, 1))
+        for _ in uvkeep.view_limit(Judge(), p, moved, ip, fl, np.full(len(p), 0.25), 50.0, out):
+            pass
+        self.assertEqual(out["held"], 0)  # 120 wrong pixels fit in half of the 5 touched faces' 312 pixels
+
+
 if __name__ == "__main__":
     unittest.main()

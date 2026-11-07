@@ -36,6 +36,10 @@ pub const COST_B: f64 = 4.0;
 pub const HARD_BUDGET_SHARE: f64 = 0.5;
 /// The per-corner walk stays within this many result-face diameters (plus the reference hit's distance).
 pub const WALK_REACH: f64 = 2.0;
+/// The walk's UV check: a source face is walked only when its UV centre's offset from the reference UV, taken back to
+/// 3D through the reference triangle's map, is at most this many times its 3D distance (plus its radius). Faces past
+/// it sit on the far side of a seam reached the long way round (a thin tube or plate inside one island).
+pub const WALK_UV_SLACK: f64 = 2.0;
 /// A corner is out of reach (slid along its triangle's plane instead of clamped to the seam) when its reachable point is
 /// farther than its nearest point by more than this share of the result face's mean edge.
 pub const SLIDE_EDGE: f64 = 0.02;
@@ -46,6 +50,8 @@ pub const STOP_TEXEL_SHARE: f64 = 0.02;
 /// Fold fix stall rule: the largest move must drop by `STALL_DROP` within `STALL_WINDOW` sweeps (reported).
 pub const STALL_WINDOW: usize = 50;
 pub const STALL_DROP: f64 = 0.01;
+/// Untangling stops after this many sweeps in a row that do not bring the fold count to a new low.
+pub const UNTANGLE_STALL: usize = 3;
 
 /// What a seam chain asks of the remesh (spec 4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -653,6 +659,10 @@ struct Source<'a> {
     /// Per corner: the face across its edge (or -1) and the crossing: 0 free, 1 Shift chain, 2 blocked.
     across: Vec<i64>,
     crossing: Vec<u8>,
+    /// The active layer (2 per source corner) when the walk's UV check is on; per face its UV centre and 3D radius.
+    uv: Option<&'a [f64]>,
+    uv_centre: Vec<[f64; 2]>,
+    radius: Vec<f64>,
 }
 
 impl Source<'_> {
@@ -676,7 +686,7 @@ impl Source<'_> {
     }
 }
 
-fn source<'a>(points: &'a [f64], faces: &'a Faces<'a>, set: &SeamSet) -> Source<'a> {
+fn source<'a>(points: &'a [f64], faces: &'a Faces<'a>, set: &SeamSet, uv: Option<&'a [f64]>) -> Source<'a> {
     let nf = faces.count();
     let (mut tri, mut tri_ptr) = (Vec::new(), vec![0usize]);
     let (mut centre, mut normal) = (Vec::with_capacity(nf), Vec::with_capacity(nf));
@@ -723,7 +733,50 @@ fn source<'a>(points: &'a [f64], faces: &'a Faces<'a>, set: &SeamSet) -> Source<
         crossing[h] = kind;
         crossing[g] = kind;
     }
-    Source { points, faces, tri, tri_ptr, centre, normal, across, crossing }
+    let (mut uv_centre, mut radius) = (Vec::new(), Vec::new());
+    if let Some(layer) = uv {
+        for f in 0..nf {
+            let (s, e) = (faces.indptr[f] as usize, faces.indptr[f + 1] as usize);
+            let mut u = [0.0; 2];
+            for h in s..e {
+                u[0] += layer[2 * h] / (e - s) as f64;
+                u[1] += layer[2 * h + 1] / (e - s) as f64;
+            }
+            uv_centre.push(u);
+            let mut r = 0.0f64;
+            for &v in faces.face(f) {
+                r = r.max(dist(p3(points, v), centre[f]));
+            }
+            radius.push(r);
+        }
+    }
+    Source { points, faces, tri, tri_ptr, centre, normal, across, crossing, uv, uv_centre, radius }
+}
+
+/// The inverse of a triangle's 3D-to-UV map as [k00, k01, k10, k11]: UV offsets to 3D lengths in the triangle's
+/// plane. None when either side has no area.
+fn uv_to_3d(p0: V3, p1: V3, p2: V3, q0: [f64; 2], q1: [f64; 2], q2: [f64; 2]) -> Option<[f64; 4]> {
+    let (e1, e2) = (sub(p1, p0), sub(p2, p0));
+    let l1 = dot(e1, e1).sqrt();
+    if l1 <= 0.0 {
+        return None;
+    }
+    let x = [e1[0] / l1, e1[1] / l1, e1[2] / l1];
+    let bx = dot(e2, x);
+    let y3 = [e2[0] - bx * x[0], e2[1] - bx * x[1], e2[2] - bx * x[2]];
+    let by = dot(y3, y3).sqrt();
+    if by <= 0.0 {
+        return None;
+    }
+    let (du1, dv1, du2, dv2) = (q1[0] - q0[0], q1[1] - q0[1], q2[0] - q0[0], q2[1] - q0[1]);
+    // J = [du1 du2; dv1 dv2] * inverse([l1 bx; 0 by])
+    let (j00, j10) = (du1 / l1, dv1 / l1);
+    let (j01, j11) = ((du2 - j00 * bx) / by, (dv2 - j10 * bx) / by);
+    let det = j00 * j11 - j01 * j10;
+    if det == 0.0 {
+        return None;
+    }
+    Some([j11 / det, -j01 / det, -j10 / det, j00 / det])
 }
 
 struct FaceRead {
@@ -785,6 +838,26 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
     let (rf, rd, rt, rw) = hits[ref_sample];
     // Walk from the reference face across free and Shift edges only, within reach of the face.
     let reach = WALK_REACH * diameter + rd;
+    // The walk's UV check (see WALK_UV_SLACK): reference UV, reference point, UV offsets back to 3D lengths.
+    let uv_reach = src.uv.and_then(|layer| {
+        let tri = src.tri[rt];
+        let (p0, p1, p2) = (src.corner_point(tri[0]), src.corner_point(tri[1]), src.corner_point(tri[2]));
+        let q = |h: usize| [layer[2 * h], layer[2 * h + 1]];
+        let (q0, q1, q2) = (q(tri[0]), q(tri[1]), q(tri[2]));
+        let u_ref = [rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1]];
+        uv_to_3d(p0, p1, p2, q0, q1, q2).map(|k| (u_ref, mix(rw, p0, p1, p2), k))
+    });
+    let uv_near = |g: usize, shifted: bool| {
+        let Some((u_ref, p_ref, k)) = uv_reach else { return true };
+        let u = src.uv_centre[g];
+        let (mut du, mut dv) = (u[0] - u_ref[0], u[1] - u_ref[1]);
+        if shifted {
+            du += whole(-du);
+            dv += whole(-dv);
+        }
+        let (lx, ly) = (k[0] * du + k[1] * dv, k[2] * du + k[3] * dv);
+        (lx * lx + ly * ly).sqrt() <= WALK_UV_SLACK * (dist(src.centre[g], p_ref) + src.radius[g])
+    };
     let mut order: Vec<(usize, bool)> = vec![(rf, false)];
     let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
     seen.insert(rf, ());
@@ -796,8 +869,12 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
             if g < 0 || src.crossing[h] == 2 || seen.contains_key(&(g as usize)) || dist(src.centre[g as usize], c) > reach {
                 continue;
             }
+            let sh = shifted || src.crossing[h] == 1;
+            if !uv_near(g as usize, sh) {
+                continue;
+            }
             seen.insert(g as usize, ());
-            order.push((g as usize, shifted || src.crossing[h] == 1));
+            order.push((g as usize, sh));
             queue.push_back(order.len() - 1);
         }
     }
@@ -865,7 +942,12 @@ pub fn join_tolerance(set: &SeamSet) -> Vec<f64> {
 
 /// Per-side lookup for a result mesh against the source (SPEC 4.8 steps 1-3). Runs on all cores; checks `stop` per face.
 pub fn lookup(src_points: &[f64], src_faces: &Faces, set: &SeamSet, res_points: &[f64], res_faces: &Faces, stop: &AtomicBool) -> Lookup {
-    let src = source(src_points, src_faces, set);
+    lookup_with(src_points, src_faces, set, res_points, res_faces, None, stop)
+}
+
+/// `lookup` with the active layer (2 per source corner), which turns on the walk's UV check (WALK_UV_SLACK).
+pub fn lookup_with(src_points: &[f64], src_faces: &Faces, set: &SeamSet, res_points: &[f64], res_faces: &Faces, layer: Option<&[f64]>, stop: &AtomicBool) -> Lookup {
+    let src = source(src_points, src_faces, set, layer);
     let tree = FaceTree::new(src_points, src_faces.indptr, src_faces.flat);
     let nf = res_faces.count();
     let reads: Vec<Option<FaceRead>> = (0..nf)
@@ -978,9 +1060,236 @@ pub struct FoldReport {
     pub stuck: usize,
     pub stalled: bool,
     pub stopped: bool,
+    /// Vertex moves the untangling made (before and after the ring fills).
+    pub untangled: usize,
+    /// Faces still folded after the ring fills that were read again through their reference triangle (`reread_folded`).
+    pub reread: usize,
 }
 
-/// Fold fix (SPEC 4.8 step 4): folded faces plus their 1-ring, within their side region, get a harmonic fill (own
+/// Fold fix (SPEC 4.8 step 4): untangling first (`untangle`: single free vertices of folded faces move into the
+/// spot that unfolds all their triangles), then the ring fills below for what is left, then untangling again. Only
+/// corners of folded faces' vertices and of faces inside a ring spot change; every other UV stays bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub fn fold_fix(res_points: &[f64], res_faces: &Faces, uv: &mut [f64], region: &[i64], expected: &[f64], join: &[f64], texture_px: f64, stop: &AtomicBool) -> FoldReport {
+    let nf = res_faces.count();
+    let before = (0..nf).filter(|&f| folded(res_faces, uv, expected, f)).count();
+    if before == 0 {
+        return FoldReport::default();
+    }
+    let mut untangled = untangle(res_faces, uv, region, expected, join, stop);
+    let mut report = ring_fill(res_points, res_faces, uv, region, expected, join, texture_px, stop);
+    if report.after > 0 && !stop.load(Ordering::Relaxed) {
+        untangled += untangle(res_faces, uv, region, expected, join, stop);
+        report.after = (0..nf).filter(|&f| folded(res_faces, uv, expected, f)).count();
+    }
+    report.before = before;
+    report.untangled = untangled;
+    report.stopped |= stop.load(Ordering::Relaxed);
+    report
+}
+
+fn det3(m: [[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// Largest t with g_l . x + h_l >= t for every row l (rows of unit length), as (x, t): the Chebyshev centre of the
+/// kernel, by trying every triple of rows as the active set (a 3-unknown linear program). None when no triple solves.
+fn chebyshev(g: &[[f64; 2]], h: &[f64]) -> Option<([f64; 2], f64)> {
+    let n = g.len();
+    let mut best: Option<([f64; 2], f64)> = None;
+    for i in 0..n {
+        for j in i + 1..n {
+            for k in j + 1..n {
+                let m = [[g[i][0], g[i][1], -1.0], [g[j][0], g[j][1], -1.0], [g[k][0], g[k][1], -1.0]];
+                let det = det3(m);
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let r = [-h[i], -h[j], -h[k]];
+                let col = |c: usize| {
+                    let mut a = m;
+                    for row in 0..3 {
+                        a[row][c] = r[row];
+                    }
+                    det3(a) / det
+                };
+                let (x0, x1, t) = (col(0), col(1), col(2));
+                let tol = 1e-12 * (1.0 + t.abs());
+                if (0..n).all(|l| g[l][0] * x0 + g[l][1] * x1 + h[l] >= t - tol) && best.is_none_or(|b| t > b.1) {
+                    best = Some(([x0, x1], t));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Four rows keeping x within `r` of `x0` on each UV axis (g . x + h >= t form, unit rows).
+fn box_rows(g: &mut Vec<[f64; 2]>, h: &mut Vec<f64>, x0: [f64; 2], r: f64) {
+    g.extend([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]);
+    h.extend([r - x0[0], r + x0[0], r - x0[1], r + x0[1]]);
+}
+
+/// Untangling (the idea of Freitag, Plassmann 2000, "Local optimization-based simplicial mesh untangling and
+/// improvement", written our own way for UV fans): each free vertex of a folded face, one at a time, moves toward the
+/// point that makes the worst of its fan triangles as large as possible (`chebyshev`), only when that point unfolds all
+/// of them, and stops halfway so the move stays small. A vertex is free when all its faces lie in one side region, its
+/// corners share one UV (within `join`) and no open edge touches it; any other vertex moves per wedge (its corners
+/// of one region sharing one UV), within its shortest UV edge. Sweeps repeat while they bring the fold count to a
+/// new low (`UNTANGLE_STALL`). Returns the number of moves.
+fn untangle(faces: &Faces, uv: &mut [f64], region: &[i64], expected: &[f64], join: &[f64], stop: &AtomicBool) -> usize {
+    let nf = faces.count();
+    let n_points = faces.flat.iter().map(|&v| v as usize + 1).max().unwrap_or(0);
+    let mut vc_ptr = vec![0usize; n_points + 1];
+    for &v in faces.flat {
+        vc_ptr[v as usize + 1] += 1;
+    }
+    for v in 0..n_points {
+        vc_ptr[v + 1] += vc_ptr[v];
+    }
+    let mut vc = vec![0usize; faces.flat.len()];
+    let mut fill = vc_ptr.clone();
+    for (h, &v) in faces.flat.iter().enumerate() {
+        vc[fill[v as usize]] = h;
+        fill[v as usize] += 1;
+    }
+    let mut face_of = vec![0usize; faces.flat.len()];
+    for f in 0..nf {
+        for h in faces.indptr[f] as usize..faces.indptr[f + 1] as usize {
+            face_of[h] = f;
+        }
+    }
+    let mut edge_use: HashMap<(i64, i64), usize, FxBuild> = HashMap::default();
+    for f in 0..nf {
+        let face = faces.face(f);
+        for i in 0..face.len() {
+            let (a, b) = (face[i], face[(i + 1) % face.len()]);
+            *edge_use.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let join_of = |r: i64| if r >= 0 && (r as usize) < join.len() { join[r as usize] } else { f64::INFINITY };
+    let mut moves = 0usize;
+    let mut best = usize::MAX;
+    let mut stall = 0usize;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let bad: Vec<usize> = (0..nf).filter(|&f| folded(faces, uv, expected, f)).collect();
+        if bad.is_empty() {
+            break;
+        }
+        if bad.len() < best {
+            best = bad.len();
+            stall = 0;
+        } else {
+            stall += 1;
+            if stall >= UNTANGLE_STALL {
+                break;
+            }
+        }
+        let mut verts: Vec<usize> = bad.iter().flat_map(|&f| faces.face(f).iter().map(|&v| v as usize)).collect();
+        verts.sort_unstable();
+        verts.dedup();
+        let mut moved = 0usize;
+        for v in verts {
+            let all = &vc[vc_ptr[v]..vc_ptr[v + 1]];
+            // The vertex's wedges: its corners grouped by side region and shared UV (within `join`).
+            let mut wedges: Vec<Vec<usize>> = Vec::new();
+            for &h in all {
+                let r = region[face_of[h]];
+                if r < 0 {
+                    continue;
+                }
+                match wedges.iter_mut().find(|w| region[face_of[w[0]]] == r && uv_gap(uv, h, w[0]) <= join_of(r)) {
+                    Some(w) => w.push(h),
+                    None => wedges.push(vec![h]),
+                }
+            }
+            // A whole fan inside one region with no open edge moves freely; any other wedge (a seam or open border
+            // runs through the vertex) moves only that wedge's corners, at most its shortest UV edge (`box_rows`), so
+            // the seam's UV line stays where it is to within a sliver's width.
+            let whole = wedges.len() == 1
+                && wedges[0].len() == all.len()
+                && all.iter().all(|&h| {
+                    let f = face_of[h];
+                    let (s, e) = (faces.indptr[f] as usize, faces.indptr[f + 1] as usize);
+                    let (n, i) = (e - s, h - s);
+                    let me = faces.flat[h];
+                    [faces.flat[s + (i + n - 1) % n], faces.flat[s + (i + 1) % n]].iter().all(|&o| edge_use.get(&(me.min(o), me.max(o))).copied() == Some(2))
+                });
+            for cs in &wedges {
+                if !whole && !cs.iter().any(|&h| folded(faces, uv, expected, face_of[h])) {
+                    continue;
+                }
+                let (mut g, mut hh): (Vec<[f64; 2]>, Vec<f64>) = (Vec::new(), Vec::new());
+                let mut shortest = f64::INFINITY;
+                for &h in cs {
+                    let f = face_of[h];
+                    let (s, e) = (faces.indptr[f] as usize, faces.indptr[f + 1] as usize);
+                    let (n, i) = (e - s, h - s);
+                    for o in [s + (i + n - 1) % n, s + (i + 1) % n] {
+                        shortest = shortest.min(((uv[2 * o] - uv[2 * h]).powi(2) + (uv[2 * o + 1] - uv[2 * h + 1]).powi(2)).sqrt());
+                    }
+                    if expected[f] == 0.0 {
+                        continue;
+                    }
+                    for k in 1..n.saturating_sub(1) {
+                        let tri = [0, k, k + 1];
+                        let Some(p) = tri.iter().position(|&x| x == i) else { continue };
+                        let (a, b) = (s + tri[(p + 1) % 3], s + tri[(p + 2) % 3]);
+                        let (a0, a1, b0, b1) = (uv[2 * a], uv[2 * a + 1], uv[2 * b], uv[2 * b + 1]);
+                        let (d0, d1) = (a0 - b0, a1 - b1);
+                        let (g0, g1, h0) = (expected[f] * d1, expected[f] * -d0, expected[f] * (a0 * b1 - a1 * b0));
+                        let norm = (g0 * g0 + g1 * g1).sqrt();
+                        if norm < 1e-15 {
+                            continue;
+                        }
+                        g.push([g0 / norm, g1 / norm]);
+                        hh.push(h0 / norm);
+                    }
+                }
+                let x = [uv[2 * cs[0]], uv[2 * cs[0] + 1]];
+                let m0: Vec<f64> = (0..g.len()).map(|l| g[l][0] * x[0] + g[l][1] * x[1] + hh[l]).collect();
+                if !whole {
+                    if !(shortest > 0.0 && shortest.is_finite()) || g.is_empty() {
+                        continue;
+                    }
+                    box_rows(&mut g, &mut hh, x, shortest);
+                } else if g.len() < 3 {
+                    continue;
+                }
+                let worst = m0.iter().cloned().fold(f64::INFINITY, f64::min);
+                let Some((xs, t)) = chebyshev(&g, &hh) else { continue };
+                if t <= worst.max(0.0) {
+                    continue;
+                }
+                let goal = 0.5 * t;
+                let mut step = 0.0f64;
+                for l in 0..m0.len() {
+                    let m1 = g[l][0] * xs[0] + g[l][1] * xs[1] + hh[l];
+                    if m0[l] < goal && m1 > m0[l] {
+                        step = step.max((goal - m0[l]) / (m1 - m0[l]));
+                    }
+                }
+                let step = step.min(1.0);
+                let xn = [x[0] + step * (xs[0] - x[0]), x[1] + step * (xs[1] - x[1])];
+                for &h in cs {
+                    uv[2 * h] = xn[0];
+                    uv[2 * h + 1] = xn[1];
+                }
+                moved += 1;
+            }
+        }
+        moves += moved;
+        if moved == 0 {
+            break;
+        }
+    }
+    moves
+}
+
+/// Ring fills (the fold fix's second layer): folded faces plus their 1-ring, within their side region, get a harmonic fill (own
 /// Gauss-Seidel, inverse-length weights) with the spot's border corners pinned; while a spot still folds it grows by one
 /// ring, up to its region's border. A spot that ends with no fewer folds than it started with gets its UVs back. Only
 /// corners of faces inside a spot change; every other UV stays bit for bit.
@@ -989,7 +1298,7 @@ pub struct FoldReport {
 /// units; half the region's smallest self-seam gap, so the two sides of a seam inside one island stay apart). An empty
 /// `join` joins all.
 #[allow(clippy::too_many_arguments)]
-pub fn fold_fix(res_points: &[f64], res_faces: &Faces, uv: &mut [f64], region: &[i64], expected: &[f64], join: &[f64], texture_px: f64, stop: &AtomicBool) -> FoldReport {
+fn ring_fill(res_points: &[f64], res_faces: &Faces, uv: &mut [f64], region: &[i64], expected: &[f64], join: &[f64], texture_px: f64, stop: &AtomicBool) -> FoldReport {
     let nf = res_faces.count();
     let bad: Vec<bool> = (0..nf).map(|f| folded(res_faces, uv, expected, f)).collect();
     let mut report = FoldReport { before: bad.iter().filter(|&&x| x).count(), ..FoldReport::default() };
@@ -1289,10 +1598,57 @@ pub struct Transfer {
 /// (`look.done` false) and the fold fix is skipped.
 #[allow(clippy::too_many_arguments)]
 pub fn transfer(src_points: &[f64], src_faces: &Faces, set: &SeamSet, layer: &[f64], res_points: &[f64], res_faces: &Faces, fix_folds: bool, stop: &AtomicBool) -> Transfer {
-    let look = lookup(src_points, src_faces, set, res_points, res_faces, stop);
+    let look = lookup_with(src_points, src_faces, set, res_points, res_faces, Some(layer), stop);
     let (mut uv, expected) = evaluate(&look, src_faces, layer, res_faces);
-    let fold = if fix_folds && look.done { fold_fix(res_points, res_faces, &mut uv, &look.region, &expected, &look.join, set.texture_px, stop) } else { FoldReport::default() };
+    let mut fold = if fix_folds && look.done { fold_fix(res_points, res_faces, &mut uv, &look.region, &expected, &look.join, set.texture_px, stop) } else { FoldReport::default() };
+    if fix_folds && look.done && fold.after > 0 {
+        fold.reread = reread_folded(src_points, src_faces, layer, &look, res_points, res_faces, &mut uv, &expected);
+        fold.after -= fold.reread;
+    }
     Transfer { uv, look, expected, fold }
+}
+
+/// The fold fix's last layer: a result face that still folds reads all its corners again through its reference
+/// triangle's own map (the affine map from the triangle's plane to its UVs, extended past its edges), which keeps the
+/// face's winding the source's wherever the face lies flat over that triangle. The face's corners then no longer share
+/// UVs with its neighbours (a sliver-wide UV cut around it) instead of showing a mirrored texture. A face that would still
+/// fold keeps its UVs. Returns how many faces were read again.
+#[allow(clippy::too_many_arguments)]
+pub fn reread_folded(src_points: &[f64], src_faces: &Faces, layer: &[f64], look: &Lookup, res_points: &[f64], res_faces: &Faces, uv: &mut [f64], expected: &[f64]) -> usize {
+    if src_points.is_empty() {
+        return 0;
+    }
+    let mut done = 0;
+    for f in 0..res_faces.count() {
+        if look.ref_face[f] < 0 || !folded(res_faces, uv, expected, f) {
+            continue;
+        }
+        let c = [look.ref_ids[3 * f] as usize, look.ref_ids[3 * f + 1] as usize, look.ref_ids[3 * f + 2] as usize];
+        let p = c.map(|h| p3(src_points, src_faces.flat[h]));
+        let q = c.map(|h| [layer[2 * h], layer[2 * h + 1]]);
+        let (e1, e2) = (sub(p[1], p[0]), sub(p[2], p[0]));
+        let (g11, g12, g22) = (dot(e1, e1), dot(e1, e2), dot(e2, e2));
+        let det = g11 * g22 - g12 * g12;
+        if !(det.abs() > 1e-30) {
+            continue;
+        }
+        let (s, e) = (res_faces.indptr[f] as usize, res_faces.indptr[f + 1] as usize);
+        let old = uv[2 * s..2 * e].to_vec();
+        for h in s..e {
+            let x = sub(p3(res_points, res_faces.flat[h]), p[0]);
+            let (r1, r2) = (dot(x, e1), dot(x, e2));
+            let (b1, b2) = ((g22 * r1 - g12 * r2) / det, (g11 * r2 - g12 * r1) / det);
+            for k in 0..2 {
+                uv[2 * h + k] = q[0][k] + b1 * (q[1][k] - q[0][k]) + b2 * (q[2][k] - q[0][k]);
+            }
+        }
+        if folded(res_faces, uv, expected, f) {
+            uv[2 * s..2 * e].copy_from_slice(&old);
+        } else {
+            done += 1;
+        }
+    }
+    done
 }
 
 /// Compile probe: calls every `crate::` helper this kernel is assigned. Returns 1 when all worked.
