@@ -32,6 +32,7 @@ ROW_TOL_DEG = 1e-6
 WAIT = "wait"  # a stage yields this while a faster job runs: step() returns at once instead of spinning
 SELF_CHECK_FACES = 4  # charts smaller than this are not checked for lying over themselves (a pole of valence 5 needs 5 faces)
 CHECK_BATCH = 48  # charts checked in one call, each in its own tile
+RASTER_PX = 128  # tile size of the check that runs without the faster callable
 SELF_CHECK_PX = 256.0  # a checked chart is drawn this big (its longest side is SELF_CHECK_FILL of it)
 SELF_CHECK_FILL = 0.9
 NUMPY_CHECK_FACES = 30000  # without the faster check the guard is skipped above this size
@@ -494,9 +495,42 @@ class NewUVs:
                 yield WAIT
             numbers = np.asarray(job.result()[0])
         else:
-            yield
-            numbers = uvscore.check(m, texture_px=SELF_CHECK_PX, use_fast=False).numbers
+            return (yield from self._raster_overlap(m, side))
         return bool(numbers[uvscore._I["overlap_pct"]] > 0.0 or numbers[uvscore._I["flipped_faces"]] > 0)
+
+    def _raster_overlap(self, m, side):
+        """The same question without the faster check, in slices: pixel centres covered by two triangles, and triangles
+        wound against their tile's majority. Coarser than `uvscore.check` (128 px per tile, centres only)."""
+
+        res = RASTER_PX
+        sizes = np.diff(m.indptr)
+        fan = np.concatenate([np.arange(1, n - 1) for n in sizes]) if len(sizes) else np.zeros(0, np.int64)
+        face = np.repeat(np.arange(len(sizes)), np.maximum(sizes - 2, 0))
+        base = m.indptr[face]
+        a, b, c = (m.uv[base] * res), (m.uv[base + fan] * res), (m.uv[base + fan + 1] * res)
+        area = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+        tile = (np.floor(a[:, 1] / res) * side + np.floor(a[:, 0] / res)).astype(np.int64)
+        ntile = side * side
+        pos = np.bincount(tile, weights=(area > 0).astype(float), minlength=ntile)
+        neg = np.bincount(tile, weights=(area < 0).astype(float), minlength=ntile)
+        if (np.minimum(pos, neg) > 0).any():
+            return True  # a triangle wound against its chart
+        image = np.zeros((side * res + 1, side * res + 1), np.int16)
+        until = time.perf_counter() + self.budget
+        for i in range(len(area)):
+            if not area[i]:
+                continue
+            tri = np.array([a[i], b[i], c[i]])
+            lo, hi = np.floor(tri.min(axis=0)).astype(int), np.ceil(tri.max(axis=0)).astype(int)
+            xs, ys = np.meshgrid(np.arange(lo[0], hi[0]) + 0.5, np.arange(lo[1], hi[1]) + 0.5)
+            w0 = ((b[i, 0] - xs) * (c[i, 1] - ys) - (b[i, 1] - ys) * (c[i, 0] - xs)) / area[i]
+            w1 = ((c[i, 0] - xs) * (a[i, 1] - ys) - (c[i, 1] - ys) * (a[i, 0] - xs)) / area[i]
+            inside = (w0 > 1e-9) & (w1 > 1e-9) & (w0 + w1 < 1 - 1e-9)
+            image[lo[1] : hi[1], lo[0] : hi[0]] += inside
+            if time.perf_counter() > until:
+                yield
+                until = time.perf_counter() + self.budget
+        return bool((image >= 2).any())
 
     def _split_overlapping(self, tree, chart, corner_uv, rows, x):
         """A chart the solver kept free of flips can still lie over itself (a cap with a pole of valence 5 or more).
