@@ -33,6 +33,8 @@ WAIT = "wait"  # a stage yields this while a faster job runs: step() returns at 
 LEVEL_STEP = 0.5  # a chart that lies over itself is redone at this share of the Stretch allowed it had
 SELF_CHECK_FACES = 1  # every chart is checked for lying over itself (a fold of 3 faces, or one bent quad, is enough)
 CHECK_BATCH = 24  # charts checked in one call
+STRETCH_CHUNK = 8000  # triangles measured per slice in the stretch check
+CELLS_PER_TRI = 8  # grid cells per triangle (on average) in the overlap test's spatial hash
 CHECK_PAIRS = 5000  # triangle pairs tested in one go (a slice)
 OVERLAP_EPS = 1e-4  # triangles overlapping by less than this share of a median triangle's side count as touching
 REDO_FACES = 64  # charts this small are laid out again on their own when their layout stretches too much
@@ -504,8 +506,15 @@ class NewUVs:
         tri = _fan(indptr, np.arange(nf))
         tface = np.repeat(np.arange(nf), np.maximum(np.diff(indptr) - 2, 0))
         yield
-        L = _l2_stretch(self.points[flat[tri]], corner_uv[tri], chart[tface], len(rows))
-        a3 = 0.5 * np.linalg.norm(np.cross(*(self.points[flat[tri[:, k]]] - self.points[flat[tri[:, 0]]] for k in (1, 2))), axis=1)
+        q3 = self.points[flat[tri]]
+        a3 = 0.5 * np.linalg.norm(np.cross(q3[:, 1] - q3[:, 0], q3[:, 2] - q3[:, 0]), axis=1)
+        a2 = 0.5 * np.abs(_tri_area2(corner_uv[tri]))
+        ratio = np.bincount(chart[tface], weights=a2, minlength=len(rows)) / np.maximum(np.bincount(chart[tface], weights=a3, minlength=len(rows)), 1e-30)
+        L = np.empty(len(tri))
+        for i in range(0, len(tri), STRETCH_CHUNK):
+            yield
+            sl = slice(i, i + STRETCH_CHUNK)
+            L[sl] = _l2_stretch(q3[sl], corner_uv[tri[sl]], chart[tface[sl]], len(rows), ratio)
         yield
         tch = chart[tface]
         worst = np.zeros(len(rows))
@@ -564,6 +573,13 @@ class NewUVs:
             fixed += 1
         return corner_uv, rows, fixed
 
+    def _edges(self):
+        """`edge_ids` of this mesh, worked out once."""
+
+        if getattr(self, "_edge_cache", None) is None:
+            self._edge_cache = edge_ids(self.indptr, self.flat)
+        return self._edge_cache
+
     def _attach_small(self, chart, corner_uv, rows):
         """Small charts hinged onto a neighbour (ours): a chart of at most `ATTACH_FACES` faces is turned and moved onto
         the neighbour it shares the longest border with (not a Straight rows On chart), its shared corners snapped to the
@@ -583,7 +599,7 @@ class NewUVs:
         nxt = np.arange(1, len(flat) + 1)
         nxt[indptr[1:] - 1] = indptr[:-1]
         yield
-        ids, ne = edge_ids(indptr, flat)
+        ids, ne = self._edges()
         yield
         cnt = np.bincount(ids, minlength=ne)
         order = np.argsort(ids, kind="stable")
@@ -690,7 +706,7 @@ class NewUVs:
         nxt = np.arange(1, len(flat) + 1)
         nxt[indptr[1:] - 1] = indptr[:-1]
         yield
-        ids, _ = edge_ids(indptr, flat)
+        ids, _ = self._edges()
         yield
         open_ = cut_edges(indptr, flat, local)[ids] | (np.bincount(ids)[ids] == 1)
         yield
@@ -985,19 +1001,19 @@ def _tris_overlap(new, faces, indptr, corner_uv, hfaces, eps) -> bool:
     return bool(_sat_overlap(t1[i.ravel()], t2[j.ravel()], eps).any())
 
 
-def _l2_stretch(q: np.ndarray, t: np.ndarray, chart: np.ndarray, nchart: int) -> np.ndarray:
+def _l2_stretch(q: np.ndarray, t: np.ndarray, chart: np.ndarray, nchart: int, ratio=None) -> np.ndarray:
     """Per triangle (3D corners q (n, 3, 3), UV t (n, 3, 2)): the L2 stretch of Sander, Snyder, Gortler, Hoppe 2001,
     each chart scaled to its 3D area (the UV Check's stretch); inf for a triangle with no UV area."""
 
     a2s = 0.5 * _tri_area2(t)
-    a3 = 0.5 * np.linalg.norm(np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]), axis=1)
-    a2i = np.bincount(chart, weights=np.abs(a2s), minlength=nchart)
-    a3i = np.bincount(chart, weights=a3, minlength=nchart)
+    if ratio is None:  # UV area / 3D area per chart
+        a3 = 0.5 * np.linalg.norm(np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]), axis=1)
+        ratio = np.bincount(chart, weights=np.abs(a2s), minlength=nchart) / np.maximum(np.bincount(chart, weights=a3, minlength=nchart), 1e-30)
     s_, t_ = t[:, :, 0], t[:, :, 1]
     d = np.where(a2s == 0, np.nan, 2 * a2s)[:, None]
     ss = (q[:, 0] * (t_[:, 1] - t_[:, 2])[:, None] + q[:, 1] * (t_[:, 2] - t_[:, 0])[:, None] + q[:, 2] * (t_[:, 0] - t_[:, 1])[:, None]) / d
     st = (q[:, 0] * (s_[:, 2] - s_[:, 1])[:, None] + q[:, 1] * (s_[:, 0] - s_[:, 2])[:, None] + q[:, 2] * (s_[:, 1] - s_[:, 0])[:, None]) / d
-    out = np.sqrt(0.5 * ((ss * ss).sum(1) + (st * st).sum(1)) * (a2i / np.maximum(a3i, 1e-30))[chart])
+    out = np.sqrt(0.5 * ((ss * ss).sum(1) + (st * st).sum(1)) * ratio[chart])
     return np.where(np.isfinite(out), out, np.inf)
 
 
@@ -1033,6 +1049,12 @@ def overlap_pairs(t: np.ndarray, eps: float, chunk: int = CHECK_PAIRS):
     lo, hi = t.min(axis=1), t.max(axis=1)
     cell = max(float(np.median(hi - lo)), 1e-300)
     yield False
+    ext = hi - lo
+    while True:  # a few huge triangles must not fill thousands of cells each: grow the cell until about CELLS_PER_TRI per triangle
+        cnt = (np.floor(ext[:, 0] / cell) + 2) * (np.floor(ext[:, 1] / cell) + 2)
+        if cnt.sum() <= CELLS_PER_TRI * n:
+            break
+        cell *= 1.5
     c0 = np.floor((lo - lo.min(axis=0)) / cell).astype(np.int64)
     c1 = np.floor((hi - lo.min(axis=0)) / cell).astype(np.int64)
     span = c1 - c0 + 1
