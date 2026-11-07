@@ -11,6 +11,7 @@ from mathutils import Vector
 import numpy as np
 
 from .triadq import MeshData, topology_summary
+from . import uv_layers; from .triadq import uvscore  # main-only: uv
 
 
 @dataclass(slots=True)
@@ -42,6 +43,7 @@ class MeshDiagnostics:
     p95_aspect_ratio: float = 0.0
     quad_only: bool = False
     uv_valid: bool = False
+    uv_check: object = None  # main-only: uv
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -207,6 +209,7 @@ def mesh_diagnostics(obj: bpy.types.Object, target_faces: int = 0) -> MeshDiagno
             and min_jacobian > 0.0
         ),
         uv_valid=uv_mapping_is_valid(obj),
+        uv_check=lambda: uvscore.as_dict(uvscore.check(uvscore.mesh(*uv_layers.geometry(mesh))).numbers) if mesh.uv_layers else None,  # main-only: uv
     )
 
 
