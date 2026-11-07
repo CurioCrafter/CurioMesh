@@ -21,6 +21,8 @@ PowerShell: `Get-ChildItem models\*.obj | ForEach-Object { & $env:BLENDER -b --f
 
 Then read every JSON, and give the user one table: file, source faces, faces, quad %, view changed %, defect totals, `verdict.ok`. Retry only the files whose `verdict.ok` is false, following the retry steps of `curiomesh-retopo`. A file that fails (`ok: false`) does not stop the others.
 
+For many jobs that share one Blender (keeping its state, reading numbers between steps), `curiomesh-agent` can serve commands from one headless Blender instead of starting a new one per file.
+
 CurioMesh's own `Batch Remesh Selected` button belongs to the older whole-mesh remesher, not Auto Segments. Do not use it here.
 
 ## LOD sets

@@ -20,7 +20,6 @@ to put it. You get `<mesh name>_curiomesh_job/`:
 | --- | --- |
 | `mesh.npz` | your mesh (welded, with its material indices) |
 | `job.json` | the settings: Change Allowed or Reduce To, and the effort (Full) |
-| `curiomesh_engine/` | a copy of the CurioMesh Python code, so the add-on is not needed there |
 | `run_job.py` | runs the same search the button runs, without a window |
 | `README.txt` | the same steps as below, for whoever runs it |
 
@@ -44,6 +43,7 @@ card.
    wget -O blender.tar.xz "<link>"
    mkdir blender && tar -xf blender.tar.xz -C blender --strip-components=1
    ```
+   The job folder does not carry CurioMesh's code. `run_job.py` uses the CurioMesh add-on installed and enabled in the Blender that runs it, so install the release zip for that Blender version there too (the README's Install section), and use the same CurioMesh version as on your PC.
 3. Copy the job folder to it (from your PC):
 
    ```bash
@@ -87,7 +87,7 @@ Measured 2026-11-02 on a Ryzen 9 5900X and RTX 3080 Ti, Blender 5.2.3.
 
 The card works in single precision, so a pixel on a depth tie can pick the neighbouring triangle. Against the processor's pictures the camera counts 0.02 to 0.4% of the pixels as changed on real meshes (up to 1.3% on a very dense scan at 32 pixels a side). The Use Graphics Card setting, or `CURIOMESH_GPU=0`, keeps everything on the processor.
 
-**Measuring the parts uses several cores** (Use Several Cores, from 0.9.1): helper Blenders measure parts at once, as many as the free cores and memory allow. The rest of a job (pairing, the checks and repairs) still uses about one core, apart from the native steps. So a rented machine helps through a fast core, enough memory, and more cores on a job with many parts. The exported folder carries the Python code only, so a job there runs on the Python paths unless the native core is copied too.
+**Measuring the parts uses several cores** (Use Several Cores, from 0.9.1): helper Blenders measure parts at once, as many as the free cores and memory allow. The rest of a job (pairing, the checks and repairs) still uses about one core, apart from the native steps. So a rented machine helps through a fast core, enough memory, and more cores on a job with many parts. The add-on installed on the rented machine decides this: it runs the native core if that add-on zip includes the core for the machine's system, and the Python paths if not.
 
 ## Price comparison
 

@@ -6,7 +6,8 @@ blender -b --factory-startup --python curiomesh_fix.py -- RESULT --original ORIG
 --fix: ALL, or a comma list in the order to try: CLEAN,FLIP,UNTANGLE,RELAX,PATCH (omit to only measure).
 --faces 3,10-20: fix only these face numbers (default: every bad face).  --grow N: rings of faces checked around them (0 with --faces).
 --original: your source mesh. Says which way is out; Flip Inward and Untangle need it.
-Each step is kept only if it leaves fewer bad faces than before; otherwise it is undone. bad_face_ids in the report feed --faces.
+Each step is kept only if it leaves fewer bad faces than before; otherwise it is undone. The list is run again while a round still
+gains something, and stops when a round gains nothing (no round cap). bad_face_ids in the report feed --faces.
 """
 
 import argparse
@@ -57,6 +58,27 @@ def select_faces(obj, ids):
         bpy.ops.mesh.select_all(action="DESELECT")
 
 
+def fix_rounds(fixes, first, do_step):
+    """Keep going while the bad-face count drops: run the whole fix list again after every round that gained something,
+    and stop when a round gains nothing or no bad face is left. No round cap. do_step(key, current, fresh) returns
+    (record, new_count_or_None); None means the step was undone."""
+    current, steps, rounds = first, [], 0
+    while fixes and current["bad"] > 0:
+        rounds += 1
+        gained = False
+        for key in fixes:
+            record, after = do_step(key, current, current is first)
+            record["round"] = rounds
+            steps.append(record)
+            if after is not None:
+                current, gained = after, True
+                if current["bad"] == 0:
+                    break
+        if not gained:
+            break
+    return current, steps, rounds
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="curiomesh_fix.py")
     ap.add_argument("input")
@@ -84,30 +106,31 @@ def main() -> int:
     ctx.scene.curiomesh_fix.grow = args.grow if args.grow is not None else (0 if ids else 1)
 
     first = count_bad(obj, fix_select, ctx)
-    current = first
-    steps = []
-    for key in fixes:
+
+    def do_step(key, current, fresh):
+        """One fix on the real mesh. Returns (record, count if kept else None)."""
         cm.select_only(obj)
         backup = obj.data.copy()
-        select_faces(obj, ids if current is first else [])  # the face numbers only mean something before the first change
+        select_faces(obj, ids if fresh else [])  # the face numbers only mean something before the first change
         try:
             bpy.ops.curiomesh.fix_run(how=key)
         except Exception as exc:
-            steps.append({"fix": key, "kept": False, "error": str(exc).strip()[:300]})
             bpy.ops.object.mode_set(mode="OBJECT")
             obj.data = backup
-            continue
+            return {"fix": key, "kept": False, "error": str(exc).strip()[:300]}, None
         bpy.ops.object.mode_set(mode="OBJECT")
         after = count_bad(obj, fix_select, ctx)
         keep = cm.better(current, after)
-        steps.append({"fix": key, "kept": keep, "bad_before": current["bad"], "bad_after": after["bad"], "faces_after": after["faces"], "by_kind": {k: after[k] for k in cm.DEFECT_KINDS}})
+        record = {"fix": key, "kept": keep, "bad_before": current["bad"], "bad_after": after["bad"], "faces_after": after["faces"], "by_kind": {k: after[k] for k in cm.DEFECT_KINDS}}
         if keep:
             bpy.data.meshes.remove(backup)
-            current = after
-        else:
-            old = obj.data
-            obj.data = backup
-            bpy.data.meshes.remove(old)
+            return record, after
+        old = obj.data
+        obj.data = backup
+        bpy.data.meshes.remove(old)
+        return record, None
+
+    current, steps, rounds = fix_rounds(fixes, first, do_step)
     report = {
         "input": args.input,
         "original": args.original,
@@ -116,6 +139,7 @@ def main() -> int:
         "after": {k: v for k, v in current.items() if k != "bad_face_ids"},
         "bad_face_ids": current["bad_face_ids"],
         "steps": steps,
+        "rounds": rounds,
         "improved": cm.better(first, current),
         "ok": True,
     }
