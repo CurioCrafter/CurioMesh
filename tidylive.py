@@ -1385,22 +1385,10 @@ class LiveTool:
 
     def execute(self, context):
         """No preview: run to the end and keep it (F9 redo, scripts, the agent skills)."""
-        s = Session(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
-        if s.error:
-            self.report({"WARNING"}, s.error)
-            return {"CANCELLED"}
-        s.finish()
-        if s.waiting():
-            self.report({"WARNING"}, f"{s.trial.name}: {s.ask()} first (or set it in the redo panel)")
-            return {"CANCELLED"}
-        if s.cand is not None and s.cand.refusal:
-            self.report({"WARNING"}, s.cand.refusal)
-            return {"CANCELLED"}
-        if s.cand is not None and s.cand.co is None and not s.error:
-            self.report({"WARNING"}, s.cand.note or f"{s.trial.name}: nothing to keep")
-            return {"CANCELLED"}
-        if s.error or not s.ready_to_keep():
-            self.report({"WARNING"}, s.error or f"{s.trial.name} did not finish")
+        s = work_out(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
+        why = why_not_kept(s)
+        if why:
+            self.report({"WARNING"}, why)
             return {"CANCELLED"}
         numbers = numbers_text(s.cand, s.trial, s.cap)
         if not commit(context, s.cand, s.trial.name, numbers):
@@ -1409,11 +1397,33 @@ class LiveTool:
             history._push(f"Tidy: {s.trial.name}")
         _remember(context, self.bl_idname, s.trial.name, numbers, {k: v for k, v in s.settings.items() if k not in s.trial.picks})
         while _keeps_going(s):  # Keep going: again on the kept result until a run makes nothing better
-            s = Session(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
-            s.finish()
+            s = work_out(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
             if s.error or not s.ready_to_keep() or not commit(context, s.cand, s.trial.name, numbers_text(s.cand, s.trial, s.cap)):  # one Undo step for the whole run (F9), one History entry each
                 break
         return {"FINISHED"}
+
+
+def work_out(context, trial: T.Trial, settings: dict, scope: str = "WHOLE", pick: dict | None = None) -> Session:
+    """Run a tool to the end with no window (F9, scripts, the agent commands): the finished Session. Nothing is kept."""
+    s = Session(context, trial, settings, scope, pick)
+    if not s.error:
+        s.finish()
+    return s
+
+
+def why_not_kept(s: Session) -> str:
+    """"" when `s` holds a result that can be kept, else why not, in words."""
+    if s.error:
+        return s.error
+    if s.waiting():
+        return f"{s.trial.name}: {s.ask()} first (or set it in the redo panel)"
+    if s.cand is not None and s.cand.refusal:
+        return s.cand.refusal
+    if s.cand is not None and s.cand.co is None:
+        return s.cand.note or f"{s.trial.name}: nothing to keep"
+    if not s.ready_to_keep():
+        return f"{s.trial.name} did not finish"
+    return ""
 
 
 def _keeps_going(s) -> bool:
