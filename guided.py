@@ -1031,7 +1031,7 @@ def gather(obj, gs=None) -> list[Pt]:
             continue
         local = inv @ o.matrix_world.translation
         kind = str(o.get("curiomesh_kind", default)).upper()
-        ok, _loc, normal, _i = obj.closest_point_on_mesh(local)
+        ok, _loc, normal = _closest(obj, local)
         pts.append(
             Pt(
                 kind if kind in KIND_KEYS else default,
@@ -1101,7 +1101,7 @@ def suggest(obj, gs) -> list[dict]:
             out.append({"kind": kind, "co": co[v], "r": radius})
             taken.append(co[v])
     for o in out:
-        ok, loc, normal, _i = obj.closest_point_on_mesh(Vector(o["co"]))
+        ok, loc, normal = _closest(obj, Vector(o["co"]))
         o["co"] = np.asarray(loc if ok else o["co"], float)
         o["normal"] = np.asarray(normal if ok else (0, 0, 1), float)
     return out[: gs.suggest_count]
@@ -1137,14 +1137,25 @@ def next_spot(res, project, L0):
 
 def state_source():
     obj = bpy.data.objects.get(state["source"]) if state["source"] else None
-    return obj if obj is not None and obj.type == "MESH" else None
+    return obj if obj is not None and obj.type == "MESH" and len(obj.data.polygons) else None
 
 
 def _source_mesh(context):
+    """The mesh to work on: the active one, else the last one used. A mesh without faces has nothing to work on."""
     o = context.object
-    if o is not None and o.type == "MESH" and not overlay.is_preview(o):
+    if o is not None and o.type == "MESH" and not overlay.is_preview(o) and len(o.data.polygons):
         return o
     return state_source()
+
+
+def _closest(obj, local):
+    """(found, location, normal) on the object's mesh, in its own space. Also in Edit Mode, where Blender's
+    closest_point_on_mesh can't build its lookup."""
+    if obj.mode != "EDIT":
+        return obj.closest_point_on_mesh(local)[:3]
+    obj.update_from_editmode()
+    loc, normal, _index, _dist = _bvh(_source_data(obj)).find_nearest(local)
+    return loc is not None, loc, normal
 
 
 def _signature(context, src_obj) -> tuple:
@@ -2712,7 +2723,7 @@ class CURIOMESH_OT_guided_add_point(bpy.types.Operator):
         obj = _source_mesh(context)
         gs = _gs(context)
         world = Vector(self.location) if any(self.location) else context.scene.cursor.location
-        ok, loc, normal, _i = obj.closest_point_on_mesh(obj.matrix_world.inverted() @ world)
+        ok, loc, normal = _closest(obj, obj.matrix_world.inverted() @ world)
         if not ok:
             self.report({"ERROR"}, "No surface found")
             return {"CANCELLED"}
