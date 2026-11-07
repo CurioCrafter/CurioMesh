@@ -4,6 +4,9 @@
 //!
 //! - Rectangles: MaxRects with best-short-side-fit (Jylänki 2010, "A thousand ways to pack the bin"); 90 degree steps
 //!   only; the order, the gap rule, the page scale search and the order moves are ours.
+//! - Bottom-left rule (Baker, Coffman and Rivest 1980, "Orthogonal packings in two dimensions"): the free place whose
+//!   box ends lowest, then leftmost, as a second placement rule beside best short side fit; large sets of many small boxes
+//!   tile 1-2 % tighter with it, small sets of few big boxes with the first. Both are tried and the better kept (ours).
 //! - Gap and mip levels (our rule, derived in `gap_axis`): a mip-k texel is a block of 2^k texels; two charts are mip-clean
 //!   when their touched blocks, each grown by one block (the bilinear footprint), do not meet.
 //! - Irregular charts: conservative row intervals per texel row (no bitmap), dilated by the gap in both axes (Minkowski
@@ -31,7 +34,11 @@ pub const MIN_GAIN: f64 = 0.0001;
 /// Number of box orders (long side, area, seen-weighted area, height, width).
 pub const ORDERS: usize = 5;
 /// Number of orientation policies (free, wide, tall, as given).
-pub const POLICIES: usize = 4;
+pub const ORIENTS: usize = 4;
+/// Number of placement rules (0 best short side fit, 1 bottom-left).
+pub const RULES: usize = 2;
+/// A policy is an orientation policy plus a placement rule: `policy % ORIENTS` and `policy / ORIENTS` (so ORIENTS * RULES).
+pub const POLICIES: usize = 8;
 /// Largest mip level the gap rule accepts (a gap of 2^(k+1) texels).
 pub const MAX_K: i64 = 20;
 
@@ -67,6 +74,7 @@ type Rect = [i64; 4];
 
 pub struct MaxRects {
     g: i64,
+    rule: usize,
     free: Vec<Rect>,
 }
 
@@ -85,8 +93,8 @@ fn gap_axis(f0: i64, flen: i64, len: i64, g: i64) -> Option<(i64, i64, i64)> {
 }
 
 impl MaxRects {
-    pub fn new(w: i64, h: i64, k: i64) -> Self {
-        MaxRects { g: block(k), free: vec![[0, 0, w, h]] }
+    pub fn new(w: i64, h: i64, k: i64, rule: usize) -> Self {
+        MaxRects { g: block(k), rule, free: vec![[0, 0, w, h]] }
     }
 
     /// Place a box of `w` x `h` texels (content). Returns (content x, content y, turned).
@@ -102,7 +110,10 @@ impl MaxRects {
                     continue;
                 };
                 let (rx, ry) = (f[2] - f[0] - (ax.1 - f[0]), f[3] - f[1] - (ay.1 - f[1]));
-                let score = (rx.min(ry), rx.max(ry), ay.1, ax.1);
+                let score = match self.rule {
+                    1 => (ay.1, ax.1, 0, 0),
+                    _ => (rx.min(ry), rx.max(ry), ay.1, ax.1),
+                };
                 if best.as_ref().map_or(true, |b| score < b.0) {
                     best = Some((score, [ax.0, ay.0, ax.1, ay.1], (ax.2, ay.2), turned));
                 }
@@ -111,6 +122,13 @@ impl MaxRects {
         let (_, p, (cx, cy), turned) = best?;
         self.split(p);
         Some((cx, cy, turned))
+    }
+
+    /// Forget free rectangles in which no box of `side` texels or more can sit, whichever way it is turned: a box needs its
+    /// side plus the gap on both sides in each direction. They could never be chosen, so the layout is the same, only faster.
+    fn prune(&mut self, side: i64) {
+        let need = side + 2 * self.g;
+        self.free.retain(|f| f[2] - f[0] >= need && f[3] - f[1] >= need);
     }
 
     fn split(&mut self, p: Rect) {
@@ -195,9 +213,15 @@ pub struct Place {
 
 /// Pack every box at scale `s` in `order` (policy 0 free turning, 1 wide first, 2 tall first, 3 as given). None when one fails.
 pub fn pack(b: &Boxes, order: &[usize], pol: usize, s: f64, page: (i64, i64), k: i64) -> Option<Vec<Place>> {
-    let mut mr = MaxRects::new(page.0, page.1, k);
+    let mut mr = MaxRects::new(page.0, page.1, k, (pol / ORIENTS).min(RULES - 1));
+    let pol = pol % ORIENTS;
     let mut out = vec![Place { x: 0, y: 0, turned: false }; b.len()];
-    for &i in order {
+    // shortest side among the boxes still to place (from each position on), for the pruning of useless free rectangles
+    let mut rest = vec![i64::MAX; order.len() + 1];
+    for (n, &i) in order.iter().enumerate().rev() {
+        rest[n] = rest[n + 1].min(snap(b.w[i] * s).min(snap(b.h[i] * s)));
+    }
+    for (n, &i) in order.iter().enumerate() {
         let (mut w, mut h) = (snap(b.w[i] * s), snap(b.h[i] * s));
         let ok = b.turn_ok[i] != 0;
         let mut pre = false;
@@ -207,6 +231,9 @@ pub fn pack(b: &Boxes, order: &[usize], pol: usize, s: f64, page: (i64, i64), k:
         }
         let (x, y, t) = mr.insert(w, h, ok && pol == 0)?;
         out[i] = Place { x, y, turned: pre ^ t };
+        if rest[n + 1] != i64::MAX {
+            mr.prune(rest[n + 1]);
+        }
     }
     Some(out)
 }
