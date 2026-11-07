@@ -40,6 +40,7 @@ WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
 DEGENERATE_SHARE = 1e-6  # a fan triangle with 2 x area <= this x its summed squared edges has no area (no say in the vote)
+EDGE_ON_COS = 1e-9  # normals this close to 90 deg are edge-on to rounding: no say in the winding vote
 WIND_BALL_EDGE = 0.25  # the winding vote's reach: nearest distance plus this share of a fan triangle's shortest edge
 REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
@@ -825,6 +826,11 @@ class _Source:
                 self.radius.append(r)
         weld = seams["weld"]
         wflat = weld[flat]
+        # faces at each welded vertex, in face order (the winding vote's ball grows through them)
+        self.wflat = wflat
+        order = np.argsort(wflat, kind="stable")
+        self.vf = _face_of_corner(indptr)[order]
+        self.vf_ptr = np.concatenate([[0], np.cumsum(np.bincount(wflat, minlength=int(seams["n_welded"]))])
         nxt = _next_corners(indptr)
         cface = _face_of_corner(indptr)
         ea, eb, estart, occ = _edges(wflat, nxt)
@@ -959,12 +965,32 @@ def _uv_area(uv, indptr, f) -> float:
     return area
 
 
+def _facing(a, b) -> float:
+    """-1, 0 or 1: whether normals a and b face the same way, 0 when edge-on to rounding (EDGE_ON_COS)."""
+
+    d = _dot(a, b)
+    return 0.0 if abs(d) <= EDGE_ON_COS * math.sqrt(_dot(a, a)) * math.sqrt(_dot(b, b)) else _sign(d)
+
+
+def _has_area(src, g) -> bool:
+    """True when source face g has area (twice-area above DEGENERATE_SHARE of its summed squared edges)."""
+
+    s, e = int(src.indptr[g]), int(src.indptr[g + 1])
+    pts = [tuple(src.P[v]) for v in src.flat[s:e]]
+    e2 = 0.0
+    for i in range(len(pts)):
+        d = _sub(pts[(i + 1) % len(pts)], pts[i])
+        e2 += _dot(d, d)
+    n = src.normal[g]
+    return math.sqrt(_dot(n, n)) > DEGENERATE_SHARE * e2
+
+
 def _fan_orient(src, Pr, face, rf, fallback) -> float:
     """A result face's orientation sign against its reference face `rf`, from the source under each of its fan
     triangles. Each triangle (0, i, i+1) gathers the source faces within reach of its centre (the nearest one's distance
-    plus WIND_BALL_EDGE of its shortest edge, joined across edges) and the windings they would show a texture with: a
+    plus WIND_BALL_EDGE of its shortest edge, joined through shared vertices) and the windings they would show a texture with: a
     face's UV winding times whether it faces the triangle, relative to the reference's UV winding (no UV area: both
-    allowed; edge-on: neither). The face takes the winding every triangle allows; both throughout: `fallback`. No common
+    allowed; edge-on or no 3D area: neither). The face takes the winding every triangle allows; both throughout: `fallback`. No common
     winding (folded in 3D, or across a crease with one half leaning into a wall): 0 (uvkeep cuts it into its fan
     triangles); no area at all (DEGENERATE_SHARE): 0 too, so the fold fix leaves its reads alone."""
 
@@ -993,14 +1019,16 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
         while at < len(ball):
             f = ball[at]
             at += 1
-            wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, f))
-            w = _sign(_dot(nt, src.normal[f])) * wind * ref_wind
-            allowed |= 3 if wind == 0.0 else (1 if w > 0.0 else (2 if w < 0.0 else 0))
+            if _has_area(src, f):
+                wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, f))
+                w = _facing(nt, src.normal[f]) * wind * ref_wind
+                allowed |= 3 if wind == 0.0 else (1 if w > 0.0 else (2 if w < 0.0 else 0))
             for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
-                g = int(src.across[h])
-                if g >= 0 and g not in seen and math.sqrt(src.on_faces([g], q)[0]) <= reach:
-                    seen.add(g)
-                    ball.append(g)
+                v = int(src.wflat[h])
+                for g in src.vf[src.vf_ptr[v]:src.vf_ptr[v + 1]].tolist():
+                    if g not in seen and math.sqrt(src.on_faces([g], q)[0]) <= reach:
+                        seen.add(g)
+                        ball.append(g)
         if allowed:
             common &= allowed
             said = True

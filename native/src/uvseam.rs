@@ -56,6 +56,9 @@ pub const WIND_BALL_EDGE: f64 = 0.25;
 /// A fan triangle whose twice-area is at most this share of its summed squared edge lengths has no area: its normal is
 /// rounding, so it has no say in its face's winding.
 pub const DEGENERATE_SHARE: f64 = 1e-6;
+/// Two normals whose cosine is at most this are edge-on: which side of 90 deg they fall on is rounding (a cap face
+/// beside a cylinder's wall), so that source face has no say in the winding vote.
+pub const EDGE_ON_COS: f64 = 1e-9;
 /// Fold fix stop rule (SPEC 3): no UV moves more than this share of a texel in one sweep.
 pub const STOP_TEXEL_SHARE: f64 = 0.02;
 /// Fold fix stall rule: the largest move must drop by `STALL_DROP` within `STALL_WINDOW` sweeps (reported).
@@ -674,6 +677,10 @@ struct Source<'a> {
     uv: Option<&'a [f64]>,
     uv_centre: Vec<[f64; 2]>,
     radius: Vec<f64>,
+    /// Welded vertex per corner, and the faces at each welded vertex (in face order).
+    wflat: Vec<i64>,
+    vf_ptr: Vec<usize>,
+    vf: Vec<usize>,
 }
 
 impl Source<'_> {
@@ -761,7 +768,23 @@ fn source<'a>(points: &'a [f64], faces: &'a Faces<'a>, set: &SeamSet, uv: Option
             radius.push(r);
         }
     }
-    Source { points, faces, tri, tri_ptr, centre, normal, across, crossing, uv, uv_centre, radius }
+    let mut vf_ptr = vec![0usize; set.n_welded + 1];
+    for &v in &wflat {
+        vf_ptr[v as usize + 1] += 1;
+    }
+    for v in 0..set.n_welded {
+        vf_ptr[v + 1] += vf_ptr[v];
+    }
+    let mut vf = vec![0usize; wflat.len()];
+    let mut fill = vf_ptr.clone();
+    for f in 0..nf {
+        for h in faces.indptr[f] as usize..faces.indptr[f + 1] as usize {
+            let v = wflat[h] as usize;
+            vf[fill[v]] = f;
+            fill[v] += 1;
+        }
+    }
+    Source { points, faces, tri, tri_ptr, centre, normal, across, crossing, uv, uv_centre, radius, wflat, vf_ptr, vf }
 }
 
 /// The inverse of a triangle's 3D-to-UV map as [k00, k01, k10, k11]: UV offsets to 3D lengths in the triangle's
@@ -862,6 +885,28 @@ fn sgn(x: f64) -> f64 {
     }
 }
 
+/// -1, 0 or 1: whether normals a and b face the same way, 0 when they are edge-on to rounding (EDGE_ON_COS).
+fn facing(a: V3, b: V3) -> f64 {
+    let d = dot(a, b);
+    if d.abs() <= EDGE_ON_COS * dot(a, a).sqrt() * dot(b, b).sqrt() {
+        0.0
+    } else {
+        sgn(d)
+    }
+}
+
+/// True when source face g has area (twice-area above DEGENERATE_SHARE of its summed squared edges): a zero-area
+/// sliver's normal is rounding, so it has no say in which way a result face winds.
+fn has_area(src: &Source, g: usize) -> bool {
+    let face = src.faces.face(g);
+    let mut e2 = 0.0;
+    for i in 0..face.len() {
+        let d = sub(p3(src.points, face[(i + 1) % face.len()]), p3(src.points, face[i]));
+        e2 += dot(d, d);
+    }
+    dot(src.normal[g], src.normal[g]).sqrt() > DEGENERATE_SHARE * e2
+}
+
 /// Twice the signed UV area of source face f in `layer` (shoelace over its corners).
 fn uv_area(layer: &[f64], faces: &Faces, f: usize) -> f64 {
     let (s, e) = (faces.indptr[f] as usize, faces.indptr[f + 1] as usize);
@@ -875,9 +920,9 @@ fn uv_area(layer: &[f64], faces: &Faces, f: usize) -> f64 {
 
 /// A result face's orientation sign against its reference face `rf`, from the source under each of its fan
 /// triangles. Each triangle (0, i, i+1) gathers the source faces within reach of its centre (the nearest one's distance
-/// plus WIND_BALL_EDGE of its shortest edge, joined across edges) and the windings they would show a texture with:
+/// plus WIND_BALL_EDGE of its shortest edge, joined through shared vertices) and the windings they would show a texture with:
 /// a face's UV winding times whether it faces the triangle, relative to the reference's UV winding (a face with no UV
-/// area allows both, one edge-on to it neither). The face takes the winding every triangle allows; when both are
+/// area allows both, one edge-on to it or with no 3D area neither). The face takes the winding every triangle allows; when both are
 /// allowed throughout, `fallback` (its own sign against the reference). A face whose triangles allow no common winding
 /// (folded in 3D, or across a crease with one half leaning into a wall) gets 0: no single winding shows the texture on
 /// all of it (`uvkeep` cuts such a face into its fan triangles). So does a face with no area (DEGENERATE_SHARE): it
@@ -909,14 +954,18 @@ fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], r
         while at < ball.len() {
             let f = ball[at];
             at += 1;
-            let wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, f)));
-            let w = sgn(dot(nt, src.normal[f])) * wind * ref_wind;
-            allowed |= if wind == 0.0 { 3 } else if w > 0.0 { 1 } else if w < 0.0 { 2 } else { 0 };
+            if has_area(src, f) {
+                let wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, f)));
+                let w = facing(nt, src.normal[f]) * wind * ref_wind;
+                allowed |= if wind == 0.0 { 3 } else if w > 0.0 { 1 } else if w < 0.0 { 2 } else { 0 };
+            }
             for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
-                let g = src.across[h];
-                if g >= 0 && !seen.contains_key(&(g as usize)) && src.on_face(g as usize, q).0.sqrt() <= reach {
-                    seen.insert(g as usize, ());
-                    ball.push(g as usize);
+                let v = src.wflat[h] as usize;
+                for &g in &src.vf[src.vf_ptr[v]..src.vf_ptr[v + 1]] {
+                    if !seen.contains_key(&g) && src.on_face(g, q).0.sqrt() <= reach {
+                        seen.insert(g, ());
+                        ball.push(g);
+                    }
                 }
             }
         }
