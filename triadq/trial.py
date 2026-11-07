@@ -130,10 +130,28 @@ class Trial:
     stages = ("poles", "move", "look")  # card numbers, most important first (up to three are shown)
     toggles: tuple = ()  # ((setting, words), ...): on/off chips on the card's fourth row
     legend = ""  # the fourth row's words when the tool tints by something other than how far corners moved
+    picks: tuple = ()  # what you click before it can run, in order ("pole", "partner"); each is a setting, -1 until clicked
+    asks: dict = {}  # pick -> what the header and the card ask for: {"pole": "click a pole"}
 
     def check(self, base: Base) -> str:
         """"" when the tool can run here, else the message the card shows instead."""
         return ""
+
+    def waiting(self, settings: dict) -> str:
+        """The first pick not made yet, or ""."""
+        return next((k for k in self.picks if int(settings.get(k, -1)) < 0), "")
+
+    def targets(self, base: Base, settings: dict, kind: str):
+        """(corner ids you can click for pick `kind`, a short label each). None: click anywhere and `pick_at` decides."""
+        return None
+
+    def pick_at(self, base: Base, settings: dict, kind: str, face: int, point) -> int:
+        """The pick for a click on `face` at `point` (object space), or -1 for nothing there."""
+        return -1
+
+    def picked_lines(self, base: Base, settings: dict) -> np.ndarray:
+        """(k, 2, 3) segments outlining what the picks in `settings` pick (drawn orange; white for a hover)."""
+        return np.zeros((0, 2, 3))
 
     def run(self, base: Base, settings: dict, rough: bool = False):
         """Generator: yield a progress 0..1 about every few milliseconds of work, return a Candidate."""
@@ -234,10 +252,9 @@ def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=
 
 
 def number_text(key: str, value, cap: float | None = None) -> tuple[str, int]:
-    """(words, sign) of one card number: sign 1 better (up triangle), -1 worse (down triangle), 0 the same. A tool's
-    own number is stored already worded, as (words, sign)."""
+    """(words, sign) of one card number: sign 1 better (up triangle), -1 worse (down triangle), 0 the same."""
     if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], str):
-        return value
+        return value  # a tool's own number, already in words: ("narrowest angle 28 -> 61 degrees", 1)
     if key == "poles":
         a, b = value
         if b < a:

@@ -103,6 +103,20 @@
   - **Relax Toward Detail** moves corners so quads get smaller where your mesh bends and bigger where it is flat, with
     the same faces. Its ring goes from Flat to Detail; the preview tints quads blue where they grew, orange where they
     shrank.
+- **Even the Band** (Loops & Strips): click a strip, and it and the strips beside it, out to the next pole or border,
+  get the same width. Points slide only along the lines that run across the strips, so no quad turns; the first and
+  last strip ease in so the band's edge does not kink. The card shows the width spread before and after.
+- **Cancel Pole Pair** (Poles): click a pole (dots show every pole with its edge count), then one of the numbered poles
+  of the other kind near it; edges are spun inside their quads to walk the two together until both have four edges,
+  with the same face count. Each spin is relaxed and checked like Tidy Up's; if no walk works, nothing changes and the
+  card says to try the next one. Esc goes back a click. Reach, Steps and Tries in the redo panel go as high as you like
+  (higher can take longer). Not on mirrored results yet.
+- **Open Up Poles** (Poles): the edges round every pole in the area turn toward even angles and equal lengths, held on
+  your original mesh, and the rings round them ease the change out. It keeps going round by round while the poles
+  still open up, so Again only finds more when something changed. The card shows the narrowest angle at the poles
+  before and after.
+- Tools that need a click first (a strip, a pole) wait for it with the ask in the header and on the card; the thing
+  under the mouse lights white and the picked one orange. Again opens the tool for a new click.
 
 ## 0.9.8 - 2026-11-06
 
