@@ -80,11 +80,16 @@ def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None) -> np.ndarray:
     for f in faces:
         if len(f) != 4:
             out[list(f)] = True
-    normal = {}
+    normal = np.zeros((len(faces), 3))
+    by_size: dict[int, list] = {}
     for i, f in enumerate(faces):
-        p = co[list(f)]
-        n = np.cross(p[2] - p[0], p[-1] - p[1]) if len(f) >= 4 else np.cross(p[1] - p[0], p[2] - p[0])
-        normal[i] = n / max(float(np.linalg.norm(n)), 1e-30)
+        by_size.setdefault(len(f), []).append(i)
+    for size, ids in by_size.items():  # one cross product per face size, not per face: opening a tool never stalls
+        if size < 3:
+            continue
+        p = co[np.asarray([faces[i] for i in ids], dtype=np.int64)]
+        normal[ids] = np.cross(p[:, 2] - p[:, 0], p[:, -1] - p[:, 1]) if size >= 4 else np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
     on_plane = np.zeros(len(co), dtype=bool) if plane is None else on_mirror(co, *plane)
     limit = np.cos(np.radians(sharp_deg))
     for (a, b), users in _edges(faces).items():

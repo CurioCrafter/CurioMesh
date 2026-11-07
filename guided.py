@@ -2083,6 +2083,9 @@ def run_update(context, force: bool = False) -> bool:
     state["source"] = source.name
     if source.mode == "EDIT":
         source.update_from_editmode()
+    if not len(source.data.polygons):
+        state["message"] = "This mesh has no faces yet. Select a mesh with faces, then press Start."
+        return False
     if gs.scope == "AUTO":
         if state["auto_base"] is not None:  # the search is done: this update is step 4, redoing parts inside the shapes
             return _start_boolean(context, gs, source, _source_data(source))
