@@ -709,6 +709,7 @@ class AutoJob:
         self.parallel = bool(parallel)  # measure parts in helper processes when the job and the computer suit it (parallel.py)
         self.threaded = False  # every slow Python step on a worker thread, however small the job (the size ladder runs while you work)
         self._pool = None
+        self._helper_note = ""
         self._copy_plan: dict | None = None  # with helpers: part -> (the part it copies, how to move onto it) or None, found ahead of time
         self._plan_reps: list = []
         self._plan_kinds: dict[int, str] = {}
@@ -1265,7 +1266,7 @@ class AutoJob:
         setup = yield from self._off(lambda: parallel.setup_of(self))
         self._pool = parallel.Pool(command, count, setup, env)
         self._copy_plan = {}
-        self.notes.append(f"Parts were measured {count} at a time, in helper processes")
+        self._helper_note = f"Parts were measured {count} at a time, in helper processes"  # noted once a helper's result is in
 
     def _close_pool(self) -> None:
         if self._pool is not None:
@@ -1327,6 +1328,9 @@ class AutoJob:
                 return None
             result = pool.take(task)
             if result is not None:
+                if self._helper_note:
+                    self.notes.append(self._helper_note)
+                    self._helper_note = ""
                 return result
             ahead = sum(float(self._done_share[k + 1] - self._done_share[k]) for k in pool.ready if isinstance(k, int))
             self.fraction = MEASURE_SHARE * min(float(self._done_share[index]) + ahead, 1.0)
