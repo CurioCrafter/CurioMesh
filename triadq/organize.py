@@ -69,27 +69,20 @@ def _edges(faces):
 
 
 def half_edges(faces):
-    """(face of each corner, corner, next corner) over every face, as arrays, worked out per face size (no per-face
-    Python), so a big result opens a tool without a stall."""
-    if not len(faces):
+    """(face of each corner, corner, next corner) over every face, as arrays in face order, with no per-face Python,
+    so a big result opens a tool without a stall."""
+    from itertools import chain
+
+    sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
+    if not len(faces) or not sizes.sum():
         empty = np.zeros(0, dtype=np.int64)
         return empty, empty, empty
-    by_size: dict[int, list] = {}
-    for i, f in enumerate(faces):
-        by_size.setdefault(len(f), []).append(i)
-    fid, a, b = [], [], []
-    for size, ids in by_size.items():
-        if not size:
-            continue
-        rows = np.asarray([faces[i] for i in ids], dtype=np.int64).reshape(len(ids), size)
-        fid.append(np.repeat(np.asarray(ids, dtype=np.int64), size))
-        a.append(rows.ravel())
-        b.append(np.roll(rows, -1, axis=1).ravel())
-    if not a:
-        empty = np.zeros(0, dtype=np.int64)
-        return empty, empty, empty
-    order = np.argsort(np.concatenate(fid), kind="stable")  # face order, as the per-face loops gave it
-    return np.concatenate(fid)[order], np.concatenate(a)[order], np.concatenate(b)[order]
+    a = np.fromiter(chain.from_iterable(faces), dtype=np.int64, count=int(sizes.sum()))
+    fid = np.repeat(np.arange(len(faces), dtype=np.int64), sizes)
+    starts = np.cumsum(sizes) - sizes
+    nxt = np.arange(1, len(a) + 1)
+    nxt[starts[sizes > 0] + sizes[sizes > 0] - 1] = starts[sizes > 0]  # each face's last corner goes round to its first
+    return fid, a, a[nxt]
 
 
 def _normals(co: np.ndarray, quads: np.ndarray) -> np.ndarray:
@@ -97,28 +90,25 @@ def _normals(co: np.ndarray, quads: np.ndarray) -> np.ndarray:
     return _unit(np.cross(p[:, 2] - p[:, 0], p[:, 3] - p[:, 1]))
 
 
-def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None) -> np.ndarray:
-    """Vertices that must not move: on a border (unless on the mirror plane), on a hard edge, or on a face that isn't a quad."""
+def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None, half=None) -> np.ndarray:
+    """Vertices that must not move: on a border (unless on the mirror plane), on a hard edge, or on a face that isn't a quad.
+    `half`: `half_edges(faces)` when the caller has it already."""
     co = np.asarray(co, dtype=np.float64)
     out = np.zeros(len(co), dtype=bool)
-    for f in faces:
-        if len(f) != 4:
-            out[list(f)] = True
+    fid, a, b = half_edges(faces) if half is None else half
+    if not len(a):
+        return out
+    sizes = np.bincount(fid, minlength=len(faces))
+    out[a[sizes[fid] != 4]] = True
+    # one normal per face from its diagonals (for a triangle this is its plain normal), with no per-face Python
+    starts = np.cumsum(sizes) - sizes
+    ok = sizes >= 3
     normal = np.zeros((len(faces), 3))
-    by_size: dict[int, list] = {}
-    for i, f in enumerate(faces):
-        by_size.setdefault(len(f), []).append(i)
-    for size, ids in by_size.items():  # one cross product per face size, not per face: opening a tool never stalls
-        if size < 3:
-            continue
-        p = co[np.asarray([faces[i] for i in ids], dtype=np.int64)]
-        normal[ids] = np.cross(p[:, 2] - p[:, 0], p[:, -1] - p[:, 1]) if size >= 4 else np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
+    s0 = starts[ok]
+    normal[ok] = np.cross(co[a[s0 + 2]] - co[a[s0]], co[a[s0 + sizes[ok] - 1]] - co[a[s0 + 1]])
     normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
     on_plane = np.zeros(len(co), dtype=bool) if plane is None else on_mirror(co, *plane)
     limit = np.cos(np.radians(sharp_deg))
-    fid, a, b = half_edges(faces)
-    if not len(a):
-        return out
     lo, hi = np.minimum(a, b), np.maximum(a, b)
     order = np.lexsort((fid, hi, lo))
     lo, hi, fid = lo[order], hi[order], fid[order]

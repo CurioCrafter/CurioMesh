@@ -61,26 +61,37 @@ class Base:
 def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=None, facing=None, labels=None, kinds=None) -> Base:
     """A Base with the usual holds: corners on a border, a hard edge or a non-quad (`organize.pinned`), on the mirror
     plane, and every corner a face outside the scope uses, so the edge of the scope never moves."""
-    from .organize import pinned
+    from .organize import half_edges, pinned
 
     co = np.asarray(co, dtype=np.float64).reshape(-1, 3)
-    faces = [tuple(int(v) for v in f) for f in faces]
+    faces = _int_faces(faces)
     scope = np.ones(len(faces), dtype=bool) if scope is None else np.asarray(scope, dtype=bool)
-    held = pinned(co, faces, plane=mirror) if len(faces) else np.zeros(len(co), dtype=bool)
+    half = half_edges(faces)
+    held = pinned(co, faces, plane=mirror, half=half) if len(faces) else np.zeros(len(co), dtype=bool)
     if stay is not None:
         held |= np.asarray(stay, dtype=bool)
+    fid, a, b = half
     if not scope.all():
-        from .organize import half_edges
-
-        fid, a, _b = half_edges(faces)
         held[a[~scope[fid]]] = True
     if mirror is not None:
         axis, offset = mirror
         size = float(np.ptp(co, axis=0).max()) if len(co) else 1.0
         held |= np.abs(co[:, axis] - offset) < 1e-6 * (size or 1.0)
-    edge = mean_edge(co, [faces[f] for f in np.flatnonzero(scope).tolist()])
+    inside = scope[fid]
+    length = float(np.linalg.norm(co[a[inside]] - co[b[inside]], axis=1).mean()) if inside.any() else 1.0
+    edge = length if length > 0.0 else 1.0
     kinds = None if kinds is None or len(kinds) != len(faces) else np.asarray(kinds)
     return Base(co, faces, scope, held, project, edge, mirror, dict(pick or {}), facing=facing, labels=dict(labels or {}), kinds=kinds)
+
+
+def _int_faces(faces) -> list:
+    """Faces as tuples of plain ints, read in one pass rather than corner by corner."""
+    from itertools import accumulate, chain
+
+    sizes = list(map(len, faces))
+    flat = np.fromiter(chain.from_iterable(faces), dtype=np.int64, count=sum(sizes)).tolist()
+    ends = list(accumulate(sizes))
+    return [tuple(flat[e - n : e]) for e, n in zip(ends, sizes)]
 
 
 def mean_edge(co, faces) -> float:

@@ -54,13 +54,17 @@ class SmoothCorners(Trial):
 
 def _unfold(base: Base, co: np.ndarray) -> np.ndarray:
     """Corners of faces that turned over go back where they were, pass by pass, until no face is turned over."""
-    from .hardtidy import face_normals
     from .organize import half_edges
 
-    before = face_normals(base.co, base.faces)
-    fid, corner, _next = half_edges(base.faces)
+    fid, corner, nxt = half_edges(base.faces)
+
+    def normals(x):  # Newell's normal per face, from the half-edges
+        c = np.cross(x[corner], x[nxt])
+        return np.stack([np.bincount(fid, c[:, k], len(base.faces)) for k in range(3)], axis=1)
+
+    before = normals(base.co)
     while True:  # each pass puts at least one face's corners back, so it ends
-        flipped = (before * face_normals(co, base.faces)).sum(axis=1) < 0.0
+        flipped = (before * normals(co)).sum(axis=1) < 0.0
         back = np.unique(corner[flipped[fid]])
         back = back[(co[back] != base.co[back]).any(axis=1)]
         if not len(back):

@@ -164,12 +164,26 @@ def _source():
     return np.asarray(data["co"], dtype=np.float64), data["faces"]
 
 
+_SOURCE_KEEP: dict = {}  # what was worked out from your original, kept while it is the same: {"co", "tree", "ref"}
+
+
+def _source_kept(src_co) -> dict:
+    """The store for this original (the same arrays as last time keep what was worked out from them)."""
+    if _SOURCE_KEEP.get("co") is not src_co:  # holding the array itself: a new original is always a new array
+        _SOURCE_KEEP.clear()
+        _SOURCE_KEEP["co"] = src_co
+    return _SOURCE_KEEP
+
+
 def _projector(src_co, src_faces):
     from mathutils.bvhtree import BVHTree
 
     from . import organize, turbo
 
-    tree = turbo.face_tree(src_co, src_faces) or BVHTree.FromPolygons(src_co.tolist(), [list(f) for f in src_faces], all_triangles=False, epsilon=0.0)
+    kept = _source_kept(src_co)
+    if "tree" not in kept:  # Blender's lookup takes a moment to build on a big original: once per original
+        kept["tree"] = turbo.face_tree(src_co, src_faces) or BVHTree.FromPolygons(src_co.tolist(), [list(f) for f in src_faces], all_triangles=False, epsilon=0.0)
+    tree = kept["tree"]
     return lambda points: organize._nearest(tree, np.asarray(points, dtype=np.float64))
 
 
@@ -234,7 +248,7 @@ def _looker(src_co, src_faces):
     low, high = src_co.min(axis=0), src_co.max(axis=0)
     centre, reach = (low + high) / 2.0, (float(np.ptp(src_co, axis=0).max()) or 1.0) * 0.55
     pixels = autoretopo.MAX_PIXELS
-    held = {}
+    held = _source_kept(src_co)  # the pictures of your original are taken once per original, not per tool
 
     def look(co, faces):
         if "ref" not in held:
@@ -452,6 +466,8 @@ class Session:
         self.work = None  # whatever was being worked out is for another value
         if self.trial.blendable and self.full is not None and not self.full.refusal:
             self.shown = T.blend(self.base, self.full, value)
+        if self.cand is not None and self.cand.exact and not self.stale():
+            self.shown = self.cand  # dragged back to where the last exact run was: show it, nothing to work out again
 
     def toggle(self, key: str) -> None:
         """A chip on the card's fourth row was clicked: flip that setting and work the preview out again."""
@@ -1372,3 +1388,4 @@ def register() -> None:
 def unregister() -> None:
     close("")
     _remove_handlers()
+    _SOURCE_KEEP.clear()
