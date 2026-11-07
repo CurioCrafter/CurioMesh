@@ -88,15 +88,10 @@ def unfold(base: Base, co: np.ndarray) -> np.ndarray:
     """Corners of faces that turned over go back where they were, pass by pass, until no face is turned over."""
     from .organize import half_edges
 
-    fid, corner, nxt = half_edges(base.faces)
-
-    def normals(x):  # Newell's normal per face, from the half-edges
-        c = np.cross(x[corner], x[nxt])
-        return np.stack([np.bincount(fid, c[:, k], len(base.faces)) for k in range(3)], axis=1)
-
-    before = normals(base.co)
+    fid, corner, _nxt = half_edges(base.faces)
+    before = face_normals(base.co, base.faces)
     while True:  # each pass puts at least one face's corners back, so it ends
-        flipped = (before * normals(co)).sum(axis=1) < 0.0
+        flipped = (before * face_normals(co, base.faces)).sum(axis=1) < 0.0
         back = np.unique(corner[flipped[fid]])
         back = back[(co[back] != base.co[back]).any(axis=1)]
         if not len(back):
@@ -331,9 +326,48 @@ def _tidiness(co, faces) -> float:
     return float(patterns.score(patterns.measure(co, faces))["score"])
 
 
+def face_normals(co, faces) -> np.ndarray:
+    """(f, 3) Newell normals (not unit), from the half-edges."""
+    from .organize import half_edges
+
+    if not len(faces):
+        return np.zeros((0, 3))
+    fid, corner, nxt = half_edges(faces)
+    co = np.asarray(co, dtype=np.float64)
+    c = np.cross(co[corner], co[nxt])
+    return np.stack([np.bincount(fid, c[:, k], len(faces)) for k in range(3)], axis=1)
+
+
+def bad_faces(base: Base, co, faces=None, parent=None) -> np.ndarray:
+    """Per face of (co, faces): turned over against the face of `base` it came from (the same face, or `parent`), or a
+    quad folded or concave. `faces=None`: base's faces. The one bad-face test of the Tidy Tools and Auto Fix."""
+    from .checks import folded_quads
+
+    faces = base.faces if faces is None else faces
+    if not len(faces):
+        return np.zeros(0, dtype=bool)
+    if "normals" not in base.cache:
+        base.cache["normals"] = face_normals(base.co, base.faces)
+    ref = base.cache["normals"]
+    if faces is not base.faces:
+        ok = parent is not None and len(parent) == len(faces) and len(ref)
+        ref = ref[np.clip(np.asarray(parent, dtype=np.int64), 0, len(ref) - 1)] if ok else None
+    out = folded_quads(co, faces)
+    if ref is not None and len(ref) == len(faces):
+        out |= (face_normals(co, faces) * ref).sum(axis=1) < 0.0
+    return out
+
+
+def _loops(co, faces, plane) -> float | None:
+    from .loopscore import loop_quality
+
+    return float(loop_quality(co, faces, plane)["quality"]) if len(faces) else None
+
+
 def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=None):
     """Generator: fill `cand.numbers` cheapest first, yielding between stages. `look(co, faces)` is a generator
-    returning the look change in percent against your original mesh (the camera check), or None to skip it."""
+    returning the look change in percent against your original mesh (the camera check), or None to skip it.
+    Auto Fix's stages: "tidy", "loops" (Loop Quality), "bad" (bad faces, `bad_faces`)."""
     if cand.refusal or cand.co is None:
         return cand
     faces = base.faces if cand.faces is None else cand.faces
@@ -352,6 +386,17 @@ def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=
             base.cache["tidy"] = _tidiness(base.co, base.faces)
             yield
         cand.numbers["tidy"] = (base.cache["tidy"], _tidiness(cand.co, faces))
+        yield
+    if "loops" in stages:
+        if "loops" not in base.cache:
+            base.cache["loops"] = _loops(base.co, base.faces, base.mirror)
+            yield
+        cand.numbers["loops"] = (base.cache["loops"], _loops(np.asarray(cand.co, dtype=np.float64), faces, base.mirror))
+        yield
+    if "bad" in stages:
+        if "bad" not in base.cache:
+            base.cache["bad"] = int(bad_faces(base, base.co).sum())
+        cand.numbers["bad"] = (base.cache["bad"], int(bad_faces(base, np.asarray(cand.co, dtype=np.float64), faces if cand.faces is not None else None, cand.parent).sum()))
         yield
     if "look" in stages and look is not None:
         if "look" not in base.cache:
@@ -385,6 +430,16 @@ def number_text(key: str, value, cap: float | None = None) -> tuple[str, int]:
         return f"look change {change:+.1f}%", -1 if worse else 1 if change < -0.05 else 0
     if key == "move":
         return f"most move {value:.2f} quad", 0
+    if key == "loops":
+        a, b = value
+        if a is None or b is None:
+            return "Loop Quality -", 0
+        return f"Loop Quality {a:.0f} -> {b:.0f}", 1 if b > a + 0.5 else -1 if b < a - 0.5 else 0
+    if key == "bad":
+        a, b = value
+        if b > a:
+            return f"{b - a} new bad face{'s' if b - a != 1 else ''}", -1
+        return (f"{a - b} bad face{'s' if a - b != 1 else ''} gone", 1) if b < a else ("no new bad faces", 0)
     return f"{key} {value}", 0
 
 
