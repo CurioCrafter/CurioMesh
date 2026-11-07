@@ -93,6 +93,22 @@ class Pairing(unittest.TestCase):
                     self.assertEqual(len({round(got.uvs[u][0] - got.vertices[v, 0] / 8, 6) for u, v in zip(uvf, face)}), 1)
 
 
+    def test_out_of_range_uv_ids_stay_triangles_and_in_range(self):
+        mesh = plane_tris(False)
+        mesh.face_uvs[10] = (len(mesh.uvs) + 5, -1, 0)  # a triangle with garbage UV ids
+        mesh.face_uvs[11] = (0, 0, 10 ** 6)
+        tri, prep = prepared(mesh)
+        bad_corners = {tuple(mesh.faces[10]), tuple(mesh.faces[11])}
+        for turbo in (None, self.real, FakeTurbo()):
+            E._turbo = turbo
+            got = uvclassic.pair(tri, prep, [0])[0][0]
+            self.assertIsNotNone(got.face_uvs)
+            self.assertLessEqual(max(max(f) for f in got.face_uvs), len(got.uvs) - 1)
+            self.assertGreaterEqual(min(min(f) for f in got.face_uvs), 0)
+            tris_out = {tuple(f) for f in got.faces if len(f) == 3}
+            self.assertTrue(bad_corners <= tris_out, "faces with bad UV ids must stay triangles")
+
+
 class Obj:
     """Stand-in for a Blender mesh object built from polygons."""
 

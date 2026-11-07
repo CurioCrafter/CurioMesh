@@ -27,10 +27,11 @@ def pair(mesh, prep, seeds):
     if mesh.uvs is None or mesh.face_uvs is None:
         return E._pair_natively(mesh, prep, seeds)  # no UVs: untouched native fast path
     face_a, face_b, quads, scores = prep.candidates
-    keep = _agree(mesh, face_a, face_b, quads)
+    mesh, bad = _sanitize(mesh)
+    keep = _agree(mesh, face_a, face_b, quads, bad)
     if keep is None:
         return None
-    if keep.all() and E._turbo is None:
+    if keep.all() and E._turbo is None and not bad.any():
         return None  # nothing to filter, Python pairs lazily as before
     prep = replace(prep, candidates=(face_a[keep], face_b[keep], quads[keep], scores[keep]), table=None)
     if E._turbo is not None:
@@ -41,14 +42,28 @@ def pair(mesh, prep, seeds):
     return {seed: E._pair_triangles(mesh, prep, seed) for seed in seeds}
 
 
-def _agree(mesh, face_a, face_b, quads):
+def _sanitize(mesh):
+    """(mesh, bad): triangles whose UV id is out of range get one extra (0, 0) UV so no id points outside the table
+    downstream; `bad` marks them. They are never paired (their UVs mean nothing) and stay triangles."""
+
+    fuv = np.asarray(mesh.face_uvs, np.int64).reshape(-1, 3)
+    bad = ~np.all((fuv >= 0) & (fuv < len(mesh.uvs)), axis=1)
+    if not bad.any():
+        return mesh, bad
+    fuv = fuv.copy()
+    fuv[bad] = len(mesh.uvs)
+    uvs = np.vstack([np.asarray(mesh.uvs, float).reshape(-1, 2), [[0.0, 0.0]]])
+    return replace(mesh, uvs=uvs, face_uvs=[tuple(r) for r in fuv.tolist()]), bad
+
+
+def _agree(mesh, face_a, face_b, quads, bad):
     """Candidates whose two triangles use the same UV at both shared-edge vertices and have valid UV ids; None if the table is unusable."""
 
     faces = np.asarray(mesh.faces, np.int64).reshape(-1, 3)
     fuv = np.asarray(mesh.face_uvs, np.int64).reshape(-1, 3)
     if len(fuv) != len(faces):
         return None
-    ok_face = np.all((fuv >= 0) & (fuv < len(mesh.uvs)), axis=1)
+    ok_face = ~bad
 
     def at(f, v):
         return np.take_along_axis(fuv[f], (faces[f] == v[:, None]).argmax(1)[:, None], 1)[:, 0]
