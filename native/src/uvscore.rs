@@ -14,6 +14,7 @@
 
 use crate::topo::{edges, halves, summary, Dsu, Faces, FxBuild};
 use rayon::prelude::*;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,6 +41,11 @@ pub const RASTER_MAX_PX: f64 = 8192.0;
 /// Query grid cell edge, in median source edges (the cell grows only when the extent would pass `GRID_MAX_DIM` cells).
 pub const GRID_EDGES: f64 = 2.0;
 pub const GRID_MAX_DIM: f64 = 4096.0;
+/// A nearest-distance probe starts at this share of the cell edge and doubles until it finds something within its radius
+/// (the answer is exact either way; most corners are far closer than the cell, so a small start gathers far fewer triangles).
+pub const PROBE_START: f64 = 0.0625;
+/// Occupied-cell blocks: this many cells per side (4^3 = 64 cells = one 64-bit mask).
+const BLOCK: i64 = 4;
 /// Stretch share counted as "too stretched".
 pub const STRETCH_BAD: f64 = 4.0;
 /// Drift above this many pixels is counted in `drift_over8_pct`.
@@ -392,12 +398,13 @@ struct Grid {
     h: f64,
     dim: [i64; 3],
     cells: HashMap<u64, (u32, u32), FxBuild>,
+    /// Occupied cells in blocks of `BLOCK`^3: block id -> one bit per cell (a ball skips empty space a block at a time).
+    blocks: HashMap<u64, u64, FxBuild>,
+    bdim: [i64; 3],
     items: Vec<u32>,
     tlo: Vec<[i32; 3]>,
-    tbox: Vec<[f64; 6]>,
-    a: Vec<V3>,
-    b: Vec<V3>,
-    c: Vec<V3>,
+    /// Box and corners of each triangle side by side (one cache line pair per candidate test).
+    rec: Vec<([f64; 6], [V3; 3])>,
 }
 
 impl Grid {
@@ -456,7 +463,15 @@ impl Grid {
             cells.insert(pairs[i].0, (i as u32, j as u32));
             i = j;
         }
-        let tbox = (0..n)
+        let bdim = [0, 1, 2].map(|k| (dim[k] + BLOCK - 1) / BLOCK);
+        let mut blocks: HashMap<u64, u64, FxBuild> = HashMap::default();
+        for &k in cells.keys() {
+            let k = k as i64;
+            let (x, y, z) = (k % dim[0], (k / dim[0]) % dim[1], k / (dim[0] * dim[1]));
+            let id = (((z / BLOCK) * bdim[1] + y / BLOCK) * bdim[0] + x / BLOCK) as u64;
+            *blocks.entry(id).or_insert(0) |= 1u64 << (((z % BLOCK) * BLOCK + y % BLOCK) * BLOCK + x % BLOCK);
+        }
+        let tbox: Vec<[f64; 6]> = (0..n)
             .map(|t| {
                 let mut o = [f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
                 for p in [a[t], b[t], c[t]] {
@@ -468,38 +483,84 @@ impl Grid {
                 o
             })
             .collect();
-        Grid { lo, h, dim, cells, items, tlo, tbox, a, b, c }
+        let rec = (0..n).map(|t| (tbox[t], [a[t], b[t], c[t]])).collect();
+        Grid { lo, h, dim, cells, blocks, bdim, items, tlo, rec }
     }
 
     fn cell_of(&self, p: V3) -> [i32; 3] {
         [0, 1, 2].map(|k| (((p[k] - self.lo[k]) / self.h).floor() as i64).clamp(0, self.dim[k] - 1) as i32)
     }
 
-    /// Calls `f(triangle, barycentric, distance)` for every triangle within `r` of `q`.
-    fn ball(&self, q: V3, r: f64, mut f: impl FnMut(u32, [f64; 3], f64)) {
+    /// One candidate triangle: skipped by its box, by `pre`, or by its exact distance, else handed to `f`.
+    #[inline]
+    fn visit(&self, t: u32, q: V3, r: f64, pre: &mut impl FnMut(u32) -> bool, f: &mut impl FnMut(u32, [f64; 3], f64)) {
+        let (bx, v) = &self.rec[t as usize];
+        let gap = (0..3).map(|k| (bx[k] - q[k]).max(q[k] - bx[k + 3]).max(0.0).powi(2)).sum::<f64>();
+        if gap > r * r || !pre(t) {
+            return;
+        }
+        let (bary, d) = closest_on_tri(q, v[0], v[1], v[2]);
+        if d <= r {
+            f(t, bary, d);
+        }
+    }
+
+    /// Every triangle whose cells meet the box `lo..hi` (each once): the shared candidate list of several nearby queries.
+    fn collect(&self, lo: V3, hi: V3) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.walk(lo, hi, |t| out.push(t));
+        out
+    }
+
+    fn walk(&self, lo: V3, hi: V3, mut each: impl FnMut(u32)) {
+        let (ql, qu) = (self.cell_of(lo), self.cell_of(hi));
+        self.cells_in(ql, qu, |x, y, z, from, to| {
+            for &t in &self.items[from as usize..to as usize] {
+                let first = self.tlo[t as usize];
+                if first[0].max(ql[0]) == x && first[1].max(ql[1]) == y && first[2].max(ql[2]) == z {
+                    each(t);
+                }
+            }
+        });
+    }
+
+    /// Calls `f(triangle, barycentric, distance)` for every triangle within `r` of `q` that `pre(triangle)` lets through
+    /// (`pre` runs before the exact distance, so a caller that can tell a triangle does not matter saves that work).
+    fn ball(&self, q: V3, r: f64, mut pre: impl FnMut(u32) -> bool, mut f: impl FnMut(u32, [f64; 3], f64)) {
         let ql = self.cell_of([q[0] - r, q[1] - r, q[2] - r]);
         let qu = self.cell_of([q[0] + r, q[1] + r, q[2] + r]);
-        for z in ql[2]..=qu[2] {
-            for y in ql[1]..=qu[1] {
-                for x in ql[0]..=qu[0] {
-                    let Some(&(from, to)) = self.cells.get(&(((z as i64 * self.dim[1] + y as i64) * self.dim[0] + x as i64) as u64)) else {
+        self.cells_in(ql, qu, |x, y, z, from, to| {
+            for &t in &self.items[from as usize..to as usize] {
+                let first = self.tlo[t as usize];
+                // a triangle in several cells is handled in the first cell of the overlap only
+                if first[0].max(ql[0]) == x && first[1].max(ql[1]) == y && first[2].max(ql[2]) == z {
+                    self.visit(t, q, r, &mut pre, &mut f);
+                }
+            }
+        });
+    }
+
+    /// Calls `each(x, y, z, from, to)` for every occupied cell in the box `ql..=qu` (empty space is skipped a block at a time).
+    fn cells_in(&self, ql: [i32; 3], qu: [i32; 3], mut each: impl FnMut(i32, i32, i32, u32, u32)) {
+        let (bl, bu) = ([0, 1, 2].map(|k| ql[k] as i64 / BLOCK), [0, 1, 2].map(|k| qu[k] as i64 / BLOCK));
+        for bz in bl[2]..=bu[2] {
+            for by in bl[1]..=bu[1] {
+                for bx in bl[0]..=bu[0] {
+                    let Some(&mask) = self.blocks.get(&(((bz * self.bdim[1] + by) * self.bdim[0] + bx) as u64)) else {
                         continue;
                     };
-                    for &t in &self.items[from as usize..to as usize] {
-                        let first = self.tlo[t as usize];
-                        // a triangle in several cells is handled in the first cell of the overlap only
-                        if first[0].max(ql[0]) != x || first[1].max(ql[1]) != y || first[2].max(ql[2]) != z {
+                    let mut bits = mask;
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as i64;
+                        bits &= bits - 1;
+                        let (x, y, z) = (bx * BLOCK + bit % BLOCK, by * BLOCK + (bit / BLOCK) % BLOCK, bz * BLOCK + bit / (BLOCK * BLOCK));
+                        if x < ql[0] as i64 || x > qu[0] as i64 || y < ql[1] as i64 || y > qu[1] as i64 || z < ql[2] as i64 || z > qu[2] as i64 {
                             continue;
                         }
-                        let bx = &self.tbox[t as usize];
-                        let gap = (0..3).map(|k| (bx[k] - q[k]).max(q[k] - bx[k + 3]).max(0.0).powi(2)).sum::<f64>();
-                        if gap > r * r {
+                        let Some(&(from, to)) = self.cells.get(&(((z * self.dim[1] + y) * self.dim[0] + x) as u64)) else {
                             continue;
-                        }
-                        let (bary, d) = closest_on_tri(q, self.a[t as usize], self.b[t as usize], self.c[t as usize]);
-                        if d <= r {
-                            f(t, bary, d);
-                        }
+                        };
+                        each(x as i32, y as i32, z as i32, from, to);
                     }
                 }
             }
@@ -508,13 +569,13 @@ impl Grid {
 
     fn gather(&self, q: V3, r: f64) -> Vec<Hit> {
         let mut v = Vec::new();
-        self.ball(q, r, |t, b, d| v.push((t, b, d)));
+        self.ball(q, r, |_| true, |t, b, d| v.push((t, b, d)));
         v
     }
 
     /// The nearest distance (exact: rings of doubling radius), the radius that found it and every hit within that radius.
     fn probe(&self, q: V3) -> (f64, f64, Vec<Hit>) {
-        let mut r = 0.5 * self.h;
+        let mut r = PROBE_START * self.h;
         loop {
             let hits = self.gather(q, r);
             let best = hits.iter().map(|h| h.2).fold(f64::INFINITY, f64::min);
@@ -651,6 +712,8 @@ pub fn check(res: &Mesh, src: Option<&Mesh>, ex: &Extras, texture_px: f64, stop:
         // drift and flips: 7 samples per result triangle
         let sn: Vec<V3> = sq.iter().map(|t| cross(sub(t[1], t[0]), sub(t[2], t[0]))).collect();
         let sa: Vec<f64> = su.iter().map(uv_area_signed).collect();
+        // UV box of each source triangle: every point of it has a UV inside, which bounds a match's drift from below.
+        let ubox: Vec<[f64; 4]> = su.iter().map(|u| [u[0][0].min(u[1][0]).min(u[2][0]), u[0][1].min(u[1][1]).min(u[2][1]), u[0][0].max(u[1][0]).max(u[2][0]), u[0][1].max(u[1][1]).max(u[2][1])]).collect();
         let per: Vec<([f64; 7], bool)> = par_map(rt.len(), |t| {
             let (q, u) = (&rq[t], &ru[t]);
             let nr = cross(sub(q[1], q[0]), sub(q[2], q[0]));
@@ -667,19 +730,59 @@ pub fn check(res: &Mesh, src: Option<&Mesh>, ex: &Extras, texture_px: f64, stop:
             let slack = face_err.max(DRIFT_EDGE_SLACK * norm(sub(q[1], q[0])));
             let mut drift = [f64::INFINITY; 7];
             let mut matched = false;
+            // One candidate list for the seven samples of this triangle, gathered when the first one needs it.
+            let mut shared: Option<Vec<u32>> = None;
             for j in 0..7 {
                 let (p, uv) = samples[j];
                 let (_, r, hits) = std::mem::take(&mut probes[j]);
-                for (ts, b, _) in grid.upto(p, r, hits, d0[j] + slack) {
+                let rad = d0[j] + slack;
+                let best = Cell::new(f64::INFINITY);
+                let found = Cell::new(false);
+                // Sample 0 also asks whether any source triangle in the ball has the result's winding.
+                let winds = |ts: u32| {
+                    let s = sign(sa[ts as usize]) * sign(dot(sn[ts as usize], nr));
+                    s == sign(a2s[t]) || sa[ts as usize].abs() < AREA_MIN
+                };
+                let take = |ts: u32, b: [f64; 3]| {
                     let c = interp(ts, b);
                     let d = ((c[0] - uv[0]).powi(2) + (c[1] - uv[1]).powi(2)).sqrt() * tex;
-                    drift[j] = drift[j].min(d);
-                    if j == 0 {
-                        let s = sign(sa[ts as usize]) * sign(dot(sn[ts as usize], nr));
-                        if s == sign(a2s[t]) || sa[ts as usize].abs() < AREA_MIN {
-                            matched = true;
-                        }
+                    best.set(best.get().min(d));
+                    if j == 0 && winds(ts) {
+                        found.set(true);
                     }
+                };
+                for &(ts, b, d) in &hits {
+                    if d <= rad {
+                        take(ts, b);
+                    }
+                }
+                if rad > r {
+                    // Only a triangle whose UV box is nearer than the best match so far (or that could still show the
+                    // winding) can change the answer; the rest skip their exact distance.
+                    let list = shared.get_or_insert_with(|| {
+                        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                        for k in 0..7 {
+                            let reach = d0[k] + slack;
+                            for c in 0..3 {
+                                lo[c] = lo[c].min(samples[k].0[c] - reach);
+                                hi[c] = hi[c].max(samples[k].0[c] + reach);
+                            }
+                        }
+                        grid.collect(lo, hi)
+                    });
+                    let mut pre = |ts: u32| {
+                        let u = &ubox[ts as usize];
+                        let (dx, dy) = ((u[0] - uv[0]).max(uv[0] - u[2]).max(0.0), (u[1] - uv[1]).max(uv[1] - u[3]).max(0.0));
+                        ((dx * dx + dy * dy).sqrt() * tex) * (1.0 - 1e-9) < best.get() || (j == 0 && !found.get() && winds(ts))
+                    };
+                    let mut hit = |ts: u32, b: [f64; 3], _: f64| take(ts, b);
+                    for &ts in list.iter() {
+                        grid.visit(ts, p, rad, &mut pre, &mut hit);
+                    }
+                }
+                drift[j] = best.get();
+                if j == 0 {
+                    matched = found.get();
                 }
             }
             (drift, !matched && a2s[t].abs() >= AREA_MIN)
