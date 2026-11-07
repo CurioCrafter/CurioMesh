@@ -81,7 +81,22 @@ def chain_xyz(seams: dict, points) -> np.ndarray:
 def vertex_edge(points, indptr, flat) -> np.ndarray:
     """Mean length of the edges at each vertex (the snap's local edge); the mean edge where a vertex has none."""
 
-    return _Mesh(points, indptr, flat).vedge.copy()
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    counts = np.diff(ip)
+    nxt = np.arange(len(fl)) + 1
+    last = ip[1:] - 1
+    nxt[last[counts > 0]] = ip[:-1][counts > 0]
+    lo, hi = np.minimum(fl, fl[nxt]), np.maximum(fl, fl[nxt])
+    key = np.unique(lo.astype(np.int64) * (int(hi.max(initial=0)) + 1) + hi)  # the same edges as _Mesh, without its per-vertex lists
+    ea, eb = key // (int(hi.max(initial=0)) + 1), key % (int(hi.max(initial=0)) + 1)
+    d = P[eb] - P[ea]
+    length = np.sqrt(d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1] + d[:, 2] * d[:, 2])
+    mean = float(length.sum()) / len(length) if len(length) else 1.0
+    ends = np.stack([ea, eb], 1).ravel()
+    s = np.bincount(ends, weights=np.repeat(length, 2), minlength=len(P))
+    cnt = np.bincount(ends, minlength=len(P))
+    return np.where(cnt > 0, s / np.maximum(cnt, 1), mean)
 
 
 def with_seam_uvs(uv, corner_uv) -> np.ndarray:

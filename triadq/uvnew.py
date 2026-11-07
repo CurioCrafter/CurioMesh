@@ -577,6 +577,7 @@ class NewUVs:
             lby = {int(i): order[a:b] for i, a, b in zip(ids, start, list(start[1:]) + [len(order)])}
             still = []
             for c in pending:
+                yield  # one chart a slice: each walks every face
                 faces = np.flatnonzero(chart == c)
                 inside = np.unique(lchart[faces])
                 if not all(np.all(chart[lby[int(i)]] == c) for i in inside):  # not nested: try a lower level

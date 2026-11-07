@@ -47,15 +47,18 @@ class _DrawJob:
     def stop(self) -> None:
         self._job.stop()
 
-    def result(self):
+    def parts(self):
+        """The pictures one view at a time, so the reader can yield between them."""
         self._job.result()
         import numpy as np
 
         n = self._pictures.frame()[0]
-        count = int(self._pictures.drawn)
-        faces = [self._pictures.face(k).reshape(n, n) for k in range(count)]
-        depths = [self._pictures.depth(k).astype(np.float32).reshape(n, n) for k in range(count)]
-        return faces, depths
+        for k in range(int(self._pictures.drawn)):
+            yield self._pictures.face(k).reshape(n, n), self._pictures.depth(k).astype(np.float32).reshape(n, n)
+
+    def result(self):
+        got = list(self.parts())
+        return [f for f, _ in got], [d for _, d in got]
 
 
 def _install_sight() -> None:

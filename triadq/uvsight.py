@@ -176,6 +176,9 @@ def _turned_pictures(pictures_fn, points, polys, dirs, center, half, pixels):
 # --------------------------------------------------------------------------- reading the pictures
 
 
+EDGES_PER_STEP = 256  # edges a read step walks before it yields (slicing only; the numbers do not change)
+
+
 class Sight:
     """Sliceable: `step()` does about 4 ms and returns True when finished; then `seen_face`, `inside_px`, `outline_px`.
 
@@ -233,7 +236,15 @@ class Sight:
             if job is not None:
                 while not job.done():
                     yield
-                got = job.result()
+                if hasattr(job, "parts"):  # one view at a time: each copy is a slice of its own
+                    got = ([], [])
+                    for face, depth in job.parts():
+                        got[0].append(face)
+                        got[1].append(depth)
+                        yield
+                else:
+                    got = job.result()
+                    yield
                 pic.face, pic.depth = list(got[0]), list(got[1])
                 self.renders += len(pic.face)
             else:
@@ -263,6 +274,7 @@ class Sight:
         size = np.linalg.norm(m, axis=1)
         area = size / 2.0
         normal = np.divide(m, size[:, None], out=np.zeros_like(m), where=size[:, None] > 0)
+        yield
         # Edges: first-occurrence order like the kernel (sorted keys, ordered by first corner).
         lo, hi = np.minimum(flat, flat[nxt]), np.maximum(flat, flat[nxt])
         keys = lo.astype(np.uint64) << np.uint64(32) | hi.astype(np.uint64)
@@ -275,6 +287,7 @@ class Sight:
         ea, eb = lo[first[order]], hi[first[order]]
         edge_key = keys[first[order]]
         sorted_edge = np.argsort(edge_key)
+        yield
         # Face pair -> first edge shared (edges in order, uses in corner order).
         pair_keys, pair_edges = [], []
         by_edge = np.argsort(corner_edge, kind="stable")
@@ -286,6 +299,8 @@ class Sight:
                     if uses[i] != uses[j]:
                         pair_keys.append((min(uses[i], uses[j]) << 32) | max(uses[i], uses[j]))
                         pair_edges.append(e)
+            if e % EDGES_PER_STEP == EDGES_PER_STEP - 1:
+                yield
         pair_keys = np.array(pair_keys, dtype=np.uint64)
         pair_edges = np.array(pair_edges, dtype=np.int64)
         if len(pair_keys):
@@ -309,6 +324,7 @@ class Sight:
             dx, dy = proj[eb, 0] - proj[ea, 0], proj[eb, 1] - proj[ea, 1]
             length = np.hypot(dx, dy)
             factor = np.divide(length, np.abs(dx) + np.abs(dy), out=np.zeros(ne), where=length > 1e-9)
+            yield
             for r0 in range(0, n, max(1, CELLS_PER_STEP // n)):
                 r1 = min(n, r0 + max(1, CELLS_PER_STEP // n))
                 self._scan(F, D, r0, r1, front, proj, scale, tol, pair_keys, pair_edges, factor, inside, outline, pic.weights[k] / total_w, owner, flat, indptr, sizes, edge_key, sorted_edge)
@@ -322,11 +338,14 @@ class Sight:
             for a in uses:
                 if small[a]:
                     neighbours[a].extend(int(b) for b in uses if b != a)
+            if e % EDGES_PER_STEP == EDGES_PER_STEP - 1:
+                yield
         for _ in range(SMOOTH_ROUNDS):
             before = seen.copy()
             for f in np.nonzero(small)[0]:
                 if neighbours[f]:
                     seen[f] = sum(before[g] for g in neighbours[f]) / len(neighbours[f])
+            yield
         self.seen_face, self.inside_px, self.outline_px = seen, inside, outline
         yield
 
