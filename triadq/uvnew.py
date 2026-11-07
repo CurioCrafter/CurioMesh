@@ -31,7 +31,7 @@ SLICE_SECONDS = 0.002
 ROW_TOL_DEG = 1e-6
 WAIT = "wait"  # a stage yields this while a faster job runs: step() returns at once instead of spinning
 LEVEL_STEP = 0.5  # a chart that lies over itself is redone at this share of the Stretch allowed it had
-SELF_CHECK_FACES = 4  # charts smaller than this are not checked for lying over themselves (a pole of valence 5 needs 5 faces)
+SELF_CHECK_FACES = 1  # every chart is checked for lying over itself (a fold of 3 faces, or one bent quad, is enough)
 CHECK_BATCH = 24  # charts checked in one call
 CHECK_PAIRS = 5000  # triangle pairs tested in one go (a slice)
 OVERLAP_EPS = 1e-4  # triangles overlapping by less than this share of a median triangle's side count as touching
@@ -62,7 +62,7 @@ class Settings:
     """The New UVs popover values (SPEC 10.1), in the units the card shows."""
 
     def __init__(self, **kw):
-        self.stretch_allowed = 10.0  # percent; P0's start value (SPEC 6.4), P1 tunes. Sweeps 10-100 on 13 models: charts within 25 %
+        self.stretch_allowed = 120.0  # percent (SPEC 6.4); tuned in R3 on 13 models (bench/uvplan/uv_defaults.md): worst 1 % stretch <= 1.26
         self.rows = "auto"  # auto / on / soft / off
         self.out_of_sight = True
         self.hidden_pct = 50.0  # px per metre of hidden parts, percent of seen ones
@@ -511,7 +511,10 @@ class NewUVs:
         worst = np.zeros(len(rows))
         np.maximum.at(worst, tch, np.where(np.isfinite(L), L, np.inf))
         over = np.bincount(tch, weights=a3 * (L > REDO_MEDIAN), minlength=len(rows)) > 0.5 * np.bincount(tch, weights=a3, minlength=len(rows))
-        todo = np.flatnonzero((size > 0) & (size <= REDO_FACES) & ((worst > 1.0 + x / 100.0) | over))
+        lying = np.zeros(len(rows), bool)
+        lying[list(getattr(self, "_unresolved", ()))] = True  # still lying over itself after the guard: any clean layout wins
+        worst[lying] = np.inf
+        todo = np.flatnonzero((size > 0) & (((size <= REDO_FACES) & ((worst > 1.0 + x / 100.0) | over)) | lying))
         if not len(todo):
             return corner_uv, rows, 0
         corner_uv, rows = corner_uv.copy(), np.asarray(rows).copy()
@@ -579,12 +582,15 @@ class NewUVs:
         owner = np.repeat(np.arange(nf), np.diff(indptr))
         nxt = np.arange(1, len(flat) + 1)
         nxt[indptr[1:] - 1] = indptr[:-1]
+        yield
         ids, ne = edge_ids(indptr, flat)
+        yield
         cnt = np.bincount(ids, minlength=ne)
         order = np.argsort(ids, kind="stable")
         first = np.concatenate([[0], np.cumsum(cnt)])[:-1]
         two = np.flatnonzero(cnt == 2)
         A, B = order[first[two]], order[first[two] + 1]
+        yield
         same = flat[A] == flat[B]
         B0 = np.where(same, B, nxt[B])  # the other face's corner at A's start vertex
         B1 = np.where(same, nxt[B], B)  # ... at A's end vertex
@@ -594,10 +600,13 @@ class NewUVs:
         sb0, sb1 = np.concatenate([B0, A]), np.concatenate([B1, nxt[A]])
         slen = np.concatenate([length, length])
         sface, oface = owner[sa0], owner[sb0]
+        yield
         by_face = np.argsort(sface, kind="stable")
         fstart = np.searchsorted(sface[by_face], np.arange(nf + 1))
         face_order = np.argsort(chart, kind="stable")
         cbounds = np.searchsorted(chart[face_order], np.arange(len(rows) + 1))
+        csign = np.sign(np.bincount(chart, weights=_signed_areas(corner_uv, indptr, np.arange(nf)), minlength=len(rows)))
+        yield
         added = {}  # host -> face arrays joined to it so far
         moved = 0
         until = time.perf_counter() + self.budget
@@ -616,17 +625,19 @@ class NewUVs:
                 continue
             h = int(np.argmax(np.bincount(host, weights=slen[k])))
             k = k[host == h]
-            corners = np.concatenate([np.arange(indptr[f], indptr[f + 1]) for f in faces])
-            p = np.concatenate([corner_uv[sa0[k]], corner_uv[sa1[k]]])
+            corners = self._sub(faces)[0]
+            mirror = np.array([-1.0, 1.0]) if csign[c] != csign[h] else np.ones(2)  # wound the other way: mirrored to match
+            own = corner_uv[corners] * mirror
+            p = np.concatenate([corner_uv[sa0[k]], corner_uv[sa1[k]]]) * mirror
             q = np.concatenate([corner_uv[sb0[k]], corner_uv[sb1[k]]])
             r_, t_ = _fit_rigid(p, q)
             mean_len = float(slen[k].mean()) or 1.0
             if np.abs(p @ r_.T + t_ - q).max() > ATTACH_TOL * mean_len:
                 k = k[[int(np.argmax(slen[k]))]]
-                p = np.array([corner_uv[sa0[k[0]]], corner_uv[sa1[k[0]]]])
+                p = np.array([corner_uv[sa0[k[0]]], corner_uv[sa1[k[0]]]]) * mirror
                 q = np.array([corner_uv[sb0[k[0]]], corner_uv[sb1[k[0]]]])
                 r_, t_ = _fit_rigid(p, q)
-            new = corner_uv[corners] @ r_.T + t_
+            new = own @ r_.T + t_
             snap = {}
             for a0, a1, b0, b1 in zip(sa0[k], sa1[k], sb0[k], sb1[k]):
                 snap[int(flat[a0])] = corner_uv[b0]
@@ -635,9 +646,8 @@ class NewUVs:
                 got = snap.get(int(v))
                 if got is not None:
                     new[i] = got
-            before = _signed_areas(corner_uv, indptr, faces)
-            after = _signed_areas(new, indptr, faces, local=True)
-            if np.any(np.sign(after) != np.sign(before)) or np.any(after == 0):
+            after = _tri_area2(new[_fan(indptr, faces, local=True)])  # per triangle, as the UV Check counts flips
+            if csign[h] == 0 or np.any(np.sign(after) != csign[h]):
                 continue
             hfaces = np.concatenate([face_order[cbounds[h] : cbounds[h + 1]]] + added.get(h, []))
             if _tris_overlap(new, faces, indptr, corner_uv, hfaces, 1e-6 * mean_len):
@@ -669,6 +679,7 @@ class NewUVs:
         base = indptr[fan_face]
         tri = np.stack([base, base + 1 + j, base + 2 + j], 1)
         tri_chart = chart[fan_face].astype(np.int64)
+        yield
         boxy = (area >= BOX_LIKE * width * height).astype(np.uint8)  # fills its box: placed on the block grid, less gap
         turn_ok = np.ones(nchart, np.uint8)
         total = float(area.sum())
@@ -678,8 +689,11 @@ class NewUVs:
         local = np.column_stack((lu, lv))
         nxt = np.arange(1, len(flat) + 1)
         nxt[indptr[1:] - 1] = indptr[:-1]
+        yield
         ids, _ = edge_ids(indptr, flat)
+        yield
         open_ = cut_edges(indptr, flat, local)[ids] | (np.bincount(ids)[ids] == 1)
+        yield
         edge_len = np.linalg.norm(local[nxt] - local, axis=1)
         outline = float((edge_len * open_).sum())
         ring = 2 * uvpack.block(k) - 1 if k >= 0 else 0
@@ -751,6 +765,7 @@ class NewUVs:
         indptr, nf = self.indptr, len(self.indptr) - 1
         nchart = int(chart.max()) + 1
         chart, corner_uv = chart.copy(), corner_uv.copy()
+        self._unresolved = set()
         rows = {c: int(rows[c]) for c in range(nchart)}
         next_id = nchart
 
@@ -813,7 +828,8 @@ class NewUVs:
                 if n_done % 16 == 15:
                     yield
             if placed is None:
-                continue  # a patch that is not a clean grid (a ring): the chart stays as the solver left it
+                self._unresolved.add(int(c))  # a patch that is not a clean grid: laid out again on its own (`_redo_stretched`)
+                continue
             rows.pop(c, None)
             for pf, pc, puv in placed:
                 chart[pf] = next_id
@@ -821,6 +837,7 @@ class NewUVs:
                 rows[next_id] = 2
                 next_id += 1
         used, renum = np.unique(chart, return_inverse=True)
+        self._unresolved = {int(i) for i in np.searchsorted(used, sorted(self._unresolved))}
         return renum.reshape(-1).astype(np.int64), corner_uv, np.array([rows[int(u)] for u in used], dtype=np.int64), back
 
     def _sub(self, faces):
