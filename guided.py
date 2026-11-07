@@ -4028,6 +4028,13 @@ def unregister() -> None:
     except Exception:
         pass
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, hover=None, message="")
+    try:  # its timer is gone: a scene left on would keep Start from starting it again after a re-enable
+        for sc in bpy.data.scenes:
+            gs = getattr(sc, "curiomesh_guided", None)
+            if gs is not None and gs.enabled:
+                gs["enabled"] = False
+    except AttributeError:  # Blender's data is not readable while it starts or quits
+        pass
     for owner, name in ((bpy.types.Scene, "curiomesh_guided"), (bpy.types.Object, "curiomesh_points"), (bpy.types.Object, "curiomesh_point_index")):
         if hasattr(owner, name):
             delattr(owner, name)
