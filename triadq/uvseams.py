@@ -41,6 +41,7 @@ SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
 DEGENERATE_SHARE = 1e-6  # a fan triangle with 2 x area <= this x its summed squared edges has no area (no say in the vote)
 EDGE_ON_COS = 1e-4  # normals this close to 90 deg are edge-on to rounding: no say in the winding vote
+F32_TURN = 8.0 / 16777216.0  # cosine noise per unit rounding scale (largest coordinate / shortest edge): 8 float32 ulps
 WIND_BALL_EDGE = 0.25  # the winding vote's reach: nearest distance plus this share of a fan triangle's shortest edge
 REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
@@ -965,11 +966,23 @@ def _uv_area(uv, indptr, f) -> float:
     return area
 
 
-def _facing(a, b) -> float:
-    """-1, 0 or 1: whether normals a and b face the same way, 0 when edge-on to rounding (EDGE_ON_COS)."""
+def _rounding_scale(pts) -> float:
+    """How far single-precision rounding of a face's corners (`pts`) can turn its normal: largest coordinate over
+    shortest edge."""
+
+    big, short = 0.0, math.inf
+    for i, p in enumerate(pts):
+        big = max(big, abs(p[0]), abs(p[1]), abs(p[2]))
+        short = min(short, _dist(p, pts[(i + 1) % len(pts)]))
+    return big / short if short > 0.0 else math.inf
+
+
+def _facing(a, b, scale) -> float:
+    """-1, 0 or 1: whether normals a and b face the same way, 0 when edge-on to rounding (cosine at most EDGE_ON_COS or
+    F32_TURN times the two faces' rounding scales)."""
 
     d = _dot(a, b)
-    return 0.0 if abs(d) <= EDGE_ON_COS * math.sqrt(_dot(a, a)) * math.sqrt(_dot(b, b)) else _sign(d)
+    return 0.0 if abs(d) <= max(EDGE_ON_COS, F32_TURN * scale) * math.sqrt(_dot(a, a)) * math.sqrt(_dot(b, b)) else _sign(d)
 
 
 def _has_area(src, g) -> bool:
@@ -1014,6 +1027,7 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
         if g0 < 0:
             continue
         shortest = min(_dist(a, b), _dist(b, cc), _dist(cc, a))
+        scale_t = _rounding_scale([a, b, cc])
         reach = math.sqrt(src.on_faces([g0], q)[0]) + WIND_BALL_EDGE * shortest
         ball, seen, out, allowed = [g0], {g0}, set(), 0
         frontier = [g0]
@@ -1037,7 +1051,7 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
         for f in ball:
             if _has_area(src, f):
                 wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, f))
-                w = _facing(nt, src.normal[f]) * wind * ref_wind
+                w = _facing(nt, src.normal[f], scale_t + _rounding_scale([tuple(src.P[v]) for v in src.flat[int(src.indptr[f]):int(src.indptr[f + 1])]])) * wind * ref_wind
                 allowed |= 3 if wind == 0.0 else (1 if w > 0.0 else (2 if w < 0.0 else 0))
         if allowed:
             common &= allowed

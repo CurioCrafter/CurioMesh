@@ -60,6 +60,9 @@ pub const DEGENERATE_SHARE: f64 = 1e-6;
 /// a cylinder's wall reads cosines of 4e-9 to 5e-6 from single-precision positions), so that source face has no say in the
 /// winding vote.
 pub const EDGE_ON_COS: f64 = 1e-4;
+/// Cosine noise per unit of a face's rounding scale (largest coordinate over shortest edge): 8 single-precision ulps.
+/// A 1 mm face half a metre from the origin reads cosines up to 2e-4 off from its float corners.
+pub const F32_TURN: f64 = 8.0 / 16777216.0;
 /// Fold fix stop rule (SPEC 3): no UV moves more than this share of a texel in one sweep.
 pub const STOP_TEXEL_SHARE: f64 = 0.02;
 /// Fold fix stall rule: the largest move must drop by `STALL_DROP` within `STALL_WINDOW` sweeps (reported).
@@ -886,10 +889,23 @@ fn sgn(x: f64) -> f64 {
     }
 }
 
-/// -1, 0 or 1: whether normals a and b face the same way, 0 when they are edge-on to rounding (EDGE_ON_COS).
-fn facing(a: V3, b: V3) -> f64 {
+/// How far single-precision rounding of a face's corners can turn its normal: its largest coordinate over its shortest
+/// edge (times F32_TURN gives the cosine noise).
+fn rounding_scale(points: &[f64], face: &[i64]) -> f64 {
+    let (mut big, mut short) = (0.0f64, f64::INFINITY);
+    for i in 0..face.len() {
+        let p = p3(points, face[i]);
+        big = big.max(p[0].abs()).max(p[1].abs()).max(p[2].abs());
+        short = short.min(dist(p, p3(points, face[(i + 1) % face.len()])));
+    }
+    if short > 0.0 { big / short } else { f64::INFINITY }
+}
+
+/// -1, 0 or 1: whether normals a and b face the same way, 0 when they are edge-on to rounding: a cosine at most
+/// EDGE_ON_COS, or at most what single-precision corners can turn the two faces (F32_TURN times their rounding scales).
+fn facing(a: V3, b: V3, scale: f64) -> f64 {
     let d = dot(a, b);
-    if d.abs() <= EDGE_ON_COS * dot(a, a).sqrt() * dot(b, b).sqrt() {
+    if d.abs() <= EDGE_ON_COS.max(F32_TURN * scale) * dot(a, a).sqrt() * dot(b, b).sqrt() {
         0.0
     } else {
         sgn(d)
@@ -946,6 +962,7 @@ fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], r
         }
         let Some(g0) = tree.nearest(q).map(|h| h.1 as usize) else { continue };
         let shortest = dist(a, b).min(dist(b, cc)).min(dist(cc, a));
+        let scale_t = rounding_scale(res_points, &t);
         let reach = src.on_face(g0, q).0.sqrt() + WIND_BALL_EDGE * shortest;
         let mut ball = vec![g0];
         let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
@@ -957,7 +974,7 @@ fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], r
             at += 1;
             if has_area(src, f) {
                 let wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, f)));
-                let w = facing(nt, src.normal[f]) * wind * ref_wind;
+                let w = facing(nt, src.normal[f], scale_t + rounding_scale(src.points, src.faces.face(f))) * wind * ref_wind;
                 allowed |= if wind == 0.0 { 3 } else if w > 0.0 { 1 } else if w < 0.0 { 2 } else { 0 };
             }
             for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
