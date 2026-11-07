@@ -159,10 +159,16 @@ def settle_work():
 
 def tick_to_end(limit=3600.0):
     """Pump the job the way Blender's timer does: `_tick` until it stops asking to be called."""
-    ends = time.perf_counter() + limit
+    ends, t0 = time.perf_counter() + limit, time.perf_counter()
+    seen = len(AL.fx["report"]["passes"]) if AL.fx["report"] else 0
     while AL.busy() and time.perf_counter() < ends:
         if AL._tick() is None:
             break
+        passes = AL.fx["report"]["passes"] if AL.fx["report"] else []
+        for e in passes[seen:]:
+            p = e["proposal"]
+            print(f"PASS-LOG {time.perf_counter() - t0:6.1f}s round {e['round']} {e['name']}: {'kept' if e['kept'] else 'left (' + str(p.reason) + ')'} spots {len(p.fixed)}/{len(p.fixed) + len(p.left)} tidy {p.before.tidy} -> {p.after.tidy}", flush=True)
+        seen = len(passes)
 
 
 class Fake:
@@ -251,9 +257,15 @@ def run_model(key):
     ladder.finish(timeout=0.01)  # must return at once while Auto Fix works, not spin
     began = time.perf_counter()
     tick_to_end()
-    seconds = time.perf_counter() - began
     rep = AL.fx["report"]
-    ok(not AL.busy() and rep["how"] == "done", f"it ends by itself: {rep['how']}, {rep['words']}")
+    limits = 0
+    while rep["how"] == "limit" and AL.keep_going(bpy.context):  # Time Limits Normal hit on a big model: the stop line, then Keep going
+        limits += 1
+        ok("Time Limits: Normal" in rep["stop"] and "still improving" in rep["stop"], f"the time limit says so: {rep['stop']}")
+        tick_to_end()
+        rep = AL.fx["report"]
+    seconds = time.perf_counter() - began
+    ok(not AL.busy() and rep["how"] == "done", f"it ends by itself: {rep['how']}, {rep['words']} (time limit hit {limits} times)")
     kept = kept_passes(rep)
     ok(all(e["proposal"].after.bad <= e["proposal"].before.bad for e in kept), "bad faces never higher after a kept pass")
     first, last = (kept[0]["proposal"].before, kept[-1]["proposal"].after) if kept else (autofix.Scores(), autofix.Scores())

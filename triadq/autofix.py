@@ -26,7 +26,7 @@ WHY = {  # the reasons of AUTO_FIX.md 2.3, in the readout's words
     "look": "the look would change too much",
     "held": "could not be worked on",
 }
-EXTRA = ("tidy", "loops", "bad")  # measured on top of the tool's own stages: the accept rule needs them
+EXTRA = ("poles", "tidy", "loops", "bad")  # measured on top of the tool's own stages: the accept rule needs them
 STRENGTH_LEAST = 0.02  # a handle below this moves nothing visible: halving ends there (nothing left to try, not a cap)
 
 FINISHED = "Auto Fix finished: another round found nothing it could make better."
