@@ -21,7 +21,7 @@ from itertools import chain
 import bpy
 import numpy as np
 
-from . import autoretopo, history, organize, overlay, segments, tidylive, tidytools
+from . import autofix_live, autoretopo, history, organize, overlay, segments, tidylive, tidytools
 from .triadq import ladder as L
 from .triadq import tasks
 from .triadq import parts as P
@@ -134,6 +134,8 @@ def work(seconds: float) -> None:
         if lad["key"] is not None:
             cancel()
         return
+    if autofix_live.busy():  # Auto Fix is changing the result on screen: other sizes wait, they are worked out after it
+        return
     ends = time.perf_counter() + seconds
     while time.perf_counter() < ends:
         job = lad["job"]
@@ -185,7 +187,7 @@ def finish(timeout: float | None = None, styles=None) -> bool:
     ends = None if timeout is None else time.perf_counter() + timeout
     if styles is not None:
         lad["plan"] = [r for r in lad["plan"] if r[0] in styles]
-    while (lad["job"] is not None or lad["plan"]) and (ends is None or time.perf_counter() < ends):
+    while (lad["job"] is not None or lad["plan"]) and (ends is None or time.perf_counter() < ends) and not autofix_live.busy():
         work(1.0)
     return lad["job"] is None and not lad["plan"]
 

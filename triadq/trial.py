@@ -88,15 +88,10 @@ def unfold(base: Base, co: np.ndarray) -> np.ndarray:
     """Corners of faces that turned over go back where they were, pass by pass, until no face is turned over."""
     from .organize import half_edges
 
-    fid, corner, nxt = half_edges(base.faces)
-
-    def normals(x):  # Newell's normal per face, from the half-edges
-        c = np.cross(x[corner], x[nxt])
-        return np.stack([np.bincount(fid, c[:, k], len(base.faces)) for k in range(3)], axis=1)
-
-    before = normals(base.co)
+    fid, corner, _nxt = half_edges(base.faces)
+    before = face_normals(base.co, base.faces)
     while True:  # each pass puts at least one face's corners back, so it ends
-        flipped = (before * normals(co)).sum(axis=1) < 0.0
+        flipped = (before * face_normals(co, base.faces)).sum(axis=1) < 0.0
         back = np.unique(corner[flipped[fid]])
         back = back[(co[back] != base.co[back]).any(axis=1)]
         if not len(back):
@@ -157,6 +152,17 @@ class Candidate:
     lines: np.ndarray | None = None  # the pink Kept lines layer: (k, 2, 3) float points, or (k, 2) int corner pairs of the candidate (they follow its corners)
 
 
+@dataclass
+class Spot:
+    """One place a tool can fix by itself (Auto Fix, "Fix every spot like this"): bench/tools_design/AUTO_FIX.md 2.1."""
+
+    kind: str  # a key of the tool's `kinds`: "slanted"
+    faces: np.ndarray  # face ids of the region the fix may change (its edge is held, like Work On's)
+    at: np.ndarray  # (3,) where Show frames and the dial opens
+    bad: float  # the tool's own number here, lower is better: ranks the spots, worst first
+    pick: dict = field(default_factory=dict)  # settings a picking tool needs for this spot: {"strip": e}, {"row": "pairs"}
+
+
 class Trial:
     """One Tidy Tool's maths. Subclass it, set the class fields, write `check` and `run`."""
 
@@ -173,6 +179,23 @@ class Trial:
     picks: tuple = ()  # what you click before it can run, in order ("pole", "partner"); each is a setting, -1 until clicked
     asks: dict = {}  # pick -> what the header and the card ask for: {"pole": "click a pole"}
     stay_open = False  # True: after Enter the tool opens again on the new result (one Undo step per Enter)
+    # Auto Fix (AUTO_FIX.md 2.1): a tool that fills these in also fixes its spots by itself
+    kinds: tuple = ()  # ((key, one, many), ...): ("slanted", "patch of slanted quads", "patches of slanted quads")
+    auto: bool = True  # False: manual only (it needs the user's intent; there is no defect to find)
+    own: str = ""  # this tool's own measure, lower is better ("square", "wave", "bump", ...); "" until it has `own_number`
+    least: float = 0.0  # the smallest drop of the own number that counts as better: a tolerance against noise, not a cap
+    changes_faces: bool = False  # True when `run` returns new faces (with `parent`)
+
+    def spots(self, base: Base):
+        """Generator: yield a progress 0..1, return the list of `Spot`s in `base.scope` this tool would fix. Touching
+        spots are one spot, so two never share a corner. Never cut to a count."""
+        return []
+        yield 0.0
+
+    def own_number(self, base: Base, co, faces, spot: Spot) -> float:
+        """The own number on `spot.faces` of the mesh (co, faces), lower is better. `base` is the mesh before the fix
+        (its cache, project and labels); `spot.faces` are ids into `faces`."""
+        return float(spot.bad)
 
     def prepare(self, base: Base):
         """Generator: slow reads a tool needs before `check`, in small steps (the Session yields between them)."""
@@ -206,6 +229,38 @@ class Trial:
         """Generator: yield a progress 0..1 about every few milliseconds of work, return a Candidate."""
         raise NotImplementedError
         yield 0.0
+
+
+def rebase(base: Base, cand: Candidate) -> Base:
+    """A Base for the candidate's mesh, with what the tool did not change carried over: project, facing, mirror, the
+    per-face labels and kinds (through `parent`), the scope mapped through `parent`, and the corners' extra holds when
+    the corners are the same ones. For a tool that changed the faces, before the next spot is worked on."""
+    co = base.co if cand.co is None else np.asarray(cand.co, dtype=np.float64)
+    if cand.faces is None:
+        new = Base(co.copy(), base.faces, base.scope.copy(), base.stay.copy(), base.project, base.edge, base.mirror, facing=base.facing, labels=dict(base.labels), kinds=base.kinds)
+        return new
+    faces = list(cand.faces)
+    parent = None if cand.parent is None else np.asarray(cand.parent, dtype=np.int64)
+    ok = parent is not None and len(parent) == len(faces) and len(base.faces) > 0
+    take = np.clip(parent, 0, max(len(base.faces) - 1, 0)) if ok else None
+
+    def per_face(values):
+        values = np.asarray(values)
+        return values[take] if ok and len(values) == len(base.faces) else None
+
+    scope = per_face(base.scope)
+    if scope is not None:
+        scope = scope & (parent >= 0)
+    labels = {}
+    for key, values in base.labels.items():
+        if values is None:
+            continue
+        mapped = per_face(values) if len(values) == len(base.faces) else (values if len(values) == len(co) else None)
+        if mapped is not None:
+            labels[key] = mapped
+    kinds = None if base.kinds is None else per_face(base.kinds)
+    stay = base.stay if len(base.stay) == len(co) else None
+    return make_base(co, faces, scope=scope, stay=stay, project=base.project, mirror=base.mirror, facing=base.facing, labels=labels, kinds=kinds)
 
 
 def finish(work):
@@ -271,9 +326,48 @@ def _tidiness(co, faces) -> float:
     return float(patterns.score(patterns.measure(co, faces))["score"])
 
 
+def face_normals(co, faces) -> np.ndarray:
+    """(f, 3) Newell normals (not unit), from the half-edges."""
+    from .organize import half_edges
+
+    if not len(faces):
+        return np.zeros((0, 3))
+    fid, corner, nxt = half_edges(faces)
+    co = np.asarray(co, dtype=np.float64)
+    c = np.cross(co[corner], co[nxt])
+    return np.stack([np.bincount(fid, c[:, k], len(faces)) for k in range(3)], axis=1)
+
+
+def bad_faces(base: Base, co, faces=None, parent=None) -> np.ndarray:
+    """Per face of (co, faces): turned over against the face of `base` it came from (the same face, or `parent`), or a
+    quad folded or concave. `faces=None`: base's faces. The one bad-face test of the Tidy Tools and Auto Fix."""
+    from .checks import folded_quads
+
+    faces = base.faces if faces is None else faces
+    if not len(faces):
+        return np.zeros(0, dtype=bool)
+    if "normals" not in base.cache:
+        base.cache["normals"] = face_normals(base.co, base.faces)
+    ref = base.cache["normals"]
+    if faces is not base.faces:
+        ok = parent is not None and len(parent) == len(faces) and len(ref)
+        ref = ref[np.clip(np.asarray(parent, dtype=np.int64), 0, len(ref) - 1)] if ok else None
+    out = folded_quads(co, faces)
+    if ref is not None and len(ref) == len(faces):
+        out |= (face_normals(co, faces) * ref).sum(axis=1) < 0.0
+    return out
+
+
+def _loops(co, faces, plane) -> float | None:
+    from .loopscore import loop_quality
+
+    return float(loop_quality(co, faces, plane)["quality"]) if len(faces) else None
+
+
 def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=None):
     """Generator: fill `cand.numbers` cheapest first, yielding between stages. `look(co, faces)` is a generator
-    returning the look change in percent against your original mesh (the camera check), or None to skip it."""
+    returning the look change in percent against your original mesh (the camera check), or None to skip it.
+    Auto Fix's stages: "tidy", "loops" (Loop Quality), "bad" (bad faces, `bad_faces`)."""
     if cand.refusal or cand.co is None:
         return cand
     faces = base.faces if cand.faces is None else cand.faces
@@ -292,6 +386,17 @@ def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=
             base.cache["tidy"] = _tidiness(base.co, base.faces)
             yield
         cand.numbers["tidy"] = (base.cache["tidy"], _tidiness(cand.co, faces))
+        yield
+    if "loops" in stages:
+        if "loops" not in base.cache:
+            base.cache["loops"] = _loops(base.co, base.faces, base.mirror)
+            yield
+        cand.numbers["loops"] = (base.cache["loops"], _loops(np.asarray(cand.co, dtype=np.float64), faces, base.mirror))
+        yield
+    if "bad" in stages:
+        if "bad" not in base.cache:
+            base.cache["bad"] = int(bad_faces(base, base.co).sum())
+        cand.numbers["bad"] = (base.cache["bad"], int(bad_faces(base, np.asarray(cand.co, dtype=np.float64), faces if cand.faces is not None else None, cand.parent).sum()))
         yield
     if "look" in stages and look is not None:
         if "look" not in base.cache:
@@ -325,6 +430,16 @@ def number_text(key: str, value, cap: float | None = None) -> tuple[str, int]:
         return f"look change {change:+.1f}%", -1 if worse else 1 if change < -0.05 else 0
     if key == "move":
         return f"most move {value:.2f} quad", 0
+    if key == "loops":
+        a, b = value
+        if a is None or b is None:
+            return "Loop Quality -", 0
+        return f"Loop Quality {a:.0f} -> {b:.0f}", 1 if b > a + 0.5 else -1 if b < a - 0.5 else 0
+    if key == "bad":
+        a, b = value
+        if b > a:
+            return f"{b - a} new bad face{'s' if b - a != 1 else ''}", -1
+        return (f"{a - b} bad face{'s' if a - b != 1 else ''} gone", 1) if b < a else ("no new bad faces", 0)
     return f"{key} {value}", 0
 
 

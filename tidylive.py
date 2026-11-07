@@ -55,6 +55,7 @@ import bpy
 import numpy as np
 
 from . import history, overlay
+from .triadq import autofix
 from .triadq import trial as T
 
 BUDGET = 0.008  # seconds of work per timer tick: half a 60 Hz frame
@@ -100,8 +101,14 @@ def _g():
 
 
 def busy() -> bool:
-    """A tool preview is open: the ladder, Tidy Up and the Adjust sliders wait."""
-    return live["session"] is not None
+    """A tool preview is open, or Auto Fix is working: the ladder, Tidy Up and the Adjust sliders wait."""
+    if live["session"] is not None:
+        return True
+    try:
+        from . import autofix_live
+    except ImportError:  # the driver is its own module; without it nothing else can be working
+        return False
+    return bool(autofix_live.busy())
 
 
 def close(message: str) -> None:
@@ -250,13 +257,27 @@ def _looker(src_co, src_faces):
     pixels = autoretopo.MAX_PIXELS
     held = _source_kept(src_co)  # the pictures of your original are taken once per original, not per tool
 
-    def look(co, faces):
+    last = {}  # the newest pictures, so `parts` on the candidate just measured does not take them again
+
+    def shot(co, faces):
         if "ref" not in held:
             held["ref"] = yield from autoretopo.pictures(src_co, src_faces, centre, reach, pixels)
-        pictures = yield from autoretopo.pictures(np.asarray(co, dtype=np.float64), faces, centre, reach, pixels)
+        if last.get("of") != (id(co), id(faces)):
+            last["of"], last["pictures"] = None, (yield from autoretopo.pictures(np.asarray(co, dtype=np.float64), faces, centre, reach, pixels))
+            last["of"] = (id(co), id(faces))
+        return last["pictures"]
+
+    def look(co, faces):
+        pictures = yield from shot(co, faces)
         wrong, shown = autoretopo.picture_counts(held["ref"], pictures, 2.0 * reach / pixels)
         return 100.0 * wrong / max(shown, 1)
 
+    def parts(co, faces, labels, limit):
+        """The labels of the parts where more than `limit` of what the camera shows changed (Auto Fix rule 5)."""
+        pictures = yield from shot(co, faces)
+        return autoretopo.parts_changed_too_much(held["ref"], pictures, 2.0 * reach / pixels, np.asarray(labels, dtype=np.int64), limit)
+
+    look.parts = parts
     return look
 
 
@@ -302,6 +323,7 @@ class Session:
         self.pick = dict(pick or {})
         self.showing: tuple[int, int] | None = None  # (report line, spot) lit by Show
         self.message = ""  # a short word for the card ("Pick Fix These on a line first.")
+        self.proposal = None  # the last `autofix.Proposal`: its fixed and left spots, before and after numbers
         if self.res is None:
             self.error = "Make a result first with Start. Tools work on the result before you apply it."
             return
@@ -323,7 +345,7 @@ class Session:
         project = _projector(src_co, src_faces) if src_co is not None else None
         yield
         facing = _facer(src_co, src_faces) if src_co is not None else None
-        labels = _labels(self.res, co) if self.trial.toggles else None
+        labels = _labels(self.res, co) if self.trial.toggles or self.trial.kinds else None  # Auto Fix drops spots by part
         self.base = T.make_base(co, faces, scope=mask, project=project, mirror=plane, pick=self.pick, facing=facing, labels=labels, kinds=self.kinds)
         self.look = _looker(src_co, src_faces) if src_co is not None and "look" in self.trial.stages else None
         yield
@@ -360,20 +382,38 @@ class Session:
             self.full = yield from self._run(dict(settings, **{self.handle: 1.0}), rough)
             if self.full.co is not None:  # a refused full-strength run has nothing to blend toward
                 self.shown = T.blend(self.base, self.full, float(settings[self.handle]))
-        cand = yield from self._run(settings, rough)
+        p = yield from self._propose(settings, rough)
+        cand = p.cand
+        if cand is not None and not cand.refusal and cand.co is not None and p.reason:
+            if p.judged:  # Fix every spot: nothing is kept when the accept rule says no
+                cand = T.Candidate(None, refusal=autofix.refusal_words(self.trial.trial, p), found=cand.found, held=cand.held)
+            elif p.reason in ("bad faces", "worse"):  # a manual run is the user's call: a warning, not a refusal
+                cand.note = (cand.note + "  " if cand.note else "") + f"Auto Fix would not keep this: {autofix.WHY[p.reason]}."
+        self.proposal = p
         self.cand = self.shown = cand
-        held = None
-        while True:
-            self.status = "measuring look" if self.look is not None else "measuring"
-            yield from T.measure(self.base, cand, self.trial.stages, self.look)
-            change = cand.numbers.get("look")
-            if self.cap is None or change is None or change[1] - change[0] <= self.cap or not self.handle or settings[self.handle] < 0.02:
-                break
-            settings[self.handle] = held = round(settings[self.handle] * 0.5, 2)  # ponytail: halving; a search between would land closer
-            cand = yield from self._run(settings, rough)
-            self.cand = self.shown = cand
+        held = p.held
         self.status = f"held at {held:.2f}" if held is not None else ("quick preview" if rough else "ready")
-        yield from self._row_costs(cand)
+        if cand is not None and not cand.refusal:
+            yield from self._row_costs(cand)
+
+    def _propose(self, settings: dict, rough: bool):
+        """`autofix.propose` on this preview: the same run, guards and numbers as the per-tool button and Auto Fix."""
+
+        def shown(cand):
+            self.cand = self.shown = cand
+
+        budget = (lambda before, cap=self.cap: before + cap) if self.cap is not None else None
+        work = autofix.propose(self.trial, self.base, settings, look=self.look, budget=budget, rough=rough, shown=shown)
+        while True:
+            try:
+                progress = next(work)
+            except StopIteration as done:
+                return done.value
+            if isinstance(progress, str):
+                self.status = "measuring look" if self.look is not None else "measuring"
+            elif progress is not None:
+                self.status = ("quick preview " if rough else "working ") + f"{int(100 * float(progress))}%"
+            yield
 
     def _row_costs(self, cand):
         """A report's lines each get the look change their fix would make, worked out after everything else."""
@@ -1036,9 +1076,10 @@ def _draw_card(shader, s, region, dial, scale) -> None:
 FACE_ARRAYS = ("mat", "piece", "parts", "new", "locked", "chart")
 
 
-def commit(context, cand: T.Candidate, name: str, numbers: str = "") -> bool:
-    """Make `cand` the result on screen and keep it as a History step (the operator's UNDO flag pushes Blender's).
-    The Tidy Up passes of the result before it are let go (History still has them)."""
+def commit(context, cand: T.Candidate, name: str, numbers: str = "", push: bool = False) -> bool:
+    """Make `cand` the result on screen and keep it as a History step (the operator's UNDO flag pushes Blender's;
+    `push`: push it here and name the step `name` as given, for a timer such as Auto Fix's). The Tidy Up passes of
+    the result before it are let go (History still has them)."""
     from . import organize, segments
 
     guided = _g()
@@ -1068,7 +1109,7 @@ def commit(context, cand: T.Candidate, name: str, numbers: str = "") -> bool:
 
         guided._build_preview(context, source, new, uvs=False, mesh=_make_mesh(guided.PREVIEW_NAME + "_Mesh", new, source))
     guided.state["draw_key"] = None
-    history.record(context, f"Tidy: {name}", numbers)
+    history.record(context, name if push else f"Tidy: {name}", numbers, push=push)
     overlay.tag_redraw()
     return True
 
@@ -1110,7 +1151,8 @@ class LiveTool:
     trial = None
 
     def _settings(self) -> dict:
-        return {k: getattr(self, k) for k in self.trial.defaults if hasattr(self, k)}
+        defaults = self.trial().defaults  # an instance: EverySpot sets its defaults (Keep going) per wrapped tool
+        return {k: getattr(self, k) for k in defaults if hasattr(self, k)}
 
     def _scope(self, context) -> str:
         ts = history.settings(context.scene)
@@ -1186,7 +1228,7 @@ class LiveTool:
             self._finish(context)
             return {"CANCELLED"}
         _remember(context, self.bl_idname, name, numbers, {k: v for k, v in s.settings.items() if k not in s.trial.picks})
-        if s.trial.stay_open:
+        if s.trial.stay_open or _keeps_going(s):
             return self._reopen(context, name)
         close("")
         self._finish(context)
@@ -1207,6 +1249,8 @@ class LiveTool:
         s.area, s.region, s.region_ptr = old.area, old.region, old.region_ptr
         live["session"], live["note"] = s, ""
         self._s = s
+        if _keeps_going(s):
+            s.apply()  # Keep going: the next run is kept by itself when it makes something better; Esc stops it
         _add_handlers()
         s.area.tag_redraw()
         return {"RUNNING_MODAL"}
@@ -1364,7 +1408,17 @@ class LiveTool:
         if s.trial.stay_open:  # no UNDO flag on these operators (one step per Enter instead): push it here
             history._push(f"Tidy: {s.trial.name}")
         _remember(context, self.bl_idname, s.trial.name, numbers, {k: v for k, v in s.settings.items() if k not in s.trial.picks})
+        while _keeps_going(s):  # Keep going: again on the kept result until a run makes nothing better
+            s = Session(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
+            s.finish()
+            if s.error or not s.ready_to_keep() or not commit(context, s.cand, s.trial.name, numbers_text(s.cand, s.trial, s.cap)):  # one Undo step for the whole run (F9), one History entry each
+                break
         return {"FINISHED"}
+
+
+def _keeps_going(s) -> bool:
+    """A "Fix every spot" run with Keep going on: it runs again on what it just kept."""
+    return isinstance(s.trial, autofix.EverySpot) and bool(s.settings.get("keep_going"))
 
 
 def _remember(context, idname: str, name: str, numbers: str, settings: dict) -> None:

@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 from . import guided as G
-from . import faceloops, flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry, tidylive, tidytools
+from . import autofix_live, faceloops, flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry, tidylive, tidytools
 from . import verdict as V
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
@@ -340,6 +340,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
             draw_working(layout, gs, searching)
         elif done:
             draw_verdict(layout, gs)
+            autofix_live.draw_readout(layout, context)
             body = G.fold(layout, gs, "ui_setup_open", f"Settings: {setup_words(gs)}")
             if body is not None:
                 draw_setup(body, context, gs, obj, again=True)
@@ -439,6 +440,7 @@ def draw_options(layout, context, gs) -> None:
     col.label(text="Tidiness", **icons.kw("tidy", "MESH_GRID"))
     col.row(align=True).prop(gs, "auto_style", expand=True)
     col.row(align=True).prop(gs, "cleanup", expand=True)
+    autofix_live.draw_option(col, context, gs)
     factor = hardware.style_factor(gs.auto_style, gs.auto_method)
     if factor > 1:
         col.label(text=f"Slow: about {factor:g}x Fewest Faces, or more", icon="TIME")
@@ -528,7 +530,11 @@ def part_edits() -> int:
 
 def draw_adjust(layout, gs) -> None:
     _help(layout, "adjust")
-    if tidylive.busy():  # the sliders would change the result under the open preview
+    if autofix_live.busy():  # the sliders would swap the result under the fixes
+        layout.label(text="Auto Fix is working. Stop keeps what it fixed so far.", icon="INFO")
+        layout = layout.column()
+        layout.enabled = False
+    elif tidylive.busy():  # the sliders would change the result under the open preview
         layout.label(text="Finish or cancel the open tool first.", icon="INFO")
         layout = layout.column()
         layout.enabled = False
@@ -894,6 +900,7 @@ class CURIOMESH_PT_pro_engine(_Pro, bpy.types.Panel):
         col.enabled = G.progress_info("AUTO") is None
         col.label(text="Cleanup, one by one")
         col.prop(gs, "auto_redo_rough", toggle=True, icon="MOD_SMOOTH")
+        col.prop(gs, "auto_fix", toggle=True, icon="SHADERFX")
         col.prop(gs, "auto_chords", toggle=True, icon="MOD_REMESH")
         col.prop(gs, "auto_tidy", toggle=True, icon="MESH_GRID")
         col.prop(gs, "time_limits", text="Time")
@@ -1196,9 +1203,11 @@ def register() -> None:
     icons.load()
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    autofix_live.register()
 
 
 def unregister() -> None:
+    autofix_live.unregister()
     for cls in reversed(CLASSES):
         try:
             bpy.utils.unregister_class(cls)
