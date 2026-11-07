@@ -31,6 +31,7 @@ from . import guides, live, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
 from . import autofix_live, autoretopo, blockout, faceloops, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
+from . import uv_hooks  # main-only: uv
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
@@ -1831,7 +1832,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     drawn = {kind: _guide_lines(context, gs, src, kind) for kind in ("LOOP", "BEND")}
     paint = _painted(state_source(), gs, src)
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
-    charts = _uv_charts(state_source(), src) if gs.keep_uvs and gs.bake_detail != "NORMAL_COLOR" else None
+    charts = uv_hooks.kinds(_uv_charts, state_source(), src, gs)  # main-only: uv
     codes = src["mat"] if charts is None else charts[0]
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
@@ -3031,6 +3032,7 @@ def _blockout_result() -> bool:
 def _write_result(context, source, res, gs, name: str):
     """A new object from a result, with UVs, normals, shading and materials as your mesh has them. Returns (object, bake text)."""
     mesh = _make_mesh(name, source, res)
+    uv_hooks.after_apply(mesh, source, res, gs)  # main-only: uv
     _shade_by_angle(mesh)
     if not _blockout_result():
         _transfer_normals(mesh, _source_data(source), res)
@@ -3208,6 +3210,7 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             self.report({"INFO"}, "Keep Copies as Instances was not used: this result has no exact copies, or it is baked, mirrored, tidied or repaired")
         written = instances["rest"] if instances else res
         mesh = _make_mesh(source.name + "_Retopo", source, written)
+        uv_hooks.after_apply(mesh, source, written, gs)  # main-only: uv
         _shade_by_angle(mesh)
         if not _blockout_result():
             _transfer_normals(mesh, _source_data(source), written)

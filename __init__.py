@@ -23,6 +23,7 @@ from .operators import (
     CURIOMESH_OT_remesh,
 )
 from . import batch, fix_select, game_export, guided, history, live, overlay, panel, region, tidytools
+from . import uv_panel  # main-only: uv
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
 D = overlay.PREF_DEFAULTS
@@ -299,6 +300,7 @@ def register():
     tidytools.register()
     fix_select.register()
     game_export.register()
+    uv_panel.register()  # main-only: uv
     panel.register()
     apply_category()
 
@@ -309,6 +311,7 @@ def unregister():
         return
     _registered = False
     panel.unregister()
+    uv_panel.unregister()  # main-only: uv
     game_export.unregister()
     fix_select.unregister()
     tidytools.unregister()

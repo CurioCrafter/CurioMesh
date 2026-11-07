@@ -17,6 +17,7 @@ import bpy
 from . import guided as G
 from . import autofix_live, faceloops, flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry, tidylive, tidytools
 from . import verdict as V
+from . import uv_panel  # main-only: uv
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
 WIDTH = 36  # characters per wrapped line in the sidebar
@@ -789,6 +790,7 @@ def draw_finish(layout, context, gs) -> None:
     if not done and G.state["applied"]:
         overlay.wrap_label(layout, f"Applied: {G.state['applied']}", icon="CHECKMARK", width=30, limit=4)
         layout.operator("curiomesh.export_game", text="Export for game...", **icons.kw("export", "EXPORT"))
+        uv_panel.draw_row(layout, context)  # main-only: uv
         G._draw_thanks(layout)
         return
     _help(layout, "finish")
@@ -800,6 +802,7 @@ def draw_finish(layout, context, gs) -> None:
     row = layout.row(align=True)
     row.prop(gs, "bake_detail", text="Bake", **icons.kw("bake", "IMAGE_DATA"))
     row.popover(panel="CURIOMESH_PT_pop_bake", text="", icon="PREFERENCES")
+    uv_panel.draw_row(layout, context)  # main-only: uv
     layout.popover(panel="CURIOMESH_PT_pop_lod", text="LOD set...", **icons.kw("lod", "MOD_DECIM"))
     if done and not busy:
         layout.operator("curiomesh.guided_stop", text="Discard result", icon="X")
