@@ -30,6 +30,7 @@ CLEAN_DOWN_TO_PX = 256  # SPEC 8.2: the gap keeps neighbours apart down to this 
 SLICE_SECONDS = 0.002
 ROW_TOL_DEG = 1e-6
 WAIT = "wait"  # a stage yields this while a faster job runs: step() returns at once instead of spinning
+LEVEL_STEP = 0.5  # a chart that lies over itself is redone at this share of the Stretch allowed it had
 SELF_CHECK_FACES = 4  # charts smaller than this are not checked for lying over themselves (a pole of valence 5 needs 5 faces)
 CHECK_BATCH = 24  # charts checked in one call, each in its own tile
 RASTER_PX = 128  # tile size of the check that runs without the faster callable
@@ -568,7 +569,7 @@ class NewUVs:
         back = len(pending)
         patch = np.asarray(tree.patches() if callable(getattr(tree, "patches", None)) else tree.patch, dtype=np.int64)
         while pending and x > 0:
-            x = x / 2 if x >= 1 else 0.0
+            x = x * LEVEL_STEP if x >= 1 else 0.0
             luv, lchart, lrows, _ = yield from self._flatten(tree, x)
             lby = {}
             order = np.argsort(lchart, kind="stable")
