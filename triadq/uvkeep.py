@@ -543,7 +543,7 @@ class FitStage:
             look = tr.result
             if again:
                 break
-            halve = (np.asarray(look["orient"]) == 0) & (np.diff(ip) > 3)
+            halve = halve_mask(P, ip, fl, look["orient"])
             if not halve.any():
                 break
             ip, fl, origin = fan_split(ip, fl, origin, halve)
@@ -573,6 +573,24 @@ class FitStage:
         self.candidate, self.numbers = c, numbers
         if not self.only_transfer:
             remember(c)
+
+
+def halve_mask(points, indptr, flat, orient) -> np.ndarray:
+    """Per result face: True for a face of 4 or more corners that the lookup gave no common winding (orient 0) and that has
+    area (a fan triangle above uvseams.DEGENERATE_SHARE): its fan triangles want opposite windings."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    sizes = np.diff(ip)
+    fan = np.maximum(sizes - 2, 0)
+    tri_face = np.repeat(np.arange(len(sizes)), fan)
+    k = np.arange(len(tri_face)) - np.repeat(np.cumsum(fan) - fan, fan) + 1
+    s = ip[tri_face]
+    a, b, c = P[fl[s]], P[fl[s + k]], P[fl[s + k + 1]]
+    two_area = np.linalg.norm(np.cross(b - a, c - a), axis=1)
+    edges2 = ((b - a) ** 2).sum(1) + ((c - b) ** 2).sum(1) + ((a - c) ** 2).sum(1)
+    has_area = np.bincount(tri_face, two_area > uvseams.DEGENERATE_SHARE * edges2, len(sizes)) > 0
+    return (np.asarray(orient) == 0) & (sizes > 3) & has_area
 
 
 def fan_split(indptr, flat, origin, mask) -> tuple:

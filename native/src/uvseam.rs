@@ -53,6 +53,9 @@ pub const REF_ALIGN_COS: f64 = 0.5;
 /// The winding vote's reach around a fan triangle's centre: the nearest source face's distance plus this share of the
 /// triangle's shortest edge.
 pub const WIND_BALL_EDGE: f64 = 0.25;
+/// A fan triangle whose twice-area is at most this share of its summed squared edge lengths has no area: its normal is
+/// rounding, so it has no say in its face's winding.
+pub const DEGENERATE_SHARE: f64 = 1e-6;
 /// Fold fix stop rule (SPEC 3): no UV moves more than this share of a texel in one sweep.
 pub const STOP_TEXEL_SHARE: f64 = 0.02;
 /// Fold fix stall rule: the largest move must drop by `STALL_DROP` within `STALL_WINDOW` sweeps (reported).
@@ -877,21 +880,27 @@ fn uv_area(layer: &[f64], faces: &Faces, f: usize) -> f64 {
 /// area allows both, one edge-on to it neither). The face takes the winding every triangle allows; when both are
 /// allowed throughout, `fallback` (its own sign against the reference). A face whose triangles allow no common winding
 /// (folded in 3D, or across a crease with one half leaning into a wall) gets 0: no single winding shows the texture on
-/// all of it (`uvkeep` cuts such a face into its fan triangles).
+/// all of it (`uvkeep` cuts such a face into its fan triangles). So does a face with no area (DEGENERATE_SHARE): it
+/// shows no texture, and the fold fix leaves its reads alone instead of opening it up in UV.
 fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], rf: usize, fallback: f64) -> f64 {
     let ref_wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, rf)));
     if ref_wind == 0.0 {
         return fallback;
     }
     let mut common = 3u8; // bit 0: +1 allowed, bit 1: -1 allowed
+    let mut said = false;
     for i in 1..face.len().saturating_sub(1) {
         let t = [face[0], face[i], face[i + 1]];
         let (a, b, cc) = (p3(res_points, t[0]), p3(res_points, t[1]), p3(res_points, t[2]));
         let q = [(a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0];
+        let nt = newell(res_points, &t);
+        let edges2 = dot(sub(b, a), sub(b, a)) + dot(sub(cc, b), sub(cc, b)) + dot(sub(a, cc), sub(a, cc));
+        if dot(nt, nt).sqrt() <= DEGENERATE_SHARE * edges2 {
+            continue; // a zero-area triangle: its normal, and so the winding it shows, is rounding
+        }
         let Some(g0) = tree.nearest(q).map(|h| h.1 as usize) else { continue };
         let shortest = dist(a, b).min(dist(b, cc)).min(dist(cc, a));
         let reach = src.on_face(g0, q).0.sqrt() + WIND_BALL_EDGE * shortest;
-        let nt = newell(res_points, &t);
         let mut ball = vec![g0];
         let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
         seen.insert(g0, ());
@@ -913,7 +922,11 @@ fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], r
         }
         if allowed != 0 {
             common &= allowed;
+            said = true;
         }
+    }
+    if !said {
+        return 0.0;
     }
     match common {
         1 => 1.0,

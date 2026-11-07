@@ -39,6 +39,7 @@ WALK_REACH = 2.0
 WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
+DEGENERATE_SHARE = 1e-6  # a fan triangle with 2 x area <= this x its summed squared edges has no area (no say in the vote)
 WIND_BALL_EDGE = 0.25  # the winding vote's reach: nearest distance plus this share of a fan triangle's shortest edge
 REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
@@ -965,7 +966,7 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
     face's UV winding times whether it faces the triangle, relative to the reference's UV winding (no UV area: both
     allowed; edge-on: neither). The face takes the winding every triangle allows; both throughout: `fallback`. No common
     winding (folded in 3D, or across a crease with one half leaning into a wall): 0 (uvkeep cuts it into its fan
-    triangles)."""
+    triangles); no area at all (DEGENERATE_SHARE): 0 too, so the fold fix leaves its reads alone."""
 
     ref_wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, rf))
     if ref_wind == 0.0:
@@ -977,13 +978,17 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
         qs.append(((a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0))
     near = src.grid.nearest_many(qs) if qs else []
     common = 3  # bit 0: +1 allowed, bit 1: -1 allowed
+    said = False
     for t, q, g0 in zip(tris, qs, near):
+        a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
+        nt = _newell(Pr, t)
+        ab, bc, ca = _sub(b, a), _sub(cc, b), _sub(a, cc)
+        if math.sqrt(_dot(nt, nt)) <= DEGENERATE_SHARE * (_dot(ab, ab) + _dot(bc, bc) + _dot(ca, ca)):
+            continue  # a zero-area triangle: its normal, and so the winding it shows, is rounding
         if g0 < 0:
             continue
-        a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
         shortest = min(_dist(a, b), _dist(b, cc), _dist(cc, a))
         reach = math.sqrt(src.on_faces([g0], q)[0]) + WIND_BALL_EDGE * shortest
-        nt = _newell(Pr, t)
         ball, seen, at, allowed = [g0], {g0}, 0, 0
         while at < len(ball):
             f = ball[at]
@@ -998,6 +1003,9 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
                     ball.append(g)
         if allowed:
             common &= allowed
+            said = True
+    if not said:
+        return 0.0
     return {1: 1.0, 2: -1.0, 0: 0.0}.get(common, fallback)
 
 
