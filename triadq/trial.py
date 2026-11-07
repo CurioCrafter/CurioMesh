@@ -61,13 +61,22 @@ class Base:
 def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=None, facing=None, labels=None, kinds=None) -> Base:
     """A Base with the usual holds: corners on a border, a hard edge or a non-quad (`organize.pinned`), on the mirror
     plane, and every corner a face outside the scope uses, so the edge of the scope never moves."""
+    return finish(make_base_steps(co, faces, scope, stay, project, mirror, pick, facing, labels, kinds))
+
+
+def make_base_steps(co, faces, scope=None, stay=None, project=None, mirror=None, pick=None, facing=None, labels=None, kinds=None):
+    """`make_base` as a generator: yields (nothing) between its pieces, so no slice runs long. Returns the Base."""
     from .organize import half_edges, pinned
 
+    yield
     co = np.asarray(co, dtype=np.float64).reshape(-1, 3)
     faces = _int_faces(faces)
     scope = np.ones(len(faces), dtype=bool) if scope is None else np.asarray(scope, dtype=bool)
+    yield
     half = half_edges(faces)
+    yield
     held = pinned(co, faces, plane=mirror, half=half) if len(faces) else np.zeros(len(co), dtype=bool)
+    yield
     if stay is not None:
         held |= np.asarray(stay, dtype=bool)
     fid, a, b = half
@@ -149,6 +158,8 @@ class Candidate:
     found: np.ndarray | None = None  # (k, 3) spots the tool found to work on: the dashed Found rings
     tint: np.ndarray | None = None  # per corner -1..1, drawn instead of the move wash: blue grew, orange shrank
     rows: list = field(default_factory=list)  # a report's lines (Preview Tidy): {"key", "words", "spots", "cost", ...}
+    uv: object = None  # a tool's UV payload (new UVs): carried through `autofix.propose` untouched, for `Trial.after_commit`
+    uv_cand: object = None  # the tool's own candidate that made `uv` (what its `after_commit` bakes from)
     lines: np.ndarray | None = None  # the pink Kept lines layer: (k, 2, 3) float points, or (k, 2) int corner pairs of the candidate (they follow its corners)
 
 
@@ -185,6 +196,7 @@ class Trial:
     own: str = ""  # this tool's own measure, lower is better ("square", "wave", "bump", ...); "" until it has `own_number`
     least: float = 0.0  # the smallest drop of the own number that counts as better: a tolerance against noise, not a cap
     changes_faces: bool = False  # True when `run` returns new faces (with `parent`)
+    splits_faces: bool = False  # True: the tool splits faces (Seam Fit): the faces made by a split are expected, see `bad_by_parent`
 
     def spots(self, base: Base):
         """Generator: yield a progress 0..1, return the list of `Spot`s in `base.scope` this tool would fix. Touching
@@ -229,6 +241,19 @@ class Trial:
         """Generator: yield a progress 0..1 about every few milliseconds of work, return a Candidate."""
         raise NotImplementedError
         yield 0.0
+
+    def after_commit(self, obj, cand: Candidate) -> None:
+        """Called once by `tidylive.commit` after the candidate's geometry is written to the applied mesh `obj`: a tool
+        that carries more than geometry (`cand.uv`) writes it here (bake). Never called for a refused or unapplied one."""
+
+
+def run_after_commit(trial, obj, cand) -> bool:
+    """`trial.after_commit(obj, cand)` once, for a kept candidate on an applied mesh `obj` (None: nothing applied yet,
+    so nothing to bake). A refused or stand-in candidate never gets here. True when the hook was called."""
+    if trial is None or obj is None or cand is None or cand.refusal or cand.co is None or not cand.exact:
+        return False
+    trial.after_commit(obj, cand)
+    return True
 
 
 def rebase(base: Base, cand: Candidate) -> Base:
@@ -281,6 +306,11 @@ def _pole_points(co, faces) -> np.ndarray:
 
 def diff(base: Base, cand: Candidate) -> Candidate:
     """Fill in how far each corner moved, the biggest moves as arrows, and the poles that went or came."""
+    return finish(diff_steps(base, cand))
+
+
+def diff_steps(base: Base, cand: Candidate):
+    """`diff` as a generator: yields (nothing) between the poles before and the poles after. Returns the candidate."""
     if cand.refusal or cand.co is None:
         return cand
     co = np.asarray(cand.co, dtype=np.float64)
@@ -295,7 +325,9 @@ def diff(base: Base, cand: Candidate) -> Candidate:
         return cand
     if "pole_points" not in base.cache:
         base.cache["pole_points"] = _pole_points(base.co, base.faces)
+        yield
     before, after = base.cache["pole_points"], _pole_points(co, cand.faces)
+    yield
     tol = 1e-4 * base.edge
 
     def keys(points):
@@ -320,10 +352,17 @@ def blend(base: Base, full: Candidate, s: float) -> Candidate:
     return diff(base, Candidate(co, strength=float(s), exact=False, held=list(full.held), note=full.note, lines=full.lines))
 
 
-def _tidiness(co, faces) -> float:
+def _tidiness_steps(co, faces):
     from . import patterns
 
-    return float(patterns.score(patterns.measure(co, faces))["score"])
+    yield  # the first import of a module can take longer than a slice
+    m = yield from patterns.measure_steps(co, faces)
+    yield
+    return float(patterns.score(m)["score"])
+
+
+def _tidiness(co, faces) -> float:
+    return finish(_tidiness_steps(co, faces))
 
 
 def face_normals(co, faces) -> np.ndarray:
@@ -338,70 +377,128 @@ def face_normals(co, faces) -> np.ndarray:
     return np.stack([np.bincount(fid, c[:, k], len(faces)) for k in range(3)], axis=1)
 
 
-def bad_faces(base: Base, co, faces=None, parent=None) -> np.ndarray:
+BAD_CHUNK = 400  # faces checked between two yields of `bad_faces_steps` (about 2 ms)
+
+
+DEGENERATE = 1e-6  # a piece of a split with less than this share of its parent's area has no direction: it is not "turned over"
+
+
+def bad_faces(base: Base, co, faces=None, parent=None, splits=False) -> np.ndarray:
     """Per face of (co, faces): turned over against the face of `base` it came from (the same face, or `parent`), or a
-    quad folded or concave. `faces=None`: base's faces. The one bad-face test of the Tidy Tools and Auto Fix."""
+    quad folded or concave. `faces=None`: base's faces. The one bad-face test of the Tidy Tools and Auto Fix.
+    `splits` (`Trial.splits_faces`): a split can leave a zero-area piece (the cut runs along an edge) whose sign is
+    noise; it is not counted as turned over. A real turned or folded face still is."""
+    return finish(bad_faces_steps(base, co, faces, parent, splits))
+
+
+def bad_faces_steps(base: Base, co, faces=None, parent=None, splits=False):
+    """`bad_faces` as a generator: yields (nothing) every `BAD_CHUNK` faces, so no slice runs long. Same answer."""
     from .checks import folded_quads
 
+    yield
     faces = base.faces if faces is None else faces
     if not len(faces):
         return np.zeros(0, dtype=bool)
     if "normals" not in base.cache:
         base.cache["normals"] = face_normals(base.co, base.faces)
+        yield
     ref = base.cache["normals"]
     if faces is not base.faces:
         ok = parent is not None and len(parent) == len(faces) and len(ref)
         ref = ref[np.clip(np.asarray(parent, dtype=np.int64), 0, len(ref) - 1)] if ok else None
-    out = folded_quads(co, faces)
-    if ref is not None and len(ref) == len(faces):
-        out |= (face_normals(co, faces) * ref).sum(axis=1) < 0.0
+    co = np.asarray(co, dtype=np.float64)
+    out = np.zeros(len(faces), dtype=bool)
+    for s in range(0, len(faces), BAD_CHUNK):
+        part = faces[s : s + BAD_CHUNK]
+        out[s : s + len(part)] = folded_quads(co, part)
+        if ref is not None and len(ref) == len(faces):
+            n, r = face_normals(co, part), ref[s : s + len(part)]
+            turned = (n * r).sum(axis=1) < 0.0
+            if splits:
+                turned &= np.linalg.norm(n, axis=1) > DEGENERATE * np.linalg.norm(r, axis=1)
+            out[s : s + len(part)] |= turned
+        if s + BAD_CHUNK < len(faces):
+            yield
     return out
 
 
+def bad_by_parent(bad: np.ndarray, parent) -> int:
+    """Bad faces counted per face they came from: a face split in two that is bad counts once, a good one that gave a
+    bad piece counts once (Seam Fit's splits: `Trial.splits_faces`)."""
+    bad = np.asarray(bad, dtype=bool)
+    if parent is None or len(parent) != len(bad):
+        return int(bad.sum())
+    parent = np.asarray(parent, dtype=np.int64)
+    return int(len(np.unique(parent[bad & (parent >= 0)])) + (bad & (parent < 0)).sum())
+
+
+def _loops_steps(co, faces, plane):
+    from .loopscore import loop_quality_steps
+
+    yield
+    return float((yield from loop_quality_steps(co, faces, plane))["quality"]) if len(faces) else None
+
+
 def _loops(co, faces, plane) -> float | None:
-    from .loopscore import loop_quality
-
-    return float(loop_quality(co, faces, plane)["quality"]) if len(faces) else None
+    return finish(_loops_steps(co, faces, plane))
 
 
-def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=None):
+def _unsplit(base: Base, cand: Candidate):
+    """(base faces, candidate faces) without the faces a split touched, for a tool that splits faces. Both lose the same
+    places, so a pole or a Loop Quality point gained or lost at the split edges themselves counts for neither side."""
+    parent = np.asarray(cand.parent, dtype=np.int64)
+    kids = np.bincount(parent[parent >= 0], minlength=len(base.faces))
+    cut = kids > 1
+    before = [f for f, c in zip(base.faces, cut.tolist()) if not c]
+    after = [f for f, p in zip(cand.faces, parent.tolist()) if p < 0 or not cut[p]]
+    return before, after
+
+
+def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=None, splits=False):
     """Generator: fill `cand.numbers` cheapest first, yielding between stages. `look(co, faces)` is a generator
     returning the look change in percent against your original mesh (the camera check), or None to skip it.
-    Auto Fix's stages: "tidy", "loops" (Loop Quality), "bad" (bad faces, `bad_faces`)."""
+    Auto Fix's stages: "tidy", "loops" (Loop Quality), "bad" (bad faces, `bad_faces`). `splits`: the tool splits faces
+    (`Trial.splits_faces`): bad faces count per face they came from, and poles, Tidiness and Loop Quality are read
+    without the faces a split touched."""
     if cand.refusal or cand.co is None:
         return cand
     faces = base.faces if cand.faces is None else cand.faces
+    cut = splits and cand.faces is not None and cand.parent is not None and len(cand.parent) == len(faces)
+    b_faces, a_faces = _unsplit(base, cand) if cut else (base.faces, faces)
+    tag = "~" if cut else ""  # a base number worked out without the split faces is kept apart from the whole one
+    co_after = np.asarray(cand.co, dtype=np.float64)
     if "poles" in stages:
-        if "poles" not in base.cache:
-            base.cache["poles"] = int(base.topo.poles.sum())
-        after = base.cache["poles"] if cand.faces is None else int(len(_pole_points(cand.co, faces)))
-        cand.numbers["poles"] = (base.cache["poles"], after)
+        if "poles" + tag not in base.cache:
+            base.cache["poles" + tag] = int(len(_pole_points(base.co, b_faces))) if cut else int(base.topo.poles.sum())
+        after = base.cache["poles" + tag] if cand.faces is None else int(len(_pole_points(cand.co, a_faces)))
+        cand.numbers["poles"] = (base.cache["poles" + tag], after)
         yield
     if "faces" in stages:
         cand.numbers["faces"] = (len(base.faces), len(faces))
     if "move" in stages and cand.moved is not None:
         cand.numbers["move"] = float(cand.moved.max()) if len(cand.moved) else 0.0
     if "tidy" in stages:
-        if "tidy" not in base.cache:
-            base.cache["tidy"] = _tidiness(base.co, base.faces)
+        if "tidy" + tag not in base.cache:
+            base.cache["tidy" + tag] = yield from _tidiness_steps(base.co, b_faces)
             yield
-        cand.numbers["tidy"] = (base.cache["tidy"], _tidiness(cand.co, faces))
+        cand.numbers["tidy"] = (base.cache["tidy" + tag], (yield from _tidiness_steps(cand.co, a_faces)))
         yield
     if "loops" in stages:
-        if "loops" not in base.cache:
-            base.cache["loops"] = _loops(base.co, base.faces, base.mirror)
+        if "loops" + tag not in base.cache:
+            base.cache["loops" + tag] = yield from _loops_steps(base.co, b_faces, base.mirror)
             yield
-        cand.numbers["loops"] = (base.cache["loops"], _loops(np.asarray(cand.co, dtype=np.float64), faces, base.mirror))
+        cand.numbers["loops"] = (base.cache["loops" + tag], (yield from _loops_steps(co_after, a_faces, base.mirror)))
         yield
     if "bad" in stages:
         if "bad" not in base.cache:
-            base.cache["bad"] = int(bad_faces(base, base.co).sum())
-        cand.numbers["bad"] = (base.cache["bad"], int(bad_faces(base, np.asarray(cand.co, dtype=np.float64), faces if cand.faces is not None else None, cand.parent).sum()))
+            base.cache["bad"] = int((yield from bad_faces_steps(base, base.co)).sum())
+        bad = yield from bad_faces_steps(base, co_after, faces if cand.faces is not None else None, cand.parent, splits)
+        cand.numbers["bad"] = (base.cache["bad"], bad_by_parent(bad, cand.parent) if cut else int(bad.sum()))
         yield
     if "look" in stages and look is not None:
         if "look" not in base.cache:
             base.cache["look"] = yield from look(base.co, base.faces)
-        after = yield from look(np.asarray(cand.co, dtype=np.float64), faces)
+        after = yield from look(co_after, faces)
         cand.numbers["look"] = (base.cache["look"], after)
     return cand
 

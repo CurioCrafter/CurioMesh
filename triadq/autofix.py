@@ -157,9 +157,10 @@ def _positions(trial, base: T.Base, settings: dict, spots: list, rough: bool):
     out = T.Candidate(co, strength=float(settings.get(trial.handles[0], 1.0)) if trial.handles else 1.0, exact=not rough)
     if last is not None:
         out.lines, out.note, out.held = last.lines, last.note, list(last.held)
+        out.uv, out.uv_cand = last.uv, last.uv_cand  # a tool's UV payload goes on to `own_number` and `after_commit`
     gone = {id(sp) for sp, _ in left}
-    bad_after = T.bad_faces(base, co)
-    bad_before = T.bad_faces(base, base.co)
+    bad_after = yield from T.bad_faces_steps(base, co)
+    bad_before = yield from T.bad_faces_steps(base, base.co)
     fixed = []
     for sp in spots:
         if id(sp) in gone:
@@ -208,8 +209,13 @@ def _faces(trial, base: T.Base, settings: dict, spots: list, rough: bool):
         a, b = trial.own_number(base, cur.co, cur.faces, now), trial.own_number(base, co, faces, then)
         why = "" if _better(a, b, trial.least) else "no better"
         if not why:
-            bad_before = int(T.bad_faces(cur, cur.co)[now.faces].sum())
-            bad_after = int(T.bad_faces(cur, co, faces if cand.faces is not None else None, parent)[then.faces].sum())
+            before = yield from T.bad_faces_steps(cur, cur.co)
+            after = yield from T.bad_faces_steps(cur, co, faces if cand.faces is not None else None, parent, getattr(trial, "splits_faces", False))
+            bad_before = int(before[now.faces].sum())
+            if getattr(trial, "splits_faces", False):
+                bad_after = T.bad_by_parent(after[then.faces], parent[then.faces])
+            else:
+                bad_after = int(after[then.faces].sum())
             why = "bad faces" if bad_after > bad_before else ""
         if why:
             left.append((sp, why))
@@ -221,6 +227,7 @@ def _faces(trial, base: T.Base, settings: dict, spots: list, rough: bool):
     out = T.Candidate(cur.co.copy(), faces=list(cur.faces) if changed else None, parent=origin.copy() if changed else None, exact=not rough)
     if last is not None:
         out.note, out.lines = last.note, last.lines if not changed else None
+        out.uv, out.uv_cand = last.uv, last.uv_cand
     return out, fixed, left
 
 
@@ -288,11 +295,11 @@ def propose(trial, base: T.Base, settings: dict, spots=None, look=None, budget=N
             p = Proposal(cand, fixed, left, judged=judged, held=held)
             p.reason = verdict(trial, p, budget) if judged else ""
             return p
-        cand = T.diff(base, cand)
+        cand = yield from T.diff_steps(base, cand)
         if shown is not None:
             shown(cand)
         yield "measuring"
-        yield from T.measure(base, cand, stages, look)
+        yield from T.measure(base, cand, stages, look, splits=getattr(trial, "splits_faces", False))
         p = Proposal(cand, fixed, left, _scores(cand.numbers, 0), _scores(cand.numbers, 1), judged=judged, held=held)
         if _fits(p, budget) or (judged and not fixed):
             break
@@ -359,7 +366,7 @@ class EverySpot(T.Trial):
         self.layers = tuple(dict.fromkeys(tuple(t.layers) + ("found", "held")))
         self.stages = t.stages
         self.toggles = tuple(t.toggles) + (("keep_going", "Keep going"),)
-        self.kinds, self.own, self.least, self.changes_faces = t.kinds, t.own, t.least, t.changes_faces
+        self.kinds, self.own, self.least, self.changes_faces, self.splits_faces = t.kinds, t.own, t.least, t.changes_faces, t.splits_faces
 
     def value_text(self, value: float) -> str:
         return self.trial.value_text(value)
@@ -375,6 +382,9 @@ class EverySpot(T.Trial):
 
     def own_number(self, base, co, faces, spot) -> float:
         return self.trial.own_number(base, co, faces, spot)
+
+    def after_commit(self, obj, cand) -> None:
+        self.trial.after_commit(obj, cand)
 
     def run(self, base, settings, rough=False):
         p = yield from propose(self, base, settings, rough=rough)
