@@ -131,22 +131,6 @@ us = bpy.context.scene.curiomesh_uv
 gs = bpy.context.scene.curiomesh_guided
 print(f"INFO result faces {len(guided.state['res']['faces'])}, source faces {len(src.data.polygons)}", flush=True)
 
-# --- 0. Auto: the timer fits seams on the finished result, a few ms a tick; the row gets a verdict
-t0, ticks = time.perf_counter(), 0
-UP.ROW["key"] = None
-while time.perf_counter() - t0 < 60:
-    a = time.perf_counter()
-    UP._auto_tick()
-    frame("auto timer tick", time.perf_counter() - a)
-    ticks += 1
-    if UP.ROW["key"] is not None and UP.ROW["stage"] is None:
-        break
-print(f"INFO Auto guards: work={guided.state['work'] is not None} tool_busy={TL.busy()} uv_session={UP.live['session'] is not None} mode={UP.keep_mode(us, gs)} key={UP.ROW['key']}", flush=True)
-ok(UP.ROW["level"] in ("GOOD", "CHECK", "BAD"), f"Auto: row {UP.ROW['level']} {UP.ROW['number']!r} after {ticks} ticks; {UP.ROW['message']!r}")
-f = importlib.import_module(pkg.__name__ + ".triadq.types").FlatFaces.of(guided.state["res"]["faces"])
-auto_key = KEEP.result_key(res_co(), f.indptr, f.flat)
-ok(auto_key in KEEP.CANDIDATES, "Auto's fit is filed under the result, so Apply writes it")
-
 # --- 1. Seam Fit in Look First: sliced, nothing written before Apply
 before = res_co()
 before_faces = len(guided.state["res"]["faces"])
@@ -168,10 +152,13 @@ fit_key = cand.fit.key
 AF = importlib.import_module(pkg.__name__ + ".triadq.autofix")
 af_trial = UT.SeamFit()
 af_spots = UT.finish(af_trial.spots(s.base))
+auto_kept = False
 ok(len(af_spots) == 1, f"Auto Fix finds Seam Fit's spot: {[(sp.kind, len(sp.faces), round(sp.bad, 2)) for sp in af_spots]}")
 if af_spots:
     prop = UT.finish(AF.propose(af_trial, s.base, {}, af_spots))
     print(f"INFO Auto Fix on Seam Fit: fixed {len(prop.fixed)}, left {[w for _, w in prop.left]}, verdict {prop.reason!r}; before {prop.before}; after {prop.after}", flush=True)
+    auto_kept = not prop.reason
+    ok(True, f"Auto Fix {'KEPT' if auto_kept else 'REFUSED'} Seam Fit's spot")
 
 # Keep going: on, then Esc (the Session closes at once and the result is untouched)
 s2 = TL.Session(bpy.context, UT.SeamFit(), {"faces": 0.05, "split": True, "keep_going": True}, "WHOLE")
@@ -185,11 +172,20 @@ ok(esc_ms < 50 and np.allclose(res_co(), before), f"Keep going + Esc stops in {e
 TL.live["session"] = None
 
 # --- 2. Apply: one step, one History entry
-kept = TL.commit(bpy.context, cand, "Seam Fit", TL.numbers_text(cand, s.trial))
-bpy.ops.ed.undo_push(message="Seam Fit")
+if auto_kept:  # what Auto Fix's driver does with a kept pass: commit it with its trial, as its own step
+    cand, entry = prop.cand, "Auto Fix: Seam Fit"
+    kept = TL.commit(bpy.context, cand, entry, prop.words, push=True, trial=af_trial)
+    ff = importlib.import_module(pkg.__name__ + ".triadq.types").FlatFaces.of(cand.faces)
+    filed = KEEP.CANDIDATES.get(KEEP.result_key(np.asarray(cand.co, np.float64), ff.indptr, ff.flat))
+    ok(filed is not None, "the kept pass's fit is filed for Apply")
+    fit_key = filed.key if filed is not None else ""
+else:
+    entry = "Tidy: Seam Fit"
+    kept = TL.commit(bpy.context, cand, "Seam Fit", TL.numbers_text(cand, s.trial), trial=s.trial)
+    bpy.ops.ed.undo_push(message="Seam Fit")
 after = res_co()
 ok(kept and len(guided.state["res"]["faces"]) == len(cand.faces), f"Apply made the fit the result ({before_faces} -> {len(cand.faces)} faces)")
-ok(names()[-1] == "Tidy: Seam Fit" and step() == 1, f"Apply is one History step: {names()} at {step()}")
+ok(names()[-1] == entry and step() == 1, f"Apply is one History step: {names()} at {step()}")
 undo(can)
 ok(len(res_co()) == len(before) and np.allclose(res_co(), before), f"Ctrl+Z brings back the result before Seam Fit (step {step()})")
 redo(can, 1)
@@ -321,7 +317,7 @@ bpy.ops.object.mode_set(mode="OBJECT")
 
 # --- 9. clean up: no handler, no timer after unregister
 pkg.unregister()
-ok(not bpy.app.timers.is_registered(UP._auto_tick) and not UP.live["handles"], "unregister removes the timer and the draw handlers")
+ok(not hasattr(UP, "_auto_tick") and not UP.live["handles"], "no Auto timer, and unregister removes the draw handlers")
 for name, sec in sorted(FRAMES.items()):
     print(f"FRAME {name}: longest {1000 * sec:.1f} ms (wall clock; at Idle priority a busy PC adds its own time)", flush=True)
 print(f"UVUI {'FAILED ' + str(len(FAILS)) if FAILS else 'OK'}", flush=True)

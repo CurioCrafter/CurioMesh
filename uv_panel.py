@@ -11,8 +11,8 @@
 - New, New page layout, Cut here / Join here and Bake those spots change the UVs of a mesh that has been applied (the
   active mesh). They open the same way: a card with the verdict and numbers before -> after, Enter / Esc / B, Again (A),
   Keep going (K, Esc stops), one Ctrl+Z step and one History entry per Apply.
-- Auto: a timer (`_auto_tick`) runs Seam Fit on every finished result while UVs keep the source's (Light), so Apply
-  writes the fit without opening anything; the row shows its verdict ("estimate" until done). Nothing runs from draw().
+- Auto: Seam Fit and Bake those spots are Auto Fix passes (`triadq/uvtrial.py`), so a kept pass is a History step and
+  Apply writes its fit. Nothing runs from draw().
 """
 
 from __future__ import annotations
@@ -28,8 +28,6 @@ from .triadq import uvbake, uvkeep, uvnew, uvscore, uvtrial
 
 BUDGET = 0.008  # seconds of work per modal tick, like Look First
 REST = 0.15  # seconds after the value stops moving: the run starts again
-AUTO_GAP = 0.05  # seconds between the Auto timer's ticks while it works
-AUTO_IDLE = 0.5  # and while there is nothing to do
 DRAG_PX = 300.0
 
 MODES = (("AUTO", "Auto", "Keeps the UVs your mesh came with, or makes new ones when it has none"),
@@ -44,7 +42,6 @@ ROWS = (("AUTO", "Auto", "Straight where it costs no stretch, else Soft"), ("ON"
 SHARPEN = (("OFF", "Off", "No cut becomes a sharp edge"), ("CREASED", "Only creased", "Cuts where the surface turns become sharp edges"),
            ("ALL", "All", "Every cut becomes a sharp edge"))
 
-ROW: dict = {"key": None, "level": "", "title": "", "number": "", "estimate": False, "stage": None, "message": ""}
 live: dict = {"session": None, "handles": []}
 _FIT_CACHE: dict = {"key": None, "value": None}
 
@@ -206,6 +203,17 @@ def _source_mesh_for(obj):
         return None
     p, ip, fl, uv, mat = uv_layers.geometry(source.data)
     return uvscore.mesh(p, ip, fl, uv, mat)
+
+
+def _bake_inputs():
+    """Bake those spots in Auto Fix: the applied mesh on screen, when the result has been applied to it."""
+    obj = target(bpy.context)
+    if obj is None or not _g().state.get("applied") or not obj.data.uv_layers:
+        return None
+    points, indptr, flat, material, _forced = uvbake.mesh_arrays(obj.data)
+    us = settings()
+    return uvtrial.make_uv_base(points, indptr, flat, material if material.max(initial=0) > 0 else None, uv_layers.read_uv(obj.data),
+                                float(us.texture_size) if us is not None else uvtrial.CHECK_PX, _source_mesh_for(obj))
 
 
 class UVSession:
@@ -785,94 +793,6 @@ class CURIOMESH_OT_uv_look(bpy.types.Operator):
         return bpy.ops.curiomesh.uv_tool("INVOKE_DEFAULT", tool="new" if not context.object.data.uv_layers else "layout")
 
 
-def _auto_tick():
-    """The Auto timer: Seam Fit on every finished result while UVs keep the source's (Light), a few ms per tick. Its fit
-    is filed under the result, so Apply writes it. Never runs while a search, a tool or a UV tool is working."""
-    try:
-        return _auto_step()
-    except Exception as exc:  # a timer must never die silently: say so on the row and try again later
-        ROW.update(stage=None, message=f"Seam Fit could not run: {exc}")
-        return AUTO_IDLE
-
-
-def _auto_step():
-    scene = bpy.context.scene
-    us, gs = settings(scene), _gs(scene)
-    if us is None or gs is None:
-        return AUTO_IDLE
-    sync(scene)
-    guided = _g()
-    res = guided.state["res"]
-    work = guided.state["work"]
-    searching = work is not None and bool(getattr(work.get("runner"), "busy", True))
-    if res is None or searching or tidylive.busy() or live["session"] is not None or keep_mode(us, gs) != "light":
-        if ROW["stage"] is not None:
-            ROW["stage"].stop()
-            ROW["stage"] = None
-        return AUTO_IDLE
-    key = (id(res), len(res["faces"]), float(us.extra_faces), bool(us.split_seams))
-    if ROW["key"] != key:
-        if ROW["stage"] is not None:
-            ROW["stage"].stop()
-        got = _fit_inputs()
-        ROW.update(key=key, level="", title="", number="", estimate=True, message="", stage=None)
-        if got is None or got.get("refusal"):
-            ROW["estimate"] = False
-            return AUTO_IDLE
-        source = guided.state_source()
-        ROW["stage"] = uvkeep.fit_stage(source, guided._source_data(source), res, gs)
-        ROW["number"] = "fitting seams"
-    stage = ROW["stage"]
-    if stage is None:
-        return AUTO_IDLE
-    end, longest = time.perf_counter() + 0.006, 0.0
-    while not stage.done:
-        t = time.perf_counter()
-        stage.step()
-        longest = max(longest, time.perf_counter() - t)
-        if time.perf_counter() + longest >= end:  # the next step would not fit: stop before it
-            break
-    if not stage.done:
-        return AUTO_GAP
-    if isinstance(stage, uvkeep.FitStage):
-        c = stage.candidate
-        if c is None:
-            ROW["stage"] = None
-            return AUTO_IDLE
-        ROW.update(number=f"+{int(c.numbers.get('extra_faces', 0))} faces", message="; ".join(c.messages))
-        source = guided.state_source()
-        sp, sip, sfl, suv, smat = uv_layers.geometry(source.data)
-        base = uvtrial.make_uv_base(c.points, c.indptr, c.flat, c.material, None, float(us.texture_size), uvscore.mesh(sp, sip, sfl, suv, smat))
-        ROW["stage"] = _Measure(uvtrial._check(base, c.layers[c.active][1], True), base)
-        return AUTO_GAP
-    if not stage.done:
-        return AUTO_GAP
-    ROW["stage"] = None
-    n = stage.value[0] if stage.value else None
-    if n is not None:
-        level, title, _reasons = uvscore.uv_verdict(n, "keep")
-        ROW.update(estimate=False, level=level, title=title, number=f"{n['straddle_pct']:.1f} % across seams, " + ROW["number"])
-    else:
-        ROW["estimate"] = False
-    overlay.tag_redraw()
-    return AUTO_IDLE
-
-
-class _Measure:
-    """The row's UV Check after Auto's fit, as a stage the timer steps."""
-
-    def __init__(self, work, base):
-        self.work, self.base, self.done, self.value = work, base, False, None
-
-    def step(self) -> None:
-        self.done, value = uvtrial.drive(self.work, 0.004)
-        if self.done:
-            self.value = value
-
-    def stop(self) -> None:
-        self.done = True
-
-
 def draw_row(layout, context) -> None:
     """The UVs row (one call from panel.py, beside Bake): mode, verdict, one number, Look and the popover."""
     us = settings(context.scene)
@@ -880,14 +800,8 @@ def draw_row(layout, context) -> None:
         return
     row = layout.row(align=True)
     row.prop(us, "uvs", text="UVs")
-    if ROW["level"] or ROW["estimate"]:
-        sub = row.row(align=True)
-        sub.alert = ROW["level"] == "BAD"
-        sub.label(text=(ROW["level"] or "...") + "  " + (ROW["number"] + (" (estimate)" if ROW["estimate"] else "")))
     row.operator("curiomesh.uv_look", text="Look", icon="HIDE_OFF")
     row.popover(panel="CURIOMESH_PT_pop_uv", text="", icon="THREE_DOTS")
-    if ROW["message"]:
-        overlay.wrap_label(layout, ROW["message"], icon="INFO", width=36, limit=3)
 
 
 class CURIOMESH_PT_pop_uv(bpy.types.Panel):
@@ -946,17 +860,6 @@ class CURIOMESH_PT_pop_uv(bpy.types.Panel):
         op.tool, op.value, op.keep_going = "bake", 1.0, True
 
 
-# main-only: uv begin temp-pump
-# Until a Look First timer exists for results that are not open in a tool, this timer is the pump (SPEC 14, A3).
-def _start_timer() -> None:
-    if not bpy.app.timers.is_registered(_auto_tick):
-        bpy.app.timers.register(_auto_tick, first_interval=AUTO_IDLE, persistent=True)
-
-
-def _stop_timer() -> None:
-    if bpy.app.timers.is_registered(_auto_tick):
-        bpy.app.timers.unregister(_auto_tick)
-# main-only: uv end temp-pump
 
 
 CLASSES = (CurioUVSettings, CURIOMESH_OT_uv_seam_fit, CURIOMESH_OT_uv_tool, CURIOMESH_OT_uv_look, CURIOMESH_PT_pop_uv)
@@ -967,6 +870,7 @@ def register() -> None:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_uv = bpy.props.PointerProperty(type=CurioUVSettings)
     uvtrial.FIT["inputs"] = _fit_inputs
+    uvtrial.BAKE.update(inputs=_bake_inputs, write=lambda obj, c: bake_spots(bpy.context, obj, c))
     try:
         from . import uv_fast
 
@@ -974,18 +878,14 @@ def register() -> None:
     except ImportError:
         pass
     uvbake.register()
-    _start_timer()
 
 
 def unregister() -> None:
-    _stop_timer()
     close()
     _remove_handlers()
     uvbake.unregister()
     uvtrial.FIT["inputs"] = None
-    if ROW["stage"] is not None:
-        ROW["stage"].stop()
-    ROW.update(key=None, stage=None)
+    uvtrial.BAKE.update(inputs=None, write=None)
     if hasattr(bpy.types.Scene, "curiomesh_uv"):
         del bpy.types.Scene.curiomesh_uv
     for cls in reversed(CLASSES):
