@@ -1436,6 +1436,19 @@ def _map_material_indices(
     return assigned > 0
 
 
+def _set_uv_layer_select(modifier, source: bpy.types.Object) -> None:
+    """Copy the source's active UV map into the target's active one. Older Blenders take "ACTIVE" for both; newer
+    ones (5.x) list the source's UV map names and "NAME" for the target instead."""
+    try:
+        modifier.layers_uv_select_src = "ACTIVE"
+    except TypeError:
+        modifier.layers_uv_select_src = source.data.uv_layers.active.name
+    try:
+        modifier.layers_uv_select_dst = "ACTIVE"
+    except TypeError:
+        modifier.layers_uv_select_dst = "NAME"
+
+
 def _transfer_uvs_with_modifier(source: bpy.types.Object, target: bpy.types.Object) -> bool:
     if not source.data.uv_layers:
         return False
@@ -1450,8 +1463,7 @@ def _transfer_uvs_with_modifier(source: bpy.types.Object, target: bpy.types.Obje
         modifier.data_types_loops = {"UV"}
         # "Nearest Face Interpolated" in the UI; its id is POLYINTERP_NEAREST.
         modifier.loop_mapping = "POLYINTERP_NEAREST"
-        modifier.layers_uv_select_src = "ACTIVE"
-        modifier.layers_uv_select_dst = "ACTIVE"
+        _set_uv_layer_select(modifier, source)
         modifier.mix_mode = "REPLACE"
         bpy.ops.object.modifier_apply(modifier=modifier.name)
     except (RuntimeError, TypeError, ValueError):
