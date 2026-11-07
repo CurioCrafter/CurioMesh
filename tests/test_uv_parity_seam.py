@@ -115,6 +115,24 @@ class Twin(unittest.TestCase):
         self.assertLess(float(np.max(np.minimum(d, 1 - d))) * 1024, 1.0)
         self.assertTrue(np.any(out["shift"]))
 
+    def test_walk_stays_on_its_side_of_a_thin_tube_cut(self):
+        # a coarse result tube whose faces sit across the source tube's one cut: walking the long way round would read the
+        # far side of the cut and fold the face; the walk's UV check keeps every corner on the reference side
+        points, indptr, flat, uv = tube(24, 4, 0.0)
+        res, rip, rfl, _ = tube(4, 2, 0.5)
+        out = uvseams.transfer(points, indptr, flat, uv, res, rip, rfl, repeat=[False], fix_folds=False, use_fast=False)
+        self.assertEqual(sum(uvseams.folded(rip, out["uv"], out["expected"], f) for f in range(len(rip) - 1)), 0)
+
+    def test_reread_unfolds_a_face_through_its_reference_triangle(self):
+        src = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float)
+        sflat, suv = np.array([0, 1, 2, 3]), np.array([0, 0, 1, 0, 1, 1, 0, 1], float)
+        res = np.array([[0.2, 0.2, 0.01], [0.6, 0.2, 0.0], [0.6, 0.6, 0.0], [0.2, 0.6, 0.0]])
+        rip, rfl = np.array([0, 4]), np.array([0, 1, 2, 3])
+        uv = np.array([0.2, 0.2, 0.2, 0.6, 0.6, 0.6, 0.6, 0.2])  # read mirrored: folded against the source's winding
+        look = dict(ref_face=np.array([0]), ref_ids=np.array([0, 1, 2]))
+        self.assertEqual(uvseams.reread_folded(src, sflat, suv, look, res, rip, rfl, uv, np.array([1.0])), 1)
+        np.testing.assert_allclose(uv, [0.2, 0.2, 0.6, 0.2, 0.6, 0.6, 0.2, 0.6], atol=1e-12)
+
     def test_fold_fix_folds_no_neighbour(self):
         points, indptr, flat, uv, before = fold_case()
         nf = len(indptr) - 1
@@ -123,6 +141,7 @@ class Twin(unittest.TestCase):
         self.assertGreater(folds, 0)
         report = uvseams.fold_fix(points, indptr, flat, uv, region, expected)
         self.assertEqual((report["before"], report["after"]), (folds, 0))
+        self.assertGreater(report["untangled"], 0)  # untangling moved the thrown vertex back
         cheb = np.maximum(np.abs(flat % 9 - 4), np.abs(flat // 9 - 4)).reshape(-1, 4).min(1)
         far = np.repeat(cheb >= 3, 8)
         np.testing.assert_array_equal(uv[far], before[far])
