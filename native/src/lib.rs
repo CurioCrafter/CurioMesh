@@ -1613,8 +1613,150 @@ fn uvpack_probe() -> usize {
     uvpack::probe()
 }
 
+fn pack_stopped(stop: &StopFlag) -> PyResult<()> {
+    finished(!stop.0.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn pack_flags(a: &[bool]) -> Vec<u8> {
+    a.iter().map(|&b| u8::from(b)).collect()
+}
+
+fn pack_ints(a: &[usize]) -> Vec<i64> {
+    a.iter().map(|&i| i as i64).collect()
+}
+
+/// Fill one page with boxes (`uvpack::fill_page`): the largest scale at which the boxes (unit w x h) fit a
+/// `page_w` x `page_h` texel page with the mip-`k` gap (k < 0: no gap), and Keep going on it. `order` (a permutation,
+/// empty = none), `policy` and `scale` resume an earlier call. `passes` = swap passes after the variants (0 none, negative until a pass gains nothing). `budget` seconds,
+/// 0 = none. Returns (info, x, y, turned, order); info = [scale, used, policy, passes, budget_hit, stopped, ok].
+/// A stop returns the best layout so far (never an error), so Keep going can resume.
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn uvpack_fill_page<'py>(
+    py: Python<'py>,
+    w: PyReadonlyArray1<'py, f64>,
+    h: PyReadonlyArray1<'py, f64>,
+    turn_ok: PyReadonlyArray1<'py, bool>,
+    weight: PyReadonlyArray1<'py, f64>,
+    page_w: i64,
+    page_h: i64,
+    k: i64,
+    order: PyReadonlyArray1<'py, i64>,
+    policy: usize,
+    scale: f64,
+    passes: i64,
+    budget: f64,
+    stop: &StopFlag,
+) -> PyResult<(F64Array<'py>, I64Array<'py>, I64Array<'py>, I64Array<'py>, I64Array<'py>)> {
+    let (w, h, weight, order) = (slice(&w, "w")?, slice(&h, "h")?, slice(&weight, "weight")?, slice(&order, "order")?);
+    let turn_ok = pack_flags(slice(&turn_ok, "turn_ok")?);
+    let n = w.len();
+    if h.len() != n || turn_ok.len() != n || weight.len() != n || !(order.is_empty() || order.len() == n) || page_w < 1 || page_h < 1 {
+        return Err(PyValueError::new_err("pack arrays are inconsistent"));
+    }
+    if w.iter().chain(h).chain(weight).any(|x| !x.is_finite() || *x < 0.0) {
+        return Err(PyValueError::new_err("box sizes must be finite and not negative"));
+    }
+    let start: Vec<usize> = order.iter().map(|&i| i as usize).collect();
+    let mut seen = vec![false; n];
+    if start.iter().any(|&i| i >= n || std::mem::replace(&mut seen[i], true)) {
+        return Err(PyValueError::new_err("order is not a permutation"));
+    }
+    let boxes = uvpack::Boxes { w, h, turn_ok: &turn_ok, weight };
+    let found = py.detach(|| {
+        let start = (!start.is_empty()).then(|| (start.as_slice(), policy, scale));
+        uvpack::fill_page(&boxes, (page_w, page_h), k, start, passes, budget, &stop.0)
+    });
+    let Some(f) = found else {
+        let stopped = f64::from(stop.0.load(std::sync::atomic::Ordering::Relaxed));
+        let zeros = || vec![0i64; n].into_pyarray(py);
+        return Ok((vec![0.0, 0.0, 0.0, 0.0, 0.0, stopped, 0.0].into_pyarray(py), zeros(), zeros(), zeros(), (0..n as i64).collect::<Vec<_>>().into_pyarray(py)));
+    };
+    let info = vec![f.scale, f.used, f.pol as f64, f.passes as f64, f64::from(f.budget_hit), f64::from(f.stopped), 1.0];
+    let x: Vec<i64> = f.places.iter().map(|p| p.x).collect();
+    let y: Vec<i64> = f.places.iter().map(|p| p.y).collect();
+    let t: Vec<i64> = f.places.iter().map(|p| i64::from(p.turned)).collect();
+    Ok((info.into_pyarray(py), x.into_pyarray(py), y.into_pyarray(py), t.into_pyarray(py), pack_ints(&f.order).into_pyarray(py)))
+}
+
+/// Pack boxes at one fixed scale in the given order (`uvpack::pack`): (ok, x, y, turned). Nothing placed when ok is false.
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn uvpack_pack_boxes<'py>(
+    py: Python<'py>,
+    w: PyReadonlyArray1<'py, f64>,
+    h: PyReadonlyArray1<'py, f64>,
+    turn_ok: PyReadonlyArray1<'py, bool>,
+    order: PyReadonlyArray1<'py, i64>,
+    policy: usize,
+    scale: f64,
+    page_w: i64,
+    page_h: i64,
+    k: i64,
+    stop: &StopFlag,
+) -> PyResult<(bool, I64Array<'py>, I64Array<'py>, I64Array<'py>)> {
+    let (w, h, order) = (slice(&w, "w")?, slice(&h, "h")?, slice(&order, "order")?);
+    let turn_ok = pack_flags(slice(&turn_ok, "turn_ok")?);
+    let n = w.len();
+    let order: Vec<usize> = order.iter().map(|&i| i as usize).collect();
+    if h.len() != n || turn_ok.len() != n || order.len() != n || order.iter().any(|&i| i >= n) || page_w < 1 || page_h < 1 || !(scale > 0.0 && scale.is_finite()) {
+        return Err(PyValueError::new_err("pack arrays are inconsistent"));
+    }
+    let weight = vec![1.0; n];
+    let boxes = uvpack::Boxes { w, h, turn_ok: &turn_ok, weight: &weight };
+    let placed = py.detach(|| uvpack::pack(&boxes, &order, policy.min(uvpack::POLICIES - 1), scale, (page_w, page_h), k));
+    pack_stopped(stop)?;
+    let (ok, p) = match placed {
+        Some(p) => (true, p),
+        None => (false, vec![uvpack::Place { x: 0, y: 0, turned: false }; n]),
+    };
+    let x: Vec<i64> = p.iter().map(|q| q.x).collect();
+    let y: Vec<i64> = p.iter().map(|q| q.y).collect();
+    let t: Vec<i64> = p.iter().map(|q| i64::from(q.turned)).collect();
+    Ok((ok, x.into_pyarray(py), y.into_pyarray(py), t.into_pyarray(py)))
+}
+
+/// Pack charts (triangles in texels, `tri_chart` per triangle) into a page that may already hold `seed` triangles
+/// (`uvpack::pack_into`). Returns (ok, dx, dy, quarter turns) per chart: add (dx, dy) after turning the chart's points
+/// `quarter` x 90 degrees, (x, y) -> (-y, x). A stop returns what was placed so far (the rest ok = 0).
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn uvpack_pack_into<'py>(
+    py: Python<'py>,
+    seed: PyReadonlyArray1<'py, f64>,
+    tris: PyReadonlyArray1<'py, f64>,
+    tri_chart: PyReadonlyArray1<'py, i64>,
+    charts: usize,
+    as_box: PyReadonlyArray1<'py, bool>,
+    turn_ok: PyReadonlyArray1<'py, bool>,
+    page_w: i64,
+    page_h: i64,
+    k: i64,
+    stop: &StopFlag,
+) -> PyResult<(I64Array<'py>, I64Array<'py>, I64Array<'py>, I64Array<'py>)> {
+    let (seed, tris, tri_chart) = (slice(&seed, "seed")?, slice(&tris, "tris")?, slice(&tri_chart, "tri_chart")?);
+    let (as_box, turn_ok) = (pack_flags(slice(&as_box, "as_box")?), pack_flags(slice(&turn_ok, "turn_ok")?));
+    if seed.len() % 6 != 0 || tris.len() % 6 != 0 || tri_chart.len() * 6 != tris.len() || as_box.len() != charts || turn_ok.len() != charts || page_w < 1 || page_h < 1 {
+        return Err(PyValueError::new_err("pack arrays are inconsistent"));
+    }
+    if seed.iter().chain(tris).any(|x| !x.is_finite() || x.abs() > 1.0e9) {
+        return Err(PyValueError::new_err("triangle corners must be finite texel positions"));
+    }
+    let placed = py.detach(|| uvpack::pack_into((page_w, page_h), k, seed, tris, tri_chart, charts, &as_box, &turn_ok, &stop.0));
+    let ok: Vec<i64> = placed.iter().map(|p| i64::from(p.ok)).collect();
+    let dx: Vec<i64> = placed.iter().map(|p| p.dx).collect();
+    let dy: Vec<i64> = placed.iter().map(|p| p.dy).collect();
+    let q: Vec<i64> = placed.iter().map(|p| p.quarter as i64).collect();
+    Ok((ok.into_pyarray(py), dx.into_pyarray(py), dy.into_pyarray(py), q.into_pyarray(py)))
+}
+
 fn register_uvpack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvpack_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(uvpack_fill_page, m)?)?;
+    m.add_function(wrap_pyfunction!(uvpack_pack_boxes, m)?)?;
+    m.add_function(wrap_pyfunction!(uvpack_pack_into, m)?)?;
+    m.add("UVPACK_ORDERS", uvpack::ORDERS)?;
+    m.add("UVPACK_POLICIES", uvpack::POLICIES)?;
     Ok(())
 }
 // main-only: uv end pack
