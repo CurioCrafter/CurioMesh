@@ -26,7 +26,7 @@ from .triadq import trial as T
 GAP = 0.01  # seconds between timer ticks while working: the interface stays usable
 REDRAW = 0.25  # seconds between panel redraws while working
 WIDTH = 36
-GROUP_TEXT = {  # the ticks of the popover: (label, what it fixes), AUTO_FIX.md 5.1
+GROUP_TEXT = {  # the seven ticks of the popover: (label, what it fixes), AUTO_FIX.md 5.1
     "leftovers": ("Leftovers", "faces facing in, two-edge corners, triangle pairs, thin quads"),
     "seam": ("Mirror seam", "puts the middle back on the mirror plane"),
     "poles": ("Poles", "removes stray pairs and short dead-end strips"),
