@@ -130,6 +130,7 @@ class SeamFit(T.Trial):
         if passes > 1:
             notes.append(f"{passes} passes")
         cand.note = "; ".join(notes)
+        remember_applied(cand)  # filed now, so whichever path keeps it (the modal, F9, a script) is written by Apply
         return cand
 
 
@@ -452,7 +453,7 @@ class PageLayout(UVTrial):
 
     name = "New page layout"
     handle = "gap"
-    words = ("big gap", "small gap")
+    words = ("small gap", "big gap")
     defaults = {"gap": 0.4, "time": 2.0, "keep_going": False}
     card = (("space_used_pct", "space used", "{:.0f} %", 1), ("islands", "islands", "{:.0f}", 0), ("overlap_pct", "used twice", "{:.2f} %", -1))
 
@@ -561,6 +562,19 @@ def _density(base: UVBase) -> float:
     return float(np.median(np.sqrt(a2[ok] / a3[ok]))) if ok.any() else base.texture_px
 
 
+def _pack_into(page, k, seed, tris, tri_chart, charts):
+    """Generator: `uvpack.pack_into`, as a polled job when the faster callable is there. [(ok, dx, dy, quarter)] per chart."""
+    fast = uvpack.FAST.get("pack_into")
+    job = fast(seed, tris, tri_chart, charts, [False] * charts, [True] * charts, int(page[0]), int(page[1]), int(k)) if fast is not None else None
+    if job is None:
+        yield
+        return uvpack.pack_into(page, k, seed, tris, tri_chart, charts, turn_ok=[True] * charts)
+    while not job.done():
+        yield
+    ok, dx, dy, q = job.result()  # four arrays, one entry per chart
+    return [(bool(a), int(b), int(c), int(d)) for a, b, c, d in zip(ok, dx, dy, q)]
+
+
 class BakeSpots(UVTrial):
     """Bake those spots: the faces that still straddle a seam each get a small new island in the page's free space, and
     the bake fills just those islands from your original mesh. The rest of the texture is untouched."""
@@ -613,8 +627,7 @@ class BakeSpots(UVTrial):
         yield
         k = uvnew.mip_level(base.texture_px)
         page = (int(base.texture_px), int(base.texture_px))
-        got = uvpack.pack_into(page, k, seed, tris, tri_chart, len(groups), turn_ok=[True] * len(groups))
-        yield
+        got = yield from _pack_into(page, k, seed, tris, tri_chart, len(groups))
         uv = np.array(uv0, np.float64)
         baked, missed = [], 0
         for (corners, local), group, (ok, dx, dy, q) in zip(placed_corners, groups, got):

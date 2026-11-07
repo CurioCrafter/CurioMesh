@@ -433,6 +433,7 @@ def bake_spots(context, obj, cand) -> str:
         obj.select_set(True)
         context.view_layer.objects.active = obj
         scene.render.engine = "CYCLES"
+        scene.cycles.device = "CPU"
         scene.cycles.samples = 16
         scene.render.bake.use_selected_to_active = True
         scene.render.bake.margin = margin
@@ -571,6 +572,10 @@ class CURIOMESH_OT_uv_tool(bpy.types.Operator):
         trial = uvtrial.TRIALS[self.tool]
         if self.value >= 0.0 and trial.handle:
             out[trial.handle] = float(self.value)
+        elif trial.handle == "gap" and us is not None:  # the dial opens at the popover's "clean down to"
+            sizes = [c for c in uvtrial.CLEAN if c <= us.texture_size] or [4]
+            near = min(range(len(sizes)), key=lambda i: abs(math.log2(sizes[i]) - math.log2(max(us.clean_down_to, 1))))
+            out["gap"] = near / max(len(sizes) - 1, 1)
         elif trial.handle == "stretch" and us is not None:
             out["stretch"] = min(1.0, float(us.stretch_allowed) / max(uvtrial.STRETCH_DIAL, float(us.stretch_allowed)))
         return out
@@ -798,7 +803,9 @@ def _auto_step():
     sync(scene)
     guided = _g()
     res = guided.state["res"]
-    if res is None or guided.state["work"] is not None or tidylive.busy() or live["session"] is not None or keep_mode(us, gs) != "light":
+    work = guided.state["work"]
+    searching = work is not None and bool(getattr(work.get("runner"), "busy", True))
+    if res is None or searching or tidylive.busy() or live["session"] is not None or keep_mode(us, gs) != "light":
         if ROW["stage"] is not None:
             ROW["stage"].stop()
             ROW["stage"] = None

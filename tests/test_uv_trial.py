@@ -163,5 +163,22 @@ class UVOnly(unittest.TestCase):
         self.assertLess(cand.numbers["overlap_pct"], 0.01 + base.cache["numbers"]["overlap_pct"])
 
 
+class Names(unittest.TestCase):
+    AVOID = ("New UV Map", "Keep Seams", "Keep My Seams", "Pack Islands", "Pack Again", "Repack", "Hide Cuts", "Mark Seam", "Protect UV",
+             "Fewer Islands", "Low Stretch", "Bake Into Existing", "Even Out UVs", "Utilization", "Straighten", "Rectify")
+
+    def test_no_avoided_names_in_the_ui_files(self):
+        for name in ("uv_panel.py", "uv_draw.py", "triadq/uvtrial.py"):
+            text = (common.ROOT / name).read_text(encoding="utf-8")
+            for word in self.AVOID:
+                self.assertNotIn(word, text, f"{word!r} in {name}")
+
+    def test_no_engine_words_in_the_core(self):
+        import re
+
+        text = (common.ROOT / "triadq" / "uvtrial.py").read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"(?i)turbo|native|rust|\bgpu\b", text))
+
+
 if __name__ == "__main__":
     unittest.main()
