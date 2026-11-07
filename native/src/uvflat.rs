@@ -1663,7 +1663,7 @@ pub fn flatten_chart(chart: &Chart, start: Option<&[f64]>, labels: Option<(&[i64
         }
     }
     if report.is_none() {
-        let mode = match opts.rows {
+        let mut mode = match opts.rows {
             Rows::Off => Rows::Off,
             _ if triples.is_empty() => Rows::Off,
             _ => Rows::Soft,
@@ -1698,8 +1698,14 @@ pub fn flatten_chart(chart: &Chart, start: Option<&[f64]>, labels: Option<(&[i64
                 w *= SOFT_GROW;
             }
             let (_, trial, r) = best.unwrap();
-            uv = trial;
-            report = Some(r);
+            // Auto refuses Soft rows that break Stretch allowed, as it does for On: Off is the fallback.
+            if opts.rows == Rows::Auto && !r.stopped && stretch_of(&el, chart.faces.count(), &trial).0 > 1.0 + opts.stretch_allowed {
+                report = Some(run(&mut uv, Rows::Off, 0.0)?);
+                mode = Rows::Off;
+            } else {
+                uv = trial;
+                report = Some(r);
+            }
         }
         used = mode;
     }

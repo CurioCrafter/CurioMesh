@@ -573,7 +573,13 @@ class Flatten:
                     if bend <= BEND_P95_DEG or not improved or self._stop:
                         break
                     w *= SOFT_GROW
-                _, uv, energy, info = best
+                _, soft_uv, soft_energy, soft_info = best
+                # Auto refuses Soft rows that break Stretch allowed, as it does for On: Off is the fallback.
+                if self.rows == "auto" and not self._stop and _stretch_of(el, soft_uv)[0] > 1.0 + self.stretch_allowed:
+                    used, info = "off", {}
+                    energy = yield from self._arap(el, uv, triples, 0.0, False, tol, info)
+                else:
+                    uv, energy, info = soft_uv, soft_energy, soft_info
         self.uv = uv
         self.numbers = {
             "rows": used, "start": kind, "steps": info.get("steps", 0), "energy": energy,
