@@ -39,6 +39,7 @@ WALK_REACH = 2.0
 WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
+WIND_BALL_EDGE = 0.25  # the winding vote's reach: nearest distance plus this share of a fan triangle's shortest edge
 REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
 STALL_WINDOW = 50
@@ -959,11 +960,12 @@ def _uv_area(uv, indptr, f) -> float:
 
 def _fan_orient(src, Pr, face, rf, fallback) -> float:
     """A result face's orientation sign against its reference face `rf`, from the source under each of its fan
-    triangles: each triangle (0, i, i+1) asks the source face nearest its centre which way it winds, the way a texture
-    shows on it (that face's UV winding times whether it faces the triangle), relative to the reference's UV winding.
-    All agreeing: that sign. Triangles that disagree (a face folded in 3D, or across a crease with one triangle leaning
-    into a wall): 0, so its reads stay as read and the fold fix leaves it. Triangles over a face with no UV area or edge-on
-    to it have no say; with no say at all, `fallback`."""
+    triangles. Each triangle (0, i, i+1) gathers the source faces within reach of its centre (the nearest one's distance
+    plus WIND_BALL_EDGE of its shortest edge, joined across edges) and the windings they would show a texture with: a
+    face's UV winding times whether it faces the triangle, relative to the reference's UV winding (no UV area: both
+    allowed; edge-on: neither). The face takes the winding every triangle allows; both throughout: `fallback`. No common
+    winding (folded in 3D, or across a crease with one half leaning into a wall): 0 (uvkeep cuts it into its fan
+    triangles)."""
 
     ref_wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, rf))
     if ref_wind == 0.0:
@@ -974,20 +976,29 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
         a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
         qs.append(((a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0))
     near = src.grid.nearest_many(qs) if qs else []
-    vote = 0.0
-    for t, g in zip(tris, near):
-        if g < 0:
+    common = 3  # bit 0: +1 allowed, bit 1: -1 allowed
+    for t, q, g0 in zip(tris, qs, near):
+        if g0 < 0:
             continue
-        facing = _sign(_dot(_newell(Pr, t), src.normal[g]))
-        wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, g))
-        w = facing * wind * ref_wind
-        if w == 0.0 or w != w:
-            continue
-        if vote == 0.0:
-            vote = w
-        elif vote != w:
-            return 0.0
-    return fallback if vote == 0.0 else vote
+        a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
+        shortest = min(_dist(a, b), _dist(b, cc), _dist(cc, a))
+        reach = math.sqrt(src.on_faces([g0], q)[0]) + WIND_BALL_EDGE * shortest
+        nt = _newell(Pr, t)
+        ball, seen, at, allowed = [g0], {g0}, 0, 0
+        while at < len(ball):
+            f = ball[at]
+            at += 1
+            wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, f))
+            w = _sign(_dot(nt, src.normal[f])) * wind * ref_wind
+            allowed |= 3 if wind == 0.0 else (1 if w > 0.0 else (2 if w < 0.0 else 0))
+            for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
+                g = int(src.across[h])
+                if g >= 0 and g not in seen and math.sqrt(src.on_faces([g], q)[0]) <= reach:
+                    seen.add(g)
+                    ball.append(g)
+        if allowed:
+            common &= allowed
+    return {1: 1.0, 2: -1.0, 0: 0.0}.get(common, fallback)
 
 
 def _read_face(src: _Source, region, Pr, face):
