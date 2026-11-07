@@ -39,7 +39,6 @@ WALK_REACH = 2.0
 WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
-DEGENERATE_SHARE = 1e-6  # a source face whose 2 x area / summed squared edges is below this is a sliver (no say in the winding vote)
 REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
 STALL_WINDOW = 50
@@ -958,33 +957,10 @@ def _uv_area(uv, indptr, f) -> float:
     return area
 
 
-def _clear_facing(a, b) -> float:
-    """1 or -1 when normals a and b clearly face the same or opposite ways (at most 60 deg off, REF_ALIGN_COS), 0 when
-    nearer edge-on, where which side of 90 deg they fall on is rounding."""
-
-    la, lb, d = math.sqrt(_dot(a, a)), math.sqrt(_dot(b, b)), _dot(a, b)
-    return _sign(d) if la > 0.0 and lb > 0.0 and abs(d) >= REF_ALIGN_COS * la * lb else 0.0
-
-
-def _flat_enough(src, g) -> bool:
-    """True when source face g has a normal worth reading: twice its area over its summed squared edge lengths is above
-    DEGENERATE_SHARE (a zero-area sliver's normal is rounding noise)."""
-
-    s, e = int(src.indptr[g]), int(src.indptr[g + 1])
-    pts = [tuple(src.P[v]) for v in src.flat[s:e]]
-    s2 = 0.0
-    for i in range(len(pts)):
-        d = _sub(pts[(i + 1) % len(pts)], pts[i])
-        s2 += _dot(d, d)
-    n = src.normal[g]
-    return math.sqrt(_dot(n, n)) > DEGENERATE_SHARE * s2
-
-
 def _fan_orient(src, Pr, face, rf, fallback) -> float:
     """A result face's orientation sign against its reference face `rf`, from the source under each of its fan
     triangles: each triangle (0, i, i+1) asks the source face nearest its centre which way it winds, the way a texture
-    shows on it (that face's UV winding times whether it faces the triangle), relative to the reference's UV winding
-    (slivers and faces edge-on to the triangle have no say).
+    shows on it (that face's UV winding times whether it faces the triangle), relative to the reference's UV winding.
     All agreeing: that sign. Triangles that disagree (a face folded in 3D, or across a crease with one triangle leaning
     into a wall): 0, so its reads stay as read and the fold fix leaves it. Triangles over a face with no UV area or edge-on
     to it have no say; with no say at all, `fallback`."""
@@ -1000,9 +976,9 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
     near = src.grid.nearest_many(qs) if qs else []
     vote = 0.0
     for t, g in zip(tris, near):
-        if g < 0 or not _flat_enough(src, g):
+        if g < 0:
             continue
-        facing = _clear_facing(_newell(Pr, t), src.normal[g])
+        facing = _sign(_dot(_newell(Pr, t), src.normal[g]))
         wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, g))
         w = facing * wind * ref_wind
         if w == 0.0 or w != w:
@@ -1077,12 +1053,11 @@ def _read_face(src: _Source, region, Pr, face):
                     seen.add(g)
                     near.append(g)
         cands = [g for g in near if aligned(g)]
-        # A reference clearly turned away (over 120 deg) gives way only to a face nearer the centre: being the nearest
-        # face, it is the surface the face lies on (a thin part's far side seen from a coarse face). An edge-on one
-        # (60-120 deg: its side of 90 deg is rounding) always gives way.
+        # Only a face nearer the centre than the reference: a reference that is the nearest face is the surface the
+        # face lies on, however it is turned (a thin part's far side seen from a coarse face).
         if cands:
             d2, t2, w2, which = src.on_faces(cands, c)
-            if _clear_facing(nr, src.normal[rf]) == 0.0 or d2 < src.on_faces([rf], c)[0]:
+            if d2 < src.on_faces([rf], c)[0]:
                 rf, rd, rt, rw = cands[which], math.sqrt(d2), t2, w2
                 reg = int(region[rf])
     order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
