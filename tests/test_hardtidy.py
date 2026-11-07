@@ -151,5 +151,148 @@ class PressPanelsFlatTest(unittest.TestCase):
         self.assertEqual(hardtidy.PressPanelsFlat().check(empty), hardtidy.NO_PANELS)
 
 
+# --------------------------------------------------------------------------- Auto Fix: spots, own numbers, propose
+
+
+def _spots(tool, base):
+    return trial.finish(tool.spots(base))
+
+
+def _propose(tool, base, spots=None, settings=None):
+    from triadq import autofix
+
+    spots = _spots(tool, base) if spots is None else spots
+    return spots, trial.finish(autofix.propose(tool, base, settings or {}, spots=spots))
+
+
+def _wavy_fold(mirror=None):
+    points, faces, crease = _fold()
+    inner = crease[1:-1]
+    points[inner, 1] += 0.5 * np.array([0.15, -0.0, 0.12, 0.0, 0.18])  # half the wave of the test above: the first row of quads follows it
+    points[inner, 0] += 0.5 * np.array([0.2, -0.1, 0.15, 0.0, -0.2])
+    return points, faces, crease, trial.make_base(points, faces, project=_fold_surface, mirror=mirror)
+
+
+class TrueUpEdgesSpotsTest(unittest.TestCase):
+    def test_fields(self):
+        tool = hardtidy.TrueUpEdges()
+        self.assertEqual([k[0] for k in tool.kinds], ["wavy", "off"])
+        self.assertTrue(tool.auto)
+        self.assertFalse(tool.changes_faces)
+        self.assertGreater(tool.least, 0.0)
+
+    def test_wavy_chain_is_a_spot_and_fixing_it_drops_the_own_number(self):
+        points, faces, crease, base = _wavy_fold()
+        tool = hardtidy.TrueUpEdges()
+        spots, p = _propose(tool, base)
+        self.assertEqual([sp.kind for sp in spots], ["wavy"])
+        self.assertGreater(spots[0].bad, 0.02)  # edges off the crease, on average
+        self.assertEqual(p.reason, "")
+        self.assertEqual(p.fixed, spots)
+        after = tool.own_number(base, p.cand.co, base.faces, spots[0])
+        self.assertLess(after, 1e-6)
+        self.assertGreater(tool.own_number(base, base.co, base.faces, spots[0]), 0.02)
+        self.assertTrue(np.allclose(p.cand.co[crease[1:-1], 1:], 0.0, atol=1e-6))
+        self.assertTrue(np.allclose(p.cand.co[[crease[0], crease[-1]]], points[[crease[0], crease[-1]]]))
+
+    def test_straight_creases_make_a_wavy_spot_and_bent_ones_do_not_line_up(self):
+        points, faces, crease = _fold()
+        points[crease[1:-1], 1] += 0.15
+        base = trial.make_base(points, faces, project=_fold_surface)
+        self.assertEqual([sp.kind for sp in _spots(hardtidy.TrueUpEdges(), base)], ["wavy"])  # its creases line up: a wave
+        bent = np.array([(0, 0, 0), (1, 0.5, 0), (2, 0, 0)], dtype=np.float64)
+        self.assertIsNone(hardtidy._straight(bent, 2.0, False))
+        self.assertIsNotNone(hardtidy._straight(bent * (1, 0, 0), 2.0, False))
+
+    def test_a_chain_already_on_its_crease_is_no_spot(self):
+        points, faces, _crease = _fold()
+        base = trial.make_base(points, faces, project=_fold_surface)
+        self.assertEqual(_spots(hardtidy.TrueUpEdges(), base), [])
+
+    def test_a_spot_with_no_hard_edge_in_it_comes_back_in_left(self):
+        points, faces, crease, base = _wavy_fold()
+        tool = hardtidy.TrueUpEdges()
+        real = _spots(tool, base)[0]
+        flat = [i for i, f in enumerate(faces) if np.allclose(points[list(f), 2], 0.0) and points[list(f), 1].min() >= 2.0]
+        fake = trial.Spot("off", np.array(flat), points[list(faces[flat[0]])].mean(axis=0), 0.5)
+        _s, p = _propose(tool, base, [real, fake])
+        self.assertEqual(p.fixed, [real])
+        self.assertEqual([why for sp, why in p.left if sp is fake], ["no better"])
+
+    def test_mirrored_base_and_nothing_free(self):
+        points, faces, crease, base = _wavy_fold(mirror=(0, 0.0))
+        spots, p = _propose(hardtidy.TrueUpEdges(), base)
+        self.assertEqual(len(spots), 1)
+        self.assertEqual(p.reason, "")
+        on = np.isclose(points[:, 0], 0.0)
+        self.assertTrue(np.allclose(p.cand.co[on, 0], 0.0))  # the plane's corners stay in it
+        nothing = trial.make_base(points, faces, scope=np.zeros(len(faces), dtype=bool), project=_fold_surface)
+        self.assertEqual(_spots(hardtidy.TrueUpEdges(), nothing), [])
+        self.assertEqual(_spots(hardtidy.TrueUpEdges(), trial.make_base(np.zeros((0, 3)), [])), [])
+
+
+def _plate(n: int = 6, bump: float = 0.08):
+    points = np.array([(x, y, 0.0) for y in range(n + 1) for x in range(n + 1)], dtype=np.float64)
+    faces = [(y * (n + 1) + x, y * (n + 1) + x + 1, (y + 1) * (n + 1) + x + 1, (y + 1) * (n + 1) + x) for y in range(n) for x in range(n)]
+    rng = np.random.default_rng(1)
+    inner = [v for v in range(len(points)) if 0 < points[v, 0] < n and 0 < points[v, 1] < n]
+    points[inner, 2] += rng.uniform(-bump, bump, len(inner))
+    return points, faces
+
+
+class PressPanelsFlatSpotsTest(unittest.TestCase):
+    def test_fields(self):
+        tool = hardtidy.PressPanelsFlat()
+        self.assertEqual([k[0] for k in tool.kinds], ["bumpy"])
+        self.assertTrue(tool.auto)
+        self.assertGreater(tool.least, 0.0)
+
+    def test_bumpy_plate_is_a_spot_and_goes_flat(self):
+        points, faces = _plate()
+        base = trial.make_base(points, faces, project=_flat)
+        tool = hardtidy.PressPanelsFlat()
+        spots, p = _propose(tool, base)
+        self.assertEqual([sp.kind for sp in spots], ["bumpy"])
+        self.assertEqual(p.reason, "")
+        self.assertEqual(p.fixed, spots)
+        self.assertGreater(tool.own_number(base, base.co, base.faces, spots[0]), 0.01)
+        self.assertLess(tool.own_number(base, p.cand.co, base.faces, spots[0]), 1e-9)
+        self.assertTrue(np.allclose(p.cand.co[:, 2], 0.0, atol=1e-9))
+
+    def test_flat_plate_and_curved_original_have_no_spot(self):
+        points, faces = _plate(bump=0.0)
+        self.assertEqual(_spots(hardtidy.PressPanelsFlat(), trial.make_base(points, faces, project=_flat)), [])
+        points, faces = _plate()
+        self.assertEqual(_spots(hardtidy.PressPanelsFlat(), trial.make_base(points, faces, project=lambda p: np.asarray(p) + 0.0)), [])  # your original is as bumpy as the result: no panel
+
+    def test_a_spot_that_is_already_flat_comes_back_in_left(self):
+        points, faces = _plate()
+        base = trial.make_base(points, faces, project=_flat)
+        tool = hardtidy.PressPanelsFlat()
+        real = _spots(tool, base)[0]
+        fake = trial.Spot("bumpy", np.array([0, 1]), points[list(faces[0])].mean(axis=0), 0.5)
+        _s, p = _propose(tool, base, [real, fake])
+        self.assertIn(fake, [sp for sp, why in p.left])
+        self.assertEqual([why for sp, why in p.left if sp is fake], ["no better"])
+
+    def test_two_panels_that_touch_are_one_spot_and_the_mirror_plane_holds(self):
+        points, faces, crease = _fold()
+        rng = np.random.default_rng(2)
+        moving = [v for v in range(len(points)) if 0 < points[v, 0] < 6]
+        points[moving] += rng.uniform(-0.04, 0.04, (len(moving), 3))
+        base = trial.make_base(points, faces, project=_fold_surface, mirror=(0, 0.0))
+        spots, p = _propose(hardtidy.PressPanelsFlat(), base)
+        self.assertEqual(len(spots), 1)  # they share the crease corners
+        self.assertEqual(p.reason, "")
+        on = np.isclose(points[:, 0], 0.0)
+        self.assertTrue(np.allclose(p.cand.co[on, 0], 0.0))
+
+    def test_empty_and_nothing_free(self):
+        self.assertEqual(_spots(hardtidy.PressPanelsFlat(), trial.make_base(np.zeros((0, 3)), [])), [])
+        points, faces = _plate()
+        nothing = trial.make_base(points, faces, scope=np.zeros(len(faces), dtype=bool), project=_flat)
+        self.assertEqual(_spots(hardtidy.PressPanelsFlat(), nothing), [])
+
+
 if __name__ == "__main__":
     unittest.main()

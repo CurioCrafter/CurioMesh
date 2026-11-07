@@ -9,14 +9,19 @@ puts it back on your original mesh after each step, so nothing shrinks and every
 
 Cleanup: Preview Tidy lists what it finds (two-edge corners and doublets, Tarini et al. 2010; triangle pairs that make
 good quads; slivers; faces turned the other way) with each line's fix worked out up front. Seal the Middle puts the
-corners near the mirror plane onto it and merges doubled ones.
+corners near the mirror plane onto it and merges doubled ones. Hard Edges compares the result's edges with the creases
+of your original mesh.
+
+Auto Fix (bench/tools_design/AUTO_FIX.md): Preview Tidy has five kinds of spot (one per line), Seal the Middle one spot
+(the whole seam) and Hard Edges the places where its marks and your original's creases disagree. Each tool says what a
+spot is (`spots`) and counts what it is made to remove there (`own_number`); `autofix.propose` does the rest.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .trial import Base, Candidate, Trial, edges_of, unfold
+from .trial import Base, Candidate, Spot, Trial, edges_of, face_normals, finish, unfold
 
 NOTHING_FREE = "Nothing can move here: every corner is held (borders, hard edges or the mirror plane)."
 
@@ -128,16 +133,13 @@ def _plural(n: int, one: str, many: str) -> str:
 # --------------------------------------------------------------------------- Preview Tidy: what each line finds and fixes
 
 
-def two_edge_corners(base, quads: bool):
-    """Corners inside the scope with only two edges, so their two faces fold onto each other. `quads`: only those
-    between two quads (Tarini et al. 2010 call such a pair a doublet), else only the others (a triangle or n-gon on one
-    side). Fix: the corner goes and its two faces become one. Returns (corners found, (co, faces, parent) or None,
-    held), a face joined at most once per run (Again takes the rest)."""
+def two_edge_found(base, quads: bool):
+    """(corners found, {corner: its two faces}) for `two_edge_corners`: the detection alone."""
     co, faces = base.co, base.faces
     n = len(co)
     fid, a, b = _half_edges(faces)
     if not len(a):
-        return [], None, []
+        return [], {}
     key, _users = _edge_users(a, b, n)
     _k, first = np.unique(key, return_index=True)
     edge_count = np.bincount(a[first], minlength=n) + np.bincount(b[first], minlength=n)
@@ -145,11 +147,24 @@ def two_edge_corners(base, quads: bool):
     keep_out = _open_corners(faces, n) | _outside_scope(base) | _on_plane(base)
     found = np.flatnonzero((edge_count == 2) & (face_count == 2) & ~keep_out)
     at: dict[int, list[int]] = {}
-    want = set(found.tolist())
-    for f, v in zip(fid.tolist(), a.tolist()):
-        if v in want:
-            at.setdefault(v, []).append(f)
+    want = np.zeros(n, dtype=bool)
+    want[found] = True
+    take = want[a]
+    for f, v in zip(fid[take].tolist(), a[take].tolist()):
+        at.setdefault(v, []).append(f)
     corners = [v for v in found.tolist() if (len(faces[at[v][0]]) == 4 and len(faces[at[v][1]]) == 4) == quads]
+    return corners, at
+
+
+def two_edge_corners(base, quads: bool):
+    """Corners inside the scope with only two edges, so their two faces fold onto each other. `quads`: only those
+    between two quads (Tarini et al. 2010 call such a pair a doublet), else only the others (a triangle or n-gon on one
+    side). Fix: the corner goes and its two faces become one. Returns (corners found, (co, faces, parent) or None,
+    held), a face joined at most once per run (Again takes the rest)."""
+    co, faces = base.co, base.faces
+    corners, at = two_edge_found(base, quads)
+    if not at:
+        return [], None, []
     out_faces = list(faces)
     gone = np.zeros(len(faces), dtype=bool)
     held, touched, joined = [], set(), 0
@@ -316,63 +331,194 @@ TIDY_LINES = (  # (key, one, many) in the order the report lists them
     ("slivers", "sliver", "slivers"),
     ("inward", "face facing in", "faces facing in"),
 )
+SLIVER_STEPS = 8  # small slides in a row when a sliver is opened up; a setting ("Higher can take longer"), not a cap
+
+
+def _trust_neighbours(base, inward) -> None:
+    """The faces facing in are the bad ones: the bad-face test of `trial.bad_faces` then judges by the way their
+    neighbours face, so turning them round counts as a repair and not as a face that turned over."""
+    if len(inward):
+        way = face_normals(base.co, base.faces)
+        way[np.asarray(inward, dtype=np.int64)] *= -1.0
+        base.cache["normals"] = way
+        base.cache.pop("bad", None)
+
+
+def join_faces(items, faces):
+    """[(face ids, tag)] -> [(sorted face ids, [tags])]: items whose faces share a corner become one (Auto Fix: two
+    spots never share a corner, so putting one back never undoes the next)."""
+    root = list(range(len(items)))
+
+    def top(i):
+        while root[i] != i:
+            root[i] = root[root[i]]
+            i = root[i]
+        return i
+
+    owner: dict = {}
+    for i, (ids, _tag) in enumerate(items):
+        for v in {v for f in np.asarray(ids).tolist() for v in faces[f]}:
+            j = owner.setdefault(v, i)
+            if j != i:
+                x, y = top(i), top(j)
+                if x != y:
+                    root[max(x, y)] = min(x, y)
+    out: dict = {}
+    for i, (ids, tag) in enumerate(items):
+        group = out.setdefault(top(i), ([], []))
+        group[0].extend(np.asarray(ids).tolist())
+        group[1].append(tag)
+    return [(np.unique(np.asarray(ids, dtype=np.int64)), tags) for ids, tags in out.values()]
+
+
+def _ring(faces, ids):
+    """(faces that share a corner with any of `ids`, ids included, sorted; bool per corner: used by `ids`)."""
+    fid, corner, _next = _half_edges(faces)
+    inside = np.zeros(len(faces), dtype=bool)
+    inside[ids] = True
+    mine = np.zeros(int(corner.max(initial=-1)) + 1, dtype=bool)
+    mine[corner[inside[fid]]] = True
+    return np.unique(fid[mine[corner]]), mine
 
 
 class PreviewTidy(Trial):
     """A findings report: one line per kind of problem actually found in the scope, each with a count, its look cost,
     Show and Fix These. Each line's fix is worked out up front and kept on the base, so picking a line shows its ghost
-    at once; the Session measures each line's look cost after."""
+    at once; the Session measures each line's look cost after.
+
+    Auto Fix: the five lines are five kinds of spot (a doublet, a corner with two edges, a triangle pair, a sliver, and
+    the faces facing in), each fixed by its own line (`row`), counted by what is left of that kind in the spot."""
 
     name = "Preview Tidy"
     group = "CLEANUP"
     handles = ()
-    defaults = {"row": ""}
+    defaults = {"row": "", "steps": SLIVER_STEPS}
     blendable = False
     stay_open = True  # after Enter the list refreshes for the next line
     layers = ("scope", "ghost", "wash", "arrows", "poles", "held", "found")
     stages = ("faces", "poles", "look")
+    kinds = TIDY_LINES
+    own = "found"
+    least = 0.5  # one finding fewer counts
+    changes_faces = True
 
-    def lines(self, base):
-        """Generator: the report's lines (dicts), worked out once per result."""
-        if "tidy_lines" in base.cache:
-            return base.cache["tidy_lines"]
+    def lines(self, base, steps=None, only=None):
+        """Generator: the report's lines (dicts), worked out once per result. `only`: just that line (Auto Fix)."""
+        steps = int(self.defaults["steps"] if steps is None else steps)
+        tag = f"tidy_lines:{steps}:{only or ''}"
+        if tag in base.cache:
+            return base.cache[tag]
+
+        def want(key):
+            return only is None or only == key
+
         found: dict = {}
         for key, quads in (("corners", False), ("doublets", True)):
-            corners, fix, held = two_edge_corners(base, quads)
-            if corners:
-                found[key] = (len(corners), base.co[corners], fix, held)
+            if want(key):
+                corners, fix, held = two_edge_corners(base, quads)
+                if corners:
+                    found[key] = (len(corners), base.co[corners], fix, held)
             yield 0.2 if quads else 0.1
-        pairs, spots, fix = triangle_pairs(base)
-        if len(pairs):
-            found["pairs"] = (len(pairs), spots, fix, [])
+        if want("pairs"):
+            pairs, spots, fix = triangle_pairs(base)
+            if len(pairs):
+                found["pairs"] = (len(pairs), spots, fix, [])
         yield 0.4
-        thin, moved, held = slivers(base)
-        if len(thin):
-            found["slivers"] = (len(thin), _middles(base.co, base.faces, thin), None if moved is None else (moved, None, None), held)
+        if want("slivers"):
+            thin, moved, held = slivers(base, steps)
+            if len(thin):
+                found["slivers"] = (len(thin), _middles(base.co, base.faces, thin), None if moved is None else (moved, None, None), held)
         yield 0.7
-        inward, fix = facing_in(base)
-        if len(inward):
-            found["inward"] = (len(inward), _middles(base.co, base.faces, inward), fix, [])
+        if want("inward"):
+            inward, fix = facing_in(base)
+            if len(inward):
+                found["inward"] = (len(inward), _middles(base.co, base.faces, inward), fix, [])
+                _trust_neighbours(base, inward)
         yield 0.9
         rows = []
         for key, one, many in TIDY_LINES:
             if key in found:
                 count, spots, fix, held = found[key]
                 rows.append({"key": key, "words": _plural(count, one, many), "count": count, "spots": np.asarray(spots, dtype=np.float64).reshape(-1, 3), "fix": fix, "held": list(held), "cost": None})
-        base.cache["tidy_lines"] = rows
+        base.cache[tag] = rows
         return rows
 
     def run(self, base: Base, settings: dict, rough: bool = False):
-        rows = yield from self.lines(base)
+        steps = int(settings.get("steps", self.defaults["steps"]))
+        wanted = settings.get("row", "")
+        rows = yield from self.lines(base, steps, wanted if settings.get("only") and wanted else None)
         if not rows:
             return Candidate(None, refusal=NOTHING_TO_TIDY)
-        row = next((r for r in rows if r["key"] == settings.get("row", "")), None)
+        row = next((r for r in rows if r["key"] == wanted), None)
         if row is None:
             return Candidate(None, rows=rows, note="Show lights up where; Fix These shows the fix. Nothing changes until Enter.")
         if row["fix"] is None:
             return Candidate(None, rows=rows, held=list(row["held"]), found=row["spots"], note=f"The {row['words'].split(' ', 1)[1]} here cannot be fixed without bad faces.")
         co, faces, parent = row["fix"]
         return Candidate(np.asarray(co, dtype=np.float64), faces=None if faces is None else list(faces), parent=parent, held=list(row["held"]), found=row["spots"], rows=rows, note=f"Fix These: {row['words']}")
+
+    # ---- Auto Fix
+
+    def spots(self, base: Base):
+        faces, co = base.faces, base.co
+        out: list = []
+        if not len(faces) or not base.scope.any():
+            return out
+        from .issues import topology_flags
+
+        def add(key, items):
+            for ids, tags in join_faces(items, faces):
+                out.append(Spot(key, ids, _middles(co, faces, ids).mean(axis=0), float(len(tags)), {"row": key, "only": True}))
+
+        inward, _fix = facing_in(base)
+        yield 0.1
+        if len(inward):
+            # one spot for all of them, ranked before every other (more than any count can be): a face turned round is
+            # judged against its neighbours' way, and that reference (`_trust_neighbours`) holds only for the first fix
+            _trust_neighbours(base, inward)
+            out.append(Spot("inward", inward, _middles(co, faces, inward).mean(axis=0), float(len(faces) + len(inward)), {"row": "inward", "only": True}))
+        for key, quads in (("corners", False), ("doublets", True)):
+            found, at = two_edge_found(base, quads)
+            add(key, [(np.asarray(at[v]), v) for v in found])
+            yield 0.3
+        pairs, _spots, _fix = triangle_pairs(base)
+        add("pairs", [(p, k) for k, p in enumerate(np.asarray(pairs, dtype=np.int64).reshape(-1, 2))])
+        yield 0.6
+        thin = np.flatnonzero(topology_flags(co, faces)["sliver"] & base.scope)
+        if len(thin):
+            fid, corner, _next = _half_edges(faces)
+            order = np.argsort(corner, kind="stable")
+            starts = np.searchsorted(corner[order], np.arange(len(co) + 1))
+            items = []
+            for f in thin.tolist():  # the sliver and every face round its corners: they only move when all of them are in scope
+                near = np.unique(np.concatenate([fid[order[starts[v] : starts[v + 1]]] for v in faces[f]]))
+                items.append((near, f))
+            add("slivers", items)
+        yield 1.0
+        return out
+
+    def own_number(self, base: Base, co, faces, spot: Spot) -> float:
+        """What is left of the spot's kind inside its faces: the findings of that line, counted on the spot's faces and
+        the ring of faces round them (so every corner of the spot has all its faces)."""
+        ids = np.asarray(spot.faces, dtype=np.int64)
+        ids = ids[(ids >= 0) & (ids < len(faces))]
+        if not len(ids):
+            return 0.0
+        co = np.asarray(co, dtype=np.float64)
+        ring, mine = _ring(faces, ids)
+        here = np.zeros(len(faces), dtype=bool)
+        here[ids] = True
+        sub = Base(co, [faces[i] for i in ring.tolist()], here[ring], np.zeros(len(co), dtype=bool), base.project, base.edge, base.mirror)
+        key = spot.kind
+        if key in ("corners", "doublets"):
+            return float(sum(1 for v in two_edge_found(sub, key == "doublets")[0] if v < len(mine) and mine[v]))
+        if key == "pairs":
+            return float(len(triangle_pairs(sub)[0]))
+        if key == "inward":
+            return float(len(facing_in(sub)[0]))
+        from .issues import topology_flags
+
+        return float(topology_flags(co, sub.faces)["sliver"][sub.scope].sum())
 
 
 # --------------------------------------------------------------------------- Seal the Middle
@@ -458,6 +604,41 @@ def _grid_patch(co, axis, offset, near, edge, lines=6):
     return np.asarray(out, dtype=np.float64)
 
 
+def seam_numbers(co, faces, ids, plane, edge) -> tuple[int, int, int]:
+    """(corners off the plane that Seal the Middle would put on it, doubled corners on the plane, gaps along the plane)
+    in the faces `ids`, counted the way `SealMiddle.run` decides: only corners no face outside `ids` uses."""
+    co = np.asarray(co, dtype=np.float64)
+    ids = np.asarray(ids, dtype=np.int64)
+    ids = ids[(ids >= 0) & (ids < len(faces))]
+    if not len(ids) or not len(co):
+        return 0, 0, 0
+    axis, offset = plane
+    size = float(np.ptp(co, axis=0).max()) or 1.0
+    tiny = 1e-6 * size
+    fid, a, b = _half_edges(faces)
+    inside = np.zeros(len(faces), dtype=bool)
+    inside[ids] = True
+    mine = np.zeros(len(co), dtype=bool)
+    mine[a[inside[fid]]] = True
+    mine[a[~inside[fid]]] = False
+    d = np.abs(co[:, axis] - offset)
+    key, users = _edge_users(a, b, len(co))
+    open_ = np.zeros(len(co), dtype=bool)
+    open_[a[users == 1]] = True
+    open_[b[users == 1]] = True
+    go = np.flatnonzero(mine & (d > tiny) & ((d <= REACH * edge) | (open_ & (d <= GAP_REACH * edge))))
+    twin = finish(_has_twin(co, go, axis, offset, edge, tiny))
+    off = int((~twin[go]).sum()) if len(go) else 0
+    root = _merge_close(co, np.flatnonzero(mine & (d <= tiny)), MERGE * edge)
+    doubles = sum(1 for v, r in root.items() if v != r)
+    gaps = 0
+    side = co[:, axis] - offset
+    if (side > tiny).any() and (side < -tiny).any():
+        flat = d <= tiny
+        gaps = int((inside[fid] & (users == 1) & flat[a] & flat[b]).sum())
+    return off, doubles, gaps
+
+
 class SealMiddle(Trial):
     """Puts the corners of the scope near the mirror plane exactly onto it, merges doubled ones, and reports the faces
     still crossing the plane and the gaps still open along it. Exact, so no handle."""
@@ -469,13 +650,42 @@ class SealMiddle(Trial):
     blendable = False
     layers = ("scope", "ghost", "arrows", "held", "found", "kept")
     stages = ("faces", "look")
+    kinds = (("seam", "messy mirror seam", "messy mirror seams"),)
+    own = "seam"
+    least = 0.5  # one seam corner, double or gap fewer counts
+    changes_faces = True
 
     def check(self, base: Base) -> str:
         return "" if plane_of(base) is not None else NOT_MIRRORED
 
+    def spots(self, base: Base):
+        """The whole seam is one spot: every face of the scope with a corner near the plane."""
+        plane = plane_of(base)
+        if plane is None or not len(base.faces):
+            return []
+        axis, offset = plane
+        edge = base.edge
+        near = np.abs(base.co[:, axis] - offset) <= GAP_REACH * edge
+        fid, corner, _next = _half_edges(base.faces)
+        hit = np.zeros(len(base.faces), dtype=bool)
+        hit[fid[near[corner]]] = True
+        ids = np.flatnonzero(hit & base.scope)
+        yield 0.3
+        if not len(ids):
+            return []
+        off, doubles, gaps = seam_numbers(base.co, base.faces, ids, plane, edge)
+        yield 0.9
+        if not off + doubles:  # gaps alone are not this tool's to close
+            return []
+        at = base.co[near].mean(axis=0)
+        return [Spot("seam", ids, at, float(off + doubles + gaps), {"plane": plane, "edge": edge})]
+
+    def own_number(self, base: Base, co, faces, spot: Spot) -> float:
+        return float(sum(seam_numbers(co, faces, spot.faces, spot.pick.get("plane") or plane_of(base), spot.pick.get("edge", base.edge))))
+
     def run(self, base: Base, settings: dict, rough: bool = False):
         axis, offset = plane_of(base)
-        co, faces, edge = base.co, base.faces, base.edge
+        co, faces, edge = base.co, base.faces, float(base.pick.get("edge", base.edge))
         size = float(np.ptp(co, axis=0).max()) if len(co) else 1.0
         tiny = 1e-6 * (size or 1.0)
         mine = np.zeros(len(co), dtype=bool)
@@ -689,9 +899,63 @@ def value_of(angle: float) -> float:
     return min(max((float(angle) - ANGLE_LOW) / (ANGLE_HIGH - ANGLE_LOW), 0.0), 1.0)
 
 
+SOURCE_CREASE = 30.0  # degrees: your original bends more than this across a result edge, so a crease runs there
+READ_AT = 0.15  # of the way from an edge to the middle of each of its two faces, where your original's way is read
+ANGLE_STEP = 1.0  # degrees between the angles Auto Fix tries for Hard Edges
+
+
+def source_creases(base):
+    """Generator -> (edges (e, 2), the two faces of each (e, 2), degrees between them on the result (e,), crease bool
+    (e,)): every edge used by two faces, and whether your original has a crease there. Your original's way is read just
+    inside each face beside the edge (`base.facing`); the angle between the two readings is the bend the original has
+    across the edge. Edges that bend under ANGLE_LOW on the result never get a mark, so they are not read."""
+    if "hard_src" in base.cache:
+        return base.cache["hard_src"]
+    from .hardtidy import Edges
+    from .hardtidy import face_normals as unit_normals
+
+    co = np.asarray(base.co, dtype=np.float64)
+    ed = Edges(base.faces, len(co))
+    two = ed.count == 2
+    ab, f0, f1 = ed.ab[two], ed.f0[two], ed.f1[two]
+    if not len(ab):
+        base.cache["hard_src"] = (ab, np.zeros((0, 2), dtype=np.int64), np.zeros(0), np.zeros(0, dtype=bool))
+        return base.cache["hard_src"]
+    normals = unit_normals(co, base.faces, ed.groups)
+    angle = np.degrees(np.arccos(np.clip((normals[f0] * normals[f1]).sum(axis=1), -1.0, 1.0)))
+    crease = np.zeros(len(ab), dtype=bool)
+    if base.facing is not None:
+        middles = np.zeros((len(base.faces), 3))
+        for ids, idx in ed.groups:
+            middles[ids] = co[idx].mean(axis=1)
+        mid = 0.5 * (co[ab[:, 0]] + co[ab[:, 1]])
+        read = np.flatnonzero(angle > ANGLE_LOW)
+        chunk = 1024
+        for k in range(0, len(read), chunk):
+            c = read[k : k + chunk]
+            n0 = np.asarray(base.facing(mid[c] + READ_AT * (middles[f0[c]] - mid[c])), dtype=np.float64)
+            n1 = np.asarray(base.facing(mid[c] + READ_AT * (middles[f1[c]] - mid[c])), dtype=np.float64)
+            n0 /= np.maximum(np.linalg.norm(n0, axis=1, keepdims=True), 1e-300)
+            n1 /= np.maximum(np.linalg.norm(n1, axis=1, keepdims=True), 1e-300)
+            crease[c] = np.degrees(np.arccos(np.clip((n0 * n1).sum(axis=1), -1.0, 1.0))) > SOURCE_CREASE
+            yield min(k / max(len(read), 1), 0.99)
+    base.cache["hard_src"] = (ab, np.stack((f0, f1), axis=1), angle, crease)
+    return base.cache["hard_src"]
+
+
+def marks_wrong(angle, crease, at: float) -> np.ndarray:
+    """Per edge: marked at `at` degrees but your original is smooth there, or not marked but it has a crease."""
+    return (angle > at) != crease
+
+
 class HardEdges(Trial):
     """Every edge of the result whose two faces meet at more than the angle, drawn pink: what Apply marks sharp (or
-    holds with loops). Nothing moves; Enter keeps the angle for Apply."""
+    holds with loops). Nothing moves; Enter keeps the angle for Apply.
+
+    Auto Fix: the spots are the places where the marks at the angle now and the creases of your original mesh
+    disagree (a mark on a smooth surface, a crease with no mark). The fix is the one angle, tried from ANGLE_LOW up in
+    ANGLE_STEP steps, where the fewest edges disagree (the nearest to the angle now when they tie); once `spots`
+    found something to better it is `fitted` (degrees) on the tool, and `run` marks at that angle. Nothing moves."""
 
     name = "Hard Edges"
     group = "HARD"
@@ -701,6 +965,10 @@ class HardEdges(Trial):
     blendable = False
     layers = ("scope", "kept")
     stages = ()
+    kinds = (("marked", "mark on a smooth surface", "marks on a smooth surface"), ("missing", "crease without a mark", "creases without a mark"))
+    own = "marks"
+    least = 0.5
+    fitted: float | None = None  # degrees Auto Fix picked; None: the dial decides
 
     def value_text(self, value: float) -> str:
         return f"Angle {angle_of(value):.0f} degrees"
@@ -708,12 +976,71 @@ class HardEdges(Trial):
     def check(self, base: Base) -> str:
         return "" if len(base.faces) > 1 else "No hard edges in this area."
 
+    def spots(self, base: Base):
+        self.fitted = None
+        if base.facing is None or len(base.faces) < 2:
+            return []
+        ab, pair, angle, crease = yield from source_creases(base)
+        if not len(ab):
+            return []
+        now = float(base.pick.get("angle", angle_of(self.defaults["angle"])))
+        mine = base.scope[pair[:, 0]] | base.scope[pair[:, 1]]
+        wrong = marks_wrong(angle, crease, now) & mine
+        if not wrong.any():
+            return []
+        grid = np.arange(ANGLE_LOW, ANGLE_HIGH + 0.5 * ANGLE_STEP, ANGLE_STEP)
+        cost = np.array([int((marks_wrong(angle, crease, g) & mine).sum()) for g in grid])
+        if cost.min() >= int(wrong.sum()):
+            return []
+        best = float(grid[np.lexsort((np.abs(grid - now), cost))[0]])
+        root: dict = {}
+
+        def top(v):
+            while root.setdefault(v, v) != v:
+                root[v] = root[root[v]]
+                v = root[v]
+            return v
+
+        edge_ids = np.flatnonzero(wrong)
+        for e in edge_ids.tolist():
+            x, y = top(int(ab[e, 0])), top(int(ab[e, 1]))
+            if x != y:
+                root[max(x, y)] = min(x, y)
+        groups: dict = {}
+        for e in edge_ids.tolist():
+            groups.setdefault(top(int(ab[e, 0])), []).append(e)
+        keep = base.cache.setdefault("hard_spots", {})
+        out = []
+        for es in groups.values():
+            es = np.asarray(es, dtype=np.int64)
+            ids = np.unique(pair[es].ravel())
+            marked = int(((angle[es] > now) & ~crease[es]).sum())
+            kind = "marked" if marked * 2 >= len(es) else "missing"
+            at = 0.5 * (base.co[ab[es, 0]] + base.co[ab[es, 1]]).mean(axis=0)
+            spot = Spot(kind, ids, at, float(len(es)))
+            keep[id(spot)] = (spot, es)  # the spot stays in the table, so its id is never handed to another
+            out.append(spot)
+        base.cache["hard_now"] = now
+        self.fitted = best
+        return out
+
+    def own_number(self, base: Base, co, faces, spot: Spot) -> float:
+        """Edges of the spot that disagree with your original: at the angle now for the mesh as it is, at the fitted
+        angle for the result (`autofix._positions` passes `base.co` itself for the one before)."""
+        _spot, es = base.cache.get("hard_spots", {}).get(id(spot), (None, None))
+        if es is None or "hard_src" not in base.cache:
+            return float(spot.bad)
+        _ab, _pair, angle, crease = base.cache["hard_src"]
+        at = base.cache.get("hard_now", angle_of(self.defaults["angle"])) if co is base.co or self.fitted is None else self.fitted
+        return float(marks_wrong(angle[es], crease[es], at).sum())
+
     def run(self, base: Base, settings: dict, rough: bool = False):
         if "edge_angles" not in base.cache:
             base.cache["edge_angles"] = edge_angles(base.co, base.faces)
             yield 0.8
         edges, angles = base.cache["edge_angles"]
-        angle = angle_of(settings.get("angle", self.defaults["angle"]))
+        value = settings.get("angle", self.defaults["angle"]) if self.fitted is None else value_of(self.fitted)
+        angle = angle_of(value)
         hard = edges[angles > angle]
         word = "edge" if len(hard) == 1 else "edges"
-        return Candidate(base.co.copy(), strength=float(settings.get("angle", 0.0)), lines=base.co[hard], note=f"{len(hard):,} hard {word} at {angle:.0f} degrees, in pink")
+        return Candidate(base.co.copy(), strength=float(value if self.fitted is not None else settings.get("angle", 0.0)), lines=base.co[hard], note=f"{len(hard):,} hard {word} at {angle:.0f} degrees, in pink")
