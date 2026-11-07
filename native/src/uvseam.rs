@@ -45,6 +45,11 @@ pub const WALK_UV_SLACK: f64 = 2.0;
 pub const SLIDE_EDGE: f64 = 0.02;
 /// Share of a result face's area its centre sample stands for (the corners share the rest equally).
 pub const CENTRE_WEIGHT: f64 = 0.5;
+/// A result face reads through a reference face turned at most this far from it (cosine of 60 deg). A coarse face
+/// across a crease often has its centre nearest a wall turned away from it; that wall's winding, taken as the face's
+/// expected winding, makes the fold fix fold the face. Such a face takes the nearest walked face turned at most 60 deg
+/// from it as its reference instead, and is read again from there.
+pub const REF_ALIGN_COS: f64 = 0.5;
 /// Fold fix stop rule (SPEC 3): no UV moves more than this share of a texel in one sweep.
 pub const STOP_TEXEL_SHARE: f64 = 0.02;
 /// Fold fix stall rule: the largest move must drop by `STALL_DROP` within `STALL_WINDOW` sweeps (reported).
@@ -791,6 +796,53 @@ struct FaceRead {
     region: i64,
 }
 
+/// The faces a result face reads from: from the reference face `rf` (hit at triangle `rt`, weights `rw`) across free
+/// and Shift edges only, within `reach` of the face centre `c`, and (with a UV layer) passing the walk's UV check.
+/// Breadth-first order, each with whether a Shift chain was crossed on the way.
+fn walk(src: &Source, rf: usize, rt: usize, rw: [f64; 3], c: V3, reach: f64) -> Vec<(usize, bool)> {
+    // The walk's UV check (see WALK_UV_SLACK): reference UV, reference point, UV offsets back to 3D lengths.
+    let uv_reach = src.uv.and_then(|layer| {
+        let tri = src.tri[rt];
+        let (p0, p1, p2) = (src.corner_point(tri[0]), src.corner_point(tri[1]), src.corner_point(tri[2]));
+        let q = |h: usize| [layer[2 * h], layer[2 * h + 1]];
+        let (q0, q1, q2) = (q(tri[0]), q(tri[1]), q(tri[2]));
+        let u_ref = [rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1]];
+        uv_to_3d(p0, p1, p2, q0, q1, q2).map(|k| (u_ref, mix(rw, p0, p1, p2), k))
+    });
+    let uv_near = |g: usize, shifted: bool| {
+        let Some((u_ref, p_ref, k)) = uv_reach else { return true };
+        let u = src.uv_centre[g];
+        let (mut du, mut dv) = (u[0] - u_ref[0], u[1] - u_ref[1]);
+        if shifted {
+            du += whole(-du);
+            dv += whole(-dv);
+        }
+        let (lx, ly) = (k[0] * du + k[1] * dv, k[2] * du + k[3] * dv);
+        (lx * lx + ly * ly).sqrt() <= WALK_UV_SLACK * (dist(src.centre[g], p_ref) + src.radius[g])
+    };
+    let mut order: Vec<(usize, bool)> = vec![(rf, false)];
+    let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
+    seen.insert(rf, ());
+    let mut queue = VecDeque::from([0usize]);
+    while let Some(at) = queue.pop_front() {
+        let (f, shifted) = order[at];
+        for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
+            let g = src.across[h];
+            if g < 0 || src.crossing[h] == 2 || seen.contains_key(&(g as usize)) || dist(src.centre[g as usize], c) > reach {
+                continue;
+            }
+            let sh = shifted || src.crossing[h] == 1;
+            if !uv_near(g as usize, sh) {
+                continue;
+            }
+            seen.insert(g as usize, ());
+            order.push((g as usize, sh));
+            queue.push_back(order.len() - 1);
+        }
+    }
+    order
+}
+
 fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], face: &[i64]) -> FaceRead {
     let n = face.len();
     let corners: Vec<V3> = face.iter().map(|&v| p3(res_points, v)).collect();
@@ -835,47 +887,28 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
         }
     }
     let ref_sample = if set.region[hits[n].0] == win.0 { n } else { (0..n).find(|&s| set.region[hits[s].0] == win.0).unwrap_or(n) };
-    let (rf, rd, rt, rw) = hits[ref_sample];
-    // Walk from the reference face across free and Shift edges only, within reach of the face.
-    let reach = WALK_REACH * diameter + rd;
-    // The walk's UV check (see WALK_UV_SLACK): reference UV, reference point, UV offsets back to 3D lengths.
-    let uv_reach = src.uv.and_then(|layer| {
-        let tri = src.tri[rt];
-        let (p0, p1, p2) = (src.corner_point(tri[0]), src.corner_point(tri[1]), src.corner_point(tri[2]));
-        let q = |h: usize| [layer[2 * h], layer[2 * h + 1]];
-        let (q0, q1, q2) = (q(tri[0]), q(tri[1]), q(tri[2]));
-        let u_ref = [rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1]];
-        uv_to_3d(p0, p1, p2, q0, q1, q2).map(|k| (u_ref, mix(rw, p0, p1, p2), k))
-    });
-    let uv_near = |g: usize, shifted: bool| {
-        let Some((u_ref, p_ref, k)) = uv_reach else { return true };
-        let u = src.uv_centre[g];
-        let (mut du, mut dv) = (u[0] - u_ref[0], u[1] - u_ref[1]);
-        if shifted {
-            du += whole(-du);
-            dv += whole(-dv);
-        }
-        let (lx, ly) = (k[0] * du + k[1] * dv, k[2] * du + k[3] * dv);
-        (lx * lx + ly * ly).sqrt() <= WALK_UV_SLACK * (dist(src.centre[g], p_ref) + src.radius[g])
+    let (mut rf, mut rd, mut rt, mut rw) = hits[ref_sample];
+    let mut order = walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd);
+    // A reference turned away from the face (REF_ALIGN_COS): the nearest walked face that is not, read again from it.
+    let nr = newell(res_points, face);
+    let aligned = |g: usize| {
+        let (a, b) = (dot(nr, nr).sqrt(), dot(src.normal[g], src.normal[g]).sqrt());
+        a > 0.0 && b > 0.0 && dot(nr, src.normal[g]) >= REF_ALIGN_COS * a * b
     };
-    let mut order: Vec<(usize, bool)> = vec![(rf, false)];
-    let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
-    seen.insert(rf, ());
-    let mut queue = VecDeque::from([0usize]);
-    while let Some(at) = queue.pop_front() {
-        let (f, shifted) = order[at];
-        for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
-            let g = src.across[h];
-            if g < 0 || src.crossing[h] == 2 || seen.contains_key(&(g as usize)) || dist(src.centre[g as usize], c) > reach {
+    if !aligned(rf) {
+        let mut best: Option<(f64, usize, usize, [f64; 3])> = None;
+        for &(g, _) in &order {
+            if !aligned(g) {
                 continue;
             }
-            let sh = shifted || src.crossing[h] == 1;
-            if !uv_near(g as usize, sh) {
-                continue;
+            let (d2, t, w) = src.on_face(g, c);
+            if best.is_none_or(|b| d2 < b.0) {
+                best = Some((d2, g, t, w));
             }
-            seen.insert(g as usize, ());
-            order.push((g as usize, sh));
-            queue.push_back(order.len() - 1);
+        }
+        if let Some((d2, g, t, w)) = best {
+            (rf, rd, rt, rw) = (g, d2.sqrt(), t, w);
+            order = walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd);
         }
     }
     let mut out = FaceRead {
@@ -886,7 +919,7 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
         ref_ids: src.tri[rt].map(|h| h as i64),
         ref_w: rw,
         ref_face: rf as i64,
-        orient: if dot(newell(res_points, face), src.normal[rf]) < 0.0 { -1.0 } else { 1.0 },
+        orient: if dot(nr, src.normal[rf]) < 0.0 { -1.0 } else { 1.0 },
         region: win.0,
     };
     for (i, &q) in corners.iter().enumerate() {

@@ -39,6 +39,7 @@ WALK_REACH = 2.0
 WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
+REF_ALIGN_COS = 0.5  # a reference face turned more than 60 deg from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
 STALL_WINDOW = 50
 STALL_DROP = 0.01
@@ -904,6 +905,43 @@ class _Source:
         return float(d2[k]), int(t[k]), tuple(float(x) for x in w[k]), which
 
 
+def _walk(src: _Source, rf, rt, rw, c, reach):
+    """The source faces a result face reads from: from the reference face `rf` (hit at triangle `rt`, weights `rw`)
+    across free and Shift edges only, within `reach` of the face centre `c`, passing the walk's UV check (with a layer).
+    Breadth-first, each with whether a Shift chain was crossed on the way."""
+
+    # The walk's UV check: a face whose UV offset from the reference UV, taken back to 3D through the reference
+    # triangle's map, is much longer than its 3D distance lies on the far side of a seam reached the long way round (a
+    # thin tube or plate inside one island); it is not walked.
+    uv_reach = None
+    if src.uv is not None:
+        tri = src.tri[rt]
+        p0, p1, p2 = (tuple(src.cp[tri[k]]) for k in range(3))
+        q0, q1, q2 = (tuple(src.uv[tri[k]]) for k in range(3))
+        u_ref = (rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1])
+        p_ref = _mix(rw, p0, p1, p2)
+        inverse = _uv_to_3d(p0, p1, p2, q0, q1, q2)
+        if inverse is not None:
+            uv_reach = (u_ref, p_ref, inverse)
+    order = [(rf, False)]
+    seen = {rf}
+    queue = deque([0])
+    indptr = src.indptr
+    while queue:
+        f, shifted = order[queue.popleft()]
+        for h in range(int(indptr[f]), int(indptr[f + 1])):
+            g = int(src.across[h])
+            if g < 0 or src.crossing[h] == 2 or g in seen or _dist(src.centre[g], c) > reach:
+                continue
+            sh = shifted or src.crossing[h] == 1
+            if uv_reach is not None and not _uv_near(src, g, sh, uv_reach):
+                continue
+            seen.add(g)
+            order.append((g, sh))
+            queue.append(len(order) - 1)
+    return order
+
+
 def _read_face(src: _Source, region, Pr, face):
     n = len(face)
     corners = [tuple(Pr[v]) for v in face]
@@ -937,38 +975,24 @@ def _read_face(src: _Source, region, Pr, face):
             win = v
     ref = n if region[hits[n][0]] == win[0] else next((s for s in range(n) if region[hits[s][0]] == win[0]), n)
     rf, rd, rt, rw = hits[ref]
-    reach = WALK_REACH * diameter + rd
-    # The walk's UV check: a face whose UV offset from the reference UV, taken back to 3D through the reference
-    # triangle's map, is much longer than its 3D distance lies on the far side of a seam reached the long way round (a
-    # thin tube or plate inside one island); it is not walked.
-    uv_reach = None
-    if src.uv is not None:
-        tri = src.tri[rt]
-        p0, p1, p2 = (tuple(src.cp[tri[k]]) for k in range(3))
-        q0, q1, q2 = (tuple(src.uv[tri[k]]) for k in range(3))
-        u_ref = (rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1])
-        p_ref = _mix(rw, p0, p1, p2)
-        inverse = _uv_to_3d(p0, p1, p2, q0, q1, q2)
-        if inverse is not None:
-            uv_reach = (u_ref, p_ref, inverse)
-    order = [(rf, False)]
-    seen = {rf}
-    queue = deque([0])
-    indptr = src.indptr
-    while queue:
-        f, shifted = order[queue.popleft()]
-        for h in range(int(indptr[f]), int(indptr[f + 1])):
-            g = int(src.across[h])
-            if g < 0 or src.crossing[h] == 2 or g in seen or _dist(src.centre[g], c) > reach:
-                continue
-            sh = shifted or src.crossing[h] == 1
-            if uv_reach is not None and not _uv_near(src, g, sh, uv_reach):
-                continue
-            seen.add(g)
-            order.append((g, sh))
-            queue.append(len(order) - 1)
-    reached = [f for f, _ in order]
+    order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
+    # A reference turned away from the face (REF_ALIGN_COS): a coarse face across a crease often has its centre nearest
+    # a wall turned away from it, whose winding would make the fold fix fold it. The nearest walked face turned at most
+    # 60 deg from it becomes the reference, and the face is read again from there.
     nr = _newell(Pr, face)
+    na = math.sqrt(_dot(nr, nr))
+
+    def aligned(g):
+        ng = src.normal[g]
+        nb = math.sqrt(_dot(ng, ng))
+        return na > 0.0 and nb > 0.0 and _dot(nr, ng) >= REF_ALIGN_COS * na * nb
+    if not aligned(rf):
+        cands = [g for g, _ in order if aligned(g)]
+        if cands:
+            d2, rt, rw, which = src.on_faces(cands, c)
+            rf, rd = cands[which], math.sqrt(d2)
+            order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
+    reached = [f for f, _ in order]
     out = dict(ids=[], w=[], shift=[], slid=[], ref_ids=[int(x) for x in src.tri[rt]], ref_w=list(rw), ref_face=rf,
                orient=-1.0 if _dot(nr, src.normal[rf]) < 0.0 else 1.0, region=win[0])
     for i, (q, (d2, t, w, which)) in enumerate(zip(corners, src.on_each([reached] * n, corners))):
