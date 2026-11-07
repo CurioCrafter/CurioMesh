@@ -138,16 +138,17 @@ def _positions(trial, base: T.Base, settings: dict, spots: list, rough: bool):
     union &= base.scope
     work = T.make_base(base.co, base.faces, scope=union, stay=base.stay, project=base.project, mirror=base.mirror, facing=base.facing, labels=base.labels, kinds=base.kinds)
     co, last, left = base.co.copy(), None, []
-    groups = [[sp] for sp in spots] if any(sp.pick for sp in spots) else [spots]
+    picked = any(sp.pick for sp in spots)
+    groups = [[sp] for sp in spots] if picked else [spots]
     for k, group in enumerate(groups):
-        scope = union if len(groups) == 1 else (_mask(len(base.faces), group[0].faces) & union)
-        here = _sub(work, scope, co, group[0].pick if len(groups) > 1 else base.pick)
+        scope = (_mask(len(base.faces), group[0].faces) & union) if picked else union
+        here = _sub(work, scope, co, group[0].pick if picked else base.pick)
         yield from trial.prepare(here)
         refusal = trial.check(here) if scope.any() else "nothing free"
         if refusal:
             left += [(sp, "held") for sp in group]
             continue
-        cand = yield from _run(trial, here, dict(settings, **(group[0].pick if len(groups) > 1 else {})), rough)
+        cand = yield from _run(trial, here, dict(settings, **(group[0].pick if picked else {})), rough)
         if cand is None or cand.refusal or cand.co is None:
             left += [(sp, "held") for sp in group]
             continue
@@ -497,11 +498,11 @@ def run(make_base, plan, settings=None, look=None, budget=None, stopped=None, st
 
 
 def _relay(work, rnd, i, trial, count):
-    """Pump a generator, turning its progress into "working" events."""
+    """Pump a generator, turning its progress into "working" events. A step with no number yet (camera pictures, the
+    word "measuring") is an event too (progress -1), so a timer slice can end there."""
     while True:
         try:
             progress = next(work)
         except StopIteration as done:
             return done.value
-        if isinstance(progress, (int, float)):
-            yield Event("working", rnd, i, trial, spots=count, progress=float(progress))
+        yield Event("working", rnd, i, trial, spots=count, progress=float(progress) if isinstance(progress, (int, float)) else -1.0)

@@ -213,6 +213,31 @@ and the experiment branches are not in this release.
   across the side of the head; the note under the buttons counts them, and Ctrl+Z undoes it. One step, one Undo; other
   tools call `curiomesh.redraw_rows` or `faceloops.redraw_rows(context, face ids)`.
 
+### Auto Fix
+- **Auto Fix** (Tidiness row, on by default; Quick turns it off): after the search, each tidy tool finds the spots it
+  is made for and fixes them, in rounds that repeat while a round still makes something better. A fix is kept only
+  when its spots get better, no bad face is added, Tidiness, Loop Quality and poles are no worse, and the look stays
+  within Most Detail Loss (or Auto's own Detail test when that is off). Spots in the parts that changed the look most
+  are dropped first, then the strength is halved, until it fits or nothing is left to try.
+- Every kept pass is one step in History ("Auto Fix: Square Up") and one Ctrl+Z; **Undo Auto Fix** jumps back to
+  "Before Auto Fix" in one step. **Stop** (or Esc, or Ctrl+Z) keeps what it fixed so far.
+- Its run time is a new **Time Limits** entry (3 min on Normal, scaled by Longer and No Limit). When it runs out the
+  readout says so and offers **Keep going**, which carries on from the next pass.
+- The readout gives one line (spots, fixes, Tidiness, look change) with Show and Undo Auto Fix, and folds per-kind
+  lines underneath: what was fixed and what was left as it was, and why. Show frames each spot in turn.
+- A popover with seven ticks (Leftovers, Mirror seam, Poles, Messy patches, Hard edges, Rows, Quad shape) picks which
+  kinds it fixes.
+- **Fix every spot like this**: a small button beside each tool that finds its own spots (Tools popovers) runs that
+  tool on every spot in Work On, shown first in Look First, with Keep going.
+- Tools that find their own spots: Preview Tidy (faces facing in, two-edge corners, doublets, triangle pairs,
+  slivers), Seal the Middle, Cancel Pole Pair, Remove Dead End (new), Redraw in Rows on messy patches, True Up Edges,
+  Press Panels Flat, Hard Edges (picks the angle where the marks best match the creases of your original),
+  Straighten, Even Width, Even the Band, Open Up Poles, Square Up, Relax Toward Detail, Source Relax and Keep Lines
+  Relax.
+- No made-up limits: Fix Every Strip no longer stops after 3 rounds, at 0.75 of a change or at 1 point of the camera
+  check; it uses Keep going and Most Detail Loss like every tool. Preview Tidy's sliver steps and Cancel Pole Pair's
+  tries and reach are settings ("Higher can take longer").
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

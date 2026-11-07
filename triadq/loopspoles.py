@@ -290,9 +290,6 @@ class EvenTheBand(Trial):
 
     def run(self, base: Base, settings: dict, rough: bool = False):
         elements = [int(e) for e in settings.get("strips") or []] or [int(settings.get("strip", -1))]
-        if elements == [-1]:  # no pick (a spot whose pick did not come through): the bands that need it, found in the scope
-            found = yield from self.spots(base)
-            elements = [int(e) for sp in found for e in sp.pick["strips"]] or elements
         strength = float(settings.get("strength", 1.0))
         count = 2 * len(self._strips(base).quads)
         bands = [self._lines(base, e) for e in elements if 0 <= e < count]

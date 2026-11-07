@@ -441,6 +441,7 @@ class CURIOMESH_OT_tool_preview_tidy(_Tool, bpy.types.Operator):
         default="",
         options={"SKIP_SAVE"},
     )
+    steps: bpy.props.IntProperty(name="Sliver Steps", description="How many small steps each thin quad's corner takes toward its neighbours. Higher can take longer", default=T.SLIVER_STEPS, min=1, soft_max=60)
 
 
 def _mirror_plane(context) -> dict:

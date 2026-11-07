@@ -1151,7 +1151,8 @@ class LiveTool:
     trial = None
 
     def _settings(self) -> dict:
-        return {k: getattr(self, k) for k in self.trial.defaults if hasattr(self, k)}
+        defaults = self.trial().defaults  # an instance: EverySpot sets its defaults (Keep going) per wrapped tool
+        return {k: getattr(self, k) for k in defaults if hasattr(self, k)}
 
     def _scope(self, context) -> str:
         ts = history.settings(context.scene)

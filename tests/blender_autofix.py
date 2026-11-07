@@ -22,7 +22,7 @@ ARGV = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
 ADDON = os.path.abspath(ARGV[ARGV.index("--addon") + 1]) if "--addon" in ARGV else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS = ARGV[ARGV.index("--models") + 1].split(",") if "--models" in ARGV else ["bust"]
 NAMES = {"bust": "marble_bust_01", "lion": "lion_head", "crane": "overhead_crane", "barrier": "concrete_road_barrier"}
-BUTTON = {"bust": ("tidytools", "SquareUp"), "barrier": ("hardtidy", "TrueUpEdges"), "crane": ("loopspoles", "EvenTheBand"), "lion": ("loopspoles", "OpenUpPoles")}
+BUTTON = {"bust": ("relax", "SquareUp"), "barrier": ("hardtidy", "TrueUpEdges"), "crane": ("loopspoles", "EvenTheBand"), "lion": ("loopspoles", "OpenUpPoles")}
 sys.path.insert(0, os.path.dirname(ADDON))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "bench", "assets")))
 import uvm  # noqa: E402

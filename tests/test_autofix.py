@@ -158,7 +158,7 @@ def _bent(stay_b=True, mirror=None):
 
 def _split(co, faces, quads):
     """Each quad in `quads` cut in two triangles."""
-    out, parent = [], []
+    out = []
     for k, face in enumerate(faces):
         if k in quads:
             a, b, c, d = face

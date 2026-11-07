@@ -158,10 +158,6 @@ class _StripMove(_StripTools):
     def run(self, base: Base, settings: dict, rough: bool = False):
         elements = [int(e) for e in settings.get("strips") or []] or [int(settings.get("strip", -1))]
         fixes = list(settings.get("fix") or []) or [self.fixes[0]] * len(elements)
-        if elements == [-1]:  # no pick (a spot whose pick did not come through): the strips that need it, found in the scope
-            found = yield from self.spots(base)
-            elements = [int(e) for sp in found for e in sp.pick["strips"]] or elements
-            fixes = [f for sp in found for f in sp.pick["fix"]] or fixes
         amount = float(settings.get("amount", 1.0))
         st = self._strips(base)
         if any(e < 0 or e >= len(st.labels) for e in elements):

@@ -43,24 +43,6 @@ TIME_WORDS = {"NORMAL": "Normal", "LONGER": "Longer", "NONE": "No Limit"}
 fx = {"job": None, "report": None, "show": None, "show_handle": None, "show_op": False, "seen_kinds": {}}
 
 
-# --------------------------------------------------------------------------- one shim
-
-
-def _relay(work, rnd, i, trial, count):
-    """`autofix._relay`, with one change: a step of the work that has no number yet (the camera pictures, the word
-    "measuring") is also an event, so a timer slice ends there and Blender never waits on a whole measurement.
-    ponytail: drop this once autofix._relay yields on those steps itself."""
-    while True:
-        try:
-            progress = next(work)
-        except StopIteration as done:
-            return done.value
-        yield autofix.Event("working", rnd, i, trial, spots=count, progress=float(progress) if isinstance(progress, (int, float)) else -1.0)
-
-
-autofix._relay = _relay
-
-
 # --------------------------------------------------------------------------- the settings
 
 
@@ -136,6 +118,7 @@ class AutoFixJob:
         self.gs_cap = gs.organize_cap if gs.organize_cap_use else None
         self.detail = float(getattr(guided.state["auto_base"].get("job"), "detail", 0.0) or 0.0)
         self.look = None
+        self.scene, self.plane = context.scene, None
         self.stopped_words = ""
         self.last_draw = 0.0
         self.work = self._drive(context)
@@ -155,7 +138,12 @@ class AutoFixJob:
         mirror = getattr(job, "mirror", None)
         if self.look is not None:
             self.look.fresh()
-        return T.make_base(co, faces, scope=np.ones(len(faces), dtype=bool), project=project, mirror=(mirror[0], mirror[1]) if mirror else None, facing=facing, labels=tidylive._labels(res, co), kinds=tidylive._kinds(res))
+        if self.plane is None:  # Seal the Middle on a result not made mirrored: the plane found once, as its tool does
+            from . import tidytools
+
+            self.plane = tidytools._mirror_plane(bpy.context)
+        pick = dict(self.plane, angle=self.scene.curiomesh_guided.hs_angle)  # Hard Edges: the angle in use now
+        return T.make_base(co, faces, scope=np.ones(len(faces), dtype=bool), project=project, mirror=(mirror[0], mirror[1]) if mirror else None, pick=pick, facing=facing, labels=tidylive._labels(res, co), kinds=tidylive._kinds(res))
 
     def stopped(self) -> str:
         if self.spent >= self.limit:
@@ -214,6 +202,10 @@ class AutoFixJob:
                 if not tidylive.commit(context, p.cand, f"Auto Fix: {name}", numbers, push=True):
                     kept = False
                     p.reason = "held"
+            if kept and getattr(ev.trial, "fitted", None) is not None:  # Hard Edges moves nothing: its pick is the angle
+                from . import tidytools
+
+                tidytools.CURIOMESH_OT_tool_hard_edges._set(None, context, float(ev.trial.fitted))
             if kept:
                 for sp in p.fixed:
                     fx["seen_kinds"][sp.kind] = fx["seen_kinds"].get(sp.kind, 0) + 1
@@ -322,7 +314,7 @@ def start(context, plan=None, force: bool = False, limit: float | None = None) -
         report.update(words=autofix.NOTHING, how="done")
         overlay.tag_redraw()
         return True
-    job = fx["job"] = AutoFixJob(context, plan, report, 0, limit)
+    fx["job"] = AutoFixJob(context, plan, report, 0, limit)
     _arm()
     return True
 

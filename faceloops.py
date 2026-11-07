@@ -900,10 +900,6 @@ class CURIOMESH_OT_strip_fix_all(tidylive.LiveTool, bpy.types.Operator):
     def poll(cls, context):
         return _g().state["res"] is not None and _g().state["auto_base"] is not None  # no 3D view needed for F9 and scripts
 
-    def _settings(self) -> dict:
-        # the wrapper's settings (with Keep going) belong to an instance, not to the class LiveTool reads them from
-        return {k: getattr(self, k) for k in self.trial().defaults if hasattr(self, k)}
-
 
 class CURIOMESH_OT_strip_add(_Edit, bpy.types.Operator):
     bl_idname = "curiomesh.strip_add"
