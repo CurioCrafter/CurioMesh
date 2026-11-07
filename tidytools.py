@@ -95,6 +95,12 @@ def _op(idname: str):
         return None
 
 
+def _again_op(idname: str):
+    """The operator Again may reopen: only this add-on's own, since last_tool is saved in the .blend and a file
+    from someone else could name any operator."""
+    return _op(idname) if idname and idname.startswith("curiomesh.") and idname != "curiomesh.tool_again" else None
+
+
 def why_not(context) -> str:
     """The reason a tool cannot open on the Work On scope now, or ""."""
     g = _guided()
@@ -820,17 +826,24 @@ class CURIOMESH_OT_tool_again(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         ts = history.settings(context.scene)
-        return ts is not None and bool(ts.last_tool) and _op(ts.last_tool) is not None and not why_not(context)
+        return ts is not None and _again_op(ts.last_tool) is not None and not why_not(context)
 
     def invoke(self, context, event):
         ts = history.settings(context.scene)
+        op = _again_op(ts.last_tool)
+        if op is None:
+            return {"CANCELLED"}
         try:
             kept = json.loads(ts.last_settings or "{}")
         except ValueError:
             kept = {}
-        op = _op(ts.last_tool)
+        if not isinstance(kept, dict):
+            kept = {}
         names = {p.identifier for p in op.get_rna_type().properties}
-        return op("INVOKE_DEFAULT", **{k: v for k, v in kept.items() if k in names})
+        try:
+            return op("INVOKE_DEFAULT", **{k: v for k, v in kept.items() if k in names})
+        except (TypeError, ValueError):  # a stored value of the wrong type: open with the tool's own defaults
+            return op("INVOKE_DEFAULT")
 
     def execute(self, context):
         return self.invoke(context, None)
