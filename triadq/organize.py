@@ -68,6 +68,30 @@ def _edges(faces):
     return out
 
 
+def half_edges(faces):
+    """(face of each corner, corner, next corner) over every face, as arrays, worked out per face size (no per-face
+    Python), so a big result opens a tool without a stall."""
+    if not len(faces):
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty, empty
+    by_size: dict[int, list] = {}
+    for i, f in enumerate(faces):
+        by_size.setdefault(len(f), []).append(i)
+    fid, a, b = [], [], []
+    for size, ids in by_size.items():
+        if not size:
+            continue
+        rows = np.asarray([faces[i] for i in ids], dtype=np.int64).reshape(len(ids), size)
+        fid.append(np.repeat(np.asarray(ids, dtype=np.int64), size))
+        a.append(rows.ravel())
+        b.append(np.roll(rows, -1, axis=1).ravel())
+    if not a:
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty, empty
+    order = np.argsort(np.concatenate(fid), kind="stable")  # face order, as the per-face loops gave it
+    return np.concatenate(fid)[order], np.concatenate(a)[order], np.concatenate(b)[order]
+
+
 def _normals(co: np.ndarray, quads: np.ndarray) -> np.ndarray:
     p = co[quads]
     return _unit(np.cross(p[:, 2] - p[:, 0], p[:, 3] - p[:, 1]))
@@ -92,12 +116,21 @@ def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None) -> np.ndarray:
     normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
     on_plane = np.zeros(len(co), dtype=bool) if plane is None else on_mirror(co, *plane)
     limit = np.cos(np.radians(sharp_deg))
-    for (a, b), users in _edges(faces).items():
-        if len(users) != 2:
-            if not (on_plane[a] and on_plane[b]):
-                out[a] = out[b] = True
-        elif float(normal[users[0]] @ normal[users[1]]) < limit:
-            out[a] = out[b] = True
+    fid, a, b = half_edges(faces)
+    if not len(a):
+        return out
+    lo, hi = np.minimum(a, b), np.maximum(a, b)
+    order = np.lexsort((fid, hi, lo))
+    lo, hi, fid = lo[order], hi[order], fid[order]
+    start = np.flatnonzero(np.r_[True, (lo[1:] != lo[:-1]) | (hi[1:] != hi[:-1])])
+    users = np.diff(np.r_[start, len(lo)])
+    el, eh = lo[start], hi[start]
+    border = (users != 2) & ~(on_plane[el] & on_plane[eh])
+    two = np.flatnonzero(users == 2)
+    sharp = two[(normal[fid[start[two]]] * normal[fid[start[two] + 1]]).sum(axis=1) < limit]
+    for ids in (np.flatnonzero(border), sharp):
+        out[el[ids]] = True
+        out[eh[ids]] = True
     return out
 
 

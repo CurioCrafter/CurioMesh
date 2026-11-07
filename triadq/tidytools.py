@@ -49,7 +49,23 @@ class SmoothCorners(Trial):
             if base.project is not None:
                 co[free] = base.project(co[free])
             yield (step + 1.0) / steps
-        return Candidate(co, strength=strength, exact=not rough)
+        return Candidate(_unfold(base, co), strength=strength, exact=not rough)
+
+
+def _unfold(base: Base, co: np.ndarray) -> np.ndarray:
+    """Corners of faces that turned over go back where they were, pass by pass, until no face is turned over."""
+    from .hardtidy import face_normals
+    from .organize import half_edges
+
+    before = face_normals(base.co, base.faces)
+    fid, corner, _next = half_edges(base.faces)
+    while True:  # each pass puts at least one face's corners back, so it ends
+        flipped = (before * face_normals(co, base.faces)).sum(axis=1) < 0.0
+        back = np.unique(corner[flipped[fid]])
+        back = back[(co[back] != base.co[back]).any(axis=1)]
+        if not len(back):
+            return co
+        co[back] = base.co[back]
 
 
 # --------------------------------------------------------------------------- shared by the Cleanup tools
@@ -57,13 +73,9 @@ class SmoothCorners(Trial):
 
 def _half_edges(faces):
     """(face of each corner, corner, next corner) over every face, as arrays."""
-    if not faces:
-        empty = np.zeros(0, dtype=np.int64)
-        return empty, empty, empty
-    sizes = np.fromiter((len(f) for f in faces), dtype=np.int64, count=len(faces))
-    a = np.fromiter((v for f in faces for v in f), dtype=np.int64, count=int(sizes.sum()))
-    b = np.fromiter((f[(k + 1) % len(f)] for f in faces for k in range(len(f))), dtype=np.int64, count=len(a))
-    return np.repeat(np.arange(len(faces)), sizes), a, b
+    from .organize import half_edges
+
+    return half_edges(faces)
 
 
 def _edge_users(a, b, count):

@@ -313,6 +313,7 @@ class Session:
         self.base = T.make_base(co, faces, scope=mask, project=project, mirror=plane, pick=self.pick, facing=facing, labels=labels, kinds=self.kinds)
         self.look = _looker(src_co, src_faces) if src_co is not None and "look" in self.trial.stages else None
         yield
+        yield from self.trial.prepare(self.base)
         refusal = self.trial.check(self.base)
         if refusal:
             self.cand = self.shown = T.Candidate(None, refusal=refusal)

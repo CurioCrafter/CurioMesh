@@ -213,30 +213,44 @@ def kept_lines(base: Base, kinds: dict) -> np.ndarray:
     return edges[np.isin(edges[:, 0] * n + edges[:, 1], inside[:, 0] * n + inside[:, 1])]
 
 
+BEND_CHUNK = 2048  # quads whose original normals are read per slice (Blender's own lookup is one call per point)
+
+
+def bend_steps(base: Base):
+    """Generator: reads the bend under each quad of the scope into `base.cache["bend"]`, a chunk per step, so a big
+    result never stalls the preview while it is read."""
+    if "bend" in base.cache:
+        return
+    quads = _scope_quads(base)
+    co = base.co
+    if not len(quads):
+        base.cache["bend"] = np.zeros(len(co))
+        return
+    p = co[quads]
+    samples = np.concatenate((p, p.mean(axis=1, keepdims=True), 0.5 * (p + np.roll(p, -1, axis=1))), axis=1)  # (k, 9, 3)
+    facing = getattr(base, "facing", None)
+    if facing is not None:
+        normals = np.zeros((len(quads), 9, 3))
+        for i in range(0, len(quads), BEND_CHUNK):
+            normals[i : i + BEND_CHUNK] = np.asarray(facing(samples[i : i + BEND_CHUNK].reshape(-1, 3)), dtype=np.float64).reshape(-1, 9, 3)
+            yield
+    else:  # no original to read: the result's own corner normals stand in
+        normals = _vertex_normals(co, quads)[quads]
+    spread = np.arccos(np.clip(np.linalg.norm(_unit(normals).mean(axis=1), axis=1), 0.0, 1.0))
+    # a quad's share: its bend for its size, so small quads on a curve count as much as big ones on it
+    per_quad = spread / np.maximum(np.sqrt(_areas(co, quads)), 1e-30)
+    high = float(np.percentile(per_quad, 95.0)) or 1.0
+    per_quad = np.clip(per_quad / high, 0.0, 1.0)
+    total = np.bincount(quads.reshape(-1), np.repeat(per_quad, 4), len(co))
+    count = np.bincount(quads.reshape(-1), minlength=len(co))
+    base.cache["bend"] = np.where(count > 0, total / np.maximum(count, 1), 0.0)
+
+
 def detail_density(base: Base, mix: float) -> np.ndarray:
     """Per corner: how densely quads should sit there, 1 on the flattest areas, up to 1 + DETAIL_GAIN * mix where your
     original bends most. Read once from the spread of your original's normals under each quad of the scope."""
-    if "bend" not in base.cache:
-        quads = _scope_quads(base)
-        co = base.co
-        if not len(quads):
-            base.cache["bend"] = np.zeros(len(co))
-        else:
-            p = co[quads]
-            samples = np.concatenate((p, p.mean(axis=1, keepdims=True), 0.5 * (p + np.roll(p, -1, axis=1))), axis=1)  # (k, 9, 3)
-            facing = getattr(base, "facing", None)
-            if facing is not None:
-                normals = np.asarray(facing(samples.reshape(-1, 3)), dtype=np.float64).reshape(len(quads), 9, 3)
-            else:  # no original to read: the result's own corner normals stand in
-                normals = _vertex_normals(co, quads)[quads]
-            spread = np.arccos(np.clip(np.linalg.norm(_unit(normals).mean(axis=1), axis=1), 0.0, 1.0))
-            # a quad's share: its bend for its size, so small quads on a curve count as much as big ones on it
-            per_quad = spread / np.maximum(np.sqrt(_areas(co, quads)), 1e-30)
-            high = float(np.percentile(per_quad, 95.0)) or 1.0
-            per_quad = np.clip(per_quad / high, 0.0, 1.0)
-            total = np.bincount(quads.reshape(-1), np.repeat(per_quad, 4), len(co))
-            count = np.bincount(quads.reshape(-1), minlength=len(co))
-            base.cache["bend"] = np.where(count > 0, total / np.maximum(count, 1), 0.0)
+    for _ in bend_steps(base):
+        pass
     return 1.0 + DETAIL_GAIN * float(mix) * base.cache["bend"]
 
 
@@ -466,6 +480,9 @@ class RelaxTowardDetail(_Relax):
     layers = ("scope", "ghost", "wash", "arrows", "held")
     stages = ("look", "size", "tidy")
     legend = "blue grew  orange shrank"
+
+    def prepare(self, base: Base):
+        yield from bend_steps(base)
 
     def check(self, base: Base) -> str:
         quads = _scope_quads(base)

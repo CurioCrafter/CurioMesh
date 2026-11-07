@@ -568,7 +568,8 @@ class TrueUpEdges(Trial):
                 break
             for job in worse:
                 moving[job[0]] = False
-            trued_jobs = [job for job in trued_jobs if not any(job is w for w in worse)]
+            gone = {id(w) for w in worse}
+            trued_jobs = [job for job in trued_jobs if id(job) not in gone]
         trued, straight = len(trued_jobs), sum(1 for job in trued_jobs if job[3])
         wave_before = _wave(base.co, trued_jobs) / base.edge
         wave_after = _wave(co, trued_jobs) / base.edge

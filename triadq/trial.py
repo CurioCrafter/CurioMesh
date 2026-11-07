@@ -69,8 +69,11 @@ def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=
     held = pinned(co, faces, plane=mirror) if len(faces) else np.zeros(len(co), dtype=bool)
     if stay is not None:
         held |= np.asarray(stay, dtype=bool)
-    for f in np.flatnonzero(~scope).tolist():
-        held[list(faces[f])] = True
+    if not scope.all():
+        from .organize import half_edges
+
+        fid, a, _b = half_edges(faces)
+        held[a[~scope[fid]]] = True
     if mirror is not None:
         axis, offset = mirror
         size = float(np.ptp(co, axis=0).max()) if len(co) else 1.0
@@ -83,8 +86,9 @@ def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=
 def mean_edge(co, faces) -> float:
     if not faces:
         return 1.0
-    a = np.concatenate([np.asarray(f) for f in faces])
-    b = np.concatenate([np.roll(np.asarray(f), -1) for f in faces])
+    from .organize import half_edges
+
+    _f, a, b = half_edges(faces)
     length = float(np.linalg.norm(co[a] - co[b], axis=1).mean())
     return length if length > 0.0 else 1.0
 
@@ -93,8 +97,9 @@ def edges_of(faces) -> np.ndarray:
     """(e, 2) unique edges of the faces, smaller corner first."""
     if not faces:
         return np.zeros((0, 2), dtype=np.int64)
-    a = np.concatenate([np.asarray(f, dtype=np.int64) for f in faces])
-    b = np.concatenate([np.roll(np.asarray(f, dtype=np.int64), -1) for f in faces])
+    from .organize import half_edges
+
+    _f, a, b = half_edges(faces)
     return np.unique(np.sort(np.stack((a, b), axis=1), axis=1), axis=0)
 
 
@@ -138,6 +143,10 @@ class Trial:
     picks: tuple = ()  # what you click before it can run, in order ("pole", "partner"); each is a setting, -1 until clicked
     asks: dict = {}  # pick -> what the header and the card ask for: {"pole": "click a pole"}
     stay_open = False  # True: after Enter the tool opens again on the new result (one Undo step per Enter)
+
+    def prepare(self, base: Base):
+        """Generator: slow reads a tool needs before `check`, in small steps (the Session yields between them)."""
+        yield from ()
 
     def check(self, base: Base) -> str:
         """"" when the tool can run here, else the message the card shows instead."""
