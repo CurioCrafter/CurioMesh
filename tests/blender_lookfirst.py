@@ -204,6 +204,23 @@ ok(len(organize.org["passes"]) == 1, f"Ctrl+Z brings the pass back ({len(organiz
 undo(can)
 ok(not organize.org["passes"] and np.allclose(res_co(), tidied), f"and again goes back to before Tidy Again (step {step()}, wanted {tidied_step})")
 
+# --- 5b. Face Loops edits are steps of the same History (no counter of their own)
+FL = pkg.faceloops
+res0, start_co, start_step = guided.state["res"], res_co(), step()
+strips_ = FL.strips(res0)
+element = next((int(e) for e in range(len(res0["faces"])) if strips_.sizes[strips_.labels[e]] >= 4 and not np.allclose(FL.moved_points(res0, FL.walk(res0, int(e)), "straighten", 1.0), start_co)), None)
+ok(element is not None, "a strip that Straighten changes")
+FL.fl["sel"] = (res0, element)
+err = FL.edit(bpy.context, "straighten")
+bpy.ops.ed.undo_push(message="Straighten Strip")  # the operator's UNDO flag in a window
+straight = res_co()
+ok(not err and names()[-1] == "Straighten Strip" and step() == start_step + 1, f"Straighten is a History step: {err!r} {names()[-3:]} at {step()}")
+ok(FL.selected() is not None and FL.selected()[1] == element, "the strip stays selected after the edit")
+undo(can)
+ok(np.allclose(res_co(), start_co) and step() == start_step, f"Ctrl+Z brings back the result before Straighten (step {step()})")
+redo(can, start_step + 1)
+ok(np.allclose(res_co(), straight) and FL.selected() is not None and FL.selected()[1] == element, "Ctrl+Shift+Z brings Straighten and its selected strip back")
+
 # --- 6. clean up: no handler, no session; registering twice is fine
 TL.close("")
 ok(not TL.busy() and not TL.live["handles"], "no preview and no draw handler left")

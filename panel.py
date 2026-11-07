@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 from . import guided as G
-from . import flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry, tidylive, tidytools
+from . import faceloops, flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, profiles, segment_goals, segments, symmetry, tidylive, tidytools
 from . import verdict as V
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
@@ -572,6 +572,7 @@ def draw_adjust(layout, gs) -> None:
         note = organize.status()
         if note:
             overlay.wrap_label(layout, note, icon="TIME", width=WIDTH, limit=2)
+    faceloops.draw(layout, gs)
     draw_view_strip(layout, gs)
     layout.popover(panel="CURIOMESH_PT_pop_finetune", text="Fine-tune...", icon="PREFERENCES")
 

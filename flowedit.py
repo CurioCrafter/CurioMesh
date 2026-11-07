@@ -26,6 +26,7 @@ from .triadq import checks, issues, loopscore
 from .triadq import segment as S
 
 KIND_KEY = "curiomesh_flow"  # custom property of a stroke's curve: FLOW, RING or EDGE
+REACH_KEY = "curiomesh_flow_reach"  # custom property: quad widths round the stroke that are redone (else flowstroke.REACH)
 RAW_KEY = "curiomesh_flow_raw"  # the stroke as drawn (flat x y z list), so "change to" starts from the hand's line
 LIST_KIND = {"FLOW": "GUIDE", "EDGE": "GUIDE", "RING": "LOOP"}
 COLOURS = {"FLOW": (0.25, 0.6, 1.0, 1.0), "RING": (0.3, 0.95, 0.4, 1.0), "EDGE": (1.0, 0.55, 0.1, 1.0)}
@@ -76,6 +77,8 @@ def strokes(context, gs) -> list[dict]:
     for g in _curves(gs):
         for line in guides.gather([g.obj], source, depsgraph):
             out.append(F.record(str(g.obj[KIND_KEY]), line))
+            if REACH_KEY in g.obj:
+                out[-1]["reach"] = float(g.obj[REACH_KEY])
     base = guided.state["auto_base"]
     mirror = base and getattr(base["job"], "mirror", None)
     if mirror is not None:
@@ -83,7 +86,7 @@ def strokes(context, gs) -> list[dict]:
         for s in list(out):
             p = s["points"].copy()
             p[:, axis] = 2.0 * offset - p[:, axis]
-            out.append(F.record(s["kind"], p))
+            out.append(dict(F.record(s["kind"], p), **({"reach": s["reach"]} if "reach" in s else {})))
     return out
 
 

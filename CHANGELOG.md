@@ -161,6 +161,39 @@
   tool, and Relax Toward Detail reads your original's bends a chunk at a time.
 - Dragging the ring back to where it started shows the exact result again; Enter used to wait forever there.
 - Smooth Corners puts back the corners of any face it would turn over. Start on a mesh with no faces says so.
+### Face loops
+- **Loop Flow shows face loops**: each strip of quads (walk across a quad to the one on its opposite side, and on) is
+  drawn as a line in its own colour through the quads it crosses, instead of the edge loops. A strip stops where it
+  meets a pole, so it shows one run of rows; poles are still dots.
+- **Face Loops** in Adjust, under Tidy Up. **Pick a Strip**: point at the result and the strip under the mouse lights
+  up; click to select it. The line under the buttons gives its faces, whether it closes, how much it turns and how
+  even its width is. While picking, drag the selected strip to move it sideways, or drag a pole dot to move the pole
+  along the surface; the quads round it follow. The header says what each drag does.
+- Tools for the selected strip, each one Ctrl+Z step: **Fix This** (picks the fix itself: straightens a wiggly strip,
+  else evens out an uneven one, or takes away a short dead end), **Slide** (move the mouse, click), **Straighten**,
+  **Even Width**, **Add Strip** (splits the whole strip down the middle; every face stays a quad) and **Remove Strip**
+  (joins its two sides; refused where a face next to it would stop being a quad, or where the strip winds back over
+  itself). Only the strip and up to three quads each side move, along the lines the quads already run on; folds over
+  60 degrees, borders and the mirror seam stay put, the result stays on your mesh, and a mirrored result gets the same
+  change on the other side.
+- **Face Loops share the History**: every Face Loops edit (strip tools, drags, Fix Every Strip, Ring Round This,
+  Redraw in Rows) is a step in the History list and on the same Ctrl+Z as Tidy Up and Look First, with the selected
+  strip coming back with it. There is no separate Face Loops undo counter any more.
+- **Fix Every Strip**: straightens every wiggly strip of the result and evens out the uneven ones in one step. Places
+  where the surface bends stay, and it keeps only as much of the change as costs at most 1 point of the camera check;
+  on the marble bust after Tidy Up, Loop Quality 29 -> 33 for 0.8 points.
+- **Ring Round This** builds the rings itself now, without the Flow Editor: click an eye, a mouth or a hole (its rim
+  is read off your mesh) or drag from its middle out to its edge, then move out to set how far the new faces reach
+  (drawn as two ovals) and click. The opening is filled with a small grid of quads, 2 to 4 closed rings go round it,
+  and one band joins them to the faces round it with matching edge counts: all quads, and the band's few poles (6 at
+  most) sit where the old border turns. Faces past the reach are never touched, so an eye no longer takes the nose.
+- **Redraw in Rows**: drag round an area of the result (or click a part, or select faces in Edit Mode on the result
+  first) and its quads are laid out again as long straight rows at the same size, tied to the faces round it with the
+  same edge count, all quads. The rows run along the surface's bends, the area's long side and any Flow Editor lines
+  over it; quads stay finer where they were finer. On the marble bust's face, poles inside the area 37% -> 8% of its
+  vertices and a quad's strip runs 20 quads between poles (was 2). It can leave a few folded faces where a lasso cuts
+  across the side of the head; the note under the buttons counts them, and Ctrl+Z undoes it. One step, one Undo; other
+  tools call `curiomesh.redraw_rows` or `faceloops.redraw_rows(context, face ids)`.
 
 ## 0.9.8 - 2026-11-06
 

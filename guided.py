@@ -29,7 +29,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
+from . import autoretopo, blockout, faceloops, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -434,7 +434,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
         items=(("NORMAL", "Normal", "The usual time for each step"), ("LONGER", "Longer", "Four times the usual time for each step"), ("NONE", "No Limit", "Each step runs until it stops finding anything to fix. Same model and settings give the same result every time")),
         default="NORMAL",
     )
-    organize_flow: bpy.props.BoolProperty(name="Loop Flow", description="Draws each edge loop of the result in its own colour, and its poles (points where 3 or 5+ edges meet) as dots", default=False, update=_redraw_update)
+    organize_flow: bpy.props.BoolProperty(name="Loop Flow", description="Draws each face loop (a strip of quads, as Alt+click selects) of the result in its own colour, and its poles (points where 3 or 5+ edges meet) as dots", default=False, update=_redraw_update)
     flow_live: bpy.props.BoolProperty(name="Live", description="Flow Editor: redo the quads around each stroke as soon as you draw, move or erase it. Off: strokes are only kept for the next Start", default=True)
     flow_size: bpy.props.FloatProperty(name="Shape Size", description="Flow Editor: how wide a clicked eye ring, mouth ring or nose-to-mouth shape is. 0 picks a size from your mesh", default=0.0, min=0.0, soft_max=10.0, subtype="DISTANCE")
     flow_pair: bpy.props.BoolProperty(name="Both Sides", description="Flow Editor: a clicked eye ring also goes on the other side, mirrored across the middle of your mesh (always on when the result is mirrored)", default=True)
@@ -4011,6 +4011,7 @@ def _on_load_post(*_args):
     ladder.cancel()
     segments.reset()
     flowedit.cancel()
+    faceloops.cancel()
     state.update(source="", sig=None, src=None, res=None, lock=None, spot=None, draw=None, draw_key=None, batches=None, message="", auto_base=None, curve_sig=None, region=None, found=[])
     for sc in bpy.data.scenes:
         gs = getattr(sc, "curiomesh_guided", None)
@@ -4019,7 +4020,7 @@ def _on_load_post(*_args):
 
 
 def register() -> None:
-    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes()):
+    for cls in (*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes(), *faceloops.CLASSES):
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_guided = bpy.props.PointerProperty(type=CURIOMESH_PG_guided)
     bpy.types.Object.curiomesh_points = bpy.props.CollectionProperty(type=CURIOMESH_PG_guided_point)
@@ -4028,6 +4029,7 @@ def register() -> None:
     segments.register()
     organize.register()
     flowedit.register()
+    faceloops.register()
     bpy.app.handlers.load_post.append(_on_load_post)
 
 
@@ -4040,6 +4042,7 @@ def unregister() -> None:
     segments.unregister()
     organize.unregister()
     flowedit.unregister()
+    faceloops.unregister()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     for timer in (_poll, _auto_slice):
@@ -4056,5 +4059,5 @@ def unregister() -> None:
     for owner, name in ((bpy.types.Scene, "curiomesh_guided"), (bpy.types.Object, "curiomesh_points"), (bpy.types.Object, "curiomesh_point_index")):
         if hasattr(owner, name):
             delattr(owner, name)
-    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes())):
+    for cls in reversed((*segments.PRE_CLASSES, *CLASSES, *segments.CLASSES, *ladder.CLASSES, *flowedit.classes(), *faceloops.CLASSES)):
         bpy.utils.unregister_class(cls)

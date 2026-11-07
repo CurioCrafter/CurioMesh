@@ -56,8 +56,9 @@ def _set_step(scene, step: int) -> None:
 
 
 def snapshot(context=None) -> dict:
-    """References to everything that says what is on screen: the result, Tidy Up's passes, the ladder, the parts."""
-    from . import ladder, organize, segments
+    """References to everything that says what is on screen: the result, Tidy Up's passes, the ladder, the parts, the
+    strip picked with Face Loops."""
+    from . import faceloops, ladder, organize, segments
 
     guided = _g()
     base = guided.state["auto_base"]
@@ -72,6 +73,7 @@ def snapshot(context=None) -> dict:
         "seg": {k: _seg_copy(k, v) for k, v in ((k, segments.seg.get(k)) for k in SEG_KEYS)},
         "sliders": None if gs is None else {k: float(getattr(gs, k)) for k in SLIDERS},
         "curve_sig": guided.state.get("curve_sig"),  # the search's inputs for this result: an undone Tweak does not restart it
+        "strip_sel": faceloops.fl["sel"],  # (result, element): only shown while that result is on screen
     }
 
 
@@ -86,7 +88,7 @@ def _seg_copy(key, value):
 def restore(context, snap: dict, sliders: bool = False) -> bool:
     """Put a snapshot back on screen. `sliders`: also set the sliders to what they were (a History jump; after an undo
     Blender has already put them back). True when the result on screen changed."""
-    from . import ladder, organize, segments
+    from . import faceloops, ladder, organize, segments
 
     guided = _g()
     shown = guided.state["res"]
@@ -104,6 +106,7 @@ def restore(context, snap: dict, sliders: bool = False) -> bool:
     segments.seg.update({k: _seg_copy(k, v) for k, v in snap["seg"].items()})
     if "curve_sig" in snap:
         guided.state["curve_sig"] = snap["curve_sig"]
+    faceloops.fl.update(sel=snap.get("strip_sel"), live=None, hover=None)
     segments.seg.update(batch_key=None, bad_key=None, tris=None, hover=None, lines_key=None, outline_key=None, high_key=None)
     if new_parts:
         segments.refresh_list()
