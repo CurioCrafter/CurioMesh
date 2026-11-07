@@ -25,7 +25,7 @@ import numpy as np
 from . import strips as S
 from .organize import MOST_DRIFT
 from .tidytools import NOTHING_FREE
-from .trial import Base, Candidate, Trial, edges_of, unfold
+from .trial import Base, Candidate, Spot, Trial, edges_of, unfold
 
 NO_POLES = "No poles in this area."
 NO_PARTNER = "No pole within reach can cancel with this one."
@@ -35,6 +35,8 @@ MIRRORED = "Cancel Pole Pair does not work on a mirrored result yet: its two hal
 CHUNK = 48  # poles worked on between two yields (a few milliseconds)
 STEP = 0.5  # share of the full opening taken per round, and most move per round in edges
 OPEN_GAIN = 0.01  # degrees: a round of Open Up Poles that opens the narrowest angles (mean) less than this ends it
+BUNCHED = 0.2  # Auto Fix: a band whose strips' widths spread more than this (share of the mean) is a spot
+PINCHED = 0.7  # Auto Fix: a pole whose narrowest angle is under this share of its even angle (360 / spokes) is a spot
 
 
 def _onto(base: Base, points: np.ndarray) -> np.ndarray:
@@ -64,10 +66,10 @@ def corner_faces(faces, count: int):
     return fi[order], starts
 
 
-def rings_of(faces, count: int, seeds, rings: int, allowed=None) -> tuple[np.ndarray, np.ndarray]:
+def rings_of(faces, count: int, seeds, rings: int, allowed=None, cf=None) -> tuple[np.ndarray, np.ndarray]:
     """(faces within `rings` face rings of the seed corners, ring number of every corner reached, -1 elsewhere).
-    `allowed`: bool per face; others are not crossed."""
-    order, starts = corner_faces(faces, count)
+    `allowed`: bool per face; others are not crossed. `cf`: `corner_faces(faces, count)` when the caller has it."""
+    order, starts = corner_faces(faces, count) if cf is None else cf
     ring = np.full(count, -1, dtype=np.int64)
     seeds = np.unique(np.asarray(seeds, dtype=np.int64))
     ring[seeds] = 0
@@ -88,6 +90,106 @@ def rings_of(faces, count: int, seeds, rings: int, allowed=None) -> tuple[np.nda
     return np.flatnonzero(taken), ring
 
 
+# --------------------------------------------------------------------------- Auto Fix spots (AUTO_FIX.md 2.1)
+
+
+def _cf(base: Base):
+    if "corner_faces" not in base.cache:
+        base.cache["corner_faces"] = corner_faces(base.faces, len(base.co))
+    return base.cache["corner_faces"]
+
+
+def faces_round(cf, corners) -> np.ndarray:
+    """Every face that uses one of `corners` (`cf`: `corner_faces`)."""
+    order, starts = cf
+    corners = np.unique(np.asarray(corners, dtype=np.int64))
+    if not len(corners):
+        return np.zeros(0, dtype=np.int64)
+    lo, n = starts[corners], starts[corners + 1] - starts[corners]
+    at = np.repeat(lo - np.cumsum(n) + n, n) + np.arange(int(n.sum()))
+    return np.unique(order[at])
+
+
+def with_mirror(base: Base, corners) -> np.ndarray:
+    """`corners` and, on a mirrored result, their mirror images: a fix on one half moves the other half too."""
+    corners = np.asarray(corners, dtype=np.int64)
+    if base.mirror is None:
+        return corners
+    if "partners" not in base.cache:
+        base.cache["partners"] = S.partners(base.co, *base.mirror)
+    other = base.cache["partners"][corners]
+    return np.union1d(corners, other[other >= 0])
+
+
+def lead_side(base: Base, points) -> bool:
+    """True off a mirrored result, or when the points lie on the half the mirror copies from (`strips.finish`, side 1)."""
+    if base.mirror is None:
+        return True
+    axis, offset = base.mirror
+    return float(np.mean(np.asarray(points, dtype=np.float64)[:, axis]) - offset) >= -1e-9 * base.edge
+
+
+def region(base: Base, moved) -> np.ndarray:
+    """The faces a fix that moves `moved` (and their mirror images) works on: every face round them, inside the scope.
+    Its edge is held, so a spot never disturbs the rest."""
+    ids = faces_round(_cf(base), with_mirror(base, moved))
+    return ids[base.scope[ids]] if len(ids) else ids
+
+
+def join(spots: list, faces) -> list:
+    """Spots that share a corner become one (AUTO_FIX.md 2.1): the worst one's kind and place, the union of the faces,
+    and list picks put together, so two spots never share a corner."""
+    if len(spots) < 2:
+        return list(spots)
+    root = list(range(len(spots)))
+
+    def find(i):
+        while root[i] != i:
+            root[i] = root[root[i]]
+            i = root[i]
+        return i
+
+    owner: dict = {}
+    for i, sp in enumerate(spots):
+        for v in {v for f in np.asarray(sp.faces).tolist() for v in faces[f]}:
+            j = owner.setdefault(v, i)
+            if j != i:
+                a, b = find(i), find(j)
+                if a != b:
+                    root[a] = b
+    groups: dict = {}
+    for i in range(len(spots)):
+        groups.setdefault(find(i), []).append(spots[i])
+    out = []
+    for group in groups.values():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        worst = max(group, key=lambda sp: float(sp.bad))
+        pick: dict = {}
+        for sp in group:
+            for k, v in sp.pick.items():
+                pick.setdefault(k, []).extend(v if isinstance(v, list) else [v])
+        out.append(Spot(worst.kind, np.unique(np.concatenate([np.asarray(sp.faces, dtype=np.int64) for sp in group])), worst.at, float(worst.bad), pick))
+    return out
+
+
+def _spot_corners(faces, spot) -> set:
+    return {v for f in np.asarray(spot.faces).tolist() for v in faces[f]}
+
+
+def face_poles(faces, co, ids) -> int:
+    """Poles (as Tidiness counts them, `Topology.poles`) among the corners of faces `ids` of the mesh (co, faces): a
+    spot's own number for the tools that change faces."""
+    if not len(faces) or not len(ids):
+        return 0
+    from .patterns import Topology
+
+    poles = Topology(co, faces).poles
+    corners = np.unique(np.fromiter((v for f in np.asarray(ids).tolist() for v in faces[f]), dtype=np.int64))
+    return int(poles[corners].sum())
+
+
 # --------------------------------------------------------------------------- Even the Band
 
 
@@ -100,9 +202,45 @@ class EvenTheBand(Trial):
     stages = ("spread", "move", "look")
     picks = ("strip",)
     asks = {"strip": "click a strip"}
+    kinds = (("bunched", "bunched band of strips", "bunched bands of strips"),)
+    own = "spread"
+    least = 0.005
 
     def check(self, base: Base) -> str:
         return "" if base.free.any() else NOTHING_FREE
+
+    def spots(self, base: Base):
+        """One spot per band whose strips' widths spread more than BUNCHED; the strips of a band found once."""
+        st = self._strips(base)
+        covered = np.zeros(len(base.co), dtype=bool)
+        out = []
+        labels = np.unique(st.labels[st.sizes[st.labels] >= 2]) if len(st.labels) else np.zeros(0, np.int64)
+        first = {int(lab): int(e) for e, lab in reversed(list(enumerate(st.labels.tolist())))}
+        for i, label in enumerate(labels.tolist()):
+            if i % CHUNK == CHUNK - 1:
+                yield i / max(len(labels), 1)
+            element = first[label]
+            strip = st.walk(element)
+            if covered[strip["a"] + strip["b"]].all() or not all(base.scope[f] for f in strip["faces"]):
+                continue
+            _strip, lines = self._lines(base, element)
+            for ids, _ia in lines:
+                covered[ids] = True
+            if not lines or not lead_side(base, base.co[strip["a"] + strip["b"]]):
+                continue
+            bad = spread(base.co, lines)
+            moved = np.unique(np.concatenate([ids[1:-1] for ids, _ia in lines]))
+            moved = moved[base.free[moved]]
+            if bad <= BUNCHED or not len(moved):
+                continue
+            faces = region(base, moved)
+            if len(faces):
+                out.append(Spot("bunched", faces, base.co[strip["a"] + strip["b"]].mean(axis=0), bad, {"strips": [element]}))
+        return join(out, base.faces)
+
+    def own_number(self, base: Base, co, faces, spot) -> float:
+        lines = [line for e in spot.pick.get("strips", []) for line in self._lines(base, int(e))[1]]
+        return spread(co, lines)
 
     def _strips(self, base: Base) -> S.Strips:
         if "strips" not in base.cache:
@@ -151,35 +289,43 @@ class EvenTheBand(Trial):
         return np.concatenate(out) if out else np.zeros((0, 2, 3))
 
     def run(self, base: Base, settings: dict, rough: bool = False):
-        element = int(settings.get("strip", -1))
+        elements = [int(e) for e in settings.get("strips") or []] or [int(settings.get("strip", -1))]
+        if elements == [-1]:  # no pick (a spot whose pick did not come through): the bands that need it, found in the scope
+            found = yield from self.spots(base)
+            elements = [int(e) for sp in found for e in sp.pick["strips"]] or elements
         strength = float(settings.get("strength", 1.0))
-        strip, lines = self._lines(base, element)
+        count = 2 * len(self._strips(base).quads)
+        bands = [self._lines(base, e) for e in elements if 0 <= e < count]
+        bands = [(strip, lines) for strip, lines in bands if lines]
         yield 0.3
-        if not lines:
+        if not bands:
             return Candidate(None, refusal=NO_NEIGHBOURS)
         co = base.co
-        total, hits = np.zeros_like(co), np.zeros(len(co))
-        for ids, _ia in lines:
-            p = co[ids]
-            s = S._arc(p)
-            m = len(ids)
-            even = np.linspace(s[0], s[-1], m)
-            if m > 3:  # ease in over the first and last strip, so the band's edge is not kinked
-                even[1] = 0.5 * (even[1] + s[1])
-                even[-2] = 0.5 * (even[-2] + s[-2])
-            at = s + strength * (even - s)
-            inner = ids[1:-1]
-            np.add.at(total, inner, S._along(p, s, at[1:-1]))
-            np.add.at(hits, inner, 1.0)
+        for strip, lines in bands:  # several bands (Auto Fix's joined spots): each from where the last left it
+            total, hits = np.zeros_like(co), np.zeros(len(co))
+            for ids, _ia in lines:
+                p = co[ids]
+                s = S._arc(p)
+                m = len(ids)
+                even = np.linspace(s[0], s[-1], m)
+                if m > 3:  # ease in over the first and last strip, so the band's edge is not kinked
+                    even[1] = 0.5 * (even[1] + s[1])
+                    even[-2] = 0.5 * (even[-2] + s[-2])
+                at = s + strength * (even - s)
+                inner = ids[1:-1]
+                np.add.at(total, inner, S._along(p, s, at[1:-1]))
+                np.add.at(hits, inner, 1.0)
+            new = co.copy()
+            moved = (hits > 0) & base.free
+            new[moved] = total[moved] / hits[moved, None]
+            side = float(np.sign(np.mean(co[strip["a"] + strip["b"], base.mirror[0]]) - base.mirror[1]) or 1.0) if base.mirror else 1.0
+            new = S.finish(co, new, base.faces, lambda x: _onto(base, x), _mirror(base, co), side)
+            new[base.stay] = base.co[base.stay]
+            co = new
         yield 0.6
-        new = co.copy()
-        moved = (hits > 0) & base.free
-        new[moved] = total[moved] / hits[moved, None]
-        side = float(np.sign(np.mean(co[strip["a"] + strip["b"], base.mirror[0]]) - base.mirror[1]) or 1.0) if base.mirror else 1.0
-        new = S.finish(co, new, base.faces, lambda x: _onto(base, x), _mirror(base, co), side)
-        new[base.stay] = co[base.stay]
-        a, b = spread(co, lines), spread(new, lines)
-        cand = Candidate(new, strength=strength, exact=True, note=f"{len(lines)} rungs across {_strips_across(lines)} strips")
+        lines = [line for _strip, ls in bands for line in ls]
+        a, b = spread(base.co, lines), spread(co, lines)
+        cand = Candidate(co, strength=strength, exact=True, note=f"{len(lines)} rungs across {_strips_across(lines)} strips")
         cand.numbers["spread"] = (f"width spread {100 * a:.0f}% -> {100 * b:.0f}%", 1 if b < a - 0.005 else -1 if b > a + 0.005 else 0)
         return cand
 
@@ -241,10 +387,43 @@ class OpenUpPoles(Trial):
     defaults = {"strength": 0.8, "rings": 2}
     blendable = True
     stages = ("narrow", "move", "look")
+    kinds = (("pinched", "pole with pinched quads", "poles with pinched quads"),)
+    own = "narrow"
+    least = 0.5  # degrees
+
+    def spots(self, base: Base):
+        """One spot per pole whose narrowest angle is under PINCHED of its even angle: the pole and the rings its
+        opening moves (touching spots joined)."""
+        rings = max(1, int(self.defaults["rings"]))
+        out = []
+        fans = self._poles(base)
+        for i, (v, fan) in enumerate(fans):
+            if i % CHUNK == CHUNK - 1:
+                yield i / max(len(fans), 1)
+            narrow = _narrowest(base.co, v, fan)
+            if narrow >= PINCHED * 360.0 / len(fan) or not lead_side(base, base.co[[v]]):
+                continue
+            _faces, ring = rings_of(base.faces, len(base.co), [v], rings, base.scope, _cf(base))
+            moved = np.flatnonzero((ring >= 0) & base.free)
+            faces = region(base, moved)
+            if len(faces):
+                out.append(Spot("pinched", faces, base.co[v].copy(), 360.0 / len(fan) - narrow))
+        return join(out, base.faces)
+
+    def own_number(self, base: Base, co, faces, spot) -> float:
+        """How far the narrowest angles of the spot's poles are below even (degrees, mean): lower is better."""
+        inside = np.zeros(len(base.faces), dtype=bool)
+        inside[np.asarray(spot.faces, dtype=np.int64)] = True
+        order, starts = _cf(base)
+        if "fan_of" not in base.cache:
+            base.cache["fan_of"] = dict(self._poles(base))
+        fan_of = base.cache["fan_of"]
+        gaps = [360.0 / len(fan_of[v]) - _narrowest(np.asarray(co), v, fan_of[v]) for v in _spot_corners(base.faces, spot) if v in fan_of and inside[order[starts[v] : starts[v + 1]]].all()]
+        return float(np.mean(gaps)) if gaps else 0.0
 
     def _poles(self, base: Base):
         if "fans" not in base.cache:
-            order, starts = corner_faces(base.faces, len(base.co))
+            order, starts = _cf(base)
             topo = base.topo
             fans = []
             for v in np.flatnonzero(topo.poles & ~topo.border & base.free).tolist():
@@ -372,6 +551,37 @@ class CancelPolePair(Trial):
     stages = ("poles", "faces", "look")
     picks = ("pole", "partner")
     asks = {"pole": "click a pole", "partner": "click one of the numbered poles"}
+    kinds = (("pair", "stray pole pair", "stray pole pairs"),)
+    own = "poles"
+    least = 1.0  # one pole fewer
+    changes_faces = True
+
+    def spots(self, base: Base):
+        """One spot per pair: each pole with the nearest pole of the other kind within reach that is not taken yet.
+        The spot is the patch the walk works on (Auto Fix tries them one by one on the mesh as the last left it)."""
+        if self.check(base):
+            return []
+        reach = max(1, int(self.defaults["reach"]))
+        base.cache["reach"] = reach
+        poles = np.flatnonzero(self._signs(base) != 0)
+        taken = np.zeros(len(base.co), dtype=bool)
+        out = []
+        for i, v in enumerate(poles.tolist()):
+            if i % CHUNK == CHUNK - 1:
+                yield i / max(len(poles), 1)
+            if taken[v]:
+                continue
+            free = [w for w in self._partners(base, v).tolist() if not taken[w]]
+            if not free:
+                continue
+            w = free[0]
+            taken[[v, w]] = True
+            patch, _ring = rings_of(base.faces, len(base.co), [v, w], reach + 2, base.scope, _cf(base))
+            out.append(Spot("pair", patch, 0.5 * (base.co[v] + base.co[w]), 2.0, {"pole": v, "partner": w}))
+        return out
+
+    def own_number(self, base: Base, co, faces, spot) -> float:
+        return float(face_poles(faces, co, spot.faces))
 
     def _signs(self, base: Base) -> np.ndarray:
         """Per corner: -1 fewer than four edges, 1 more, 0 four or held (borders, hard edges, the scope's edge)."""
@@ -392,7 +602,7 @@ class CancelPolePair(Trial):
         key = ("partners", pole)
         if key not in base.cache:
             sign = self._signs(base)
-            _faces, ring = rings_of(base.faces, len(base.co), [pole], int(base.cache.get("reach", 6)), base.scope)
+            _faces, ring = rings_of(base.faces, len(base.co), [pole], int(base.cache.get("reach", self.defaults["reach"])), base.scope, _cf(base))
             near = np.flatnonzero((ring > 0) & (sign == -sign[pole]))
             far = np.linalg.norm(base.co[near] - base.co[pole], axis=1)
             base.cache[key] = near[np.lexsort((far, ring[near]))]
@@ -428,7 +638,7 @@ class CancelPolePair(Trial):
         if v < 0 or w < 0 or sign[v] == 0 or sign[w] != -sign[v]:
             return Candidate(None, refusal=NO_PARTNER)
         # The walk works on a patch round the two: its edge stays where it is, so nothing outside can change.
-        patch, _ring = rings_of(base.faces, len(base.co), [v, w], reach + 2, base.scope)
+        patch, _ring = rings_of(base.faces, len(base.co), [v, w], reach + 2, base.scope, _cf(base))
         used = np.unique(np.concatenate([np.asarray(base.faces[f]) for f in patch.tolist()]))
         local = np.full(len(base.co), -1, dtype=np.int64)
         local[used] = np.arange(len(used))
@@ -437,7 +647,7 @@ class CancelPolePair(Trial):
         r = ChordReducer(MeshData(base.co[used], faces, [0] * len(faces)))
         edge = np.ones(len(used), dtype=bool)
         # A corner of the patch is free only if every face round it is in the patch.
-        order, starts = corner_faces(base.faces, len(base.co))
+        order, starts = _cf(base)
         in_patch = np.zeros(len(base.faces), dtype=bool)
         in_patch[patch] = True
         for i, u in enumerate(used.tolist()):
@@ -529,4 +739,4 @@ def _walk(cleaner, active: set, v: int, w: int, depth: int, debt: int, seen: set
     return False
 
 
-__all__ = ["EvenTheBand", "OpenUpPoles", "CancelPolePair", "spread", "rings_of", "corner_faces"]
+__all__ = ["EvenTheBand", "OpenUpPoles", "CancelPolePair", "spread", "rings_of", "corner_faces", "faces_round", "region", "join", "face_poles"]
