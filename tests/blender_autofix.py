@@ -161,14 +161,9 @@ def tick_to_end(limit=3600.0):
     """Pump the job the way Blender's timer does: `_tick` until it stops asking to be called."""
     ends, t0 = time.perf_counter() + limit, time.perf_counter()
     seen = len(AL.fx["report"]["passes"]) if AL.fx["report"] else 0
-    beat, said = t0, ""
     while AL.busy() and time.perf_counter() < ends:
         if AL._tick() is None:
             break
-        job = AL.fx["job"]
-        if job is not None and time.perf_counter() - beat > 30.0 and job.status != said:  # what a long pass is doing
-            beat, said = time.perf_counter(), job.status
-            print(f"STATUS {beat - t0:6.1f}s {said}", flush=True)
         passes = AL.fx["report"]["passes"] if AL.fx["report"] else []
         for e in passes[seen:]:
             p = e["proposal"]
