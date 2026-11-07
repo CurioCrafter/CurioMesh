@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.8.1 - unreleased
+## 0.9.9 - unreleased
 
 Merged into main: `v0981-tidytools` (Look First, History and the Tidy Tools sets), `v0981-faceloops2` (Face Loops,
 Ring Round This, Redraw in Rows) and `v0981-sitefixes` (the fixes below, ported from the Blender-site build). Symmetrize
@@ -50,7 +50,7 @@ and the experiment branches are not in this release.
   each quad toward a rectangle instead of plain evening out) pick which steps run; **Selection Only** tidies only the
   faces of the result selected in Edit Mode and leaves everything else, and the edge of the selection, where it is.
   Changing a switch works the strengths out again from the result as it was.
-- Measured at Tidy Up 1, 0.9.8 -> 0.9.8.1 (Keep Detail 6%): bust poles 722 -> 525, Tidiness 56 -> 65, Loop Quality
+- Measured at Tidy Up 1, 0.9.8 -> 0.9.9 (Keep Detail 6%): bust poles 722 -> 525, Tidiness 56 -> 65, Loop Quality
   32 -> 33, Issue Finder 170 -> 154, view changed 7.8% -> 8.4% (6.2% before Tidy Up), faces 2,410 -> 2,266.
   Lion head poles 2,194 -> 1,871, Tidiness 55 -> 59, view 7.2% -> 7.6%, faces 7,246 -> 6,953; road barrier poles
   255 -> 194, Tidiness 44 -> 54, Loop Quality 15 -> 17, view 8.0% -> 8.2%. Inward, folded and crossing faces not up.
@@ -237,6 +237,17 @@ and the experiment branches are not in this release.
 - No made-up limits: Fix Every Strip no longer stops after 3 rounds, at 0.75 of a change or at 1 point of the camera
   check; it uses Keep going and Most Detail Loss like every tool. Preview Tidy's sliver steps and Cancel Pole Pair's
   tries and reach are settings ("Higher can take longer").
+- Fitting the look on a mesh of many parts ends quickly: each step that drops the spots of the parts that changed
+  most must lower the look change, or the dropping ends, and it runs again only the spots still kept. On the crane
+  Remove Dead End's 1,975 spots took over 12 minutes without ending; it now ends in about 4 minutes and keeps 51.
+- Measured after Start (Auto Fix with every group on, Normal time limit with Keep going each time it ran out):
+
+  | Model | Tidiness | Loop Quality | Poles | Bad faces | Look change | Passes kept | Time |
+  |---|---|---|---|---|---|---|---|
+  | Marble bust | 38.8 -> 39.0 | 15.3 -> 15.6 | 1,100 -> 1,100 | 0 -> 0 | -0.02% | 6 of 12 | 35 s |
+  | Lion head | 36.8 -> 41.4 | 14.7 -> 16.9 | 3,330 -> 3,067 | 0 -> 0 | +0.17% | 43 of 79 | 695 s |
+  | Road barrier | 34.1 -> 40.2 | 6.4 -> 10.1 | 348 -> 309 | 0 -> 0 | +0.24% | 5 of 34 | 52 s |
+  | Overhead crane (26k faces) | 46.7 -> 47.2 | 30.2 -> 29.2 | 10,397 -> 10,219 | 0 -> 0 | +0.80% | 36 of 41 | 1,475 s |
 
 ## 0.9.8 - 2026-11-06
 
