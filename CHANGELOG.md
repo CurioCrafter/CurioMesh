@@ -26,7 +26,7 @@
 - Measured (Game Asset, Keep Detail 6%, rebuilds off -> on, same branch): overhead crane Issue Finder total 5,612 ->
   5,392, inward+folded+crossing 481 -> 425, slivers on flat parts 1,084 -> 1,014, Tidiness 40 -> 42; fire hydrant
   inward+folded+crossing 234 -> 145 but poles 872 -> 1,430; old compressor worse (inward+folded+crossing 208 -> 287,
-  slivers on flat parts 506 -> 682); treasure chest a little worse; drill press, barrier and four Megascans scans
+  slivers on flat parts 506 -> 682); treasure chest a little worse; drill press, barrier and four scans
   (column, stool, barrel, pipe joint) unchanged: the camera turned the rebuilds down. 0 to 25% more time. That is why
   the rebuilds are opt-in.
 

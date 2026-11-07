@@ -190,7 +190,7 @@ BANNED_CODE = (
     (r"(?m)^if __name__ == .__main__.:", "test or debug entry points"),
     (r"urllib\.request|http\.client|\bsocket\.|\brequests\.(get|post)\b", "network use"),
     (r"Star on GitHub|star helps", "promotional prompts"),
-    (r"Clean Rows|WreckQuad|\bbl_info\b|bench/", "old names and repository-only paths"),
+    (r"Clean Rows|\bbl_info\b|bench/", "old names and repository-only paths"),
     (r"(?i)\bpro\b|\bpro_|_pro\b", "a 'Pro' tab or tier"),
     (r"(?i)ponytail", "internal tags"),
     (r"CURIOMESH_[A-Z_]+[\"']", "environment switches for tests"),
@@ -206,7 +206,7 @@ BANNED_CODE = (
     (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
     (r"__pycache__|\.pyc\b", "bytecode"),
 )
-BANNED_TEXT = ("bench/", "GPU bake", "extensions.blender.org build", "Clean Rows", "WreckQuad", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
+BANNED_TEXT = ("bench/", "GPU bake", "extensions.blender.org build", "Clean Rows", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
 LISTING_NOTICES = """# Third-party notices
 
 CurioMesh is GPL-3.0-or-later. It contains Python code only and no compiled or third-party code.

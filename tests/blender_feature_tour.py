@@ -4,7 +4,7 @@
 
 blender -b --factory-startup --python tests/blender_feature_tour.py -- [options]
   --addon FOLDER   the add-on folder to test (default: the folder above this file)
-  --models DIR     folder of the free test meshes (default $CURIOMESH_MODELS or D:/LargeAmountOfMeshesForShipwreckVR/CurioMesh_free_test_meshes)
+  --models DIR     folder of the free test meshes (default $CURIOMESH_MODELS)
   --model NAME     main test model (default marble_bust_01); --alt NAME is a second one (default Sofa_01)
   --faces N        shrink the test models to about N faces first (default 4000; 0 keeps them whole)
   --only A,B       run only checks whose "group/name" contains one of these words
@@ -41,7 +41,9 @@ def arg(name, default=None):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON = os.path.abspath(arg("--addon", os.path.dirname(HERE)))
-MODELS = arg("--models", os.environ.get("CURIOMESH_MODELS", "D:/LargeAmountOfMeshesForShipwreckVR/CurioMesh_free_test_meshes"))
+MODELS = arg("--models", os.environ.get("CURIOMESH_MODELS", ""))
+if not MODELS:
+    sys.exit("Set CURIOMESH_MODELS or pass --models DIR (a folder of test meshes).")
 MAIN, ALT = arg("--model", "marble_bust_01"), arg("--alt", "Sofa_01")
 FACES = int(arg("--faces", "4000"))
 ONLY = [w for w in arg("--only", "").split(",") if w]
