@@ -177,6 +177,9 @@ def install(base: dict, src_labels: np.ndarray, out: dict, saved=None) -> None:
     view.refresh_list()
     _g().state["res"] = out
     _g().state["draw_key"] = None
+    from . import history
+
+    history.refresh(bpy.context)  # the step on screen keeps the result with its parts, so Ctrl+Z comes back to this mesh
     overlay.tag_redraw()
 
 
