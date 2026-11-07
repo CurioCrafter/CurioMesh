@@ -113,14 +113,15 @@ def _begin() -> bool:
 def request(context) -> bool:
     """Work out the strokes again (only the patches whose strokes changed), in timer slices."""
     gs = context.scene.curiomesh_guided
-    if not gs.flow_live or not _begin():
+    guided = _g()
+    source = guided.state_source()
+    if not gs.flow_live or source is None or not _begin():  # no result, or its mesh is gone: nothing to work out again
         return False
     items = strokes(context, gs)
     fe["sig"] = _sig(items)
     origin = fe["origin"]
     plan = F.areas(origin["co"], origin["faces"], items, fe["centres"], fe["adjacency"])
-    guided = _g()
-    src = guided._source_data(guided.state_source())
+    src = guided._source_data(source)
     project = region._projector(guided._bvh(src))
     box = {"stop": False, "out": None, "meter": "", "error": None, "started": time.perf_counter()}
     fe["box"] = box

@@ -207,6 +207,9 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
         if obj is None or obj.type != "MESH":
             self.report({"ERROR"}, "Select a mesh object first.")
             return {"CANCELLED"}
+        if not obj.data.polygons and not (self.apply_source_modifiers and obj.modifiers):
+            self.report({"ERROR"}, "This mesh has no faces to remesh.")
+            return {"CANCELLED"}
 
         with tasks.busy_cursor():  # one call, like Blender's own Remesh: Blender is busy until it is done
             result = run_curiomesh(obj, config_from_owner(self))
