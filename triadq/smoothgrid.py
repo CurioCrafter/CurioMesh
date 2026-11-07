@@ -36,7 +36,7 @@ from .patch import (
     quad_quality,
     tutte_embedding,
 )
-from .types import MeshData, drain
+from .types import MeshData
 
 
 @dataclass(slots=True)
@@ -83,13 +83,8 @@ class GridReport:
     loops: list[int] = field(default_factory=list)
 
 
-def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptions | None = None) -> np.ndarray:
-    """Area id per source face, -1 where the surface isn't a smooth doubly curved area."""
-    return drain(smooth_area_steps(vertices, faces, materials, options))
-
-
 def smooth_area_steps(vertices: np.ndarray, faces, materials=None, options: GridOptions | None = None):
-    """Generator: `smooth_areas`, a slice per stage."""
+    """Generator: area id per source face, -1 where the surface isn't a smooth doubly curved area; a slice per stage."""
 
     options = options or GridOptions()
     count = len(vertices)
@@ -165,13 +160,8 @@ def smooth_area_steps(vertices: np.ndarray, faces, materials=None, options: Grid
     return out
 
 
-def crease_areas(vertices: np.ndarray, faces, skip: np.ndarray, options: GridOptions | None = None) -> np.ndarray:
-    """Area id per source face: parts of the surface with creases all around, not rough, not in `skip`."""
-    return drain(crease_area_steps(vertices, faces, skip, options))
-
-
 def crease_area_steps(vertices: np.ndarray, faces, skip: np.ndarray, options: GridOptions | None = None):
-    """Generator: `crease_areas`, a slice per stage."""
+    """Generator: area id per source face: parts of the surface with creases all around, not rough, not in `skip`; a slice per stage."""
 
     options = options or GridOptions()
     normals, _areas = _face_frames(vertices, faces)
@@ -536,15 +526,10 @@ def cap_fill(loop_xyz: np.ndarray, tris: np.ndarray, points: np.ndarray, border:
     return fit_to_surface(xyz, quads, pinned, project, iterations=relax_rounds), quads
 
 
-def grid_areas(coarse: MeshData, labels: np.ndarray, nearest, options: GridOptions | None = None, project_for=None, extent: float | None = None, normals: np.ndarray | None = None) -> tuple[MeshData, GridReport]:
-    """`grid_area_steps` in one go."""
-    return drain(grid_area_steps(coarse, labels, nearest, options, project_for, extent, normals))
-
-
 def grid_area_steps(coarse: MeshData, labels: np.ndarray, nearest, options: GridOptions | None = None, project_for=None, extent: float | None = None, normals: np.ndarray | None = None):
     """Generator, a slice per area: rebuild the reduced mesh's smooth areas as organized rows. Everything else passes through untouched.
 
-    `labels` comes from `smooth_areas` or `crease_areas`; `nearest(points)` gives the closest source face and point per
+    `labels` comes from `smooth_area_steps` or `crease_area_steps`; `nearest(points)` gives the closest source face and point per
     point. `project_for(area)`, if given, moves points onto that area alone; `extent` is the whole object's size;
     `normals`, the source's face normals, let an area be judged the way the camera will.
     Quads already in `coarse` stay out of it.
@@ -641,6 +626,7 @@ def grid_area_steps(coarse: MeshData, labels: np.ndarray, nearest, options: Grid
     queue = [(size, area, True) for size, area, _part in reversed(plans)]
     retry = None  # the last area, if it got rim vertices: should it fail, it goes again without them
     while queue or retry:
+        yield
         splits.undo()  # whatever the last area split and didn't use
         if retry and retry[1] not in done:
             queue.append(retry)
@@ -649,6 +635,7 @@ def grid_area_steps(coarse: MeshData, labels: np.ndarray, nearest, options: Grid
             break
         _size, area, with_rim = queue.pop()
         project = project_for(area) if project_for else (lambda query: nearest(query)[1])
+        yield
         ids = members[area]
         loops = boundary_loops(faces, ids)[0]
         here = np.asarray([faces[f] for f in ids], dtype=np.int64)
@@ -769,6 +756,7 @@ def grid_area_steps(coarse: MeshData, labels: np.ndarray, nearest, options: Grid
                 xyz, quads = cap_fill(here[border], tris, here, border, project, None, options.relax_rounds)
                 problem = fault(xyz, quads, options.plain_quality)
                 if problem:
+                    yield
                     xyz, quads = cap_fill(here[border], tris, here, border, project, len(seam), options.relax_rounds)
                     problem = fault(xyz, quads)
         else:
@@ -809,4 +797,4 @@ def grid_area_steps(coarse: MeshData, labels: np.ndarray, nearest, options: Grid
     return MeshData(vertices=stacked[alive], faces=[tuple(remap[list(face)].tolist()) for face in out_faces], face_materials=out_materials, name=coarse.name), report
 
 
-__all__ = ["GridOptions", "GridReport", "cap_fill", "crease_areas", "grid_areas", "ring_fill", "smooth_areas"]
+__all__ = ["GridOptions", "GridReport", "cap_fill", "ring_fill"]

@@ -162,9 +162,9 @@ class DebounceTests(unittest.TestCase):
         self.assertTrue(d.due(1.35))
         ticket = d.take()
         self.assertFalse(d.due(5.0))
-        self.assertFalse(d.stale(ticket))
+        self.assertEqual(ticket, d.serial)
         d.poke(1.4)
-        self.assertTrue(d.stale(ticket))
+        self.assertNotEqual(ticket, d.serial)
 
     def test_a_long_drag_still_runs(self):
         d = parallel.Debounce(0.05, most=0.1)

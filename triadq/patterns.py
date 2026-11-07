@@ -287,25 +287,6 @@ def load_database(path: str | None = None) -> dict:
         return json.load(stream)
 
 
-def corner_costs(database: dict | None = None, use: str | None = None):
-    """A `corner_cost` for tidy and refill: how much rarer a valence is than 4 in the references, in nats."""
-
-    database = database or load_database()
-    known = database["uses"][use] if use else database["classes"]
-    shares = np.zeros(VALENCE_TOP)
-    for row in known.values():
-        shares += row["quads"] * np.asarray(row["valence"])
-    shares = (shares + 1.0) / float(shares.sum() + VALENCE_TOP)
-    table = np.maximum(np.log(shares[3] / shares), 0.0).tolist()  # shares[k] is valence k + 1
-
-    def cost(valence: int, border: bool, faces: int) -> float:
-        if border:
-            valence = 4 if faces <= 2 else faces + 2
-        return table[min(max(valence, 1), VALENCE_TOP) - 1]
-
-    return cost
-
-
 def _desire(value: float, good: float, worst: float) -> float:
     return float(np.clip(1.0 - (value - good) / max(worst - good, 1e-9), 0.0, 1.0))
 
@@ -345,4 +326,4 @@ def score(measured: dict, database: dict | None = None) -> dict:
     return {"score": round(100.0 * value, 1), "parts": parts}
 
 
-__all__ = ["CLASSES", "Topology", "code_cost", "corner_costs", "load_database", "measure", "score"]
+__all__ = ["CLASSES", "Topology", "code_cost", "load_database", "measure", "score"]

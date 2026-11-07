@@ -231,13 +231,8 @@ def _steady(values: np.ndarray, closed: bool) -> np.ndarray:
     return np.median(values[at], axis=1)
 
 
-def fit_tube(points: np.ndarray, polys) -> dict | None:
-    """The path and cross-sections of a slender piece. None if it isn't a tube."""
-    return drain(fit_tube_steps(points, polys))
-
-
 def fit_tube_steps(points: np.ndarray, polys):
-    """Generator: `fit_tube`, a slice per few cross-sections."""
+    """Generator: the path and cross-sections of a slender piece. None if it isn't a tube. A slice per few cross-sections."""
 
     points = np.asarray(points, dtype=np.float64)
     if len(points) < 12:
@@ -299,13 +294,8 @@ def fit_tube_steps(points: np.ndarray, polys):
     return {"centres": centres, "us": us, "vs": vs, "wide": wide, "deep": deep, "closed": closed, "open_ends": ends, "section": section, "size": float(np.median(wide) + np.median(deep)) / 2.0}
 
 
-def fit_prisms(points: np.ndarray, polys) -> list[dict]:
-    """The piece as the same outline along a straight line (a stack of fins, a gear, a plate), for each line that may do."""
-    return drain(fit_prism_steps(points, polys))
-
-
 def fit_prism_steps(points: np.ndarray, polys):
-    """Generator: `fit_prisms`, a slice per few cross-sections."""
+    """Generator: the piece as the same outline along a straight line (a stack of fins, a gear, a plate), for each line that may do; a slice per few cross-sections."""
 
     points = np.asarray(points, dtype=np.float64)
     if len(polys) < 24:
@@ -542,13 +532,8 @@ def _weights(corners: np.ndarray, at: np.ndarray) -> np.ndarray:
     return np.stack([1.0 - w1 - w2, w1, w2], axis=1)
 
 
-def fit_sheet(points: np.ndarray, polys) -> dict | None:
-    """A disc with one rim, spread over a square so rows can follow it. None if it isn't one."""
-    return drain(fit_sheet_steps(points, polys))
-
-
 def fit_sheet_steps(points: np.ndarray, polys):
-    """Generator: `fit_sheet`, in slices."""
+    """Generator: a disc with one rim, spread over a square so rows can follow it. None if it isn't one. In slices."""
 
     points = np.asarray(points, dtype=np.float64)
     if len(polys) < 48 or len(points) - len(_edges(polys)) + len(polys) != 1:
@@ -778,16 +763,16 @@ def fit_steps(points: np.ndarray, polys):
     return tube, prisms, sheet
 
 
-def rebuilds(points: np.ndarray, polys, kind: str = "0", fits=None):
+def rebuilds(polys, kind: str, fits):
     """Generator of kinds of rebuild that may suit a piece. Each is a generator of (points, quads, kinds) or None, most faces first.
 
-    `fits` is what `fit_steps` returned for this piece; without it each fit is made as its turn comes."""
+    `fits` is what `fit_steps` returned for this piece."""
 
-    fit = fits[0] if fits is not None else fit_tube(points, polys)
+    fit = fits[0]
     if fit is not None:
         yield (_unfolded(build_tube(fit, section, path, kind)) for section, path in reversed(TUBES))
-    for fit in fits[1] if fits is not None else fit_prisms(points, polys):
+    for fit in fits[1]:
         yield (_unfolded(build_tube(fit, section, path, kind)) for section, path in reversed(PRISMS))
-    fit = fits[2] if fits is not None else fit_sheet(points, polys)
+    fit = fits[2]
     if fit is not None:
         yield (_unfolded(build_sheet(fit, max(16, int(share * len(polys))), kind)) for share in reversed(SHEETS))

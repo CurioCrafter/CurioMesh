@@ -10,10 +10,23 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.flatquad import _close_pieces  # noqa: E402
-from triadq.quadreduce import QuadReducer, collapse_loose_triangles, join_loose_triangles  # noqa: E402
+from triadq.flatquad import _close_piece_steps  # noqa: E402
+from triadq.quadreduce import QuadReducer, collapse_loose_triangle_steps, join_loose_triangle_steps  # noqa: E402
 from triadq.topology import topology_summary  # noqa: E402
-from triadq.types import MeshData  # noqa: E402
+from triadq.types import MeshData, drain  # noqa: E402
+
+
+def join_loose_triangles(mesh):
+    return drain(join_loose_triangle_steps(mesh))
+
+
+def collapse_loose_triangles(mesh):
+    return drain(collapse_loose_triangle_steps(mesh))
+
+
+def _close_pieces(mesh):
+    return drain(_close_piece_steps(mesh))
+
 from triadq.views import picture_counts, pixels_seen  # noqa: E402
 
 

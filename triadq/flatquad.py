@@ -640,11 +640,6 @@ def flatten_region_steps(mesh: MeshData, options: FlatQuadOptions | None = None)
     return result, report
 
 
-def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
-    """`make_closable_steps` in one go."""
-    return drain(make_closable_steps(mesh))
-
-
 def make_closable_steps(mesh: MeshData):
     """Generator: make a dirty mesh certifiable for quad closure without moving anything.
 
@@ -899,13 +894,8 @@ def _close_piece(piece: MeshData):
     return (yield from quad_only_closure_steps(opened, checked=False)), 3
 
 
-def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int, int]:
-    """(closed mesh, pieces closed by ParityPath, by corner closure, left as all-quad, forced with no check of the quads)."""
-    return drain(_close_piece_steps(paired))
-
-
 def _close_piece_steps(paired: MeshData):
-    """Generator: `_close_pieces`, a slice per piece or per few thousand faces of one."""
+    """Generator: (closed mesh, pieces closed by ParityPath, by corner closure, left as all-quad, forced with no check of the quads); a slice per piece or per few thousand faces of one."""
 
     fa, fb = face_adjacency(paired.faces)
     labels = _labels(len(paired.faces), fa, fb)
@@ -946,14 +936,21 @@ def flat_quad_remesh(
     mesh: MeshData, options: FlatQuadOptions | None = None, *, force_quads: bool = True, field_mode: str = "SMOOTH",
 ) -> tuple[MeshData, FlatQuadReport, RemeshReport]:
     """Flatten regions, then pair and close with TRIAD-Q."""
+    return drain(flat_quad_remesh_steps(mesh, options, force_quads=force_quads, field_mode=field_mode))
+
+
+def flat_quad_remesh_steps(
+    mesh: MeshData, options: FlatQuadOptions | None = None, *, force_quads: bool = True, field_mode: str = "SMOOTH", cancelled=None,
+):
+    """Generator: `flat_quad_remesh`, a slice per few regions and per few thousand faces. `cancelled` as in `pair_and_close`."""
 
     options = options or FlatQuadOptions()
-    coarse, report = flatten_regions(mesh, options)
-    paired, solver = pair_and_close(coarse, seed_count=options.seed_count, force_quads=force_quads, field_mode=field_mode)
+    coarse, report = yield from cancel_steps(flatten_region_steps(mesh, options), cancelled)
+    paired, solver = yield from pair_and_close_steps(coarse, seed_count=options.seed_count, force_quads=force_quads, field_mode=field_mode, cancelled=cancelled)
     report.output_faces = len(paired.faces)
     report.all_quads = bool(paired.faces) and all(len(face) == 4 for face in paired.faces)
     return paired, report, solver
 
 
-__all__ = ["FlatQuadOptions", "FlatQuadReport", "flat_quad_remesh", "flatten_regions", "make_closable", "pair_and_close"]
+__all__ = ["FlatQuadOptions", "FlatQuadReport", "flat_quad_remesh", "flat_quad_remesh_steps", "flatten_regions", "pair_and_close"]
 

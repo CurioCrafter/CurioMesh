@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .patch import _labels, quad_quality
+from .types import drain
 
 SHARP_DEG = 60.0
 CREASE_DEG = 20.0  # faces this far apart may be a feature line
@@ -430,7 +431,8 @@ def _position_sweep(level: _Level, rng: np.random.Generator, robust: bool = Fals
         o[ids] = _place(level, o[ids] + total[ids] / uses[ids][:, None], ids)
 
 
-def solve_orientation(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None) -> None:
+def solve_orientation_steps(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None):
+    """Generator: the direction field on every level, coarsest first, a slice per sweep."""
     sweeps = int(ORIENT_SWEEPS if sweeps is None else sweeps)
     coarsest = levels[-1]
     start = rng.normal(size=coarsest.points.shape)
@@ -442,10 +444,12 @@ def solve_orientation(levels: list[_Level], rng: np.random.Generator, sweeps: in
         on = level.pinned == 1
         level.q[on] = _unit(_tangent(level.along[on], level.normals[on]))
         for _ in range(sweeps if index else max(2, sweeps // 2)):
+            yield
             _orient_sweep(level, rng)
 
 
-def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None, stop=None) -> None:
+def solve_position_steps(levels: list[_Level], rng: np.random.Generator, sweeps: int | None = None, stop=None):
+    """Generator: the grid positions on every level, coarsest first, a slice per sweep."""
     sweeps = int(POSITION_SWEEPS if sweeps is None else sweeps)
     coarsest = levels[-1]
     coarsest.o = _place(coarsest, coarsest.points.copy())
@@ -455,11 +459,13 @@ def solve_positions(levels: list[_Level], rng: np.random.Generator, sweeps: int 
             level.o = _place(level, levels[index + 1].o[level.parent])
         # Most of the work is on the second-finest level, at half the cost; the finest only takes up the rounding.
         for _ in range(max(2, sweeps // 2) if index == 0 else sweeps):
+            yield
             _position_sweep(level, rng)
         level.misfit = np.ones(len(level.o))
         for _ in range(int(FINEST_SWEEPS if index == 0 else FINAL_SWEEPS if index == 1 else ROBUST_SWEEPS)):
             if stop is not None:
                 stop()
+            yield
             _position_sweep(level, rng, True)
 
 
@@ -484,8 +490,8 @@ def _best_match(qi, ni, qj, nj):
     return q, np.cross(nj, q)
 
 
-def conformal_scale(points: np.ndarray, tris: np.ndarray, q: np.ndarray, normals: np.ndarray, rounds: int = 200) -> np.ndarray:
-    """Log of the cell size that lets a grid follow the field without row ends: the grid's edges need no curl.
+def conformal_scale_steps(points: np.ndarray, tris: np.ndarray, q: np.ndarray, normals: np.ndarray, rounds: int = 200):
+    """Generator, a slice per few rounds of the solve: log of the cell size that lets a grid follow the field without row ends: the grid's edges need no curl.
 
     With du = exp(-phi) q and dv = exp(-phi) t closed on each triangle, the gradient of phi is known there from the
     curl of q and of t; this finds the phi that fits those gradients best. Triangles around a field singularity say nothing.
@@ -535,7 +541,9 @@ def conformal_scale(points: np.ndarray, tris: np.ndarray, q: np.ndarray, normals
     z_ = residual / diagonal
     direction = z_.copy()
     rz = residual @ z_
-    for _ in range(rounds):
+    for count in range(rounds):
+        if count % 10 == 9:
+            yield
         if rz <= 1e-12 * max((rhs @ (rhs / diagonal)), 1e-30):
             break
         applied = stiffness(direction)
@@ -674,7 +682,14 @@ class FieldMesher:
     `turn`, in radians, is how far the surface may turn across a cell, read per limb.
     """
 
-    def __init__(self, vertices, tris, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None):
+    @classmethod
+    def made_in_steps(cls, vertices, tris, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None):
+        """Generator: a mesher for this piece, its split copy and direction field made in slices. Returns it."""
+        mesher = cls.__new__(cls)
+        yield from mesher._setup_steps(vertices, tris, target, turn, seed, cancelled, lines)
+        return mesher
+
+    def _setup_steps(self, vertices, tris, target, turn, seed, cancelled, lines):
         self.cancelled = cancelled
         self.rng = np.random.default_rng(seed)
         self.source = np.asarray(vertices, dtype=np.float64)
@@ -685,6 +700,7 @@ class FieldMesher:
         limits = segment_limits(self.source, self.source_tris, even, SEGMENT_TURN if turn is None else turn)
         self.target = float(target)
         sizes = fit_sizes(limits, area, self.target)
+        yield
         self.fine_points, self.fine_tris, self.fine_sizes, self.limits = split_long_edges(self.source, self.source_tris, sizes, carried=limits)
         _fine_normals, fine_areas, _ = _normals_areas(self.fine_points, self.fine_tris)
         self.fine_area = np.bincount(self.fine_tris.reshape(-1), np.repeat(fine_areas / 3.0, 3), len(self.fine_points))
@@ -699,39 +715,47 @@ class FieldMesher:
                     gap = self.fine_points[at : at + 4096, None, :] - on[None]
                     near[at : at + 4096] = np.sqrt((gap * gap).sum(axis=2).min(axis=1))
                 self.limits = np.minimum(self.limits, even * (LINE_CELL + near / (LINE_REACH * even)))
+        yield
         self.levels = _hierarchy(self.fine_points, self.fine_tris, self.fine_sizes, self.rng, forced)
-        solve_orientation(self.levels, self.rng)
+        self._stop_check()
+        yield from solve_orientation_steps(self.levels, self.rng)
         self.shape = None
         if CONFORMAL:
-            phi = conformal_scale(self.fine_points, self.fine_tris, self.levels[0].q, self.levels[0].normals)
+            self._stop_check()
+            phi = yield from conformal_scale_steps(self.fine_points, self.fine_tris, self.levels[0].q, self.levels[0].normals)
             # Each limb averages its own size: on a long shape phi alone gives one end far bigger cells than the other.
             _groups, group = np.unique(np.round(np.log(np.maximum(self.limits, 1e-30)), 3), return_inverse=True)
             phi -= (np.bincount(group, phi * self.fine_area) / np.maximum(np.bincount(group, self.fine_area), 1e-30))[group]
             self.shape = np.exp(np.clip(CONFORMAL * phi, -MOST_LOG, MOST_LOG))
 
-    def solve(self, target: float | None = None) -> FieldMesh:
-        """Lay the grid, once: finding the exact count by solving again cost half the time for a few percent of faces."""
+    def solve_steps(self, target: float | None = None):
+        """Generator: lay the grid, once, in slices (finding the exact count by solving again cost half the time for a few percent of faces)."""
 
         self._stop_check()
         wanted = self.target if target is None else target
         self.fine_sizes = fit_sizes(self.limits, self.fine_area, wanted / COUNT_SHARE, self.shape)
         set_sizes(self.levels, self.fine_sizes)
-        solve_positions(self.levels, self.rng, stop=self._stop_check)
-        return self.extract()
+        yield from solve_position_steps(self.levels, self.rng, stop=self._stop_check)
+        return (yield from self.extract_steps())
 
     def _stop_check(self) -> None:
         if self.cancelled is not None and self.cancelled():
             raise ValueError("Stopped.")
 
-    def extract(self) -> FieldMesh:
+    def extract_steps(self):
+        """Generator: the solved grid as a coarse triangle mesh, in slices. Returns a FieldMesh."""
         finest = self.levels[0]
+        yield
         labels = _clean_regions(self.fine_points, self.fine_tris, regions(self.fine_points, self.fine_tris, finest), finest.sizes)
+        yield
         count = int(labels.max()) + 1
         weight = self.fine_area
         total = np.maximum(np.bincount(labels, weight, count), 1e-30)
         start = np.stack([np.bincount(labels, finest.o[:, k] * weight, count) for k in range(3)], axis=1) / total[:, None]
         cell = np.bincount(labels, finest.sizes * weight, count) / total
+        yield
         points = fit_regions(self.fine_points, self.fine_tris, labels, start, cell)
+        yield
         tris = dual_triangles(self.fine_tris, labels)
         return FieldMesh(points, tris, self.fine_points, self.fine_tris, labels, finest.sizes, finest.pinned > 0, {"regions": count, "triangles": len(tris), "fine_points": len(self.fine_points), "levels": len(self.levels)})
 
@@ -1127,38 +1151,58 @@ def clean(points: np.ndarray, faces) -> tuple[np.ndarray, list[tuple[int, ...]]]
     return points, faces
 
 
-def quads_from(mesh: FieldMesh) -> tuple[np.ndarray, list[tuple[int, ...]]]:
-    """All the steps from one solved field to quads."""
+def quads_from_steps(mesh: FieldMesh):
+    """Generator: all the steps from one solved field to quads, a slice per step. Returns (points, quads)."""
 
+    yield
     quads, left = pair_triangles(mesh.points, mesh.tris)
     faces = quads + [tuple(row) for row in mesh.tris[left].tolist()]
+    yield
     faces = pair_along_rows(mesh.points, faces)
+    yield
     points = relax(mesh, mesh.points, faces)
+    yield
     faces = pair_along_rows(points, faces, worst=WORST_CLOSING)  # relaxed, more rows pass the shape test
+    yield
     faces = pair_by_paths(points, faces)
+    yield
     points = relax(mesh, points, faces, 4)
+    yield
     points, faces = clean(points, faces)
     for _ in range(FINISH_ROUNDS):  # cleaning can leave a triangle, and pairing a fold
+        yield
         faces = pair_by_paths(points, faces, 4000)
+        yield
         points = relax(mesh, points, faces, 2)
+        yield
         points, faces = clean(points, faces)
         if all(len(f) == 4 for f in faces):
             break
+    yield
     points = untangle(points, faces)
+    yield
     points = refit(mesh.fine_points, mesh.fine_tris, points, faces, creased=mesh.creased)[0]
     for _ in range(FINISH_ROUNDS):
+        yield
         points, faces = clean(points, faces)
+        yield
         points = untangle(points, faces, 24)
         if not _any_folded(points, faces):
             break
+    yield
     points = _even_out_folds(points, faces)
     for _ in range(FINISH_ROUNDS * 2):
+        yield
         faces = pair_by_paths(points, faces, 4000)
         if all(len(f) == 4 for f in faces):
             break
+        yield
         faces = _walk_triangles(points, faces)
+    yield
     points = _even_out_folds(points, faces)
+    yield
     points, faces = _open_crowded(points, faces)
+    yield
     used, flat = np.unique(np.fromiter((v for f in faces for v in f), dtype=np.int64), return_inverse=True)
     out, at = [], 0
     for face in faces:
@@ -1253,6 +1297,11 @@ def field_quads(vertices, faces, target: float, turn: float | None = None, seed:
     pairing, so a caller should judge the result and keep the better one.
     Raises ValueError with a message for a person on a piece too small for a grid or too large to finish in reasonable time.
     """
+    return drain(field_quad_steps(vertices, faces, target, turn, seed, cancelled, lines))
+
+
+def field_quad_steps(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None):
+    """Generator: `field_quads`, a slice per sweep of the field solve and per step after it. Raises as `field_quads` does."""
 
     if target < SMALLEST_TARGET:
         raise ValueError("This part is too small for rows of quads.")
@@ -1261,8 +1310,9 @@ def field_quads(vertices, faces, target: float, turn: float | None = None, seed:
     tris = triangulate(faces)[0]
     if len(tris) > MOST_SOURCE:
         raise ValueError(f"Rows of quads stop at {MOST_SOURCE:,} triangles on one part, and this one has {len(tris):,}.")
-    mesh = FieldMesher(vertices, tris, target, turn, seed, cancelled, lines).solve()
-    points, quads = quads_from(mesh)
+    mesher = yield from FieldMesher.made_in_steps(vertices, tris, target, turn, seed, cancelled, lines)
+    mesh = yield from mesher.solve_steps()
+    points, quads = yield from quads_from_steps(mesh)
     if len(quads) < SMALLEST_TARGET // 2:
         raise ValueError("Rows of quads fell apart on this part.")
     return points, quads

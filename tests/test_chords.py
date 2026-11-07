@@ -69,13 +69,17 @@ class WalkTests(unittest.TestCase):
         self.assertIsNone(_closed_walk([(9.0, 0.0, 9.0)] * 8, 1.0))  # straight on for ever
 
 
+def energy(reducer):
+    return sum(reducer._faces_at_cost(v, len(u)) for v, u in enumerate(reducer.users) if u)
+
+
 class RedrawTests(unittest.TestCase):
     def test_poles_go_and_the_mesh_stays_a_closed_all_quad_box(self):
         mesh = turned_edge(box(6))
         reducer = ChordReducer(mesh)
-        before = reducer.energy()
+        before = energy(reducer)
         self.assertGreater(reducer.redraw_all(), 0)
-        self.assertLess(reducer.energy(), before)
+        self.assertLess(energy(reducer), before)
         summary = topology_summary(reducer.result())
         self.assertEqual((summary.boundary_edges, summary.non_manifold_edges, summary.euler_characteristic), (0, 0, 2))
         self.assertEqual(summary.quads, summary.faces)
@@ -97,12 +101,12 @@ class RedrawTests(unittest.TestCase):
         count = len(one.vertices)
         faces = list(one.faces) + [tuple(v + count for v in f) for f in two.faces]
         reducer = ChordReducer(MeshData(np.vstack((one.vertices, np.asarray(two.vertices) + 5.0)), faces, ["0"] * len(faces)))
-        saved, messy = reducer.save(), reducer.energy()
+        saved, messy = reducer.save(), energy(reducer)
         reducer.redraw_all()
-        tidy = reducer.energy()
+        tidy = energy(reducer)
         self.assertLess(tidy, messy)
         reducer.roll_back_parts(saved, [0])
-        self.assertTrue(tidy < reducer.energy() < messy)
+        self.assertTrue(tidy < energy(reducer) < messy)
         self.assertEqual(reducer.alive, sum(1 for f in reducer.faces if f is not None))
         self.assertEqual(topology_summary(reducer.result()).non_manifold_edges, 0)
         self.assertEqual(topology_summary(reducer.result()).boundary_edges, 0)

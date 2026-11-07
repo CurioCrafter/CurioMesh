@@ -48,16 +48,18 @@ CurioMesh contains Python code only and no compiled or third-party code.
   - The **QuadriFlow** method (and Classic Remesh with QuadriFlow) runs Blender's own QuadriFlow inside your Blender,
     like Remesh > QuadriFlow does, on one reduced part at a time; Blender is busy while each part runs.
 - Blender stays usable while a job runs: the work is done in short steps from a timer, most of them well under a
-  tenth of a second. The longest single step is Blender's own Decimate on a whole part, one call that can't be cut
-  up: up to about 0.7 seconds on a 60,000-face mesh. The wait cursor shows while it runs, and **Stop** takes effect
-  right after it. **Apply** is available once the job has finished, or after **Stop**. The other sizes for the Quad
-  Size and Rows sliders are worked out only when you press **Work Out Other Sizes** under the sliders; neither Auto
-  nor moving a slider starts it. While it runs the panel says so. It works in the same short steps (again up to about
-  0.7 seconds for one Decimate on a 60,000-face mesh) and leaves Blender idle at least twice as long as each step
-  took, so it uses about a third of Blender's time at most. Working out all the sizes can take several minutes; **Stop
-  Working Out Sizes** ends it at any time (the sizes already made stay).
-- The result object carries a few CurioMesh custom properties (such as `curiomesh_engine`, `curiomesh_elapsed_ms`,
-  `curiomesh_quad_ratio`, `curiomesh_strategy`) that the HUD reads; Debug Console Logs adds a few more.
+  tenth of a second. The longest steps we measured were about half a second on a 60,000-face mesh with every Style,
+  Method and Use we tried (Fewest Faces, Even Rows, Flat Quads, Subdivision, Blockout), and up to about 1.5 seconds
+  on an 86,000-face mesh or with the Field Rows method. Blender's own Decimate on a whole part is one call that can't
+  be cut up; the wait cursor shows while it runs. **Stop** takes effect right after the step that is running.
+  **Apply** is available once the job has finished, or after **Stop**. The other sizes for the Quad Size and Rows
+  sliders are worked out only when you press **Work Out Other Sizes** under the sliders; neither Auto nor moving a
+  slider starts it. While it runs the panel says so. It works in the same short steps and leaves Blender idle at
+  least twice as long as each step took, so it uses about a third of Blender's time at most. Working out all the
+  sizes can take several minutes; **Stop Working Out Sizes** ends it at any time (the sizes already made stay).
+- A Classic Remesh result carries a few CurioMesh custom properties (such as `curiomesh_engine`,
+  `curiomesh_elapsed_ms`, `curiomesh_quad_ratio`, `curiomesh_strategy`) that the HUD reads; Debug Console Logs adds a
+  few more. Auto's Apply writes none of these.
 - The Batch panel's report goes to the extension's user folder. Issue reports and exports go where you pick in the
   file browser.
 - Remembered fixes and resume points are kept in the extension's user folder. **Remember This Fix** also saves the fix

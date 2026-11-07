@@ -17,7 +17,8 @@ if str(ROOT) not in sys.path:
 from triadq import MeshData, topology_summary  # noqa: E402
 from triadq.flatquad import pair_and_close  # noqa: E402
 from triadq.patch import _half_edges, quad_quality  # noqa: E402
-from triadq.smoothgrid import _strip, grid_areas, smooth_areas  # noqa: E402
+from triadq.smoothgrid import _strip, grid_area_steps, smooth_area_steps  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 def capsule(sides: int = 24, stacks: int = 6, length: float = 4.0):
@@ -64,7 +65,7 @@ def lookups(vertices, faces, length):
 class SmoothGridTests(unittest.TestCase):
     def test_finds_domes_not_the_band(self):
         vertices, faces, length = capsule()
-        labels = smooth_areas(vertices, faces)
+        labels = drain(smooth_area_steps(vertices, faces))
         self.assertEqual(int(labels.max()), 1)
         band = np.ptp(vertices[np.asarray(faces)][:, :, 1], axis=1) > 0.5 * length
         self.assertTrue((labels[band] < 0).all())
@@ -74,14 +75,14 @@ class SmoothGridTests(unittest.TestCase):
         rng = np.random.default_rng(3)
         vertices, faces, _length = capsule()
         rough = vertices * (1.0 + 0.05 * rng.standard_normal((len(vertices), 1)))
-        self.assertLess(int(smooth_areas(rough, faces).max()), 0)
+        self.assertLess(int(drain(smooth_area_steps(rough, faces)).max()), 0)
 
     def test_domes_become_grids_that_conform(self):
         vertices, faces, length = capsule()
-        labels = smooth_areas(vertices, faces)
+        labels = drain(smooth_area_steps(vertices, faces))
         nearest = lookups(vertices, faces, length)
         coarse = MeshData(vertices, faces, ["0"] * len(faces))
-        result, report = grid_areas(coarse, labels, nearest)
+        result, report = drain(grid_area_steps(coarse, labels, nearest))
         self.assertEqual(report.built, 2)
         quads = np.asarray([face for face in result.faces if len(face) == 4])
         self.assertGreater((quad_quality(result.vertices[quads]) > 0.0).mean(), 0.999)

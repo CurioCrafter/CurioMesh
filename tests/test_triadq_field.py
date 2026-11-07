@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import triadq.engine as engine  # noqa: E402
+from triadq.types import drain  # noqa: E402
 from triadq.field import estimate_field_gl, field_singularities  # noqa: E402
 
 
@@ -125,7 +126,7 @@ class GinzburgLandauFieldTests(unittest.TestCase):
         mesh = tri_mesh(points, faces)
         adj = engine._adjacency(mesh)
         mask = np.zeros(len(adj.edges), bool)
-        old = engine._estimate_field(mesh, adj, mask, 4)
+        old = drain(engine._estimate_field_steps(mesh, adj, mask, 4))
         new = estimate_field_gl(mesh, adj, mask, 4)
 
         def coherence(field: np.ndarray) -> float:  # 1.0 == every face on one common cross

@@ -7,21 +7,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from .types import drain
-
-
 
 SMOOTH_DEG = 60.0  # faces meeting at more than this shade as a hard edge, on the output and in the check
 
 
-def corner_normals(points: np.ndarray, polys, degrees: float = SMOOTH_DEG) -> np.ndarray:
-    """Unit normal per polygon corner, in the order of `polys`. Faces at the corner's vertex count if they're within
-    `degrees` of the corner's own face, weighted by their angle at it, as Blender does."""
-    return drain(corner_normal_steps(points, polys, degrees))
-
-
 def corner_normal_steps(points: np.ndarray, polys, degrees: float = SMOOTH_DEG):
-    """Generator: `corner_normals`, a slice per stage and per corner count."""
+    """Generator: unit normal per polygon corner, in the order of `polys`. Faces at the corner's vertex count if they're within `degrees` of the corner's own face, weighted by their angle at it, as Blender does; a slice per stage and per corner count."""
 
     flat, starts, sizes = corner_table(polys)
     ends = np.cumsum(sizes)

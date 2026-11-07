@@ -357,12 +357,23 @@ def verify_archive(path: Path, *, prefix: str, series: str | None = None, listin
 CALLED_BY_BLENDER = {"poll", "execute", "invoke", "modal", "draw", "draw_header", "draw_item", "description", "cancel", "check", "filter_items", "register", "unregister"}
 
 
+def _code_only(text: str) -> str:
+    """The code without its comments, docstrings and `__all__` lists, so naming a function in those doesn't count as a use."""
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            body[0] = ast.Pass()
+    tree.body = [n for n in tree.body if not (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in n.targets))]
+    return ast.unparse(tree)
+
+
 def unused_names(sources: dict[str, str]) -> list[str]:
     """Top-level functions, classes and constants, and methods, whose name appears only once in all the code: nothing
     uses them. Methods Blender calls itself are not counted."""
     counts: dict[str, int] = {}
     for text in sources.values():
-        for word in re.findall(r"\w+", text):
+        for word in re.findall(r"\w+", _code_only(text)):
             counts[word] = counts.get(word, 0) + 1
     found = []
     for name, text in sources.items():

@@ -9,7 +9,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.shading import blended_normals, corner_normals, corner_table, sharp_edges  # noqa: E402
+from triadq.shading import blended_normals, corner_normal_steps, corner_table, sharp_edges  # noqa: E402
+from triadq.types import drain  # noqa: E402
+
+
+def corner_normals(*args):
+    return drain(corner_normal_steps(*args))
 
 
 class ShadingTests(unittest.TestCase):

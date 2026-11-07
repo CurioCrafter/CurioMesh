@@ -46,7 +46,7 @@ class GateTests(unittest.TestCase):
         self.assertGreater(volume(*SOURCE), 0.0)
 
     def test_every_rebuild_of_a_triangle_part_faces_out(self):
-        built = list(parts.rebuilds(*SOURCE))
+        built = list(parts.rebuilds("0", parts.fit_revolve(*SOURCE)))
         self.assertGreaterEqual(len(built), 3)  # a round part starts at 16 steps (parts.min_spin): 16, 24, 32
         for co, polys, _kinds in built:
             turned = parts.orient_like(co, polys, *SOURCE)

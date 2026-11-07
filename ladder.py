@@ -111,7 +111,7 @@ def start(context) -> bool:
     if inputs[0] or job.outside is not None or len(job.faces) > MOST_FACES:  # Reduce To aims at a face count, not a Detail
         return False
     here = (job.style, round(job.detail, 3))
-    slow = (job._worked or (job.report or {}).get("seconds", 0.0)) > SLOW  # the time it worked: the gaps between its slices don't count
+    slow = (job.worked_seconds or (job.report or {}).get("seconds", 0.0)) > SLOW  # the time it worked: the gaps between its slices don't count
     plan = L.plan(here[1], here[0], rows=len(job.faces) <= ROWS_MOST and not slow and parallel.allowed())
     if slow:  # Limitation: a fixed cut; helpers for the ladder would make all sizes affordable, at the cost of more Blenders running
         plan = [(s, d) for s, d in plan if here[1] / 2.6 <= d <= here[1] * 2.6]

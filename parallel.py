@@ -352,8 +352,7 @@ def find_may_start(runner) -> bool:
 
 class Debounce:
     """The newest request wins. `poke` asks for a run; `due` says when the asking has been quiet for `wait` seconds, or
-    has gone on for `most` seconds (a long drag still shows something); `take` starts one and hands it a ticket;
-    `stale(ticket)` tells a running one that a newer request came in."""
+    has gone on for `most` seconds (a long drag still shows something); `take` starts one and hands it a ticket."""
 
     def __init__(self, wait: float, most: float | None = None):
         self.wait = wait
@@ -376,6 +375,3 @@ class Debounce:
     def take(self) -> int:
         self.asked = self.first = None
         return self.serial
-
-    def stale(self, ticket: int) -> bool:
-        return ticket != self.serial

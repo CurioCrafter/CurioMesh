@@ -92,8 +92,13 @@ def _plane_quadrics(points, faces) -> list[list[float]]:
     return out
 
 
+SETUP_FACES = 3_000  # faces a reducer sets up per slice in `made_in_steps`
+
+
 class QuadReducer:
     """Removes quads cheapest first. `remove(count)` is a generator; `save`/`restore` allow stepping back after a look."""
+
+    PUSH_EVERY = SETUP_FACES  # faces whose collapses are queued per slice of the set-up
 
     def __init__(self, mesh: MeshData):
         drain(self._setup(mesh))
@@ -149,7 +154,7 @@ class QuadReducer:
         self.heap: list[tuple] = []
         self.refused: list[tuple] = []
         for index in range(len(self.faces)):
-            if index % SETUP_FACES == SETUP_FACES - 1:
+            if index % self.PUSH_EVERY == self.PUSH_EVERY - 1:
                 yield
             if len(self.faces[index]) == 4:
                 self._push(index, 0)
@@ -442,13 +447,7 @@ def _cut_hexagon(hexagon: list[int], points, free_chord, facings=()) -> tuple[li
     return best, [middle]
 
 
-SETUP_FACES = 3_000  # faces a reducer sets up per slice in `made_in_steps`
 SEARCHES_PER_SLICE = 16  # triangles searched from per slice in the loose-triangle passes
-
-
-def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, int]:
-    """`join_loose_triangle_steps` in one go."""
-    return drain(join_loose_triangle_steps(mesh, farthest))
 
 
 def join_loose_triangle_steps(mesh: MeshData, farthest: int = 8):
@@ -602,19 +601,11 @@ def join_loose_triangle_steps(mesh: MeshData, farthest: int = 8):
     return MeshData(vertices=np.asarray(points, dtype=np.float64), faces=[faces[k] for k in kept], face_materials=[materials[k] for k in kept], name=mesh.name), joined
 
 
-__all__ = ["QuadReducer", "join_loose_triangles"]
-
-
-def collapse_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, int]:
-    """`collapse_loose_triangle_steps` in one go."""
-    return drain(collapse_loose_triangle_steps(mesh, farthest))
-
-
 def collapse_loose_triangle_steps(mesh: MeshData, farthest: int = 8):
     """Generator: get rid of leftover triangles by merging edges along a path of quads. Returns (mesh, triangles gone).
 
     Merging an edge a triangle shares with a quad removes the triangle and leaves the quad a triangle: one face fewer,
-    and the triangle has moved a step. When it reaches another triangle, both are gone. So where `join_loose_triangles`
+    and the triangle has moved a step. When it reaches another triangle, both are gone. So where `join_loose_triangle_steps`
     pays k - 2 faces for a path of k quads, this gains k + 2, for moving a few corners by about an edge's length. Every
     merge is checked first. A triangle that gets stuck is left where it is for joining and closure.
     """
@@ -768,4 +759,4 @@ def collapse_loose_triangle_steps(mesh: MeshData, farthest: int = 8):
     return result, start_count - len(loose)
 
 
-__all__ = ["QuadReducer", "collapse_loose_triangles", "join_loose_triangles"]
+__all__ = ["QuadReducer"]

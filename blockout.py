@@ -241,8 +241,8 @@ class BlockoutJob:
         for ratio in REDUCE_RATIOS:
             if ratio * triangles < 12:
                 continue
-            pts, fs, ms = autoretopo._decimate(points, polys, kinds, ratio)
-            pts, fs, ms = autoretopo.make_pure(MeshData(pts, fs, ms), "AUTO", "MIXED")
+            pts, fs, ms = yield from autoretopo._decimate_steps(points, polys, kinds, ratio)
+            pts, fs, ms = yield from autoretopo.make_pure_steps(MeshData(pts, fs, ms), "AUTO", "MIXED")
             view = yield from self._pictures(pts, fs, *frame[:3])
             made = (pts, fs, ms)
             if P.view_miss(reference, view, frame[3]) <= REDUCED_MISS:

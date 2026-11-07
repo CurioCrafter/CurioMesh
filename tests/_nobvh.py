@@ -12,6 +12,15 @@ from triadq import checks
 try:
     import mathutils  # noqa: F401  (inside Blender: the real lookups stay)
 except ImportError:
-    checks._source_of = lambda source_co, source_faces: None
+
+    def _no_source(*args, **kwargs):
+        return None
+        yield
+
+    def _no_overlap(co, faces, pad, *rest, **kwargs):
+        return np.zeros(len(pad), bool)
+        yield
+
+    checks.source_steps = _no_source
     checks.crossing_pairs = lambda co, faces: np.zeros((0, 2), np.int64)
-    checks._overlapping = lambda co, faces, pad, *rest, **kw: np.zeros(len(pad), bool)
+    checks._overlapping_steps = _no_overlap

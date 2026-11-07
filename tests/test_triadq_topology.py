@@ -639,7 +639,7 @@ class QuadClosureTests(unittest.TestCase):
         adj = triad_engine._adjacency(tri)
         line = triad_engine._material_edge_mask(adj)
         self.assertEqual(int(line.sum()), size)
-        directions = triad_engine._estimate_field(tri, adj, line, smooth_iters=4)
+        directions = drain(triad_engine._estimate_field_steps(tri, adj, line, smooth_iters=4))
         cosines = np.clip(directions @ axis_u, -1.0, 1.0)
         offsets = np.degrees(np.arccos(np.abs(cosines)))
         offsets = np.minimum(offsets, 90.0 - offsets)  # any of the four cross directions

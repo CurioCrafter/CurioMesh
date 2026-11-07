@@ -234,6 +234,8 @@ class PictureJudge:
 class ChordReducer(QuadReducer):
     """`QuadReducer` that also redraws messy patches as grids, spins edges at poles, and prefers collapses that cancel poles."""
 
+    PUSH_EVERY = 128  # pricing a collapse here looks at the pictures: about half a millisecond each
+
     def __init__(self, mesh: MeshData, judge=None):
         """`judge.wrong(corners)`, if given, is how much of this quad a viewer would see as wrong."""
 
@@ -246,7 +248,8 @@ class ChordReducer(QuadReducer):
         self._seen_stamps: list[int] = []
         self._turned: set[int] = set()
         self.project = None  # if set, the nearest point on the source, where relaxed corners go back to
-        self.deadline = math.inf  # `time.perf_counter()` past which redrawing and judging stop and plain collapses go on
+        self.clock = time.perf_counter  # what `deadline` is measured by: a job passes its own working-time clock
+        self.deadline = math.inf  # `clock()` past which redrawing and judging stop and plain collapses go on
         self.messy: set[int] | None = None  # corners of the parts worth redrawing, None for all
         self.home: list[int] = list(range(len(mesh.vertices)))  # per corner, a corner of the mesh it was made from
         self._judged: dict[tuple, float] = {}
@@ -272,7 +275,7 @@ class ChordReducer(QuadReducer):
         na, nb, nc, nd = len(users[a]), len(users[b]), len(users[c]), len(users[d])
         change = cost(a, na + nc - 2) - cost(a, na) - cost(c, nc) + cost(b, nb - 1) - cost(b, nb) + cost(d, nd - 1) - cost(d, nd)
         price = POLE_WEIGHT * change
-        if self.judge is not None and time.perf_counter() < self.deadline:
+        if self.judge is not None and self.clock() < self.deadline:
             points, faces = self.points, self.faces
             lost = -self._wrong([points[v] for v in face])
             for f in (users[a] | users[c]) - {index}:
@@ -289,12 +292,12 @@ class ChordReducer(QuadReducer):
         while self.alive > goal:
             before = self.alive
             yield from super().remove(min(self.alive - goal, max(16, int(REDRAW_EVERY * self.alive))), every)
-            if time.perf_counter() < self.deadline:
+            if self.clock() < self.deadline:
                 near = self._seeds(self._near_changes())
-                self.redraw_all(rounds=1, seeds=near)
+                yield from self.redraw_all_steps(rounds=1, seeds=near)
                 near = self._seeds(self._near_changes(near))
-                self.turn_poles(seeds=near)
-                self.relax(RELAX_PASSES, seeds=near)
+                yield from self.turn_pole_steps(seeds=near)
+                yield from self.relax_steps(RELAX_PASSES, seeds=near)
             yield
             if self.alive >= before:
                 break
@@ -341,9 +344,6 @@ class ChordReducer(QuadReducer):
         if self.border[vertex]:
             return (faces - 2) ** 2 if faces > 2 else 0
         return (faces - 4) ** 2
-
-    def energy(self) -> int:
-        return sum(self._faces_at_cost(v, len(u)) for v, u in enumerate(self.users) if u)
 
     def _is_smooth(self, vertex: int) -> bool:
         """No sharp edge of the shape runs through this corner, and it's free to go."""
@@ -599,6 +599,10 @@ class ChordReducer(QuadReducer):
 
     def redraw_all(self, radii=(1, 2, 3), rounds: int = 3, seeds=None) -> int:
         """Redraw patches around poles, worst first, until that stops paying. Returns the energy taken away."""
+        return drain(self.redraw_all_steps(radii, rounds, seeds))
+
+    def redraw_all_steps(self, radii=(1, 2, 3), rounds: int = 3, seeds=None):
+        """Generator: `redraw_all`, yielding after every pole tried."""
 
         total = 0
         for _round in range(rounds):
@@ -606,8 +610,9 @@ class ChordReducer(QuadReducer):
             pool = range(len(self.users)) if seeds is None else seeds
             order = sorted((v for v in pool if self.users[v] and not self.locked[v] and len(self.users[v]) != 4), key=lambda v: -abs(len(self.users[v]) - 4))
             for v in order:
-                if time.perf_counter() > self.deadline:
+                if self.clock() > self.deadline:
                     return total + gained
+                yield
                 if not self.users[v] or len(self.users[v]) == 4:
                     continue
                 for radius in radii:
@@ -746,24 +751,27 @@ class ChordReducer(QuadReducer):
                 flagged += 1
         return flagged
 
-    def tidy(self) -> None:
+    def tidy_steps(self):
+        """Generator: redraw the messy parts, spin edges at their poles and even them out, in slices."""
         seeds = None if self.messy is None else sorted(self.messy)
-        self.redraw_all(seeds=seeds)
-        if time.perf_counter() < self.deadline:
-            self.turn_poles(seeds=seeds)
-            self.relax(RELAX_PASSES, seeds=seeds)
+        yield from self.redraw_all_steps(seeds=seeds)
+        if self.clock() < self.deadline:
+            yield from self.turn_pole_steps(seeds=seeds)
+            yield from self.relax_steps(RELAX_PASSES, seeds=seeds)
 
     # Smoothing
 
-    def relax(self, passes: int = 2, seeds=None) -> None:
-        """Even the quads out without leaving the surface: each corner goes toward its neighbours' middle as far as its own planes allow.
+    def relax_steps(self, passes: int = 2, seeds=None):
+        """Generator, yielding every TURN_CORNERS corners: even the quads out without leaving the surface: each corner goes toward its neighbours' middle as far as its own planes allow.
 
         The planes are the corner's quadric, so a corner on a flat slides freely, on a crease only along it, at a tip not at all.
         """
 
         points, faces, users, quadrics = self.points, self.faces, self.users, self.quadrics
         for _ in range(passes):
-            for v in range(len(users)) if seeds is None else seeds:
+            for count, v in enumerate(range(len(users)) if seeds is None else seeds):
+                if count % TURN_CORNERS == TURN_CORNERS - 1:
+                    yield
                 around = users[v]
                 if not around or self.locked[v]:
                     continue

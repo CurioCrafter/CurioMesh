@@ -476,12 +476,10 @@ def sweeps(fit: dict, kind: str = "0", floor: float = 0.0):
             yield build_revolve(fit, spin, tolerance, kind)
 
 
-def rebuilds(points: np.ndarray, polys, kind: str = "0", fit=...):
+def rebuilds(kind: str, fit):
     """Generator of rebuilt versions of a piece, fewest faces first, as (points, quads, kinds); nothing if it isn't a known part.
 
-    `fit` is what `fit_revolve_steps` returned for this piece; without it, it is made here."""
+    `fit` is what `fit_revolve_steps` returned for this piece."""
 
-    if fit is ...:
-        fit = fit_revolve(points, polys)
     if fit is not None:
         yield from sweeps(fit, kind)

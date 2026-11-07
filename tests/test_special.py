@@ -10,6 +10,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq import special  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 def _tube(rings=40, sides=12, radius=0.02, bend=0.5):
@@ -32,7 +33,7 @@ def _cloth(n=30):
 class SpecialPartsTest(unittest.TestCase):
     def test_wire_becomes_a_few_sided_tube(self):
         points, polys = _tube()
-        fit = special.fit_tube(points, polys)
+        fit = drain(special.fit_tube_steps(points, polys))
         self.assertIsNotNone(fit)
         out, quads, _kinds = special.build_tube(fit, 0.3, 0.5)
         self.assertLess(len(quads), len(polys) / 2)
@@ -48,7 +49,7 @@ class SpecialPartsTest(unittest.TestCase):
         tris = special._clip_ears(comb)
         self.assertEqual(len(tris), n - 2)
         polys += [tuple(reversed(t)) for t in tris] + [tuple((rings - 1) * n + v for v in t) for t in tris]
-        builds = [special.build_tube(fit, 0.01, 0.1) for fit in special.fit_prisms(points, polys)]
+        builds = [special.build_tube(fit, 0.01, 0.1) for fit in drain(special.fit_prism_steps(points, polys))]
         self.assertTrue(any(len(faces) < len(polys) and np.abs(np.ptp(out, axis=0) - np.ptp(points, axis=0)).max() < 0.02 for out, faces, _kinds in builds))
 
     def test_processed_vertices_keep_the_part_they_came_from(self):
@@ -61,7 +62,7 @@ class SpecialPartsTest(unittest.TestCase):
 
     def test_cloth_rows_follow_the_folds(self):
         points, polys = _cloth()
-        out, quads, _kinds = special.build_sheet(special.fit_sheet(points, polys), 60)
+        out, quads, _kinds = special.build_sheet(drain(special.fit_sheet_steps(points, polys)), 60)
         self.assertLess(len(quads), 80)
         # the waves run across x, so the lines are spent on x and the long sides of the quads lie along y
         sides = np.asarray([out[q[1]] - out[q[0]] for q in quads] + [out[q[3]] - out[q[0]] for q in quads])

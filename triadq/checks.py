@@ -35,13 +35,8 @@ class Inspect:
     new_cross: dict[int, int] | None = None  # piece -> crossings the source did not have there, once that is worked out
 
 
-def edge_flags(faces) -> tuple[np.ndarray, int, int, int]:
-    """(broken per face, non-manifold edges, flipped edges, duplicate faces)."""
-    return drain(edge_flag_steps(faces))
-
-
 def edge_flag_steps(faces):
-    """Generator: `edge_flags`, yielding every STEP_ROWS faces or edges."""
+    """Generator: (broken per face, non-manifold edges, flipped edges, duplicate faces); yielding every STEP_ROWS faces or edges."""
     users: dict[tuple[int, int], list[tuple[int, bool]]] = {}
     seen: set[tuple[int, ...]] = set()
     broken = np.zeros(len(faces), bool)
@@ -72,13 +67,8 @@ def edge_flag_steps(faces):
     return broken, nm, flipped, dups
 
 
-def hole_counts(faces, piece: np.ndarray) -> tuple[int, dict[int, int]]:
-    """Boundary loops overall and per piece."""
-    return drain(hole_count_steps(faces, piece))
-
-
 def hole_count_steps(faces, piece: np.ndarray):
-    """Generator: `hole_counts`, yielding every STEP_ROWS faces or edges."""
+    """Generator: boundary loops overall and per piece; yielding every STEP_ROWS faces or edges."""
     count: dict[tuple[int, int], int] = {}
     owner: dict[tuple[int, int], int] = {}
     for f, face in enumerate(faces):
@@ -316,6 +306,7 @@ FLAT_AREA = 1e-6  # of the mean squared side: a face without area
 TOUCH_PROBE = 0.1  # of a face's longest side: how far behind and in front of it to ask which part is there
 TOUCH_NEAR = 0.5  # ...and how close both surfaces must be, so a part merely nearby doesn't count as touching
 MOST_SUNK = 20_000  # faces tested by winding number, deepest first: it looks at every source triangle
+SUNK_ROWS = 64  # of those, faces tested per slice
 
 
 @dataclass
@@ -472,13 +463,8 @@ def forget() -> None:
     _source = ((), None)
 
 
-def _source_of(source_co, source_faces) -> _Source:
-    """The `_Source` of this mesh. Kept while the same mesh (by size and corner sum) comes back."""
-    return drain(source_steps(source_co, source_faces))
-
-
 def source_steps(source_co, source_faces, crossed: bool = False):
-    """Generator: `_source_of` in slices, so the first check of a big source doesn't hold Blender. Returns the `_Source`.
+    """Generator: the `_Source` of this mesh in slices (kept while the same mesh, by size and corner sum, comes back), so the first check of a big source doesn't hold Blender. Returns the `_Source`.
     With `crossed`, where the source crosses itself is worked out too (`defects` asks for it when the result has a crossing)."""
     global _source
     co = np.asarray(source_co, dtype=np.float64)
@@ -498,11 +484,6 @@ def source_steps(source_co, source_faces, crossed: bool = False):
     if crossed:
         yield from _source[1].crossed_steps()
     return _source[1]
-
-
-def _overlapping(co, faces, pad, normal, middle, size, tree=None) -> np.ndarray:
-    """`_overlapping_steps` in one go."""
-    return drain(_overlapping_steps(co, faces, pad, normal, middle, size, tree))
 
 
 def _overlapping_steps(co, faces, pad, normal, middle, size, tree=None):
@@ -571,6 +552,22 @@ def touching_parts(ids, normal, middle, size, tree, source_normals, part) -> np.
 def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects:
     """Everything wrong with each face of a result, the source saying which way is out. The source lookups, the crossing
     test and the overlap test use Blender's BVH. `pairs`: crossings found already."""
+    return drain(defect_steps(co, faces, source_co, source_faces, pairs))
+
+
+def _nearest_steps(tree, queries):
+    """Generator: `tree.nearest(queries)`, STEP_ROWS queries per slice."""
+    if len(queries) <= STEP_ROWS:
+        return tree.nearest(queries)
+    parts = []
+    for start in range(0, len(queries), STEP_ROWS):
+        yield
+        parts.append(tree.nearest(queries[start : start + STEP_ROWS]))
+    return tuple(np.concatenate([part[k] for part in parts]) for k in range(3))
+
+
+def defect_steps(co, faces, source_co=None, source_faces=None, pairs=None):
+    """Generator: `defects`, a slice per stage and per STEP_ROWS source lookups."""
     co = np.asarray(co, dtype=np.float64)
     faces = [tuple(f) for f in faces]
     count = len(faces)
@@ -587,31 +584,35 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
     _keys, first, inverse = np.unique(np.column_stack((np.sort(pad, axis=1), sizes)), axis=0, return_index=True, return_inverse=True)
     original = first[inverse.ravel()]
     duplicate = original != np.arange(count)
+    yield
     bent = folded_quads(co, faces)
+    yield
     if pairs is None:
         pairs = crossing_pairs(co, faces)
+        yield
     pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     crossing = empty.copy()
     crossing[pairs.ravel()] = True
     inward, sunk, touching = empty.copy(), empty.copy(), empty.copy()
     edge = _edge_faces(pad)
     fold = (normal[edge[:, 0]] * normal[edge[:, 1]]).sum(axis=1) < FOLD
-    src = _source_of(source_co, source_faces) if source_co is not None else None
+    src = (yield from source_steps(source_co, source_faces)) if source_co is not None else None
     tree = None if src is None else src.tree
     if src is not None:
         source_co, source_normals, source_middle, stacked = src.co, src.normals, src.middle, src.stacked
-        at, hit, away = tree.nearest(middle)
+        at, hit, away = yield from _nearest_steps(tree, middle)
         hit = np.asarray(hit, dtype=np.int64)
         source_normal = source_normals[hit]
         # Which way is out, from the middle and halfway to each corner: a face across a sharp edge of the source gets
         # both sides' say. A face lying on two source faces back to back (a sheet with both sides) can't be turned. The
         # points sit just in front of the face, so one midway between the two sides of a plate asks the side it faces.
         towards = 0.5 * (middle[:, None, :] + co[pad]) + (LOOK_AHEAD * size)[:, None, None] * normal[:, None, :]
-        _at, near, _away = tree.nearest(towards.reshape(-1, 3))
+        _at, near, _away = yield from _nearest_steps(tree, towards.reshape(-1, 3))
         near = np.asarray(near, dtype=np.int64).reshape(len(pad), -1)
         votes = np.where(stacked[near][:, :, None], 0.0, source_normals[near]).sum(axis=1) + np.where(stacked[hit][:, None], 0.0, source_normal)
         length = np.linalg.norm(votes, axis=1)
         inward = (length > 0.0) & ((normal * votes).sum(axis=1) < FACING * np.maximum(length, 1e-300))
+        yield
         touching = touching_parts(np.flatnonzero(inward), normal, middle, size, tree, source_normals, src.parts)
         inward &= ~touching
         depth = -((middle - at) * source_normal).sum(axis=1)
@@ -620,15 +621,19 @@ def defects(co, faces, source_co=None, source_faces=None, pairs=None) -> Defects
         if len(deep):
             from .patch import inside_volume
 
-            sunk[deep] = inside_volume(middle[deep], source_co[src.tris])
+            for start in range(0, len(deep), SUNK_ROWS):  # one test per point: a few points per slice
+                yield
+                sunk[deep[start : start + SUNK_ROWS]] = inside_volume(middle[deep[start : start + SUNK_ROWS]], source_co[src.tris])
         fold &= (source_normal[edge[:, 0]] * source_normal[edge[:, 1]]).sum(axis=1) > FACING  # a knife edge of the source folds so too
     folded_over = empty.copy()
     folded_over[edge[fold].ravel()] = True
-    overlap = _overlapping(co, faces, pad, normal, middle, size) & ~duplicate
+    yield
+    overlap = (yield from _overlapping_steps(co, faces, pad, normal, middle, size)) & ~duplicate
     overlap[original[duplicate]] = False  # the first of two duplicates is not also an overlap
     if tree is not None:  # where the source passes through itself or lies on itself, the result may too
         old = src.crossed if len(pairs) or overlap.any() else stacked  # only then is it worth finding where the source crosses itself
         if old.any() and (len(pairs) or overlap.any()):
+            yield
             _near, gap = PointTree(source_middle[old]).nearest(middle)
             new = np.asarray(gap) > 2.0 * size
             pairs = pairs[new[pairs[:, 0]] | new[pairs[:, 1]]]

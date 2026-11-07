@@ -307,7 +307,7 @@ def cheaper_ways(style: str, bake: str, size: int, effort: str, lods: bool = Fal
     if effort != "LIGHT":
         ways.append("Effort: Light (gentler on this PC, slower)")
     if style == "ROWS":
-        ways.append("Style: Keep Detail instead of Even Rows")
+        ways.append("Style: Fewest Faces instead of Even Rows")
     if bake != "OFF" and int(size) > 1024:
         ways.append(f"A smaller bake: {int(size) // 2} px takes a quarter of the time")
     ways.append("Export Job (This Computer) to run it on a stronger machine")

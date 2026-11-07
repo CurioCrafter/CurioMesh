@@ -193,16 +193,8 @@ def faces_that_gain(mesh: MeshData, find_nearest, share: float) -> set[int]:
     return set(np.unique(face[np.isfinite(away) & (away > tolerance[face])]).tolist())
 
 
-def split_faces(mesh: MeshData, marked: set[int]) -> MeshData:
-    """Split the marked faces into four, and just enough others that the result is all quads and has no T-junctions.
-
-    Triangles are split too, whether marked or not. New vertices lie on the old faces, so the shape doesn't change yet.
-    """
-    return drain(split_face_steps(mesh, marked))
-
-
 def split_face_steps(mesh: MeshData, marked: set[int]):
-    """Generator: `split_faces`, in slices of a few thousand faces."""
+    """Generator: split the marked faces into four, and just enough others that the result is all quads and has no T-junctions; in slices of a few thousand faces."""
 
     faces = mesh.faces
     wanted = frozenset(
@@ -244,4 +236,4 @@ def split_face_steps(mesh: MeshData, marked: set[int]):
     return MeshData(stacked, output, materials, name=mesh.name)
 
 
-__all__ = ["faces_that_gain", "seek_features", "snap_new_vertices", "snap_rows", "split_faces", "unfold"]
+__all__ = ["faces_that_gain", "seek_features", "snap_new_vertices", "snap_rows", "unfold"]

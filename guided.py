@@ -3372,7 +3372,7 @@ class CURIOMESH_OT_ladder_stop(bpy.types.Operator):
 class CURIOMESH_OT_ladder_more(bpy.types.Operator):
     bl_idname = "curiomesh.ladder_more"
     bl_label = "Work Out Other Sizes"
-    bl_description = "Work out the other sizes for the Quad Size and Rows sliders in short steps. This can take several minutes; it uses about a third of Blender's time, and single steps last up to about 0.7 seconds on a 60,000-face mesh. Stop Working Out Sizes ends it at any time"
+    bl_description = "Work out the other sizes for the Quad Size and Rows sliders in short steps. This can take several minutes; it uses about a third of Blender's time, and single steps last under a second on a 60,000-face mesh. Stop Working Out Sizes ends it at any time"
     bl_options = {"INTERNAL"}
 
     def execute(self, context):

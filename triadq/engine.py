@@ -35,7 +35,7 @@ class RemeshOptions:
     smooth_field_iters: int = 4
     preserve_material_boundaries: bool = True
     preserve_uv_seams: bool = True
-    # "SMOOTH": diffused 4-RoSy field (_estimate_field). "CURVATURE": Ginzburg-Landau
+    # "SMOOTH": diffused 4-RoSy field (_estimate_field_steps). "CURVATURE": Ginzburg-Landau
     # relaxation pulled towards principal curvature directions (field.estimate_field_gl).
     field_mode: str = "SMOOTH"
     # Accept every locally valid pair, however poorly it scores: a leftover triangle costs 3+ quads at closure.
@@ -580,16 +580,6 @@ def _unit_rows(vectors: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     length = np.linalg.norm(vectors, axis=-1, keepdims=True)
     safe = length > 1e-12
     return np.where(safe, vectors / np.where(safe, length, 1.0), fallback)
-
-
-def _estimate_field(
-    mesh: _TriMesh,
-    adj: _Adjacency,
-    feature_mask: np.ndarray,
-    smooth_iters: int,
-) -> np.ndarray:
-    """`_estimate_field_steps` in one go."""
-    return drain(_estimate_field_steps(mesh, adj, feature_mask, smooth_iters))
 
 
 def _estimate_field_steps(

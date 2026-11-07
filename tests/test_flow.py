@@ -3,9 +3,10 @@ import unittest
 
 import numpy as np
 
-from triadq.flow import faces_that_gain, snap_new_vertices, snap_rows, split_faces, unfold
+from triadq.flow import faces_that_gain, snap_new_vertices, snap_rows, split_face_steps, unfold
 from triadq.patch import quad_quality
 from triadq.types import MeshData
+from triadq.types import drain
 
 
 def _grid(n: int):
@@ -42,7 +43,7 @@ class FlowTest(unittest.TestCase):
 
     def test_split_marked_stays_all_quads_without_t_junctions(self):
         co, faces = _grid(5)
-        out = split_faces(MeshData(co, faces), {12, 13, 7})
+        out = drain(split_face_steps(MeshData(co, faces), {12, 13, 7}))
         quads = np.asarray(out.faces)
         self.assertEqual(quads.shape[1], 4)
         self.assertGreater(quad_quality(out.vertices[quads]).min(), 0.0)

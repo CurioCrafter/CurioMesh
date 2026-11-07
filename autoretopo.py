@@ -35,15 +35,15 @@ from .triadq import bakescore, cases, checks, detail, hardsurf, issues, parts, p
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
-from .triadq.flatquad import FlatQuadOptions, _close_pieces, _face_frames, flat_quad_remesh, flatten_region_steps, pair_and_close, pair_and_close_steps
+from .triadq.flatquad import FlatQuadOptions, _close_piece_steps, _face_frames, flat_quad_remesh_steps, flatten_region_steps, pair_and_close_steps
 from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_face_steps, unfold_steps
 from .triadq.quadreduce import QuadReducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
 from .triadq.shading import blended_normals, corner_normal_steps, corner_table
-from .triadq.fieldmesh import MOST_TARGET, field_quads, is_clean
+from .triadq.fieldmesh import MOST_TARGET, field_quad_steps, is_clean
 from .triadq.smoothgrid import GridOptions, GridReport, crease_area_steps, grid_area_steps, smooth_area_steps
 from . import guides, hardware, loops, parallel, symmetry
-from .triadq.types import Cancelled, FlatFaces, MeshData, corners_of, drain
+from .triadq.types import Cancelled, FlatFaces, MeshData, cancel_steps, corners_of, drain
 from .triadq.uvs import simplify_borders
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -262,18 +262,13 @@ def triangulate(points, faces, kinds):
     return points, out, mats
 
 
-def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
-    """The faces for one group of pieces by NumPy alone, no Blender data: (points, faces, materials)."""
-    return drain(make_pure_steps(mesh, method, output, notes, **pairing))
-
-
 def make_pure_steps(mesh: MeshData, method, output, notes=None, **pairing):
-    """Generator: `make_pure`, in slices."""
+    """Generator: the faces for one group of pieces by NumPy alone, no Blender data, in slices: (points, faces, materials)."""
     if method == "FLAT":
         if output == "TRIS":
-            out = (yield from flatten_region_steps(mesh))[0]
+            out = (yield from cancel_steps(flatten_region_steps(mesh), pairing.get("cancelled")))[0]
         else:
-            out = flat_quad_remesh(mesh, force_quads=output == "QUADS")[0]
+            out = (yield from flat_quad_remesh_steps(mesh, force_quads=output == "QUADS", cancelled=pairing.get("cancelled")))[0]
     elif output == "TRIS" or method == "TRIS":
         out = mesh
     else:
@@ -353,13 +348,8 @@ def _fill(points, polys, kinds, strategy, goal):
     return out, [tuple(f) for f in result.faces], [kinds[0]] * len(result.faces)
 
 
-def shaded(picture_set, points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int) -> list[np.ndarray]:
-    """Each picture's normals as smooth shading shows them, blended from the vertices at each hit."""
-    return drain(shaded_steps(picture_set, points, polys, center, half, pixels))
-
-
 def shaded_steps(picture_set, points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int):
-    """Generator: `shaded`, a slice per stage and per picture."""
+    """Generator: each picture's normals as smooth shading shows them, blended from the vertices at each hit; a slice per stage and per picture."""
 
     normals = yield from corner_normal_steps(points, polys)
     yield
@@ -792,6 +782,7 @@ class AutoJob:
         self.levels: list[list[Level]] = []
         self.field_spent = 0.0
         self._worked, self._began = 0.0, None  # seconds spent inside `step`, and when the slice running now began
+        self._used_helpers = False  # helper Blenders measured some of the parts
         self.ready: list[list[bool]] = []  # per piece and size: already all quads, so it skips pairing
         self.seen: list[float] = []
         self.twins: dict[int, tuple[int, tuple]] = {}  # a piece that's a copy: the piece it copies, and how to move onto it
@@ -851,6 +842,14 @@ class AutoJob:
         self.cache[key] = (self.detail, sizes, levels, seen, ready)
         if file is not None and fresh:
             hardware.save_piece(file, self.detail, sizes[:-1], pairs[:-1], seen)
+
+    @property
+    def worked_seconds(self) -> float:
+        """Seconds this job took, for telling a slow one: the time it worked here, or with helpers, the whole time it ran
+        (they work while this Blender waits, so the time here leaves theirs out)."""
+        if self._used_helpers:
+            return (self.report or {}).get("seconds", self._worked)
+        return self._worked
 
     def clock(self) -> float:
         """Seconds for this job's time limits: only the time it works counts, so the gaps between slices (and the size
@@ -1047,7 +1046,7 @@ class AutoJob:
         if not cut and self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
             kind = max(set(kinds), key=kinds.count)
             revolve = yield from parts.fit_revolve_steps(points, polys)  # the fit `parts.rebuilds` makes, in slices
-            tries = chain(parts.rebuilds(points, polys, kind, fit=revolve), hardsurf.rebuilds(points, polys, kind, **self.hard))
+            tries = chain(parts.rebuilds(kind, revolve), hardsurf.rebuilds(points, polys, kind, **self.hard))
             while True:
                 out = yield from self._slice(lambda: next(tries, False))
                 if out is False:
@@ -1068,7 +1067,7 @@ class AutoJob:
             yield  # the last try above can end with a long fit: the special shapes start in a slice of their own
             hopeless = HOPELESS * PIECE_LIMIT * self.detail / 100.0
             fits = yield from special.fit_steps(points, polys)  # the fits `special.rebuilds` makes, in slices
-            for family in special.rebuilds(points, polys, max(set(kinds), key=kinds.count), fits=fits):  # wires, stacks of fins, cloth
+            for family in special.rebuilds(polys, max(set(kinds), key=kinds.count), fits):  # wires, stacks of fins, cloth
                 for out in family:  # most faces first: once one is far off, the smaller ones won't do either
                     yield
                     if out is None:
@@ -1236,6 +1235,7 @@ class AutoJob:
         env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")  # the child's own copy: each helper's NumPy keeps to one core
         setup = yield from self._slice(lambda: parallel.setup_of(self))
         self._pool = parallel.Pool(command, count, setup, env, hardware.job_folder("curiomesh_parts_"))
+        self._used_helpers = True
         self._copy_plan = {}
         self._helper_note = f"Parts were measured {count} at a time, in helper processes"  # noted once a helper's result is in
 
@@ -1321,16 +1321,15 @@ class AutoJob:
         started, spent_from = time.perf_counter(), self.clock()
         strict = self.output_kind == "QUADS"
 
-        def work():
-            try:
-                made = field_quads(points, polys, want, cancelled=lambda: self._stopped)
-                return made if not strict or is_clean(made[0], made[1]) else None
-            except ValueError as exc:
-                if "Stopped" not in str(exc) and "too small" not in str(exc):
-                    self.notes.append(str(exc))
-                return None
-
-        made = yield from self._slice(work)
+        self._feed()
+        try:
+            made = yield from field_quad_steps(points, polys, want, cancelled=lambda: self._stopped)
+            yield
+            made = made if not strict or is_clean(made[0], made[1]) else None
+        except ValueError as exc:
+            if "Stopped" not in str(exc) and "too small" not in str(exc):
+                self.notes.append(str(exc))
+            made = None
         self.field_spent += self.clock() - spent_from
         self.timings["field"] = self.timings.get("field", 0.0) + time.perf_counter() - started
         if made is None or self._stopped:
@@ -1427,12 +1426,8 @@ class AutoJob:
         self.output_id += 1
         self.shown_at = time.perf_counter()
 
-    def _source_samples(self):
-        """Each source triangle as a point: (positions, normals, areas, loose parts, the source's tree). Made once."""
-        return drain(self._source_sample_steps())
-
     def _source_sample_steps(self):
-        """Generator: `_source_samples`, the source's tree made in slices."""
+        """Generator: each source triangle as a point: (positions, normals, areas, loose parts, the source's tree). Made once; the source's tree made in slices."""
         if self._samples is None:
             flat, starts, sizes = corner_table(self.faces)
             first = np.repeat(starts, sizes - 2)
@@ -1759,7 +1754,8 @@ class AutoJob:
         yield
         reducer = yield from (ChordReducer.made_in_steps(result, judge) if chords else QuadReducer.made_in_steps(result))
         if chords:
-            chords_began = time.perf_counter()
+            reducer.clock = self.clock  # working time, as for the job's other budgets
+            chords_began = self.clock()
             reducer.deadline = chords_began + CHORDS_SECONDS
             reducer.flag_messy(CHORDS_MESSY)
             reducer.project = self.project
@@ -1811,7 +1807,8 @@ class AutoJob:
         saved = yield from self._slice(reducer.save)
         if chords:
             self.stage = "Redrawing messy patches as grids..."
-            yield from self._slice(reducer.tidy)
+            self._feed()
+            yield from reducer.tidy_steps()
             attempt, attempt_owner, now, ruined = yield from look(saved)
             if now <= self.detail and not ruined:
                 result, owner, loss = attempt, attempt_owner, now
@@ -1846,7 +1843,7 @@ class AutoJob:
             else:
                 step *= 0.5
         if chords:
-            self.notes.append(f"Redraw Messy Quads was on: {time.perf_counter() - chords_began:.0f} s of this run; tidier loops cost more faces (often 7-50% more)")
+            self.notes.append(f"Redraw Messy Quads was on: {self.clock() - chords_began:.0f} s of this run; tidier loops cost more faces (often 7-50% more)")
         return result, owner, loss
 
     def _build(self, co, faces, kinds, method, goal=0):
@@ -2000,7 +1997,7 @@ class AutoJob:
         yield
         began, budget_from = time.perf_counter(), self.clock()
         yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
-        found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        found = yield from self._defects_of(points, faces, self.co, self.faces, pairs=after.pairs)
         self._defects = (points, faces, found)
         bad = found.inward | found.folded_over
         if not bad.any():
@@ -2013,7 +2010,7 @@ class AutoJob:
         if any(getattr(now, k) > getattr(after, k) for k in ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")):
             return same
         yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
-        left = yield from self._slice(lambda: checks.defects(moved, faces, self.co, self.faces, pairs=now.pairs))
+        left = yield from self._defects_of(moved, faces, self.co, self.faces, pairs=now.pairs)
         if (left.inward | left.folded_over).sum() >= bad.sum():
             return same
         kept = list(faces)  # a new list: copies placed as instances no longer match
@@ -2023,10 +2020,15 @@ class AutoJob:
             return same
         return moved, kept, seen, now, count
 
+    def _defects_of(self, *args, **kwargs):
+        """Generator: `checks.defect_steps`, after handing the helpers their next tasks."""
+        self._feed()
+        return (yield from checks.defect_steps(*args, **kwargs))
+
     def _serious(self, points, faces, after):
         """Generator: per face, turned inward, folded over or crossing (the Issue Finder's serious kinds). Kept for reuse."""
         yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
-        found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+        found = yield from self._defects_of(points, faces, self.co, self.faces, pairs=after.pairs)
         self._defects = (points, faces, found)
         return found.inward | found.folded_over | found.crossing
 
@@ -2110,7 +2112,7 @@ class AutoJob:
         seen_before = self._defects
         if seen_before is None or seen_before[0] is not points or seen_before[1] is not faces:  # the repairs changed it, or it was never checked
             yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
-            found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+            found = yield from self._defects_of(points, faces, self.co, self.faces, pairs=after.pairs)
         else:
             found = seen_before[2]
         self.bad = found.any()
@@ -2141,7 +2143,7 @@ class AutoJob:
             self.stage = f"Redoing rough spots, round {round_index + 1}"
             yield
             yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
-            found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
+            found = yield from self._defects_of(points, faces, self.co, self.faces, pairs=after.pairs)
             bad = found.any()
             if bad_before is None:
                 bad_before = int(bad.sum())
@@ -2318,7 +2320,7 @@ class AutoJob:
                     triangles = sum(len(p) - 2 for p in polys)
                     want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
                     if triangles > want:
-                        points, polys, kinds = _decimate(points, polys, kinds, want / triangles)
+                        points, polys, kinds = yield from _decimate_steps(points, polys, kinds, want / triangles)
                     leftovers.append((points, polys, kinds))
                     yield
                     continue
@@ -2326,9 +2328,10 @@ class AutoJob:
                 for size in rows["lens"].tolist():
                     faces.append(tuple(flat[cursor : cursor + size]))
                     cursor += size
-                tree = _face_tree(points, polys)
+                tree = yield from _face_tree_steps(points, polys)
                 find = tree.find_nearest if isinstance(tree, BVHTree) else tree
                 triangles = np.asarray([(q[0], q[i], q[i + 1]) for q in polys for i in range(1, len(q) - 1)], dtype=np.int64)
+                yield
 
                 def sharpen(moved, points=points, triangles=triangles):
                     grid = KDTree(len(moved))
@@ -2348,7 +2351,7 @@ class AutoJob:
                     triangles_in = sum(len(p) - 2 for p in polys)
                     want = max(KEEP_TRIANGLES, 2 * int(wants[k]))
                     if triangles_in > want:
-                        points, polys, kinds = _decimate(points, polys, kinds, want / triangles_in)
+                        points, polys, kinds = yield from _decimate_steps(points, polys, kinds, want / triangles_in)
                     leftovers.append((points, polys, kinds))
                     self._refused += 1
                     continue
@@ -2368,9 +2371,10 @@ class AutoJob:
                 fcs += [tuple(v + cursor for v in p) for p in polys]
                 knd += kinds
                 cursor += len(points)
-            closed = yield from self._step(lambda: pair_and_close(MeshData(np.vstack(pts), fcs, knd), seed_count=1)[0])
+            closed = yield from self._steps(pair_and_close_steps(MeshData(np.vstack(pts), fcs, knd), seed_count=1))
             if closed is None:
                 return None
+            closed = closed[0]
             all_points.append(np.asarray(closed.vertices))
             all_faces += [tuple(v + offset for v in f) for f in closed.faces]
             all_kinds += list(closed.face_materials)
@@ -2399,7 +2403,7 @@ class AutoJob:
         most = int(ROWS_MOST * source)
         target = self.target_faces or min(max(int(ROWS_START * source), 256), most)
         best = None
-        reference_shaded = shaded(reference, self.co, self.faces, center, half, self.max_pixels)
+        reference_shaded = yield from shaded_steps(reference, self.co, self.faces, center, half, self.max_pixels)
         self._view = (center, half, reference, reference_shaded, pixel)
 
         def judge(points, out_faces, kinds, loss):
@@ -2446,7 +2450,7 @@ class AutoJob:
             self.notes.append(f"QuadriFlow gave up on {self._refused} parts: they were paired instead")
         if self.output_kind == "QUADS" and any(len(face) != 4 for face in out_faces):  # stuck quads came back as triangles: Quads means all quads
             mesh = MeshData(points, out_faces, kinds)
-            closed = yield from self._step(lambda: _close_pieces(mesh))
+            closed = yield from self._steps(_close_piece_steps(mesh))
             if closed is not None:
                 points, out_faces, kinds = np.asarray(closed[0].vertices, dtype=np.float64), [tuple(f) for f in closed[0].faces], list(closed[0].face_materials)
                 if closed[4]:
@@ -2471,6 +2475,16 @@ class AutoJob:
 
         try:
             return (yield from tasks.run(work, stopped=lambda: self._stopped))
+        except Exception as exc:
+            self.warnings = [f"Even Rows: {exc}"]
+            return None
+
+    def _steps(self, steps):
+        """Generator: `_step` for work that comes in slices (a `*_steps` generator). Returns its result, or None once stopped or if it failed."""
+        try:
+            return (yield from cancel_steps(steps, lambda: self._stopped))
+        except Cancelled:
+            return None
         except Exception as exc:
             self.warnings = [f"Even Rows: {exc}"]
             return None

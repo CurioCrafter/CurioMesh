@@ -16,7 +16,8 @@ if str(ROOT) not in sys.path:
 
 from triadq import MeshData, flat_quad_remesh, topology_summary  # noqa: E402
 from triadq import flatquad  # noqa: E402
-from triadq.flatquad import FlatQuadOptions, flatten_regions, make_closable  # noqa: E402
+from triadq.flatquad import FlatQuadOptions, flatten_regions, make_closable_steps  # noqa: E402
+from triadq.types import drain  # noqa: E402
 from triadq.topology import _unpair_quads  # noqa: E402
 
 
@@ -193,7 +194,7 @@ class FlatRegionTests(unittest.TestCase):
     def test_make_closable_opens_flipped_and_duplicate_faces_without_moving_anything(self):
         mesh = plate(4)
         flipped = [tuple(reversed(mesh.faces[0]))] + mesh.faces[1:] + [mesh.faces[1]]
-        fixed, added = make_closable(MeshData(vertices=mesh.vertices, faces=flipped))
+        fixed, added = drain(make_closable_steps(MeshData(vertices=mesh.vertices, faces=flipped)))
         summary = topology_summary(fixed)
         self.assertEqual(len(fixed.faces), len(mesh.faces))  # the duplicate is gone
         self.assertGreater(added, 0)

@@ -1012,13 +1012,8 @@ def _unpair_quads(mesh: MeshData, quads: list[int]) -> MeshData:
     return MeshData(vertices=vertices, faces=faces, face_materials=materials, name=mesh.name)
 
 
-def parity_path_closure_unpairing(mesh: MeshData, *, tries: int = 8) -> MeshData:
-    """ParityPath closure, giving back the few quads it can't keep so they can't cost the rest of the piece its quads."""
-    return drain(parity_path_closure_unpairing_steps(mesh, tries=tries))
-
-
 def parity_path_closure_unpairing_steps(mesh: MeshData, *, tries: int = 8):
-    """Generator: `parity_path_closure_unpairing`, in slices."""
+    """Generator: ParityPath closure, giving back the few quads it can't keep so they can't cost the rest of the piece its quads; in slices."""
 
     for _ in range(tries):
         quads = yield from _unclosable_quad_steps(mesh)
