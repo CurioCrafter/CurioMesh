@@ -50,7 +50,6 @@ WARP_COSINE = 0.5
 SKIPPED, ACCEPTED, REFUSED, NO_PATH, ON_EDGES, SHORT, PARTLY_HELD = 0, 1, 2, 3, 4, 5, 6
 KEPT, SPLIT, LEFT, CANNOT, BAKE = 0, 1, 2, 3, 4
 SOFT = 2
-CONTACT = 4  # a part contact (`part_contacts`): the snap fits it like a Soft chain, the split leaves it alone
 SLICE_S = 0.002  # one step() of a stage does about this much work (short: a loaded PC can stretch a slice several times)
 
 # Optional faster callables, set by the one adapter (uv_fast.py); the NumPy code runs when a name is missing.
@@ -76,7 +75,7 @@ def chain_xyz(seams: dict, points) -> np.ndarray:
     points = np.asarray(points, np.float64).reshape(-1, 3)
     xyz = np.zeros((int(seams["n_welded"]), 3))
     xyz[np.asarray(seams["weld"], np.int64)] = points
-    extra = seams.get("contact_xyz")  # welded ids after the source's: the part contacts' vertices (`part_contacts`)
+    extra = seams.get("extra_xyz")  # welded ids after the source's: `part_contacts` / `part_switches` chain vertices
     if extra is not None and len(extra):
         xyz[len(xyz) - len(extra):] = extra
     return xyz.ravel()
@@ -174,13 +173,14 @@ def _walk_runs(adj):
 
 
 def part_contacts(seams: dict, points, indptr, flat, corner_uv, texture_px: float = 1024.0) -> dict:
-    """The seam dict with **part contacts** added as chains of class `CONTACT`: the curves where two unconnected pieces of the source
+    """The seam dict with **part contacts** added as Soft chains with no gap: the curves where two unconnected pieces of the source
     cut through each other (a bolt through a plate, a cap pushed into a body).
 
     Such pieces share no edge, so the UV seams have no chain there, yet a result face across the crease takes its
-    texture from two places. The snap fits result edges onto the curve like a Soft chain (zero faces); the split leaves
-    it alone. Side A is the lower part's UV there, side B the other part's.
-    New chain vertices get welded ids after the source's (`chain_xyz` reads their places from `contact_xyz`).
+    texture from two places. The snap fits result edges onto the curve (zero faces); the split leaves it alone, because
+    the chain's gap is 0 px (cutting along it measured worse: the cut pieces next to a crease stay across). Side A is
+    the lower part's UV there, side B the other part's; the real gaps are in `contact_gap_px`.
+    New chain vertices get welded ids after the source's (`chain_xyz` reads their places from `extra_xyz`).
 
     Our own wiring of textbook pieces: candidate triangle pairs from a uniform grid, segment-triangle crossings
     (Moller, Trumbore 1997, "Fast, minimum storage ray-triangle intersection"), each crossing keyed by (welded edge,
@@ -299,13 +299,134 @@ def part_contacts(seams: dict, points, indptr, flat, corner_uv, texture_px: floa
     out["run_vertex"] = np.r_[np.asarray(seams["run_vertex"], np.int64), np.asarray(rv, np.int64)]
     out["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), np.asarray(ua, np.float64).ravel()]
     out["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), np.asarray(ub, np.float64).ravel()]
-    out["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), np.asarray(gp, np.float64)]
-    out["class"] = np.r_[cls, np.full(len(runs), CONTACT, cls.dtype)]
+    out["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), np.zeros(len(gp))]
+    out["contact_gap_px"] = np.asarray(gp, np.float64)
+    out["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
     out["n_welded"] = nw + len(npos)
-    out["contact_xyz"] = np.asarray(npos, np.float64).reshape(-1, 3)
+    old_extra = seams.get("extra_xyz")
+    new_xyz = np.asarray(npos, np.float64).reshape(-1, 3)
+    out["extra_xyz"] = new_xyz if old_extra is None else np.r_[np.asarray(old_extra, np.float64).reshape(-1, 3), new_xyz]
     out["part_contacts"] = len(runs)
     out["part_contact_first"] = len(cls)
     return out
+
+
+def _uv_at(src_P, src_ip, src_fl, src_uv, face, at):
+    """Source UV at closest points `at` (N, 3) on source polygons `face` (fan triangle nearest to each point)."""
+
+    out = np.zeros((len(face), 2))
+    best = np.full(len(face), np.inf)
+    counts = src_ip[face + 1] - src_ip[face]
+    for j in range(1, int(counts.max()) - 1 if len(face) else 0):
+        has = counts > j + 1
+        i = np.flatnonzero(has)
+        c0, c1, c2 = src_ip[face[i]], src_ip[face[i]] + j, src_ip[face[i]] + j + 1
+        a, b, c = src_P[src_fl[c0]], src_P[src_fl[c1]], src_P[src_fl[c2]]
+        for k in range(len(i)):
+            w = closest_bary(tuple(at[i[k]]), tuple(a[k]), tuple(b[k]), tuple(c[k]))
+            q = w[0] * a[k] + w[1] * b[k] + w[2] * c[k]
+            d = float(np.linalg.norm(q - at[i[k]]))
+            if d < best[i[k]]:
+                best[i[k]] = d
+                out[i[k]] = w[0] * src_uv[c0[k]] + w[1] * src_uv[c1[k]] + w[2] * src_uv[c2[k]]
+    return out
+
+
+def part_switches(seams: dict, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, texture_px: float = 1024.0,
+                  steps: int = 16) -> dict:
+    """The seam dict with **part switches** added as Soft chains: on the result mesh, the lines where the nearest source
+    piece changes between two unconnected pieces (a bolt on a plate, a cap pushed into a body).
+
+    Unconnected pieces share no edge, so the UV seams have no chain there, yet a result face spanning both takes texture
+    from two places. Each result edge whose two ends are nearest different pieces gets the point where the nearest
+    piece changes (bisection along the edge, `steps` halvings), and the points of a face's two such edges are joined, so
+    the chains run on the result surface itself and the split cuts exactly where the texture changes owner. Side A is
+    the lower piece's UV at that point, side B the other's. New chain vertices get welded ids after the source's
+    (`chain_xyz` reads their places from `extra_xyz`). `nearest(points) -> (closest (N, 3), polygon, distance)` is the
+    caller's lookup on the source polygons (the add-on's face tree). Our own rule; bisection is textbook."""
+
+    sP = np.asarray(src_points, np.float64).reshape(-1, 3)
+    sip, sfl = np.asarray(src_indptr, np.int64), np.asarray(src_flat, np.int64)
+    suv = np.asarray(src_uv, np.float64).reshape(-1, 2)
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    mesh = _Mesh(P, indptr, flat)
+    weld = np.asarray(seams["weld"], np.int64)
+    out = dict(seams)
+    if mesh.nf == 0 or len(sip) < 3:
+        return out
+    part = _parts(sfl, sip, weld, int(seams["n_welded"]))
+    if part.min() == part.max():
+        return out
+    _, vface, _ = nearest(P)
+    vpart = part[np.asarray(vface, np.int64)]
+    ea, eb = mesh.ea, mesh.eb
+    cross = np.flatnonzero(vpart[ea] != vpart[eb])
+    if not len(cross):
+        return out
+    pa, pb = P[ea[cross]], P[eb[cross]]
+    first = vpart[ea[cross]]
+    lo, hi = np.zeros(len(cross)), np.ones(len(cross))
+    for _ in range(steps):
+        mid = 0.5 * (lo + hi)
+        _, f, _ = nearest(pa + mid[:, None] * (pb - pa))
+        same = part[np.asarray(f, np.int64)] == first
+        lo, hi = np.where(same, mid, lo), np.where(same, hi, mid)
+    x = pa + (0.5 * (lo + hi))[:, None] * (pb - pa)
+    at_a, fa, _ = nearest(pa + lo[:, None] * (pb - pa))
+    at_b, fb, _ = nearest(pa + hi[:, None] * (pb - pa))
+    fa, fb = np.asarray(fa, np.int64), np.asarray(fb, np.int64)
+    uva = _uv_at(sP, sip, sfl, suv, fa, np.asarray(at_a).reshape(-1, 3))
+    uvb = _uv_at(sP, sip, sfl, suv, fb, np.asarray(at_b).reshape(-1, 3))
+    pair = np.sort(np.stack([part[fa], part[fb]], 1), 1)
+    low_first = part[fa] <= part[fb]
+    side_a = np.where(low_first[:, None], uva, uvb)
+    side_b = np.where(low_first[:, None], uvb, uva)
+    point_of_edge = {int(e): k for k, e in enumerate(cross.tolist())}
+    adj = {}
+    for f in range(mesh.nf):
+        fv = mesh.face(f)
+        n = len(fv)
+        ks = []
+        for i in range(n):
+            a, b = fv[i], fv[(i + 1) % n]
+            k = point_of_edge.get(_edge_index(mesh, a, b))
+            if k is not None:
+                ks.append(k)
+        if len(ks) == 2 and tuple(pair[ks[0]]) == tuple(pair[ks[1]]):
+            adj.setdefault(ks[0], set()).add(ks[1])
+            adj.setdefault(ks[1], set()).add(ks[0])
+    runs = _walk_runs(adj)
+    if not runs:
+        return out
+    base = int(out["n_welded"])
+    old_extra = out.get("extra_xyz")
+    rv, ua, ub, gp, ri = [], [], [], [], []
+    for run in runs:
+        for k in run:
+            rv.append(base + k)
+            ua.append(side_a[k])
+            ub.append(side_b[k])
+            gp.append(float(np.linalg.norm(side_a[k] - side_b[k])) * texture_px)
+        ri.append(len(rv))
+    old_ip = np.asarray(seams["run_indptr"], np.int64)
+    cls = np.asarray(seams["class"])
+    out["run_indptr"] = np.r_[old_ip, np.asarray(ri, np.int64) + int(old_ip[-1])]
+    out["run_vertex"] = np.r_[np.asarray(seams["run_vertex"], np.int64), np.asarray(rv, np.int64)]
+    out["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), np.asarray(ua, np.float64).ravel()]
+    out["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), np.asarray(ub, np.float64).ravel()]
+    out["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), np.asarray(gp, np.float64)]
+    out["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
+    out["n_welded"] = base + len(x)
+    out["extra_xyz"] = x if old_extra is None else np.r_[np.asarray(old_extra, np.float64).reshape(-1, 3), x]
+    out["part_switches"] = len(runs)
+    out["part_switch_first"] = len(cls)
+    return out
+
+
+def _edge_index(mesh, a, b):
+    if not hasattr(mesh, "_edge_of"):
+        mesh._edge_of = {(int(x), int(y)): e for e, (x, y) in enumerate(zip(mesh.ea.tolist(), mesh.eb.tolist()))}
+    return mesh._edge_of.get((min(a, b), max(a, b)))
 
 
 # ---------------------------------------------------------------- small helpers (scalar, same order as the reference)
@@ -591,7 +712,7 @@ def _snap_steps(points, indptr, flat, seams, xyz, max_move, vchain_in, vparam_in
             out["done"] = False
             break
         ch = chs[c]
-        if cls[c] not in (SOFT, CONTACT) or len(ch.pts) < 2 or n == 0:
+        if cls[c] != SOFT or len(ch.pts) < 2 or n == 0:
             continue
         Pc = np.array(pos)
         near = [_nearest(Pc, p) for p in ch.pts]

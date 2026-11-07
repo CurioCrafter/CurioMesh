@@ -51,10 +51,6 @@ pub const NEARER_SHARE: f64 = 0.5;
 /// Quad warp limit of the add-on's quad test (60 deg).
 pub const WARP_COSINE: f64 = 0.5;
 
-/// Chain class of a part contact (the twin's `part_contacts`: where two unconnected source pieces cut through each
-/// other). Only this kernel reads it: the snap fits it like a Soft chain, the split leaves it alone.
-pub const CONTACT: u8 = 4;
-
 /// Frozen cross-kernel input (K1b): per vertex, the farthest it may move in model units (0 = held).
 pub type MaxMove<'a> = &'a [f64];
 
@@ -509,7 +505,7 @@ pub fn snap(points: &[f64], faces: &Faces, chains: &Chains, max_move: MaxMove, v
             break;
         }
         let ch = &chs[c];
-        if (chains.seams.class[c] != 2 && chains.seams.class[c] != CONTACT) || ch.pts.len() < 2 || n == 0 {
+        if chains.seams.class[c] != 2 || ch.pts.len() < 2 || n == 0 {
             continue;
         }
         // Already on result edges: every chain vertex sits on a result vertex, consecutive ones joined by an edge.
