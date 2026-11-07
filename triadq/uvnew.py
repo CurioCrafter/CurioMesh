@@ -37,6 +37,9 @@ RASTER_PX = 128  # tile size of the check that runs without the faster callable
 SELF_CHECK_PX = 256.0  # a checked chart is drawn this big (its longest side is SELF_CHECK_FILL of it)
 SELF_CHECK_FILL = 0.9
 NUMPY_CHECK_FACES = 30000  # without the faster check the guard is skipped above this size
+BOX_LIKE = 0.85  # a chart covering this share of its box is packed as a box (on the block grid, half the gap of an outline)
+NEST_STEPS = 10  # bisection steps of the outline packing's scale (each halves the remaining range in log scale)
+NEST_TOL = 0.002  # the outline scale search ends when the range is this narrow
 ROWS_INDEX = {"off": 0, "soft": 1, "on": 2, "auto": 3}
 
 
@@ -283,7 +286,7 @@ class NewUVs:
         new = self.settings.copy(**changes)
         same = lambda *names: all(getattr(new, k) == getattr(self.settings, k) for k in names)  # noqa: E731
         keep = {"sight": self.sight if self.sight is not None and self.sight.done and same("views", "all_sides") else None}
-        if same("out_of_sight", "hidden_l", "views", "all_sides") and self.tree is not None:
+        if same("out_of_sight", "hidden_l", "views", "all_sides") and self.tree is not None and new.stretch_allowed / 100.0 <= getattr(self.tree, "build_stretch", uvchart.BUILD_STRETCH):
             keep["tree"] = self.tree
         return NewUVs(self.points, self.indptr, self.flat, self.material, self.forced, new, self.budget, _keep=keep)
 
@@ -335,7 +338,8 @@ class NewUVs:
         if tree is None:
             self._tick("charts", 0.2)
             stage = uvchart.Charts(pts, indptr, flat, part_label=self.material, forced=self.forced, seen_edge_px=inside if s.out_of_sight else None,
-                                   out_of_sight=bool(s.out_of_sight and inside is not None), hidden_l=s.hidden_l, budget=self.budget)
+                                   out_of_sight=bool(s.out_of_sight and inside is not None), hidden_l=s.hidden_l,
+                                   build_stretch=max(uvchart.BUILD_STRETCH, float(s.stretch_allowed) / 100.0), budget=self.budget)
             self._active = stage
             while not stage.done:
                 value = stage.step()
@@ -441,21 +445,35 @@ class NewUVs:
             raise ValueError("The charts do not fit on the page, even without a gap.")
         res.scale, res.used = float(fill["scale"]), float(fill["used"])
         res.stretch_allowed = x_now
+        lu, lv = ru - lo_u[corner_chart], rv - lo_v[corner_chart]
+        nest = None
+        if s.density is None and not self._stop:
+            self._tick("nest", 0.9)
+            nest = yield from self._nest(lu, lv, chart, nchart, width, height, a2 * (fit * factor) ** 2, res.scale, page, k)
         res.timing["pack_s"] = time.perf_counter() - t3
         t4 = time.perf_counter()
 
         # 6. corner UVs on the 0-1 square
-        px, py, turned = (np.array([p[i] for p in fill["places"]]) for i in range(3))
-        sc = res.scale
-        du = (ru - lo_u[corner_chart]) * sc
-        dv = (rv - lo_v[corner_chart]) * sc
-        wsc = (width * sc)[corner_chart]
-        turn = turned.astype(bool)[corner_chart]
-        uu = np.where(turn, dv, du)  # a quarter turn (u, v) -> (v, w - u) keeps the winding
-        vv = np.where(turn, wsc - du, dv)
         out = np.empty_like(corner_uv)
-        out[:, 0] = (px[corner_chart] + uu) / page[0]
-        out[:, 1] = (py[corner_chart] + vv) / page[1]
+        if nest is not None:
+            res.scale, ok, dx, dy, quarter = nest
+            sc = res.scale
+            x, y = lu * sc, lv * sc
+            q = quarter[corner_chart]
+            tx = np.select([q == 1, q == 2, q == 3], [-y, -x, y], x)  # (x, y) -> (-y, x) per quarter, as the packer turns
+            ty = np.select([q == 1, q == 2, q == 3], [x, -y, -x], y)
+            out[:, 0] = (tx + dx[corner_chart]) / page[0]
+            out[:, 1] = (ty + dy[corner_chart]) / page[1]
+        else:
+            px, py, turned = (np.array([p[i] for p in fill["places"]]) for i in range(3))
+            sc = res.scale
+            du, dv = lu * sc, lv * sc
+            wsc = (width * sc)[corner_chart]
+            turn = turned.astype(bool)[corner_chart]
+            uu = np.where(turn, dv, du)  # a quarter turn (u, v) -> (v, w - u) keeps the winding
+            vv = np.where(turn, wsc - du, dv)
+            out[:, 0] = (px[corner_chart] + uu) / page[0]
+            out[:, 1] = (py[corner_chart] + vv) / page[1]
         res.uv = out
         res.timing["write_s"] = time.perf_counter() - t4
         res.timing["total_s"] = time.perf_counter() - t0
@@ -463,6 +481,51 @@ class NewUVs:
         self.result = res
         self._tick("done", 1.0)
         yield
+
+    def _nest(self, lu, lv, chart, nchart, width, height, area, s0, page, k):
+        """Charts packed by their outline instead of their box (SPEC 7.4 row intervals, `uvpack.pack_into`): small charts
+        sit in the free rows of big charts' boxes, so a larger scale fits. Bisection on the scale between the box layout's
+        scale and the one where the outlines alone would fill the page; the box layout stays when no outline layout beats
+        it. Returns (scale, ok, dx, dy, quarter turns per chart) or None."""
+
+        fast = uvpack.FAST.get("pack_into")
+        if fast is None or nchart == 0:
+            return None  # ponytail: the pure-Python twin is too slow for thousands of charts; boxes stay without the kernel
+        sizes = np.diff(self.indptr)
+        nt = np.maximum(sizes - 2, 0)
+        fan_face = np.repeat(np.arange(len(sizes)), nt)
+        j = np.arange(len(fan_face)) - np.repeat(np.cumsum(nt) - nt, nt)
+        base = self.indptr[fan_face]
+        tri = np.stack([base, base + 1 + j, base + 2 + j], 1)
+        tri_chart = chart[fan_face].astype(np.int64)
+        boxy = (area >= BOX_LIKE * width * height).astype(np.uint8)  # fills its box: placed on the block grid, less gap
+        turn_ok = np.ones(nchart, np.uint8)
+        total = float(area.sum())
+        if not total > 0:
+            return None
+        lo, hi = float(s0), float(np.sqrt(page[0] * page[1] / total))
+        best = None
+        for _ in range(NEST_STEPS):
+            if not hi > lo * (1.0 + NEST_TOL):
+                break
+            s = float(np.sqrt(lo * hi))
+            x, y = lu * s, lv * s
+            tris = np.stack([x[tri[:, 0]], y[tri[:, 0]], x[tri[:, 1]], y[tri[:, 1]], x[tri[:, 2]], y[tri[:, 2]]], 1).ravel()
+            job = fast(np.zeros(0), tris, tri_chart, nchart, boxy, turn_ok, page[0], page[1], k)
+            if job is None:
+                return best
+            self._active = job
+            while not job.done():
+                yield WAIT
+            self._active = None
+            ok, dx, dy, q = (np.asarray(a) for a in job.result())
+            if ok.astype(bool).all():
+                best, lo = (s, ok, dx.astype(np.float64), dy.astype(np.float64), q.astype(np.int64)), s
+            else:
+                hi = s
+            if self._stop:
+                break
+        return best
 
     def _lies_over_itself(self, groups, corner_uv):
         """Generator: True when any chart of `groups` (face index arrays) overlaps itself or has a flipped face. The charts

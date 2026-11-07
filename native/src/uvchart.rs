@@ -594,14 +594,18 @@ impl Ord for Cand {
     }
 }
 
-/// Rank of a merge: stretch added <= 0 first, by (stretch added, -cost removed); then by cost removed / stretch added.
-fn key_of(added: f64, cost: f64) -> Key {
+/// Rank of a merge: stretch added <= 0 first, by the share of the smaller chart's border cost that the merge removes
+/// (largest first); then by that share / stretch added. The share, not the bare cost, keeps charts compact: a merge that
+/// closes most of a chart's border goes before one that glues a short stretch of a long border, so charts do not grow
+/// branches (compactness term after Garland, Willmott, Heckbert 2001; the share form is ours). A lower stretch from the
+/// merge is not ranked: it is the quantile thinning out, not a better chart.
+fn key_of(added: f64, share: f64) -> Key {
     if !added.is_finite() {
-        Key { class: 2, a: 0.0, b: -cost }
+        Key { class: 2, a: 0.0, b: -share }
     } else if added <= SAME_STRETCH {
-        Key { class: 0, a: if added.abs() <= SAME_STRETCH { 0.0 } else { added }, b: -cost }
+        Key { class: 0, a: 0.0, b: -share }
     } else {
-        Key { class: 1, a: -(cost / added), b: 0.0 }
+        Key { class: 1, a: -(share / added), b: 0.0 }
     }
 }
 
@@ -1053,7 +1057,7 @@ impl Tree {
                 let added = ev.stretch - b.stretch[c.a as usize].max(b.stretch[c.b as usize]);
                 if !c.exact {
                     seq += 1;
-                    let key = key_of(added, ev.cost);
+                    let key = key_of(added, b.share(c.a, c.b, ev.cost));
                     b.last.insert((c.a, c.b), key);
                     heap.push(Cand { key, exact: true, seq, ..c });
                     memo.insert((c.a, c.b), (c.va, c.vb, ev));
@@ -1340,6 +1344,16 @@ impl Build<'_> {
         (if total > 0.0 && diff.is_finite() { diff / total } else { f64::INFINITY }, c)
     }
 
+    /// Cost of a chart's open border (its segments not glued yet).
+    fn border(&self, r: u32) -> f64 {
+        self.segs[r as usize].iter().filter(|&&s| !self.glued_seg[s as usize]).map(|&s| self.tree.segments[s as usize].cost).sum()
+    }
+
+    /// Share of the smaller border that gluing `cost` removes (`key_of`).
+    fn share(&self, a: u32, b: u32, cost: f64) -> f64 {
+        cost / self.border(a).min(self.border(b)).max(f64::MIN_POSITIVE)
+    }
+
     fn push_for(&mut self, heap: &mut Queue, seq: &mut u64, r: u32) {
         if self.chi[r as usize] != 1 {
             return;
@@ -1356,7 +1370,7 @@ impl Build<'_> {
                 Some(k) => *k,
                 None => {
                     let (mis, c) = self.estimate(&list);
-                    key_of(mis, c)
+                    key_of(mis, self.share(r, o, c))
                 }
             };
             *seq += 1;
