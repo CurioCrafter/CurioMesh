@@ -37,6 +37,7 @@ class Values(unittest.TestCase):
     def test_info_float_range(self):
         info = R.prop_info(prop("FLOAT", hard_min=0.1, hard_max=80.0, soft_min=0.1, soft_max=20.0), 6.0, 6.0)
         self.assertEqual((info["min"], info["max"], info["soft_max"]), (0.1, 80.0, 20.0))
+        self.assertEqual(R.prop_info(prop("FLOAT", hard_min=0.10000000149011612), 1.0)["min"], 0.1)  # float32 noise trimmed
         self.assertEqual(R.prop_info(prop("FLOAT"), 1.0)["min"], None)  # no limit is None, not -3.4e38
         self.assertEqual(R.prop_info(prop("INT", hard_min=-(2**31), hard_max=2**31 - 1), 3)["max"], None)
 

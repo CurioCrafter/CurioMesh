@@ -51,7 +51,7 @@ def _limit(value, ints: bool):
     """A range end, or None when RNA means 'no limit'."""
     if value is None or abs(value) >= (2**31 - 1 if ints else UNBOUNDED):
         return None
-    return int(value) if ints else float(value)
+    return int(value) if ints else float(f"{value:.7g}")  # RNA floats are float32: 0.1 reads back as 0.10000000149
 
 
 def prop_info(prop, value, default=None) -> dict:
@@ -437,7 +437,10 @@ def _group_owner(context, group, object=None):
     if group == "part":
         return _obj(context, object).curiomesh_seg
     if group == "prefs":
-        return context.preferences.addons[__package__].preferences
+        try:
+            return context.preferences.addons[__package__].preferences
+        except KeyError as exc:
+            raise AgentError("NOT_FOUND", "the add-on preferences are not available (CurioMesh is not enabled as an add-on in this Blender)", "", {}) from exc
     attr = {"guided": "curiomesh_guided", "classic": "curiomesh_settings", "tools": "curiomesh_tools", "autofix": "curiomesh_autofix", "fix": "curiomesh_fix", "region": "curiomesh_region"}.get(group)
     if attr is None:
         raise AgentError("BAD_ARGS", f"unknown group {group!r}", "settings.groups lists them", {"allowed": list(GROUPS)})
