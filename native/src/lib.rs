@@ -1218,8 +1218,8 @@ fn register_uvseam(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvseam_layer, m)?)?;
     Ok(())
 }
-// main-only: uv end seam
 
+// main-only: uv end seam
 // main-only: uv begin snap
 mod uvsnap;
 
@@ -1394,8 +1394,8 @@ fn register_uvsnap(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvsnap_split, m)?)?;
     Ok(())
 }
-// main-only: uv end snap
 
+// main-only: uv end snap
 // main-only: uv begin qem
 mod uvqem;
 
@@ -1409,8 +1409,8 @@ fn register_uvqem(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvqem_probe, m)?)?;
     Ok(())
 }
-// main-only: uv end qem
 
+// main-only: uv end qem
 // main-only: uv begin score
 mod uvscore;
 
@@ -1499,8 +1499,8 @@ fn register_uvscore(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvscore_check, m)?)?;
     Ok(())
 }
-// main-only: uv end score
 
+// main-only: uv end score
 // main-only: uv begin sight
 mod uvsight;
 
@@ -1660,8 +1660,8 @@ fn register_uvsight(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SightPictures>()?;
     Ok(())
 }
-// main-only: uv end sight
 
+// main-only: uv end sight
 // main-only: uv begin flat
 mod uvflat;
 
@@ -1830,8 +1830,8 @@ fn register_uvflat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("UVFLAT_STATS_LEN", uvflat::STATS_LEN)?;
     Ok(())
 }
-// main-only: uv end flat
 
+// main-only: uv end flat
 // main-only: uv begin chart
 mod uvchart;
 
@@ -2065,8 +2065,8 @@ fn register_uvchart(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("UVCHART_STRETCH_ALLOWED_PCT", uvchart::STRETCH_ALLOWED_PCT)?;
     Ok(())
 }
-// main-only: uv end chart
 
+// main-only: uv end chart
 // main-only: uv begin pack
 mod uvpack;
 
@@ -2222,8 +2222,8 @@ fn register_uvpack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("UVPACK_POLICIES", uvpack::POLICIES)?;
     Ok(())
 }
-// main-only: uv end pack
 
+// main-only: uv end pack
 #[pymodule]
 fn _curiomesh_turbo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
