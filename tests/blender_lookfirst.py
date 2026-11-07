@@ -169,6 +169,7 @@ ok(np.allclose(res_co(), after), f"Ctrl+Shift+Z brings the tool's result back (s
 
 # --- 4. the F9 / script path, then a History jump back to the start
 r = bpy.ops.curiomesh.tool_smooth_corners("EXEC_DEFAULT", strength=0.3)
+bpy.ops.ed.undo_push(message="Smooth Corners")  # a script call pushes no undo step; a click in a window does
 ok(r == {"FINISHED"}, f"Smooth Corners run inline: {r}")
 third = res_co()
 ok(not np.allclose(third, after) and step() == 2, f"a second step: {names()}")
@@ -179,6 +180,7 @@ undo(can)
 ok(np.allclose(res_co(), third), "Ctrl+Z takes the jump back")
 
 # --- 5. Tidy Up: the slider, Again and Undo Pass go back and forth
+gs = bpy.context.scene.curiomesh_guided  # an undo above reloads the scene: the old reference is gone
 gs.organize = 0.5
 t0 = time.time()
 while not organize.ready() and time.time() - t0 < 300:
