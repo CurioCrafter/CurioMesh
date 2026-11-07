@@ -255,7 +255,10 @@ class RemoveDeadEnd(_StripTools):
         whose whole strip is open and inside the scope. One per whole strip."""
         st = self._strips(base)
         poles = base.topo.poles & ~base.topo.border
-        first = self._first(base)
+        # a dead end lies wholly inside the scope, so its first element does too: on a spot's small scope this skips
+        # every other strip of the mesh (Auto Fix runs this once per spot)
+        inside = base.scope[st.face_of[np.arange(2 * len(st.face_of)) // 2]] if len(st.face_of) else np.zeros(0, dtype=bool)
+        first = {label: element for label, element in self._first(base).items() if inside[element]}
         seen, out = set(), []
         for i, (label, element) in enumerate(first.items()):
             if i % CHUNK == CHUNK - 1:
