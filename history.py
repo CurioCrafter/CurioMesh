@@ -221,6 +221,9 @@ def sync(context) -> bool:
     snap, settled_ = _state_for(step)
     if snap is None:
         return False
+    gs = getattr(context.scene, "curiomesh_guided", None)
+    if settled_ and gs is not None and snap.get("sliders") and any(abs(float(getattr(gs, k)) - v) > 1e-9 for k, v in snap["sliders"].items()):
+        settled_ = False  # two drags within COALESCE share one step: Blender brought back the first drag's value, so show what it asks for
     restore(context, snap)
     if not settled_:
         _resync(context)

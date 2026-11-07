@@ -189,7 +189,7 @@ def _guard(base: Base, co: np.ndarray, moved: np.ndarray, held: list):
     for v in np.flatnonzero(far & moved).tolist():
         held.append((base.co[v].copy(), "drift"))
     co[far] = base.co[far]
-    for _round in range(4):  # putting a face back can turn a neighbour of another size, so all sizes again
+    while True:  # putting a face back can turn a neighbour of another size, so all sizes again (ends: every round puts corners back)
         any_bad = False
         for _ids, idx in _edges(base).groups:
             idx = idx[moved[idx].any(axis=1)]
@@ -555,7 +555,7 @@ class TrueUpEdges(Trial):
         # a chain that does not end up nearer its creases (the source pulled it back, a guard held it) is left as it
         # was, and the rest placed again without it, so the tool never makes an edge worse
         early = held
-        for _round in range(2):
+        while True:  # ends: every round that goes on drops a chain
             held = list(early)
             co = yield from _place(base, free, on_chain, moving, target, strength, held)
             worse = []
