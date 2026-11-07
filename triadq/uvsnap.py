@@ -18,7 +18,9 @@ the remesh and the snap could not fit are cut, once per chain, along the source 
 Inputs: a result mesh (points, indptr, flat), the seam dict of `uvseams.extract` (chains, classes, gaps) and the welded
 source positions `xyz` (`chain_xyz`). `snap` moves vertices onto Soft chains (never flipping a face, never past
 `max_move`; refused vertices are held); `split` cuts the faces still crossed and hands back a new mesh, the seam vertex
-tags and per-corner UVs on the seams (`with_seam_uvs` lays them over a per-side transfer).
+tags and per-corner UVs on the seams (`with_seam_uvs` lays them over a per-side transfer). `part_switches` adds
+chains where the nearest source piece changes between unconnected pieces, which have no UV seam between them; call it
+on the snapped mesh and hand its seam dict (and `chain_xyz` of it) to `split` only.
 """
 
 from __future__ import annotations
