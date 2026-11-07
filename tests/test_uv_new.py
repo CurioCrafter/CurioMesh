@@ -86,6 +86,14 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(r.charts, 1)
         self.assertTrue(r.on_chart.all())
 
+    def test_again_keeps_the_tree_when_only_the_layout_changes(self):
+        stage, r, _ = run(cube(4))
+        second = stage.again(texture_px=512)
+        self.assertIs(second.tree, None)  # set when the run reaches the charts stage
+        second.run()
+        self.assertIs(second.tree, stage.tree)
+        self.assertEqual(second.result.charts, r.charts)
+
     def test_nothing_to_unwrap_is_a_message_not_a_crash(self):
         stage = uvnew.NewUVs(np.zeros((0, 3)), [0], [])
         while not stage.done:

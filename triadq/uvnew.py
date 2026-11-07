@@ -18,7 +18,7 @@ the pictures and the merge tree, so a Stretch allowed or Gap change costs the la
 
 from __future__ import annotations
 
-from math import ceil, log2
+from math import log2
 import time
 
 import numpy as np
@@ -95,7 +95,6 @@ class Result:
         self.used = 0.0  # share of the page the boxes take
         self.messages: list = []
         self.stats = None
-        self.flips = 0
         self.timing: dict = {}
         self.overlap_pct = None
         self.stretch_allowed = None
@@ -280,9 +279,9 @@ class NewUVs:
         was built with changed)."""
 
         new = self.settings.copy(**changes)
-        keep = {"sight": self.sight if self.sight is not None and self.sight.done else None}
-        rebuild = any(getattr(new, k) != getattr(self.settings, k) for k in ("out_of_sight", "hidden_l", "views", "all_sides", "hidden_pct"))
-        if not rebuild and self.tree is not None:
+        same = lambda *names: all(getattr(new, k) == getattr(self.settings, k) for k in names)  # noqa: E731
+        keep = {"sight": self.sight if self.sight is not None and self.sight.done and same("views", "all_sides") else None}
+        if same("out_of_sight", "hidden_l", "views", "all_sides") and self.tree is not None:
             keep["tree"] = self.tree
         return NewUVs(self.points, self.indptr, self.flat, self.material, self.forced, new, self.budget, _keep=keep)
 
@@ -346,123 +345,119 @@ class NewUVs:
         t2 = time.perf_counter()
 
         x_now = float(s.stretch_allowed)
-        while True:
-            # 3. charts at Stretch allowed, flattened
-            self._tick("flatten", 0.5)
-            corner_uv, chart, chart_rows, ratio = yield from self._flatten(tree, x_now)
-            if self._stop:
-                res.messages.append("Stopped early: the layout is what had been reached.")
-            res.timing["flatten_s"] = time.perf_counter() - t2
-            t3 = time.perf_counter()
-            chart, corner_uv, chart_rows, back = yield from self._split_overlapping(tree, chart, corner_uv, chart_rows, x_now)
-            if back:
-                res.messages.append(f"{back} chart{'s' if back != 1 else ''} lay over themselves and were redone at a lower Stretch allowed.")
-            nchart = int(chart.max()) + 1 if len(chart) else 0
-            res.chart, res.charts = chart, nchart
-            res.stats = chart_rows
-            corner_face = np.repeat(np.arange(nf), np.diff(indptr))
-            corner_chart = chart[corner_face]
-            flips = uvflat.count_flips(indptr, flat, corner_uv) if nf < 5000 else -1
-            res.flips = flips
-            yield
+        # 3. charts at Stretch allowed, flattened
+        self._tick("flatten", 0.5)
+        corner_uv, chart, chart_rows, ratio = yield from self._flatten(tree, x_now)
+        if self._stop:
+            res.messages.append("Stopped early: the layout is what had been reached.")
+        res.timing["flatten_s"] = time.perf_counter() - t2
+        t3 = time.perf_counter()
+        chart, corner_uv, chart_rows, back = yield from self._split_overlapping(tree, chart, corner_uv, chart_rows, x_now)
+        if back:
+            res.messages.append(f"{back} chart{'s' if back != 1 else ''} lay over themselves and were redone at a lower Stretch allowed.")
+        nchart = int(chart.max()) + 1 if len(chart) else 0
+        res.chart, res.charts = chart, nchart
+        res.stats = chart_rows
+        corner_face = np.repeat(np.arange(nf), np.diff(indptr))
+        corner_chart = chart[corner_face]
+        yield
 
-            # 4. per chart: grid labels for On charts, the rows axis or the calipers box, the Hidden-parts scale
-            self._tick("orient", 0.7)
-            on = chart_rows == 2
-            res.on_chart = on[chart]
-            col = np.full(len(flat), -1, np.int64)
-            row = np.full(len(flat), -1, np.int64)
-            order = np.argsort(corner_chart, kind="stable")
-            bounds = np.searchsorted(corner_chart[order], np.arange(nchart + 1))
-            face_order = np.argsort(chart, kind="stable")
-            fbounds = np.searchsorted(chart[face_order], np.arange(nchart + 1))
-            angle = np.zeros(nchart)
-            for c in range(nchart):
-                cc = order[bounds[c] : bounds[c + 1]]
-                if on[c]:
-                    got = self._labels(c, face_order[fbounds[c] : fbounds[c + 1]], corner_uv)
-                    if got is not None:
-                        col[got[0]], row[got[0]] = got[1], got[2]
-                        if got[4] is not None:
-                            angle[c] = got[4]
-                            continue
-                    res.on_chart[chart == c] = False  # no clean labels: not counted as a straight-rows chart
-                angle[c] = min_area_angle(corner_uv[cc]) if len(cc) > 2 else 0.0
-                if c % 16 == 15:
-                    yield
-            res.col, res.row = col, row
-            ca, sa = np.cos(angle)[corner_chart], np.sin(angle)[corner_chart]
-            ru = corner_uv[:, 0] * ca - corner_uv[:, 1] * sa
-            rv = corner_uv[:, 0] * sa + corner_uv[:, 1] * ca
-            # Isotropic fit to 3D area per chart (the solver works in surface units already; this only removes rounding),
-            # then the Hidden-parts factor: scale ~ sum(area * max(floor, seen)) / sum(area), no square root (SPEC 6.7).
-            floor_ = min(max(s.hidden_pct, 0.0), 100.0) / 100.0
-            a3 = np.bincount(chart, weights=area, minlength=nchart)
-            a2 = _uv_area(corner_uv, indptr, flat, chart, nchart)
-            fit = np.where(a2 > 0, np.sqrt(np.divide(a3, a2, out=np.ones(nchart), where=a2 > 0)), 1.0)
-            weighted = np.bincount(chart, weights=area * np.maximum(floor_, seen_face), minlength=nchart)
-            factor = np.where(a3 > 0, weighted / np.where(a3 > 0, a3, 1.0), 1.0)
-            mult = (fit * factor)[corner_chart]
-            ru, rv = ru * mult, rv * mult
-            lo_u = np.full(nchart, np.inf)
-            lo_v = np.full(nchart, np.inf)
-            hi_u = np.full(nchart, -np.inf)
-            hi_v = np.full(nchart, -np.inf)
-            np.minimum.at(lo_u, corner_chart, ru)
-            np.minimum.at(lo_v, corner_chart, rv)
-            np.maximum.at(hi_u, corner_chart, ru)
-            np.maximum.at(hi_v, corner_chart, rv)
-            width, height = np.maximum(hi_u - lo_u, 1e-12), np.maximum(hi_v - lo_v, 1e-12)
-            res.density = factor[chart]
-            yield
+        # 4. per chart: grid labels for On charts, the rows axis or the calipers box, the Hidden-parts scale
+        self._tick("orient", 0.7)
+        on = chart_rows == 2
+        res.on_chart = on[chart]
+        col = np.full(len(flat), -1, np.int64)
+        row = np.full(len(flat), -1, np.int64)
+        order = np.argsort(corner_chart, kind="stable")
+        bounds = np.searchsorted(corner_chart[order], np.arange(nchart + 1))
+        face_order = np.argsort(chart, kind="stable")
+        fbounds = np.searchsorted(chart[face_order], np.arange(nchart + 1))
+        angle = np.zeros(nchart)
+        for c in range(nchart):
+            cc = order[bounds[c] : bounds[c + 1]]
+            if on[c]:
+                got = self._labels(c, face_order[fbounds[c] : fbounds[c + 1]], corner_uv)
+                if got is not None:
+                    col[got[0]], row[got[0]] = got[1], got[2]
+                    if got[4] is not None:
+                        angle[c] = got[4]
+                        continue
+                res.on_chart[face_order[fbounds[c] : fbounds[c + 1]]] = False  # no clean labels: not counted as a straight-rows chart
+            angle[c] = min_area_angle(corner_uv[cc]) if len(cc) > 2 else 0.0
+            if c % 16 == 15:
+                yield
+        res.col, res.row = col, row
+        ca, sa = np.cos(angle)[corner_chart], np.sin(angle)[corner_chart]
+        ru = corner_uv[:, 0] * ca - corner_uv[:, 1] * sa
+        rv = corner_uv[:, 0] * sa + corner_uv[:, 1] * ca
+        # Isotropic fit to 3D area per chart (the solver works in surface units already; this only removes rounding),
+        # then the Hidden-parts factor: scale ~ sum(area * max(floor, seen)) / sum(area), no square root (SPEC 6.7).
+        floor_ = min(max(s.hidden_pct, 0.0), 100.0) / 100.0
+        a3 = np.bincount(chart, weights=area, minlength=nchart)
+        a2 = _uv_area(corner_uv, indptr, flat, chart, nchart)
+        fit = np.where(a2 > 0, np.sqrt(np.divide(a3, a2, out=np.ones(nchart), where=a2 > 0)), 1.0)
+        weighted = np.bincount(chart, weights=area * np.maximum(floor_, seen_face), minlength=nchart)
+        factor = np.where(a3 > 0, weighted / np.where(a3 > 0, a3, 1.0), 1.0)
+        mult = (fit * factor)[corner_chart]
+        ru, rv = ru * mult, rv * mult
+        lo_u = np.full(nchart, np.inf)
+        lo_v = np.full(nchart, np.inf)
+        hi_u = np.full(nchart, -np.inf)
+        hi_v = np.full(nchart, -np.inf)
+        np.minimum.at(lo_u, corner_chart, ru)
+        np.minimum.at(lo_v, corner_chart, rv)
+        np.maximum.at(hi_u, corner_chart, ru)
+        np.maximum.at(hi_v, corner_chart, rv)
+        width, height = np.maximum(hi_u - lo_u, 1e-12), np.maximum(hi_v - lo_v, 1e-12)
+        res.density = factor[chart]
+        yield
 
-            # 5. page
-            self._tick("pack", 0.8)
-            k = mip_level(s.texture_px, s.clean_px)
-            page = (int(s.texture_px), int(s.texture_px))
-            weight = np.maximum(np.bincount(chart, weights=area * seen_face, minlength=nchart), 1e-12)
-            fill = None
-            if s.density:
-                places = uvpack.pack(width.tolist(), height.tolist(), [True] * nchart, uvpack.make_order(width.tolist(), height.tolist(), weight.tolist(), 0), 0,
-                                     float(s.density), page, k)
-                if places is not None:
-                    fill = dict(scale=float(s.density), places=places, used=uvpack.used(width.tolist(), height.tolist(), float(s.density), page))
-                else:
-                    res.messages.append("Pixel density does not fit the page: the largest density that fits was used.")
-            if fill is None:
-                for gap_k in (k, -1):
-                    stage = uvpack.FillPage(width.tolist(), height.tolist(), [True] * nchart, weight.tolist(), page, gap_k, budget=float(s.time_per_pass))
-                    yield from self._poll(stage)
-                    fill = stage.result
-                    if fill is not None:
-                        break
-                    res.messages.append("Too many small islands for the gap at this texture size: the gap was dropped.")
-                if fill is not None and fill.get("budget_hit"):
-                    res.messages.append(f"Stopped after {s.time_per_pass:g} s with the layout still improving. Keep going continues, or raise Time per pass.")
-            if fill is None:
-                raise ValueError("The charts do not fit on the page, even without a gap.")
-            res.scale, res.used = float(fill["scale"]), float(fill["used"])
-            res.stretch_allowed = x_now
-            res.timing["pack_s"] = time.perf_counter() - t3
-            t4 = time.perf_counter()
+        # 5. page
+        self._tick("pack", 0.8)
+        k = mip_level(s.texture_px, s.clean_px)
+        page = (int(s.texture_px), int(s.texture_px))
+        weight = np.maximum(np.bincount(chart, weights=area * seen_face, minlength=nchart), 1e-12)
+        fill = None
+        if s.density:
+            places = uvpack.pack(width.tolist(), height.tolist(), [True] * nchart, uvpack.make_order(width.tolist(), height.tolist(), weight.tolist(), 0), 0,
+                                 float(s.density), page, k)
+            if places is not None:
+                fill = dict(scale=float(s.density), places=places, used=uvpack.used(width.tolist(), height.tolist(), float(s.density), page))
+            else:
+                res.messages.append("Pixel density does not fit the page: the largest density that fits was used.")
+        if fill is None:
+            for gap_k in (k, -1):
+                stage = uvpack.FillPage(width.tolist(), height.tolist(), [True] * nchart, weight.tolist(), page, gap_k, budget=float(s.time_per_pass))
+                yield from self._poll(stage)
+                fill = stage.result
+                if fill is not None:
+                    break
+                res.messages.append("Too many small islands for the gap at this texture size: the gap was dropped.")
+            if fill is not None and fill.get("budget_hit"):
+                res.messages.append(f"Stopped after {s.time_per_pass:g} s with the layout still improving. Keep going continues, or raise Time per pass.")
+        if fill is None:
+            raise ValueError("The charts do not fit on the page, even without a gap.")
+        res.scale, res.used = float(fill["scale"]), float(fill["used"])
+        res.stretch_allowed = x_now
+        res.timing["pack_s"] = time.perf_counter() - t3
+        t4 = time.perf_counter()
 
-            # 6. corner UVs on the 0-1 square
-            px, py, turned = (np.array([p[i] for p in fill["places"]]) for i in range(3))
-            sc = res.scale
-            du = (ru - lo_u[corner_chart]) * sc
-            dv = (rv - lo_v[corner_chart]) * sc
-            wsc = (width * sc)[corner_chart]
-            turn = turned.astype(bool)[corner_chart]
-            uu = np.where(turn, dv, du)  # a quarter turn (u, v) -> (v, w - u) keeps the winding
-            vv = np.where(turn, wsc - du, dv)
-            out = np.empty_like(corner_uv)
-            out[:, 0] = (px[corner_chart] + uu) / page[0]
-            out[:, 1] = (py[corner_chart] + vv) / page[1]
-            res.uv = out
-            res.timing["write_s"] = time.perf_counter() - t4
-            res.timing["total_s"] = time.perf_counter() - t0
-            res.messages = list(self.messages) + res.messages
-            break
+        # 6. corner UVs on the 0-1 square
+        px, py, turned = (np.array([p[i] for p in fill["places"]]) for i in range(3))
+        sc = res.scale
+        du = (ru - lo_u[corner_chart]) * sc
+        dv = (rv - lo_v[corner_chart]) * sc
+        wsc = (width * sc)[corner_chart]
+        turn = turned.astype(bool)[corner_chart]
+        uu = np.where(turn, dv, du)  # a quarter turn (u, v) -> (v, w - u) keeps the winding
+        vv = np.where(turn, wsc - du, dv)
+        out = np.empty_like(corner_uv)
+        out[:, 0] = (px[corner_chart] + uu) / page[0]
+        out[:, 1] = (py[corner_chart] + vv) / page[1]
+        res.uv = out
+        res.timing["write_s"] = time.perf_counter() - t4
+        res.timing["total_s"] = time.perf_counter() - t0
+        res.messages = list(self.messages) + res.messages
         self.result = res
         self._tick("done", 1.0)
         yield
