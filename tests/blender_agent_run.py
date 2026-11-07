@@ -92,7 +92,7 @@ try:
     st = call("job.wait", seconds=900)
     ok(not st["running"], "tidy pass finished")
     tl = call("tidy.levels")
-    ok(len(tl["levels"]) >= 2, f"tidy.levels {[(l['strength'], l.get('tidy')) for l in tl['levels']]}")
+    ok(len(tl["levels"]) >= 2, f"tidy.levels {[(lv['strength'], lv.get('tidy')) for lv in tl['levels']]}")
     rows = call("history.list")
     ok(len(rows["steps"]) >= 2, f"history steps {[(r['name'], r['faces']) for r in rows['steps']]}")
 

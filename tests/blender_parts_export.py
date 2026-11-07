@@ -17,7 +17,6 @@ import tempfile
 import zipfile
 
 import bpy
-import numpy as np
 
 ARGV = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
 ADDON = os.path.abspath(ARGV[ARGV.index("--addon") + 1]) if "--addon" in ARGV else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

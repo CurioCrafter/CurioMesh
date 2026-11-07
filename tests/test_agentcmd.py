@@ -78,8 +78,12 @@ class RunTests(unittest.TestCase):
         self.assertTrue(e["details"]["trace"][-1].startswith("ValueError"))
 
     def test_missing_handler_modules_are_skipped(self):
-        agentcmd._registry = None
-        names = agentcmd.commands(reload=True)
+        agentcmd._registry, real = None, agentcmd.HANDLER_MODULES
+        agentcmd.HANDLER_MODULES = ("no_such_handler_a", "no_such_handler_b")
+        try:
+            names = agentcmd.commands(reload=True)
+        finally:
+            agentcmd.HANDLER_MODULES = real
         self.assertIn("commands.list", names)
         self.assertIn("session.info", names)
 

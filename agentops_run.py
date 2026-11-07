@@ -764,7 +764,6 @@ def tidy_again(context, strength=1.0, object=None):
     a = _m()
     _need_result()
     _idle()
-    gs = _gs(context)
     if not a.organize.active():
         set_values(context, "guided", {"organize": strength})  # the slider starts the first pass, as dragging it does
     else:

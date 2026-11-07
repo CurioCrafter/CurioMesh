@@ -297,7 +297,7 @@ def _info(s, before_faces: int) -> dict:
 def _pick_details(s) -> dict:
     kind = s.waiting()
     ids, labels = s.targets(kind) if s.base is not None else (None, None)
-    return {"pick": kind, "ask": s.ask(), "targets": None if ids is None else [{"id": int(i), "label": str(l)} for i, l in zip(np.asarray(ids).tolist(), labels)]}
+    return {"pick": kind, "ask": s.ask(), "targets": None if ids is None else [{"id": int(i), "label": str(lab)} for i, lab in zip(np.asarray(ids).tolist(), labels)]}
 
 
 def _refusal(s, allow_worse: bool):
@@ -398,7 +398,6 @@ def tools_list(context, object=None):
 
 
 def tools_scope(context, scope, faces=None, parts=None, object=None):
-    import bpy
 
     from . import history, segments, tidylive
 
@@ -625,7 +624,7 @@ def _vec(value, what: str, optional=False):
 def loops_ring(context, centre, right, normal=None, width=None, height=None, band=None, rings=0, object=None):
     """Ring Round This as numbers: rings of quads round the opening at `centre` (a point on the result). width and height
     are the oval's full size; left out, they are read off your original mesh."""
-    from . import faceloops, guided
+    from . import faceloops
     from .triadq import rings as RG
 
     _object(object)
