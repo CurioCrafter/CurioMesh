@@ -56,9 +56,10 @@ pub const WIND_BALL_EDGE: f64 = 0.25;
 /// A fan triangle whose twice-area is at most this share of its summed squared edge lengths has no area: its normal is
 /// rounding, so it has no say in its face's winding.
 pub const DEGENERATE_SHARE: f64 = 1e-6;
-/// Two normals whose cosine is at most this are edge-on: which side of 90 deg they fall on is rounding (a cap face
-/// beside a cylinder's wall), so that source face has no say in the winding vote.
-pub const EDGE_ON_COS: f64 = 1e-9;
+/// Two normals whose cosine is at most this are edge-on: which side of 90 deg they fall on is rounding (a cap face beside
+/// a cylinder's wall reads cosines near 4e-9 from single-precision positions), so that source face has no say in the
+/// winding vote.
+pub const EDGE_ON_COS: f64 = 1e-6;
 /// Fold fix stop rule (SPEC 3): no UV moves more than this share of a texel in one sweep.
 pub const STOP_TEXEL_SHARE: f64 = 0.02;
 /// Fold fix stall rule: the largest move must drop by `STALL_DROP` within `STALL_WINDOW` sweeps (reported).

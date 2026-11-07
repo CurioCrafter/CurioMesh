@@ -40,7 +40,7 @@ WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
 DEGENERATE_SHARE = 1e-6  # a fan triangle with 2 x area <= this x its summed squared edges has no area (no say in the vote)
-EDGE_ON_COS = 1e-9  # normals this close to 90 deg are edge-on to rounding: no say in the winding vote
+EDGE_ON_COS = 1e-6  # normals this close to 90 deg are edge-on to rounding: no say in the winding vote
 WIND_BALL_EDGE = 0.25  # the winding vote's reach: nearest distance plus this share of a fan triangle's shortest edge
 REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
