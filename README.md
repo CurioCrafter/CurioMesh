@@ -635,6 +635,9 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Install](#install) for which versions 
 - **Keep Detail quads are not always tidy.** It spends everything Detail allows, so on smooth surfaces quads can look slanted or scattered instead of running in rows. Spinning edges at poles helps (Tidiness about 28 to 39 on smooth busts), but it is still far from hand-made. Use Balanced or Clean Rows for that, at the cost of more faces. Clean Rows also loses small sharp detail.
 - **Soft faces and fine detail go first.** At 6%, cloth folds, small rounded ends and fine ornaments are simplified. Lower Detail to keep more. CurioMesh does not give you a hand-made low poly yet.
 - **UV seams.** By default quads may span several UV islands, so textures can smear there. Turn on Keep UV Seams (up to about twice the faces) or bake with Normal + Color.
+<!-- main-only: uv begin -->
+- **Exact UV seams cost 2-4x the faces, not 2x.** Keeping every UV seam exactly (Exact) needs two to four times the faces of a run without it, depending on how many small islands the source has. Light keeps the seams that matter within the extra-faces allowance; the card says what it left undone, and Keep going or a higher allowance fixes more.
+<!-- main-only: uv end -->
 - **Big scans are slow.** A scan of over a million faces can take a long time on a busy PC, and Blender can pause for a few seconds at a time. Use Effort, or Export Job.
 - **No global patch layout.** CurioMesh has none, and it does not promise exact loops round eyes, mouths or joints without your help. An optional script, `scripts/flowtool.py`, can use QuadWild if you install it separately. It is not in the panel, it covers organic parts only, and it is untested on Linux and macOS.
 
