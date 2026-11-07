@@ -253,6 +253,36 @@ def jump(context, index: int) -> bool:
     return True
 
 
+def listing(scene=None) -> list[dict]:
+    """The History list as plain data (for agents and tests), oldest first: index, step number, name, numbers, kind, the
+    faces of the result at that step (None while a slider's result is not in yet), which one is on screen and which are undone."""
+    here = current(scene)
+    at = steps.index_of(here)
+    rows = []
+    for i, entry in enumerate(steps.entries):
+        snap, _ = _state_for(entry.step) if entry.state is None else (entry.state, True)
+        res = None if snap is None else snap.get("res")
+        rows.append({"index": i, "step": entry.step, "name": entry.name, "numbers": entry.numbers, "kind": entry.kind, "faces": None if res is None else len(res["faces"]), "on_screen": i == at, "undone": entry.step > here})
+    return rows
+
+
+def step_to(context, step: int) -> bool:
+    """What Ctrl+Z and Ctrl+Shift+Z do, for a background Blender (which has no undo stack to bring the number back): put
+    the scene on this step number and show what CurioMesh kept for it, sliders included. No new entry. False when unknown."""
+    entry = steps.at(step)
+    if entry is None:
+        return False
+    snap, _ = _state_for(step)
+    if snap is None:
+        return False
+    from . import tidylive
+
+    tidylive.close("The result changed, so this preview was closed. Open the tool again.")
+    _set_step(context.scene, step)
+    restore(context, snap, sliders=True)
+    return True
+
+
 @persistent
 def _curiomesh_history_undo(*_args):
     try:
