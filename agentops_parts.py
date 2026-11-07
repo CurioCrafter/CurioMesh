@@ -18,12 +18,10 @@ USE_ALIASES = {"LOW_POLY": "LOWPOLY", "SUBDIV": "SUBD", "SUBDIVISION": "SUBD"}  
 METHODS = ("AUTO", "PAIRING", "FLAT", "QUADRIFLOW", "GRID", "FLOW", "FIELD", "TRIS")  # profiles.METHOD_ITEMS
 
 
-class PartsError(Exception):
-    """A coded error for agentcmd: `agent_code`, `hint` and `details` become the reply."""
-
-    def __init__(self, code, message, hint="", details=None):
-        super().__init__(message)
-        self.agent_code, self.hint, self.details = code, hint, details or {}
+try:
+    from .agentcmd import AgentError as PartsError
+except ImportError:  # the unit tests import this module on its own
+    from agentcmd import AgentError as PartsError
 
 
 # --------------------------------------------------------------------------- pure helpers (tested without Blender)

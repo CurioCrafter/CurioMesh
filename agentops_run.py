@@ -17,12 +17,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-class AgentError(Exception):
-    """An error `agentcmd` turns into a coded reply (section 5)."""
-
-    def __init__(self, code, message, hint="", details=None):
-        super().__init__(message)
-        self.agent_code, self.hint, self.details = code, hint, details or {}
+try:
+    from .agentcmd import AgentError
+except ImportError:  # the unit tests import this module on its own
+    from agentcmd import AgentError
 
 
 # --------------------------------------------------------------------------- pure helpers

@@ -31,12 +31,10 @@ HUGE = 1.0e30  # Blender's "no limit" for a float property is about 3.4e38, for 
 SCOPES = ("SELECTION", "PART", "WHOLE")
 
 
-class ToolError(Exception):
-    """Handlers raise this; `agentcmd` turns any exception with `agent_code` into the reply."""
-
-    def __init__(self, code: str, message: str, hint: str = "", details: dict | None = None):
-        super().__init__(message)
-        self.agent_code, self.hint, self.details = code, hint, details or {}
+try:
+    from .agentcmd import AgentError as ToolError
+except ImportError:  # the unit tests import this module on its own
+    from agentcmd import AgentError as ToolError
 
 
 # --------------------------------------------------------------------------- plain helpers (no bpy)

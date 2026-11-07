@@ -249,6 +249,27 @@ and the experiment branches are not in this release.
   | Road barrier | 34.1 -> 40.2 | 6.4 -> 10.1 | 348 -> 309 | 0 -> 0 | +0.24% | 5 of 34 | 52 s |
   | Overhead crane (26k faces) | 46.7 -> 47.2 | 30.2 -> 29.2 | 10,397 -> 10,219 | 0 -> 0 | +0.80% | 36 of 41 | 1,475 s |
 
+### Agent tools (GitHub build only)
+- **One command layer for agents.** Every panel action is a command with a plain-words help line, an argument
+  schema and a coded error (17 codes, such as `BUSY`, `REFUSED`, `NOT_FOUND`, each with a hint). `commands.list`
+  gives them all; a wrong name answers with the closest names, a wrong value with the allowed values or range.
+- Three ways in: a folder **mailbox** that a live Blender reads while **Agent** is on (Computer section), the
+  headless runner `cm_do.py` (a list of commands, or `--serve` a folder), and an MCP server (`curiomesh_mcp.py`,
+  standard library only) that starts its own headless Blender or talks to an open one.
+- Commands cover a whole run (Use, Auto, job status and wait, sizes, Tidy Up and Keep going, Apply, LOD, bake,
+  export, History jump, undo and redo, every panel setting), the Tidy Tools, Face Loops, the Flow Editor, Auto Fix,
+  the issue list and the parts table. Each command calls the same code as its button. A kept edit is one History
+  step and one Ctrl+Z; a pass that would make things worse or go past Most Detail Loss answers `REFUSED` and
+  changes nothing.
+- **Send to Agent** and **Bring Back** (part card): marked parts go to a folder as OBJ files with their border,
+  source and neighbours and a `parts.json`; parts made outside come back checked (border points unmoved, no new
+  holes, shape kept, camera check within Most Detail Loss), are shown in Look First, and are kept as one
+  "From Outside" History step. A part that fails is refused with the reason; the others still come in.
+  **Save for a Report** zips the marked parts with the settings and a `report.md`.
+- No made-up limits in the agent paths: Keep going stops when a pass gains nothing or its time budget (a setting)
+  runs out, and says which. The fix skill no longer stops after 4 rounds, nor the retopo skill after three retries.
+- Docs: `docs/AGENTS.md`, `docs/PARTS_EXCHANGE.md` and the `curiomesh-agent` skill.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

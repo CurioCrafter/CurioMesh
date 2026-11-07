@@ -137,7 +137,7 @@ def tool_name(command):
 
 
 def input_schema(entry):
-    """Turn a commands.list entry's argument description into a JSON schema; always allow object and timeout."""
+    """Turn a commands.list entry's argument description into a JSON schema, plus timeout. `object` only where the command takes it."""
     raw = entry.get("schema") or entry.get("args") or entry.get("arguments") or {}
     if isinstance(raw, dict) and ("properties" in raw or raw.get("type") == "object"):
         schema = json.loads(json.dumps(raw))
@@ -149,7 +149,6 @@ def input_schema(entry):
             for key, desc in raw.items():
                 props[key] = desc if isinstance(desc, dict) else {"description": str(desc)}
         schema = {"type": "object", "properties": props}
-    schema["properties"].setdefault("object", {"type": "string", "description": "Mesh object name; the active mesh if left out"})
     schema["properties"].setdefault("timeout", {"type": "number", "description": "Seconds to wait for the answer; leave out to wait until Blender answers"})
     return schema
 

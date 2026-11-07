@@ -24,16 +24,10 @@ from . import guided, partpack, segments
 from .triadq import issues
 from .triadq import parts as P
 from .triadq import segment as S
+from .agentcmd import AgentError as PartsError
 
 WARNING = "This zip holds the mesh pieces of your model named below. Check them before you share it."
 
-
-class PartsError(Exception):
-    """A coded error for the command layer (it reads `agent_code`, `hint` and `details`)."""
-
-    def __init__(self, code, message, hint="", details=None):
-        super().__init__(message)
-        self.agent_code, self.hint, self.details = code, hint, details or {}
 
 
 def _faces_of(polys) -> list:
