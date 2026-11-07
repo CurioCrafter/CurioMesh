@@ -30,7 +30,7 @@ import time
 import numpy as np
 
 from .topology import _quad_points_valid
-from .uvseams import _edges, closest_bary
+from .uvseams import _closest_bary_many, _edges, closest_bary
 
 # Constants table: same names and values as the top of the matching .rs file (tests/test_uv_scaffold.py compares).
 SNAP_REACH = 1.0
@@ -97,8 +97,8 @@ def with_seam_uvs(uv, corner_uv) -> np.ndarray:
     return out
 
 
-def _parts(fl, ip, weld, nw):
-    """Per source face: its part (faces joined across shared welded edges; union-find)."""
+def _parts_steps(fl, ip, weld, nw, out: dict):
+    """Generator: `out["part"]` = per source face its part (faces joined across shared welded edges; union-find)."""
 
     nf = len(ip) - 1
     counts = np.diff(ip)
@@ -118,12 +118,20 @@ def _parts(fl, ip, weld, nw):
             x = lab[x]
         return x
 
-    fo = face_of[order]
-    for i in np.flatnonzero(ks[1:] == ks[:-1]).tolist():
-        x, y = find(int(fo[i])), find(int(fo[i + 1]))
+    fo = face_of[order].tolist()
+    yield
+    for n, i in enumerate(np.flatnonzero(ks[1:] == ks[:-1]).tolist()):
+        x, y = find(fo[i]), find(fo[i + 1])
         if x != y:
             lab[max(x, y)] = min(x, y)
-    return np.array([find(f) for f in range(nf)], np.int64)
+        if n % 4096 == 4095:
+            yield
+    part = np.empty(nf, np.int64)
+    for f in range(nf):
+        part[f] = find(f)
+        if f % 8192 == 8191:
+            yield
+    out["part"] = part
 
 
 def _walk_runs(adj):
@@ -173,127 +181,126 @@ def _walk_runs(adj):
 
 
 def _uv_at(src_P, src_ip, src_fl, src_uv, face, at):
-    """Source UV at closest points `at` (N, 3) on source polygons `face` (fan triangle nearest to each point)."""
+    """Source UV at closest points `at` (N, 3) on source polygons `face` (the fan triangle nearest to each point)."""
 
     out = np.zeros((len(face), 2))
     best = np.full(len(face), np.inf)
     counts = src_ip[face + 1] - src_ip[face]
     for j in range(1, int(counts.max()) - 1 if len(face) else 0):
-        has = counts > j + 1
-        i = np.flatnonzero(has)
-        c0, c1, c2 = src_ip[face[i]], src_ip[face[i]] + j, src_ip[face[i]] + j + 1
+        i = np.flatnonzero(counts > j + 1)
+        c0 = src_ip[face[i]]
+        c1, c2 = c0 + j, c0 + j + 1
         a, b, c = src_P[src_fl[c0]], src_P[src_fl[c1]], src_P[src_fl[c2]]
-        for k in range(len(i)):
-            w = closest_bary(tuple(at[i[k]]), tuple(a[k]), tuple(b[k]), tuple(c[k]))
-            q = w[0] * a[k] + w[1] * b[k] + w[2] * c[k]
-            d = float(np.linalg.norm(q - at[i[k]]))
-            if d < best[i[k]]:
-                best[i[k]] = d
-                out[i[k]] = w[0] * src_uv[c0[k]] + w[1] * src_uv[c1[k]] + w[2] * src_uv[c2[k]]
+        w = _closest_bary_many(at[i], a, b, c)  # elementwise: one point per triangle
+        q = w[:, :1] * a + w[:, 1:2] * b + w[:, 2:] * c
+        d = np.sqrt(((q - at[i]) ** 2).sum(1))
+        better = d < best[i]
+        k = i[better]
+        best[k] = d[better]
+        out[k] = (w[better, :1] * src_uv[c0[better]] + w[better, 1:2] * src_uv[c1[better]]) + w[better, 2:] * src_uv[c2[better]]
     return out
 
 
 def part_switches(seams: dict, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, texture_px: float = 1024.0,
                   steps: int = 16) -> dict:
-    """The seam dict with **part switches** added as Soft chains: on the result mesh, the lines where the nearest source
-    piece changes between two unconnected pieces (a bolt on a plate, a cap pushed into a body).
+    """`part_switches_steps` in one call: the seam dict with the part switches added."""
+
+    out = {}
+    for _ in part_switches_steps(seams, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, out, texture_px, steps):
+        pass
+    return out["seams"]
+
+
+def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, out: dict,
+                        texture_px: float = 1024.0, steps: int = 16):
+    """Generator (yields between short pieces; `out["seams"]` at the end): the seam dict with **part switches** added as
+    Soft chains: on the result mesh, the lines where the nearest source piece changes between two unconnected pieces
+    (a bolt on a plate, a cap pushed into a body).
 
     Unconnected pieces share no edge, so the UV seams have no chain there, yet a result face spanning both takes texture
-    from two places. Each result edge whose two ends are nearest different pieces gets the point where the nearest
-    piece changes (bisection along the edge, `steps` halvings), and the points of a face's two such edges are joined, so
-    the chains run on the result surface itself and the split cuts exactly where the texture changes owner. Side A is
-    the UV of the piece left of the chain direction, side B the other's (the split's damage order uses their gap; the
-    corners keep the per-side transfer's UVs, measured better than these). New chain vertices get welded ids after the source's
-    (`chain_xyz` reads their places from `extra_xyz`). `nearest(points) -> (closest (N, 3), polygon, distance)` is the
-    caller's lookup on the source polygons (the add-on's face tree). Our own rule; bisection is textbook."""
+    from two places (on the bench models most faces left across seams were such faces). Each result edge whose two
+    ends are nearest different pieces gets the point where the nearest piece changes (bisection along the edge, `steps`
+    halvings), and the points of a face's two such edges are joined, so the chains run on the result surface itself
+    and the split cuts where the texture changes owner. uv_a / uv_b are the two pieces' UVs there (not oriented: they
+    only give the gap, which orders the split's budget; the corners keep the per-side transfer's UVs). New chain
+    vertices get welded ids after the source's (`chain_xyz` reads them from `extra_xyz`). `nearest(points) -> (closest
+    (N, 3), polygon, distance)` is the caller's lookup on the source polygons (the add-on's face tree). The source's
+    parts are kept in `seams["face_part"]` for the next call. Our own rule; bisection is textbook."""
 
     sP = np.asarray(src_points, np.float64).reshape(-1, 3)
     sip, sfl = np.asarray(src_indptr, np.int64), np.asarray(src_flat, np.int64)
     suv = np.asarray(src_uv, np.float64).reshape(-1, 2)
     P = np.asarray(points, np.float64).reshape(-1, 3)
-    mesh = _Mesh(P, indptr, flat)
-    weld = np.asarray(seams["weld"], np.int64)
-    out = dict(seams)
+    res = dict(seams)
+    out["seams"] = res
+    mesh = _Mesh(P, indptr, flat, lazy=True)
+    yield from mesh.build(P, indptr, flat)
     if mesh.nf == 0 or len(sip) < 3:
-        return out
-    part = _parts(sfl, sip, weld, int(seams["n_welded"]))
+        return
+    if "face_part" not in seams:
+        got = {}
+        yield from _parts_steps(sfl, sip, np.asarray(seams["weld"], np.int64), int(seams["n_welded"]), got)
+        seams["face_part"] = got["part"]
+    part = np.asarray(seams["face_part"], np.int64)
     if part.min() == part.max():
-        return out
-    _, vface, _ = nearest(P)
-    vpart = part[np.asarray(vface, np.int64)]
-    ea, eb = mesh.ea, mesh.eb
-    cross = np.flatnonzero(vpart[ea] != vpart[eb])
+        return
+    vface = np.zeros(len(P), np.int64)
+    for i in range(0, len(P), 4096):
+        vface[i:i + 4096] = np.asarray(nearest(P[i:i + 4096])[1], np.int64)
+        yield
+    vpart = part[vface]
+    cross = np.flatnonzero(vpart[mesh.ea] != vpart[mesh.eb])
     if not len(cross):
-        return out
-    pa, pb = P[ea[cross]], P[eb[cross]]
-    first = vpart[ea[cross]]
+        return
+    pa, pb = P[mesh.ea[cross]], P[mesh.eb[cross]]
+    first = vpart[mesh.ea[cross]]
     lo, hi = np.zeros(len(cross)), np.ones(len(cross))
     for _ in range(steps):
         mid = 0.5 * (lo + hi)
-        _, f, _ = nearest(pa + mid[:, None] * (pb - pa))
-        same = part[np.asarray(f, np.int64)] == first
+        same = part[np.asarray(nearest(pa + mid[:, None] * (pb - pa))[1], np.int64)] == first
         lo, hi = np.where(same, mid, lo), np.where(same, hi, mid)
+        yield
     x = pa + (0.5 * (lo + hi))[:, None] * (pb - pa)
     at_a, fa, _ = nearest(pa + lo[:, None] * (pb - pa))
     at_b, fb, _ = nearest(pa + hi[:, None] * (pb - pa))
     fa, fb = np.asarray(fa, np.int64), np.asarray(fb, np.int64)
+    yield
     uva = _uv_at(sP, sip, sfl, suv, fa, np.asarray(at_a).reshape(-1, 3))
+    yield
     uvb = _uv_at(sP, sip, sfl, suv, fb, np.asarray(at_b).reshape(-1, 3))
-    pair = np.sort(np.stack([part[fa], part[fb]], 1), 1)
-    pos = [tuple(q) for q in P.tolist()]
-    fnormal = np.array([_unit(_newell(_face_pos(pos, mesh, f))) for f in range(mesh.nf)]).reshape(-1, 3)
-    point_of_edge = {int(e): k for k, e in enumerate(cross.tolist())}
+    yield
+    pair = np.sort(np.stack([part[fa], part[fb]], 1), 1).tolist()
+    point_of_edge = dict(zip(cross.tolist(), range(len(cross))))
+    edge_of = {(x_, y_): e for e, (x_, y_) in enumerate(zip(mesh.ea.tolist(), mesh.eb.tolist()))}
     adj = {}
     for f in range(mesh.nf):
+        if f % 1024 == 1023:
+            yield
         fv = mesh.face(f)
         n = len(fv)
-        ks = []
-        for i in range(n):
-            a, b = fv[i], fv[(i + 1) % n]
-            k = point_of_edge.get(_edge_index(mesh, a, b))
-            if k is not None:
-                ks.append(k)
-        if len(ks) == 2 and tuple(pair[ks[0]]) == tuple(pair[ks[1]]):
+        ks = [k for k in (point_of_edge.get(edge_of.get((min(fv[i], fv[(i + 1) % n]), max(fv[i], fv[(i + 1) % n])))) for i in range(n)) if k is not None]
+        if len(ks) == 2 and pair[ks[0]] == pair[ks[1]]:
             adj.setdefault(ks[0], set()).add(ks[1])
             adj.setdefault(ks[1], set()).add(ks[0])
     runs = _walk_runs(adj)
     if not runs:
-        return out
-    base = int(out["n_welded"])
-    old_extra = out.get("extra_xyz")
-    rv, ua, ub, gp, ri = [], [], [], [], []
-    for run in runs:
-        for i, k in enumerate(run):
-            # side A = left of the chain direction on the result surface (the split's rule for its corner UVs)
-            t = x[run[i + 1]] - x[k] if i + 1 < len(run) else x[k] - x[run[i - 1]]
-            e = int(cross[k])
-            n = fnormal[mesh.efaces[e]].sum(0)
-            left = float(np.dot(np.cross(t, pa[k] - x[k]), n)) > 0.0  # is the edge's first end (piece `first`) on the left?
-            a_, b_ = (uva[k], uvb[k]) if left else (uvb[k], uva[k])
-            rv.append(base + k)
-            ua.append(a_)
-            ub.append(b_)
-            gp.append(float(np.linalg.norm(a_ - b_)) * texture_px)
-        ri.append(len(rv))
+        return
+    base = int(seams["n_welded"])
+    order = np.concatenate([np.asarray(r, np.int64) for r in runs])
+    gap = np.sqrt(((uva - uvb) ** 2).sum(1)) * texture_px
     old_ip = np.asarray(seams["run_indptr"], np.int64)
     cls = np.asarray(seams["class"])
-    out["run_indptr"] = np.r_[old_ip, np.asarray(ri, np.int64) + int(old_ip[-1])]
-    out["run_vertex"] = np.r_[np.asarray(seams["run_vertex"], np.int64), np.asarray(rv, np.int64)]
-    out["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), np.asarray(ua, np.float64).ravel()]
-    out["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), np.asarray(ub, np.float64).ravel()]
-    out["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), np.asarray(gp, np.float64)]
-    out["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
-    out["n_welded"] = base + len(x)
-    out["extra_xyz"] = x if old_extra is None else np.r_[np.asarray(old_extra, np.float64).reshape(-1, 3), x]
-    out["part_switches"] = len(runs)
-    out["part_switch_first"] = len(cls)
-    return out
-
-
-def _edge_index(mesh, a, b):
-    if not hasattr(mesh, "_edge_of"):
-        mesh._edge_of = {(int(x), int(y)): e for e, (x, y) in enumerate(zip(mesh.ea.tolist(), mesh.eb.tolist()))}
-    return mesh._edge_of.get((min(a, b), max(a, b)))
+    old_extra = seams.get("extra_xyz")
+    res["run_indptr"] = np.r_[old_ip, np.cumsum([len(r) for r in runs]).astype(np.int64) + int(old_ip[-1])]
+    res["run_vertex"] = np.r_[np.asarray(seams["run_vertex"], np.int64), base + order]
+    res["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), uva[order].ravel()]
+    res["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), uvb[order].ravel()]
+    res["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), gap[order]]
+    res["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
+    res["n_welded"] = base + len(x)
+    res["extra_xyz"] = x if old_extra is None else np.r_[np.asarray(old_extra, np.float64).reshape(-1, 3), x]
+    res["part_switches"] = len(runs)
+    res["part_switch_first"] = len(cls)
 
 
 # ---------------------------------------------------------------- small helpers (scalar, same order as the reference)

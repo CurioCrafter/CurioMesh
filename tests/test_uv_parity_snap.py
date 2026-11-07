@@ -231,6 +231,43 @@ class Twin(unittest.TestCase):
         self.assertTrue(np.all(r["face_state"][16:24] == uvsnap.LEFT))
         self.assertEqual(float(r["wanted"]), 16.0)
 
+    def test_part_switches_cut_between_unconnected_pieces(self):
+        from triadq.uvseams import _closest_point_many
+        left, li, lf = grid(4, 8, 3.99, 8.0)  # two pieces with no shared edge, a hair apart at x = 4
+        right, ri, rf = grid(4, 8, 3.99, 8.0)
+        right[:, 0] += 4.01
+        sp = np.vstack([left, right])
+        si = np.r_[li, ri[1:] + li[-1]]
+        sf = np.r_[lf, rf + len(left)]
+        suv = sp[sf][:, :2] / 8.0
+        tri_a, tri_b, tri_c, tri_f = [], [], [], []
+        for f in range(len(si) - 1):
+            v = sf[si[f]:si[f + 1]]
+            for j in (1, 2):
+                tri_a.append(sp[v[0]]), tri_b.append(sp[v[j]]), tri_c.append(sp[v[j + 1]]), tri_f.append(f)
+        A, B, C, TF = np.array(tri_a), np.array(tri_b), np.array(tri_c), np.array(tri_f)
+
+        def nearest(Q):
+            at, face, dist = [], [], []
+            for q in np.asarray(Q).reshape(-1, 3):
+                c = _closest_point_many(q, A, B, C)
+                d = np.linalg.norm(c - q, axis=1)
+                k = int(d.argmin())
+                at.append(c[k]), face.append(TF[k]), dist.append(d[k])
+            return np.array(at), np.array(face), np.array(dist)
+
+        seams = dict(weld=np.arange(len(sp)), n_welded=len(sp), run_indptr=np.zeros(1, np.int64), run_vertex=np.zeros(0, np.int64),
+                     uv_a=np.zeros(0), uv_b=np.zeros(0), **{"class": np.zeros(0, np.uint8)}, gap_px=np.zeros(0))
+        P, I, F = grid(7, 7, 8.0, 8.0)  # x = 4 runs through the middle of a column of faces
+        got = uvsnap.part_switches(seams, sp, si, sf, suv, P, I, F, nearest)
+        self.assertEqual(int(got["part_switches"]), 1)
+        cut = uvsnap.split(P, I, F, got, uvsnap.chain_xyz(got, sp), use_fast=False)
+        self.assertEqual(int(cut["faces_split"]), 7)
+        pts = cut["points"].reshape(-1, 3)
+        for f in range(len(cut["indptr"]) - 1):
+            xs = pts[cut["flat"][cut["indptr"][f]:cut["indptr"][f + 1]], 0]
+            self.assertTrue(np.all(xs <= 4.0 + 1e-3) or np.all(xs >= 4.0 - 1e-3), f)
+
     def test_stage_slices_stay_short(self):
         P, I, F = grid(24, 24, 8.0, 8.0)
         seams, xyz = seams_of([line(30, k=60)])
