@@ -138,6 +138,17 @@ def export_job(folder, co, faces, mat, detail: float, target_faces: int, effort:
     return folder
 
 
+def set_effort(folder, effort: str) -> None:
+    """Change how hard the job runs on the other computer (job.json and the line in README.txt), without exporting again."""
+    folder = Path(folder)
+    settings = json.loads((folder / "job.json").read_text())
+    old, settings["effort"] = settings.get("effort", "FULL"), effort
+    (folder / "job.json").write_text(json.dumps(settings, indent=2))
+    readme = folder / "README.txt"
+    if readme.exists():
+        readme.write_text(readme.read_text().replace(f"It is set to {old} now", f"It is set to {effort} now"))
+
+
 def summary(report: dict) -> str:
     return f"{report['faces']:,} faces ({report['quads']:,} quads), the view changed by {report['loss']:.1f}%, {report['seconds']:.0f} s"
 
