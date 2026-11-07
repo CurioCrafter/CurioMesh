@@ -214,7 +214,7 @@ def on_index(self, context) -> None:
 def on_view(self, context) -> None:
     """A view switch: wireframe on the result, the original beside or over it."""
     guided = _g()
-    preview = bpy.data.objects.get(guided.PREVIEW_NAME)
+    preview = guided.preview_object()
     source = guided.state_source()
     if preview is not None and source is not None:
         preview.show_wire = preview.show_all_edges = self.seg_wire
@@ -696,7 +696,7 @@ def _draw_view() -> None:
     try:
         guided = _g()
         gs = getattr(bpy.context.scene, "curiomesh_guided", None)
-        source, preview, res = guided.state_source(), bpy.data.objects.get(guided.PREVIEW_NAME), guided.state["res"]
+        source, preview, res = guided.state_source(), guided.preview_object(), guided.state["res"]
         if gs is None or not gs.enabled or gs.scope != "AUTO" or source is None or preview is None or res is None or not ready():
             return
         piece = seg["piece"]
@@ -862,7 +862,7 @@ def _part_at(context, region_, event):
     origin = view3d_utils.region_2d_to_origin_3d(region_, rv3d, point)
     direction = view3d_utils.region_2d_to_vector_3d(region_, rv3d, point)
     best = None
-    for obj, owner in ((bpy.data.objects.get(guided.PREVIEW_NAME), "result"), (guided.state_source(), "source")):
+    for obj, owner in ((guided.preview_object(), "result"), (guided.state_source(), "source")):
         if obj is None:
             continue
         inverse = obj.matrix_world.inverted()
@@ -961,7 +961,7 @@ def frame_selected(context) -> bool:
     """Move the 3D view to the selected parts."""
     guided = _g()
     rv3d = getattr(context.space_data, "region_3d", None) or context.region_data
-    preview, res = bpy.data.objects.get(guided.PREVIEW_NAME), guided.state["res"]
+    preview, res = guided.preview_object(), guided.state["res"]
     if rv3d is None or preview is None or res is None:
         return False
     mask = np.isin(seg["piece"], list(seg["sel"]))

@@ -238,9 +238,9 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        from . import guided
+        from . import overlay
 
-        if context.edit_object is not None and context.edit_object.name == guided.PREVIEW_NAME:  # the preview is rebuilt from the result: a fix there is lost on Apply
+        if context.edit_object is not None and overlay.is_preview(context.edit_object, overlay.GUIDED):  # the preview is rebuilt from the result: a fix there is lost on Apply
             cls.poll_message_set("Apply first, then fix the result. Find Bad Faces works on the preview")
             return False
         return super().poll(context)

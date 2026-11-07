@@ -234,7 +234,7 @@ def _tick():
         if now != fe["sig"]:
             request(context)
     fe["batch"] = None
-    return GAP
+    return GAP if fe["job"] is not None or (gs is not None and gs.flow_live) else None  # idle and not Live: the timer ends (request starts it again)
 
 
 # --------------------------------------------------------------------------- creases of your mesh (for Draw)
@@ -347,9 +347,8 @@ class _FlowTool:
 
     @classmethod
     def poll(cls, context):
-        guided = _g()
         o = context.object
-        return o is not None and o.type == "MESH" and o.name != guided.PREVIEW_NAME and o.mode == "OBJECT" and context.area is not None and context.area.type == "VIEW_3D"
+        return o is not None and o.type == "MESH" and not overlay.is_preview(o) and o.mode == "OBJECT" and context.area is not None and context.area.type == "VIEW_3D"
 
     def invoke(self, context, event):
         guided = _g()
@@ -724,4 +723,6 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_handles.pop(), "WINDOW")
         except Exception:
             pass
+    if bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.unregister(_tick)
     cancel()

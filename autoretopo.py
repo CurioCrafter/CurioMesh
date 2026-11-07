@@ -435,6 +435,7 @@ DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vert
 
 def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     """Reduce to `ratio`. `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders."""
+    context = bpy.context  # read at slice time: the operator's context a job was made with does not outlive the operator
 
     free = None if keep is None else np.flatnonzero(~keep)
     if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
@@ -708,6 +709,7 @@ class AutoJob:
         self.parallel = bool(parallel)  # measure parts in helper processes when the job and the computer suit it (parallel.py)
         self.threaded = False  # every slow Python step on a worker thread, however small the job (the size ladder runs while you work)
         self._pool = None
+        self._helper_note = ""
         self._copy_plan: dict | None = None  # with helpers: part -> (the part it copies, how to move onto it) or None, found ahead of time
         self._plan_reps: list = []
         self._plan_kinds: dict[int, str] = {}
@@ -1264,7 +1266,7 @@ class AutoJob:
         setup = yield from self._off(lambda: parallel.setup_of(self))
         self._pool = parallel.Pool(command, count, setup, env)
         self._copy_plan = {}
-        self.notes.append(f"Parts were measured {count} at a time, in helper processes")
+        self._helper_note = f"Parts were measured {count} at a time, in helper processes"  # noted once a helper's result is in
 
     def _close_pool(self) -> None:
         if self._pool is not None:
@@ -1326,6 +1328,9 @@ class AutoJob:
                 return None
             result = pool.take(task)
             if result is not None:
+                if self._helper_note:
+                    self.notes.append(self._helper_note)
+                    self._helper_note = ""
                 return result
             ahead = sum(float(self._done_share[k + 1] - self._done_share[k]) for k in pool.ready if isinstance(k, int))
             self.fraction = MEASURE_SHARE * min(float(self._done_share[index]) + ahead, 1.0)
@@ -2263,8 +2268,7 @@ class AutoJob:
 
     def _kill_worker(self) -> None:
         if self._worker is not None:
-            self._worker.kill()
-            self._worker.wait()
+            parallel._kill(self._worker)  # the same bounded wait as the Use Several Cores helpers
             self._worker = None
 
     def _rows_once(self, areas, target: int):
@@ -2272,8 +2276,12 @@ class AutoJob:
 
         total = float(areas.sum()) or 1.0
         folder = tempfile.mkdtemp(prefix="curiomesh_rows_")
-        atexit.register(shutil.rmtree, folder, True)  # Blender quit in the middle
-        atexit.register(self._kill_worker)
+
+        def clean_up():  # also run if Blender quits in the middle
+            self._kill_worker()
+            shutil.rmtree(folder, ignore_errors=True)
+
+        atexit.register(clean_up)
         try:
             sizes = np.asarray([len(ids) for ids in self.pieces], dtype=np.float64)
             wants = (target * 0.5 * (areas / total + sizes / sizes.sum())).astype(np.int64)  # a small part with many faces is usually detail
@@ -2365,8 +2373,8 @@ class AutoJob:
                 offset += len(moved)
                 yield
         finally:
-            self._kill_worker()
-            shutil.rmtree(folder, ignore_errors=True)
+            atexit.unregister(clean_up)  # a finished job is not kept alive by an exit hook
+            clean_up()
         if leftovers:
             pts, fcs, knd, cursor = [], [], [], 0
             for points, polys, kinds in leftovers:
@@ -2475,7 +2483,7 @@ class AutoJob:
         try:
             return (yield from tasks.run(work, "CurioMeshRows", stopped=lambda: self._stopped))
         except Exception as exc:
-            self.warnings = [f"Clean Rows: {exc}"]
+            self.warnings = [f"Even Rows: {exc}"]
             return None
 
     def _drop_hidden_pieces(self):

@@ -161,7 +161,7 @@ def _split(layout):
 
 
 def _is_preview(obj) -> bool:
-    return obj is not None and obj.name in (overlay.PREVIEW_NAME, region.PREVIEW_NAME)
+    return overlay.is_preview(obj, overlay.LIVE) or overlay.is_preview(obj, overlay.REGION)
 
 
 # --------------------------------------------------------------------------- quick start
@@ -224,7 +224,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         has_mesh = obj is not None and obj.type == "MESH"
         usable = has_mesh and not _is_preview(obj)
 
-        if not has_mesh and bpy.data.objects.get(region.PREVIEW_NAME) is not None:
+        if not has_mesh and overlay.preview_object(overlay.REGION) is not None:
             box = layout.box()
             box.label(text="Region preview in progress", icon="INFO")
             if not compact:
@@ -300,7 +300,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         if settings.live_enabled:
             box = layout.box()
             box.label(text=live.status() or "Live: waiting for a change...", icon="TIME")
-            if has_mesh and len(obj.data.polygons) > live.LIVE_FACE_CAP and obj.name != overlay.PREVIEW_NAME:
+            if has_mesh and len(obj.data.polygons) > live.LIVE_FACE_CAP and not overlay.is_preview(obj, overlay.LIVE):
                 box.label(text=f"Live needs <= {live.LIVE_FACE_CAP:,} faces", icon="ERROR")
 
 
@@ -354,6 +354,9 @@ class CURIOMESH_PT_scan(_SubPanel, bpy.types.Panel):
         col.label(text=f"Suggested: {names.get(settings.analysis_strategy, settings.analysis_strategy)}", icon="LIGHT")
         qualifier = "exact topology" if settings.analysis_exact else f"sampled {settings.analysis_sampled_faces:,} faces"
         col.label(text=f"Measured from {qualifier}")
+        if settings.analysis_boundary_loops >= 0:
+            col.label(text=f"Holes {settings.analysis_boundary_loops:,}   Non-manifold edges {settings.analysis_non_manifold:,}")
+        col.label(text=f"Sharp edges {settings.analysis_sharp_ratio:.0%}   Edge scale {settings.analysis_target_edge:.4g}")
         if settings.analysis_warning:
             warn = box.column(align=True)
             warn.alert = True
@@ -547,7 +550,9 @@ DETAIL_PROPS = (
     "metrics_sampling_status",
     "metrics_min_jacobian",
     "metrics_p95_aspect",
+    "metrics_quads",
     "metrics_extraordinary",
+    "metrics_extraordinary_ratio",
     "metrics_non_manifold_edges",
     "metrics_non_manifold_vertices",
     "metrics_duplicate_faces",

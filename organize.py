@@ -157,7 +157,7 @@ def _choice(context, out) -> dict:
     gs = context.scene.curiomesh_guided
     picked = None
     if gs.tidy_selected:
-        preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+        preview = _g().preview_object()
         if preview is not None and preview.type == "MESH":
             if preview.mode == "EDIT":
                 preview.update_from_editmode()
@@ -323,9 +323,7 @@ def _mesh_for(out):
     source = _g().state_source()
     if source is None:
         return None
-    mesh = _make_mesh(_g().PREVIEW_NAME + "_Organize", out, source)
-    mesh.use_fake_user = True  # kept while another strength is on screen
-    return mesh
+    return _make_mesh(_g().SPARE_MESHES[1], out, source)  # no fake user: a spare has no users, so a save never keeps it
 
 
 def _tick():
@@ -546,7 +544,7 @@ def _draw_flow() -> None:
     try:
         guided = _g()
         gs = getattr(bpy.context.scene, "curiomesh_guided", None)
-        res, preview = guided.state["res"], bpy.data.objects.get(guided.PREVIEW_NAME)
+        res, preview = guided.state["res"], guided.preview_object()
         if gs is None or not gs.organize_flow or res is None or preview is None:
             return
         import gpu
