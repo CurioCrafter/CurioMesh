@@ -555,7 +555,7 @@ class FitStage:
             yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
             if self._stopped:
                 return
-            out[i] = np.asarray(got["uv"], np.float64).reshape(-1, 2)
+            out[i] = close_flat(P, ip, fl, got["uv"])
             if i == sa.active:
                 f = got["fold"]
                 numbers.update(folded_before=int(f["folded_before"]), folded_after=int(f["folded_after"]), fold_stuck=int(f["fold_stuck"]),
@@ -575,9 +575,9 @@ class FitStage:
             remember(c)
 
 
-def halve_mask(points, indptr, flat, orient) -> np.ndarray:
-    """Per result face: True for a face of 4 or more corners that the lookup gave no common winding (orient 0) and that has
-    area (a fan triangle above uvseams.DEGENERATE_SHARE): its fan triangles want opposite windings."""
+def has_area(points, indptr, flat) -> np.ndarray:
+    """Per result face: True when one of its fan triangles has area (twice-area above uvseams.DEGENERATE_SHARE of its
+    summed squared edges)."""
 
     P = np.asarray(points, np.float64).reshape(-1, 3)
     ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
@@ -589,8 +589,26 @@ def halve_mask(points, indptr, flat, orient) -> np.ndarray:
     a, b, c = P[fl[s]], P[fl[s + k]], P[fl[s + k + 1]]
     two_area = np.linalg.norm(np.cross(b - a, c - a), axis=1)
     edges2 = ((b - a) ** 2).sum(1) + ((c - b) ** 2).sum(1) + ((a - c) ** 2).sum(1)
-    has_area = np.bincount(tri_face, two_area > uvseams.DEGENERATE_SHARE * edges2, len(sizes)) > 0
-    return (np.asarray(orient) == 0) & (sizes > 3) & has_area
+    return np.bincount(tri_face, two_area > uvseams.DEGENERATE_SHARE * edges2, len(sizes)) > 0
+
+
+def halve_mask(points, indptr, flat, orient) -> np.ndarray:
+    """Per result face: True for a face of 4 or more corners with area that the lookup gave no common winding (orient
+    0): its fan triangles want opposite windings."""
+
+    return (np.asarray(orient) == 0) & (np.diff(np.asarray(indptr, np.int64)) > 3) & has_area(points, indptr, flat)
+
+
+def close_flat(points, indptr, flat, uv) -> np.ndarray:
+    """`uv` (2 per corner) with every corner of a face that has no area (a zero-area sliver) at the mean of its UVs, so
+    the face has no UV area either: it shows nothing, and a winding read off its rounding-noise normal cannot flip it."""
+
+    ip = np.asarray(indptr, np.int64)
+    out = np.asarray(uv, np.float64).reshape(-1, 2).copy()
+    for f in np.flatnonzero(~has_area(points, indptr, flat)):
+        s, e = int(ip[f]), int(ip[f + 1])
+        out[s:e] = out[s:e].mean(0)
+    return out
 
 
 def fan_split(indptr, flat, origin, mask) -> tuple:
