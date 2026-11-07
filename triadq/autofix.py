@@ -414,6 +414,9 @@ PASSES = (  # AUTO_FIX.md 3.2: (group switch, module, class, kinds or None for a
     ("shape", "relax", "RelaxTowardDetail", None),
     ("shape", "relax", "SourceRelax", None),
     ("shape", "relax", "KeepLinesRelax", None),
+    ("uv", "uvauto", "SeamSnap", None),  # main-only: uv
+    ("uv", "uvtrial", "SeamFit", None),  # main-only: uv
+    ("uv", "uvtrial", "BakeSpots", None),  # main-only: uv
     ("leftovers", "tidytools", "PreviewTidy", ("slivers",)),
 )
 GROUPS = ("leftovers", "seam", "poles", "patches", "hard", "rows", "shape")
@@ -424,6 +427,7 @@ def plan(on) -> list:
     built yet, is manual only, or cannot find spots yet is left out; it joins the day it can."""
     import importlib
 
+    on = set(on) | ({"uv"} if on else set())  # main-only: uv
     out = []
     for group, module, name, kinds in PASSES:
         if group not in on:

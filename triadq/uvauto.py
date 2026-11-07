@@ -22,7 +22,7 @@ NumPy only, no bpy. Our own design and code (SPEC 4.4-4.6). The guide-edge mecha
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
+import sys
 
 import numpy as np
 
@@ -32,7 +32,14 @@ from . import autofix, trial as T, uvkeep, uvsnap, uvseams
 NEAR = 1.0  # a seam's spot is the faces with a corner within this many local edges of it (the snap's corridor)
 LEAST = 0.05  # the smallest drop of a spot's own number (seam area off the edges, in quads) that counts as better
 STEP = 0.25  # seams are sampled every this many local edges to measure how far they lie from the edges
+FOLLOW = False  # cut the Soft seams in during the search. Off by default: in the add-on's pairing every seam edge left
+# triangles that became quads, measured +60 % faces from the search on concrete_road_barrier, +34 % marble_bust_01,
+# +194 % lion_head (A4 bench, 2026-11-07). uvkeep.OVERRIDE["follow"] (or a later setting) turns it on.
+REFINE = True  # split the triangles near a seam finer before laying it on edges (as drawn guide curves are)
 DEFAULT_STRENGTH = 1.0  # share of uvkeep.MOVE_SHARE of the local edge a corner may move; Auto Fix halves it for the look
+
+
+LAST: dict = {}  # the seams the last search followed: Seam Snap made by Auto Fix (no arguments) works on them
 
 
 @dataclass
@@ -84,6 +91,7 @@ def attach(job):
     """The seams this job follows, or None: Seam Fit is not Light, the source has no Soft seams, or the job works on a
     mirrored half, a region or drawn strokes (those keep their own lines; the fit after the search still runs)."""
 
+    LAST.clear()
     if job.mirror is not None or job.outside is not None or job.guide_lines or job.strips:
         return None
     if uvkeep.mode_of(_gs(job)) != "light":
@@ -100,20 +108,41 @@ def attach(job):
     lines = chain_lines(s, xyz, soft)
     if not lines:
         return None
+    LAST.update(seams=s, xyz=xyz)
     return Auto(plan, s, xyz, soft, lines, report=dict(soft=len(lines)))
 
 
 def cut(job, co, faces, kinds):
-    """The coarse mesh with the Soft seams cut in as guide edges (the job's `_guided`), or the input when not following."""
+    """The coarse mesh with the Soft seams laid on its edges (the guide-curve steps of `guides`: the chain of edges
+    that hugs each seam, pulled onto it) and those edges handed to the pairing as guide edges, or the input when not
+    following. The triangles are not split finer first (`REFINE`): every edge a seam adds costs quads in the pairing."""
 
     a = getattr(job, "uv", None)
     if a is None or job.guide_lines or job.strips or job.methods or job.method != "AUTO" or not len(faces):
         return co, faces, kinds
-    job.guide_lines = a.lines
-    try:
-        co, faces, kinds, job.guide_edges = job._guided(co, faces, kinds)
-    finally:
-        job.guide_lines = []
+    if not uvkeep.OVERRIDE.get("follow", FOLLOW):
+        return co, faces, kinds
+    if REFINE:
+        job.guide_lines = a.lines
+        try:
+            co, faces, kinds, job.guide_edges = job._guided(co, faces, kinds)
+        finally:
+            job.guide_lines = []
+    else:
+        guides = sys.modules[type(job).__module__].guides  # the job's own guide-curve module
+        tris, owner = [], []
+        for i, face in enumerate(faces):
+            for k in range(1, len(face) - 1):
+                tris.append((face[0], face[k], face[k + 1]))
+                owner.append(i)
+        tris = np.asarray(tris, np.int64)
+        co = np.asarray(co, np.float64)
+        spacing = float(np.median(np.linalg.norm(co[tris[:, 0]] - co[tris[:, 1]], axis=1)))
+        chains, keys = guides.chain(co, tris, a.lines, spacing)
+        if chains:
+            co = guides.pull(co, tris, chains, a.lines, spacing)
+        faces, kinds = [tuple(t) for t in tris.tolist()], [kinds[o] for o in owner]
+        job.guide_edges = tuple(sorted(keys))
     pairs = np.asarray(job.guide_edges, np.int64).reshape(-1, 2)
     a.edges = np.asarray(co, np.float64)[pairs] if len(pairs) else np.zeros((0, 2, 3))
     a.report["guide_edges"] = int(len(pairs))
@@ -197,6 +226,8 @@ class SeamSnap(T.Trial):
     changes_faces = False
 
     def __init__(self, seams: dict | None = None, xyz=None, use_fast: bool = True):
+        if seams is None:  # made by Auto Fix's plan: the seams of the last search, if it followed any
+            seams, xyz = LAST.get("seams"), LAST.get("xyz")
         self.seams, self.xyz, self.use_fast = seams, xyz, use_fast
         self._active = None  # Soft chains that have a spot; the run works on those only
 

@@ -55,6 +55,7 @@ class Snap(unittest.TestCase):
         np.testing.assert_array_equal(np.asarray(prop.cand.co), p)
 
     def test_empty_and_no_seams(self):
+        uvauto.LAST.clear()
         trial = uvauto.SeamSnap()
         base = T.make_base(np.zeros((0, 3)), [])
         self.assertEqual(T.finish(trial.spots(base)), [])
@@ -79,6 +80,7 @@ def fake_job(sa, faces=None, co=None, loss=1.0):
 class Job(unittest.TestCase):
     def tearDown(self):
         uvkeep.OVERRIDE.clear()
+        uvauto.LAST.clear()
 
     def test_attach_only_in_light(self):
         sa, plan, _p, _f = setup()
@@ -119,6 +121,43 @@ class Job(unittest.TestCase):
         out, looks = T.finish(uvauto.fix(job, p, faces, (1.0, 0.0, 0.0)))
         np.testing.assert_array_equal(out, p)
         self.assertIn(job.uv.report["reason"], ("look", "no better"))  # halved until nothing moves
+
+
+class AutoFixPass(unittest.TestCase):
+    def test_uv_pass_is_planned_and_gone_when_stripped(self):
+        import importlib.util
+        from pathlib import Path
+
+        names = [cls.__name__ for cls, _k in autofix.plan(set(autofix.GROUPS))]
+        self.assertIn("SeamSnap", names)  # the UV row runs with the other passes (it finds spots only in Light)
+        self.assertEqual(names[-1], "PreviewTidy")  # slivers stay last
+        text = Path(autofix.__file__).read_text(encoding="utf-8")
+        mark = "main-only" + ": uv"
+        stripped = "\n".join(line for line in text.split("\n") if not line.rstrip().endswith(mark))
+        self.assertNotIn(mark, stripped)
+        spec = importlib.util.spec_from_loader("triadq._autofix_site", loader=None)
+        site = importlib.util.module_from_spec(spec)
+        site.__package__ = "triadq"
+        import sys
+
+        sys.modules[spec.name] = site  # dataclasses look their module up
+        try:
+            exec(compile(stripped, "autofix_site.py", "exec"), site.__dict__)
+        finally:
+            sys.modules.pop(spec.name, None)
+        site_names = [cls.__name__ for cls, _k in site.plan(set(site.GROUPS))]
+        self.assertNotIn("SeamSnap", site_names)
+        self.assertEqual(site_names, [n for n in names if n != "SeamSnap"])
+
+    def test_seam_snap_made_by_the_plan_uses_the_last_search(self):
+        sa, plan, p, faces = setup()
+        uvauto.LAST.clear()
+        self.assertEqual(T.finish(uvauto.SeamSnap().spots(T.make_base(p, faces))), [])  # no search followed seams: no spots
+        uvauto.LAST.update(seams=plan.seams, xyz=uvauto.uvsnap.chain_xyz(plan.seams, sa.points))
+        try:
+            self.assertEqual(len(T.finish(uvauto.SeamSnap(use_fast=False).spots(T.make_base(p, faces)))), 1)
+        finally:
+            uvauto.LAST.clear()
 
 
 if __name__ == "__main__":
