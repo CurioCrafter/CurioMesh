@@ -14,12 +14,13 @@ from .triadq import uvchart, uvflat, uvpack, uvscore, uvseams, uvsight, uvsnap
 
 # main-only: uv begin seam
 def _install_seam() -> None:
-    uvseams.set_fast(probe=turbo.uvseam_probe)
+    uvseams.set_fast(probe=turbo.uvseam_probe, extract=turbo.uvseam_extract, triage=turbo.uvseam_triage, transfer=turbo.uvseam_transfer,
+                     layer=turbo.uvseam_layer)
 # main-only: uv end seam
 
 # main-only: uv begin snap
 def _install_snap() -> None:
-    uvsnap.set_fast(probe=turbo.uvsnap_probe)
+    uvsnap.set_fast(probe=turbo.uvsnap_probe, snap=turbo.uvsnap_snap, split=turbo.uvsnap_split)
 # main-only: uv end snap
 
 # main-only: uv begin qem
