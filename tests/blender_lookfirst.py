@@ -108,6 +108,7 @@ print(f"INFO Blender undo in this run: {can}", flush=True)
 for o in list(bpy.data.objects):
     if o.name.startswith("Cube"):
         bpy.data.objects.remove(o, do_unlink=True)
+src = bpy.data.objects["Monkey"]  # an undo above reloads the scene: the old reference is gone
 bpy.context.view_layer.objects.active = src
 src.select_set(True)
 H.steps.clear()
