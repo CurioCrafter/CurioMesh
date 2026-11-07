@@ -189,7 +189,11 @@ class Transfer(unittest.TestCase):
         self.assertIsNone(uvclassic.preserve_textures(source, target, config))  # not a transfer mode
         config.texture_mode = "PROJECT"
         uvseams.FAST.clear()
-        self.assertIsNone(uvclassic.preserve_textures(source, target, config))  # no native core
+        saved, uvclassic._ensure_fast = uvclassic._ensure_fast, lambda: None
+        try:
+            self.assertIsNone(uvclassic.preserve_textures(source, target, config))  # no native core
+        finally:
+            uvclassic._ensure_fast = saved
 
 
 if __name__ == "__main__":

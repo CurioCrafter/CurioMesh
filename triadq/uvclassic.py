@@ -130,6 +130,25 @@ def _polys(obj):
     return points, indptr, flat.astype(np.int64), material
 
 
+def _ensure_fast() -> None:
+    """Install the compiled UV kernels if nobody has yet (the add-on's own `install()` call comes with the H1 hooks)."""
+
+    if uvseams.FAST.get("transfer") is None:
+        try:
+            from .. import uv_fast
+
+            uv_fast.install()
+        except Exception:
+            pass
+
+
+# The fold fix of SPEC 4.8 step 4 (harmonic fill of folded faces and their ring) is off in the Classic path: measured on the
+# nine bench models it moves the UVs of faces that are only straddling a seam, which raised texture drift p99 from
+# 0.8-2 px to 7-44 px (barrier, lion, bust, hydrant) while it removed at most half of a few dozen flipped faces. Drift is
+# the Classic gate; Spot-fix style repair belongs to the tools that have a preview.
+FIX_FOLDS = False
+
+
 def preserve_textures(source, target, config, allow_python_bvh: bool = True):
     """Per-side transfer of every UV layer. Returns "TRANSFERRED", or None to let the old DataTransfer/BVH code run
     (not a transfer mode, no source UVs, no native core, or the transfer gave nothing usable); the reason is stored on
@@ -140,6 +159,7 @@ def preserve_textures(source, target, config, allow_python_bvh: bool = True):
     layers = [layer.name for layer in source.data.uv_layers]
     if not layers:
         return None
+    _ensure_fast()
     if uvseams.FAST.get("transfer") is None:
         try:
             target["curiomesh_uv_note"] = "Native core off: textures moved with the older island-blind transfer."
@@ -152,12 +172,12 @@ def preserve_textures(source, target, config, allow_python_bvh: bool = True):
         active = source.data.uv_layers.active.name if source.data.uv_layers.active else layers[0]
         layers.sort(key=lambda n: n != active)  # the active layer first: it makes the lookup the others reuse
         first = read_uv(source.data, layers[0])
-        out = uvseams.transfer(sp, si, sf, first.ravel(), rp, ri, rf, material=material)
+        out = uvseams.transfer(sp, si, sf, first.ravel(), rp, ri, rf, material=material, fix_folds=FIX_FOLDS)
         if not out.get("done", True):
             return None
         results = {layers[0]: out["uv"]}
         for name in layers[1:]:
-            results[name] = uvseams.layer(si, sf, read_uv(source.data, name).ravel(), rp, ri, rf, out)[0]
+            results[name] = uvseams.layer(si, sf, read_uv(source.data, name).ravel(), rp, ri, rf, out, fix_folds=FIX_FOLDS)[0]
         for name, uv in results.items():
             uv = np.asarray(uv, float).reshape(-1, 2)
             bad = ~np.isfinite(uv).all(axis=1)
