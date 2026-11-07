@@ -1513,9 +1513,11 @@ def _transfer_uvs_with_modifier(source: bpy.types.Object, target: bpy.types.Obje
     except Exception:
         modifier.loop_data_types = {"UV"}
     for attr, value in (
-        ("loop_mapping", "NEAREST_FACE_INTERPOLATED"),
+        ("loop_mapping", "POLYINTERP_NEAREST"),  # "Nearest Face Interpolated" in the UI
         ("layers_uv_select_src", "ACTIVE"),
+        ("layers_uv_select_src", source.data.uv_layers.active.name),  # Blender 5.x lists names, not ACTIVE
         ("layers_uv_select_dst", "ACTIVE"),
+        ("layers_uv_select_dst", "NAME"),  # Blender 5.x
         ("mix_mode", "REPLACE"),
     ):
         try:
