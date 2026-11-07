@@ -100,7 +100,9 @@ def draw(layout, gs) -> None:
     row.prop(gs, "hs_cylinders", toggle=True, icon="MESH_CYLINDER")
     col.prop(gs, "hs_edges", text="Hard Edges")
     if gs.hs_edges != "NONE":
-        col.prop(gs, "hs_angle")
+        row = col.row(align=True)
+        row.prop(gs, "hs_angle")
+        row.operator("curiomesh.tool_hard_edges", text="", icon="HIDE_OFF")  # Look First: see them in pink before Apply
     if gs.hs_edges == "HOLD":
         row = col.row(align=True)
         row.prop(gs, "hs_hold_unit", text="")

@@ -467,12 +467,21 @@ def commit(runner: PartJob) -> None:
     seg["batch_key"] = None
     refresh_list()
     guided.state["message"] = runner.status()
+    from . import history
+
+    if runner.new_tries:  # a part was remade: one Ctrl+Z step back to the result before it
+        history.record(bpy.context, getattr(runner, "step_name", "Redo Part"), f"{len(base['out']['faces']):,} faces", push=True)
+    else:  # only the check after a swap: that swap's step keeps the checked result
+        history.refresh(bpy.context)
 
 
 def start_redo(context, pieces, method: str) -> bool:
+    from . import history
+
     guided = _g()
     if guided.state["auto_base"] is None or not pieces:
         return False
+    history.before(context)  # the result before the redo is the step Ctrl+Z goes back to
     guided.stop_work()
     runner = PartJob(context, pieces, method)
     guided.state["work"] = {"key": guided.state["auto_base"].get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
@@ -487,28 +496,47 @@ def use_try(context, piece: int, index: int) -> bool:
     return use_tries(context, {piece: index})
 
 
-def use_tries(context, wanted: dict) -> bool:
-    """`use_try` for several parts at once ({piece: try index}): one splice, one preview, one check."""
-    guided = _g()
-    base = guided.state["auto_base"]
-    if base is None:
-        return False
-    wanted = {p: i for p, i in wanted.items() if 0 <= i < len(seg["parts"][p]["tries"]) and i != seg["parts"][p]["cur"]}
-    if not wanted:
-        return False
+def _wanted(wanted: dict) -> dict:
+    return {p: i for p, i in wanted.items() if 0 <= p < len(seg["parts"]) and 0 <= i < len(seg["parts"][p]["tries"]) and i != seg["parts"][p]["cur"]}
+
+
+def preview_tries(wanted: dict):
+    """(co, faces, mat, face_piece) of the result with these tries swapped in ({piece: try index}), or None. Nothing
+    changes: Look First draws it, and `use_tries` makes the same splice when it is kept."""
+    base = _g().state["auto_base"]
+    wanted = _wanted(wanted)
+    if base is None or not wanted:
+        return None
     out = base["out"]
     builds = {}
+    for piece, index in wanted.items():
+        record = seg["parts"][piece]
+        if record["tries"][record["cur"]]["build"] is None:  # kept so switching back is one splice
+            record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
+        builds[piece] = record["tries"][index]["build"]
+    return splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], builds)
+
+
+def use_tries(context, wanted: dict, name: str = "Use This Result") -> bool:
+    """`use_try` for several parts at once ({piece: try index}): one splice, one preview, one check. One Ctrl+Z step
+    and one History entry called `name`."""
+    from . import history
+
+    guided = _g()
+    base = guided.state["auto_base"]
+    wanted = _wanted(wanted)
+    made = preview_tries(wanted)
+    if base is None or made is None:
+        return False
+    history.before(context)
     methods = getattr(base["job"], "methods", None)
     for piece, index in wanted.items():
         record = seg["parts"][piece]
-        if record["tries"][record["cur"]]["build"] is None:
-            record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
         chosen = record["tries"][index]
-        builds[piece] = chosen["build"]
         record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"], topology=chosen.get("topology"))
         if methods is not None and chosen["method"] != ORIGINAL:
             methods[piece] = chosen["method"]
-    co, faces, mat, face_piece = splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], builds)
+    co, faces, mat, face_piece = made
     count = len(faces)
     new = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": mat, "parts": face_piece, "piece": face_piece}
     guided.stop_work()
@@ -523,6 +551,7 @@ def use_tries(context, wanted: dict) -> bool:
     guided.state["work"] = {"key": base.get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     if not bpy.app.timers.is_registered(guided._auto_slice):
         bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
+    history.record(context, name, f"{count:,} faces", push=True)
     overlay.tag_redraw()
     return True
 
@@ -540,11 +569,17 @@ def bad_parts() -> list[int]:
     return found
 
 
-def keep_original(context, pieces) -> int:
+def keep_original(context, pieces, name: str = "Keep Original") -> int:
     """Put your own faces back on these parts, as one more try each (so the reduced result stays one click away). Returns how many changed."""
+    wanted = original_tries(pieces)
+    return len(wanted) if wanted and use_tries(context, wanted, name) else 0
+
+
+def original_tries(pieces) -> dict:
+    """{piece: index of its try that is your own faces}, adding that try where there is none yet."""
     base = _g().state["auto_base"]
     if base is None or base["job"] is None or mirrored():
-        return 0
+        return {}
     job, wanted = base["job"], {}
     for p in pieces:
         record = seg["parts"][p]
@@ -556,7 +591,7 @@ def keep_original(context, pieces) -> int:
             record["tries"].append({"method": ORIGINAL, "after": len(faces), "change": 0.0, "build": (points, faces, mats)})
             index = len(record["tries"]) - 1
         wanted[p] = index
-    return len(wanted) if use_tries(context, wanted) else 0
+    return wanted
 
 
 def original_cost(pieces) -> int:

@@ -159,6 +159,10 @@ class Trial:
         """(k, 2, 3) segments outlining what the picks in `settings` pick (drawn orange; white for a hover)."""
         return np.zeros((0, 2, 3))
 
+    def value_text(self, value: float) -> str:
+        """The dial's value on the card: "Strength 0.60". A tool whose dial means something else says it its way."""
+        return f"{self.handles[0].title()} {value:.2f}" if self.handles else ""
+
     def run(self, base: Base, settings: dict, rough: bool = False):
         """Generator: yield a progress 0..1 about every few milliseconds of work, return a Candidate."""
         raise NotImplementedError
@@ -288,7 +292,7 @@ def number_text(key: str, value, cap: float | None = None) -> tuple[str, int]:
 def readout(cand: Candidate | None, trial: Trial, settings: dict, status: str, cap: float | None = None):
     """The card's lines: (title line, [(number words, sign)] up to three, third line)."""
     handle = trial.handles[0] if trial.handles else ""
-    value = f"   {handle.title()} {settings.get(handle, 0.0):.2f}" if handle else ""
+    value = f"   {trial.value_text(float(settings.get(handle, 0.0)))}" if handle else ""
     if cand is not None and cand.refusal:
         return f"{trial.name}", [], cand.refusal
     title = f"{trial.name}{value}   {status}"

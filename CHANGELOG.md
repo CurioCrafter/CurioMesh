@@ -136,6 +136,26 @@
 - **Press Panels Flat** (Hard Surface): finds the flat panels of your original mesh under the result and lays each
   exactly flat; corners shared by two or three panels go to the point on all of them, so panel borders become clean
   lines. The kept hard edges and panel borders are drawn in pink in the preview.
+- **Smaller and Bigger Quads, Redo This Spot, Keep Original Here and Put Reduced Back** now open Look First: the
+  part's new faces are drawn teal over the old ones with "this part 412 -> 655 faces", the face count, poles and the
+  look change on the card, and Enter keeps it (Keep Original no longer asks first: the card shows the cost). Each is
+  one Ctrl+Z step and one History entry, and so is every part try you switch to and every part redone in the
+  background when it finishes. Again on the Last line makes the part one step smaller (or bigger) again from the
+  result as it is now, with no end. A size not worked out yet is still redone in the background, without a preview.
+- **Detail Markers** (Ball + and Ball -) are placed by clicking your mesh instead of at the 3D cursor. Inside the
+  ball's ring a sample grid of quads at the size it asks for lies on the surface and follows the small ring (strength,
+  new: each ball has its own) and the big ring's edge (reach) live, with "quads here about 2.0x smaller, about +340
+  faces" on the card. Enter adds the ball; Esc adds nothing. F9 and scripts still put it at the 3D cursor.
+- **Hard Edges**: the eye button next to Hard Edge Angle (and Hard Edges in the Tools section's Hard Surface group)
+  shows in pink which edges Apply will mark sharp or hold, while you drag the angle. Enter keeps the angle; nothing on
+  the result moves. One Ctrl+Z step; Again opens it on the angle you kept.
+- **Fine-tune Tweak sliders, Mirror and Symmetrize** are each a History step that the search they start fills in, so
+  one Ctrl+Z goes back to the setting and the result before it together, and undoing no longer starts the search
+  again. A Detail Marker you add is a step the same way.
+- **Quad Size and Rows**: while the slider moves and for 1.5 s after, the HUD's bottom line says "faces 6,210 ->
+  4,880".
+- Part records in History are copied (a swap changes them in place), so Ctrl+Z also puts back which try each part card
+  shows.
 
 ## 0.9.8 - 2026-11-06
 
