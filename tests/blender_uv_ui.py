@@ -314,6 +314,6 @@ bpy.ops.object.mode_set(mode="OBJECT")
 pkg.unregister()
 ok(not bpy.app.timers.is_registered(UP._auto_tick) and not UP.live["handles"], "unregister removes the timer and the draw handlers")
 for name, sec in sorted(FRAMES.items()):
-    print(f"FRAME {name}: longest {1000 * sec:.1f} ms", flush=True)
+    print(f"FRAME {name}: longest {1000 * sec:.1f} ms (wall clock; at Idle priority a busy PC adds its own time)", flush=True)
 print(f"UVUI {'FAILED ' + str(len(FAILS)) if FAILS else 'OK'}", flush=True)
 sys.exit(1 if FAILS else 0)

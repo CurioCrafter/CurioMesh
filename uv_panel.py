@@ -825,9 +825,13 @@ def _auto_step():
     stage = ROW["stage"]
     if stage is None:
         return AUTO_IDLE
-    end = time.perf_counter() + 0.004
-    while not stage.done and time.perf_counter() < end:
+    end, longest = time.perf_counter() + 0.006, 0.0
+    while not stage.done:
+        t = time.perf_counter()
         stage.step()
+        longest = max(longest, time.perf_counter() - t)
+        if time.perf_counter() + longest >= end:  # the next step would not fit: stop before it
+            break
     if not stage.done:
         return AUTO_GAP
     if isinstance(stage, uvkeep.FitStage):

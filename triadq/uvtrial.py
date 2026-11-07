@@ -40,13 +40,20 @@ def _faces_of(indptr, flat) -> list:
     return list(FlatFaces(indptr, flat))
 
 
-def new_edges(old_faces, new_faces) -> np.ndarray:
-    """(k, 2) corner pairs of edges of `new_faces` that `old_faces` did not have: the split lines."""
-    old, new = T.edges_of(old_faces), T.edges_of(new_faces)
-    if not len(new):
-        return np.zeros((0, 2), np.int64)
-    n = int(max(old.max(initial=0), new.max(initial=0))) + 1
-    return new[~np.isin(new[:, 0] * n + new[:, 1], old[:, 0] * n + old[:, 1])]
+def _edge_keys(faces, n: int) -> np.ndarray:
+    f = FlatFaces.of(faces)
+    ip, fl = f.indptr, f.flat
+    nxt = np.arange(1, len(fl) + 1)
+    nxt[ip[1:] - 1] = ip[:-1]
+    lo, hi = np.minimum(fl, fl[nxt]), np.maximum(fl, fl[nxt])
+    return np.unique(lo * n + hi)
+
+
+def new_edges(old_faces, new_faces, n: int) -> np.ndarray:
+    """(k, 2) corner pairs of edges of `new_faces` that `old_faces` did not have: the split lines. `n`: corner count."""
+    new = _edge_keys(new_faces, n)
+    new = new[~np.isin(new, _edge_keys(old_faces, n))]
+    return np.stack([new // n, new % n], axis=1)
 
 
 def allowance_of(value: float):
@@ -116,9 +123,12 @@ class SeamFit(T.Trial):
             return T.Candidate(None, refusal="Seam Fit stopped before it finished.")
         c = best[0]
         n = c.numbers
+        yield 0.96
         new_faces = _faces_of(c.indptr, c.flat)
         cand = T.Candidate(np.asarray(c.points, np.float64), faces=new_faces, parent=np.asarray(c.origin, np.int64), exact=True)
-        cand.lines = new_edges(base.faces, new_faces)
+        yield 0.97
+        cand.lines = new_edges(base.faces, FlatFaces(c.indptr, c.flat), len(c.points))
+        yield 0.98
         cand.fit = c
         cand.fit_extra = extra + int(n.get("extra_faces", 0))
         split, left = int(n.get("faces_split", 0)), int(n.get("faces_left", 0)) + int(n.get("faces_for_baking", 0))
@@ -324,6 +334,7 @@ def _new_cand(run, result) -> UVCand:
     return cand
 
 
+NEW_SLICE = 0.0005  # seconds New's own loop runs per step: the caller's slice decides the rest
 STRETCH_DIAL = 25.0  # percent at the dial's end (the popover's soft max); the popover itself has no hard max
 
 
@@ -359,7 +370,7 @@ class NewUVs(UVTrial):
             run = old.again(**{k: v for k, v in s.__dict__.items()})
         else:
             keep = {"sight": old.sight} if old is not None and old.sight is not None and old.sight.done else None
-            run = uvnew.NewUVs(base.points, base.indptr, base.flat, base.material, forced, s, _keep=keep)
+            run = uvnew.NewUVs(base.points, base.indptr, base.flat, base.material, forced, s, budget=NEW_SLICE, _keep=keep)
         result, error = yield from _poll_new(run)
         if error:
             return UVCand(None, refusal=error)
@@ -655,15 +666,30 @@ class BakeSpots(UVTrial):
 TRIALS = {"new": NewUVs, "layout": PageLayout, "cut": CutHere, "bake": BakeSpots}
 
 
+_STEP = {}  # generator id -> its longest step so far (s), so a slice stops before a step would overrun it
+
+
 def drive(work, budget: float = 0.004):
-    """Run a generator for about `budget` seconds. Returns (done, value)."""
-    end = time.perf_counter() + budget
-    while time.perf_counter() < end:
+    """Run a generator for at most about `budget` seconds: it stops before the next step when the longest step so far
+    would not fit any more (one step always runs). Returns (done, value)."""
+    start = time.perf_counter()
+    end = start + budget
+    longest = _STEP.get(id(work), 0.0)
+    now = start
+    while True:
         try:
             next(work)
         except StopIteration as fin:
+            _STEP.pop(id(work), None)
             return True, fin.value
-    return False, None
+        t = time.perf_counter()
+        longest = max(longest, t - now)
+        now = t
+        if now + longest >= end:
+            _STEP[id(work)] = longest
+            if len(_STEP) > 64:  # generators dropped without finishing: forget the oldest
+                _STEP.pop(next(iter(_STEP)))
+            return False, None
 
 
 def finish(work):
