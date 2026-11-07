@@ -862,8 +862,45 @@ def _snap_steps(points, indptr, flat, seams, xyz, max_move, vchain_in, vparam_in
         else:
             out["state"][c] = states[0]
         yield
-    # Near vertices (ours, after the paths): a free vertex closer than REUSE_EDGE of its own mean edge to a Soft chain
-    # goes to the chain's closest point, under the same guard as a path vertex (the split would reuse it unmoved).
+    border = np.zeros(n, bool)  # vertices on an open border stay on it
+    for e, fs in enumerate(mesh.efaces):
+        if len(fs) == 1:
+            border[mesh.ea[e]] = border[mesh.eb[e]] = True
+    ring = [v for v in range(n) if snapped[v]]
+    seen = snapped.copy()
+    for _ in range(int(rings)):
+        if not out["done"] or stopped():
+            out["done"] = False
+            break
+        nxt = []
+        for u in ring:
+            for w in mesh.nbr[u]:
+                if not seen[w]:
+                    seen[w] = True
+                    nxt.append(w)
+        nxt.sort()
+        for v in nxt:
+            if held[v] or vchain[v] >= 0 or not mesh.nbr[v] or not limit(v) > 0.0 or border[v]:
+                continue
+            m = (0.0, 0.0, 0.0)
+            for w in mesh.nbr[v]:
+                m = _add(m, pos[w])
+            m = _scale(m, 1.0 / len(mesh.nbr[v]))
+            nv = (0.0, 0.0, 0.0)
+            for f in mesh.vf[v]:
+                nv = _add(nv, _unit(_newell(_face_pos(pos, mesh, f))))
+            nv = _unit(nv)
+            d = _sub(m, pos[v])
+            dt = _sub(d, _scale(nv, _dot(d, nv)))
+            to = _add(pos[v], _scale(dt, RELAX_WEIGHT))
+            if _norm(_sub(to, orig[v])) <= limit(v) and _move_ok(pos, mesh, v, to):
+                pos[v] = to
+                out["relaxed"] += 1
+            yield
+        ring = nxt
+    # Near vertices (ours, after the paths and their relax): a free vertex closer than REUSE_EDGE of its own mean edge
+    # to a Soft chain goes to the chain's closest point, under the same guard as a path vertex (the split would reuse
+    # it unmoved).
     segs = [(c, j) for c in range(nc) if cls[c] == SOFT for j in range(len(chs[c].pts) - 1)]
     if segs and out["done"]:
         SA = np.array([chs[c].P[j] for c, j in segs], np.float64).reshape(-1, 3)
@@ -896,38 +933,6 @@ def _snap_steps(points, indptr, flat, seams, xyz, max_move, vchain_in, vparam_in
             snapped[v] = True
             vchain[v], vparam[v] = c, prm
             out["moved"] += 1
-    ring = [v for v in range(n) if snapped[v]]
-    seen = snapped.copy()
-    for _ in range(int(rings)):
-        if not out["done"] or stopped():
-            out["done"] = False
-            break
-        nxt = []
-        for u in ring:
-            for w in mesh.nbr[u]:
-                if not seen[w]:
-                    seen[w] = True
-                    nxt.append(w)
-        nxt.sort()
-        for v in nxt:
-            if held[v] or vchain[v] >= 0 or not mesh.nbr[v] or not limit(v) > 0.0:
-                continue
-            m = (0.0, 0.0, 0.0)
-            for w in mesh.nbr[v]:
-                m = _add(m, pos[w])
-            m = _scale(m, 1.0 / len(mesh.nbr[v]))
-            nv = (0.0, 0.0, 0.0)
-            for f in mesh.vf[v]:
-                nv = _add(nv, _unit(_newell(_face_pos(pos, mesh, f))))
-            nv = _unit(nv)
-            d = _sub(m, pos[v])
-            dt = _sub(d, _scale(nv, _dot(d, nv)))
-            to = _add(pos[v], _scale(dt, RELAX_WEIGHT))
-            if _norm(_sub(to, orig[v])) <= limit(v) and _move_ok(pos, mesh, v, to):
-                pos[v] = to
-                out["relaxed"] += 1
-            yield
-        ring = nxt
     out["points"] = np.array(pos, np.float64).ravel()
 
 

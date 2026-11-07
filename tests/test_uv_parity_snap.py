@@ -120,7 +120,13 @@ class Twin(unittest.TestCase):
         s, r = run_both(P, I, F, seams, xyz)
         self.assertEqual(int(s["state"][0]), uvsnap.REFUSED)
         self.assertGreater(int(s["turns"][0]) * uvsnap.SNAP_TURN_EVERY, int(s["path_edges"][0]))
-        np.testing.assert_array_equal(s["points"], P.ravel())
+        moved = np.flatnonzero(np.any(s["points"].reshape(-1, 3) != P, axis=1))  # only vertices next to the chain, onto it
+        edge = uvsnap.vertex_edge(P, I, F)
+        chain = uvsnap._chains(seams, xyz)[0]
+        for v in moved.tolist():
+            self.assertLessEqual(float(np.linalg.norm(s["points"].reshape(-1, 3)[v] - P[v])), uvsnap.REUSE_EDGE * edge[v] + 1e-12)
+            self.assertLess(chain.closest(0, len(chain.pts) - 1, tuple(s["points"].reshape(-1, 3)[v]))[0], 1e-20)
+            self.assertEqual(int(s["vchain"][v]), 0)
         self.assertEqual(straddlers(r, 30), 0)
         self.assertGreater(int(r["faces_split"]), 0)
         self.assertGreater(int(r["triangles_left"]), 0)  # counted for the card

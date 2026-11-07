@@ -641,9 +641,58 @@ pub fn snap(points: &[f64], faces: &Faces, chains: &Chains, max_move: MaxMove, v
             states[0]
         };
     }
-    // Near vertices (ours, after the paths): a free vertex closer than `REUSE_EDGE` of its own mean edge to a Soft chain
-    // goes to the chain's closest point, under the same guard as a path vertex. The split would reuse such a vertex
-    // unmoved as a seam vertex, and a face on the far side would keep a corner across the seam.
+    // Tangential relax of the rings around snapped vertices (snapped and held vertices stay where they are).
+    let mut border = vec![false; n]; // vertices on an open border stay on it
+    for e in 0..mesh.ea.len() {
+        if mesh.efaces[e].len() == 1 {
+            border[mesh.ea[e]] = true;
+            border[mesh.eb[e]] = true;
+        }
+    }
+    let mut ring: Vec<usize> = (0..n).filter(|&v| out.snapped[v]).collect();
+    let mut seen: Vec<bool> = out.snapped.clone();
+    for _ in 0..rings {
+        if out.stopped || stop.load(Ordering::Relaxed) {
+            out.stopped = true;
+            break;
+        }
+        let mut next = Vec::new();
+        for &u in &ring {
+            for &w in mesh.nbrs(u) {
+                if !seen[w] {
+                    seen[w] = true;
+                    next.push(w);
+                }
+            }
+        }
+        next.sort_unstable();
+        for &v in &next {
+            if out.held[v] || out.vchain[v] >= 0 || mesh.nbrs(v).is_empty() || !(limit(v) > 0.0) || border[v] {
+                continue;
+            }
+            let mut m = [0.0; 3];
+            for &w in mesh.nbrs(v) {
+                m = add(m, pos[w]);
+            }
+            m = scale(m, 1.0 / mesh.nbrs(v).len() as f64);
+            let mut nv = [0.0; 3];
+            for &f in mesh.faces_of(v) {
+                nv = add(nv, unit(newell(&face_pos(&pos, faces, f))));
+            }
+            let nv = unit(nv);
+            let d = sub(m, pos[v]);
+            let dt = sub(d, scale(nv, dot(d, nv)));
+            let to = add(pos[v], scale(dt, RELAX_WEIGHT));
+            if norm(sub(to, orig[v])) <= limit(v) && move_ok(&mut pos, faces, &mesh, v, to) {
+                pos[v] = to;
+                out.relaxed += 1;
+            }
+        }
+        ring = next;
+    }
+    // Near vertices (ours, after the paths and their relax): a free vertex closer than `REUSE_EDGE` of its own mean
+    // edge to a Soft chain goes to the chain's closest point, under the same guard as a path vertex. The split would
+    // reuse such a vertex unmoved as a seam vertex, and a face on the far side would keep a corner across the seam.
     if !out.stopped {
         let mut segs: Vec<(usize, usize)> = Vec::new();
         let mut sgrid = Grid::new(mesh.mean_edge);
@@ -685,48 +734,6 @@ pub fn snap(points: &[f64], faces: &Faces, chains: &Chains, max_move: MaxMove, v
             out.vparam[v] = prm;
             out.moved += 1;
         }
-    }
-    // Tangential relax of the rings around snapped vertices (snapped and held vertices stay where they are).
-    let mut ring: Vec<usize> = (0..n).filter(|&v| out.snapped[v]).collect();
-    let mut seen: Vec<bool> = out.snapped.clone();
-    for _ in 0..rings {
-        if out.stopped || stop.load(Ordering::Relaxed) {
-            out.stopped = true;
-            break;
-        }
-        let mut next = Vec::new();
-        for &u in &ring {
-            for &w in mesh.nbrs(u) {
-                if !seen[w] {
-                    seen[w] = true;
-                    next.push(w);
-                }
-            }
-        }
-        next.sort_unstable();
-        for &v in &next {
-            if out.held[v] || out.vchain[v] >= 0 || mesh.nbrs(v).is_empty() || !(limit(v) > 0.0) {
-                continue;
-            }
-            let mut m = [0.0; 3];
-            for &w in mesh.nbrs(v) {
-                m = add(m, pos[w]);
-            }
-            m = scale(m, 1.0 / mesh.nbrs(v).len() as f64);
-            let mut nv = [0.0; 3];
-            for &f in mesh.faces_of(v) {
-                nv = add(nv, unit(newell(&face_pos(&pos, faces, f))));
-            }
-            let nv = unit(nv);
-            let d = sub(m, pos[v]);
-            let dt = sub(d, scale(nv, dot(d, nv)));
-            let to = add(pos[v], scale(dt, RELAX_WEIGHT));
-            if norm(sub(to, orig[v])) <= limit(v) && move_ok(&mut pos, faces, &mesh, v, to) {
-                pos[v] = to;
-                out.relaxed += 1;
-            }
-        }
-        ring = next;
     }
     out.points = pos.iter().flatten().cloned().collect();
     out
