@@ -867,10 +867,37 @@ fn uv_area(layer: &[f64], faces: &Faces, f: usize) -> f64 {
     area
 }
 
+/// Below this ratio of twice its area to its summed squared edge lengths a source face is a sliver whose normal is
+/// rounding noise (DEGENERATE_SHARE); it has no say in which way a result face winds.
+pub const DEGENERATE_SHARE: f64 = 1e-6;
+
+/// 1 or -1 when normals a and b clearly face the same or opposite ways (at most 60 deg off, REF_ALIGN_COS), 0 when
+/// they are nearer edge-on, where which side of 90 deg they fall on is rounding (a cap face over a cylinder's wall).
+fn clear_facing(a: V3, b: V3) -> f64 {
+    let (la, lb, d) = (dot(a, a).sqrt(), dot(b, b).sqrt(), dot(a, b));
+    if la > 0.0 && lb > 0.0 && d.abs() >= REF_ALIGN_COS * la * lb {
+        sgn(d)
+    } else {
+        0.0
+    }
+}
+
+/// True when source face g has a normal worth reading (not a zero-area sliver; see DEGENERATE_SHARE).
+fn flat_enough(src: &Source, g: usize) -> bool {
+    let face = src.faces.face(g);
+    let mut s2 = 0.0;
+    for i in 0..face.len() {
+        let d = sub(p3(src.points, face[(i + 1) % face.len()]), p3(src.points, face[i]));
+        s2 += dot(d, d);
+    }
+    let n = src.normal[g];
+    dot(n, n).sqrt() > DEGENERATE_SHARE * s2
+}
+
 /// A result face's orientation sign against its reference face `rf`, from the source under each of its fan
 /// triangles: each triangle (0, i, i+1) asks the source face nearest its centre which way it winds, the way a
 /// texture shows on it (that face's UV winding times whether it faces the triangle), relative to the reference's
-/// UV winding. All agreeing: that sign. A face whose triangles disagree (folded in 3D, or across a crease with one
+/// UV winding (slivers and faces edge-on to the triangle have no say). All agreeing: that sign. A face whose triangles disagree (folded in 3D, or across a crease with one
 /// triangle leaning into a wall) gets 0: no single winding shows the texture on all of it, so its reads stay as read
 /// and the fold fix leaves it. Triangles on a face with no UV area, or edge-on to their face, have no say; when no
 /// triangle has a say, `fallback` (the face's own sign against the reference).
@@ -885,7 +912,10 @@ fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], r
         let (a, b, cc) = (p3(res_points, t[0]), p3(res_points, t[1]), p3(res_points, t[2]));
         let q = [(a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0];
         let Some(g) = tree.nearest(q).map(|h| h.1 as usize) else { continue };
-        let facing = sgn(dot(newell(res_points, &t), src.normal[g]));
+        if !flat_enough(src, g) {
+            continue;
+        }
+        let facing = clear_facing(newell(res_points, &t), src.normal[g]);
         let wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, g)));
         let w = facing * wind * ref_wind;
         if w == 0.0 || w.is_nan() {
@@ -985,9 +1015,11 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
                 best = Some((d2, g, t, w));
             }
         }
-        // Only a face nearer the centre than the reference: a reference that is the nearest face is the surface the
-        // face lies on, however it is turned (a thin part's far side seen from a coarse face).
-        if let Some((d2, g, t, w)) = best.filter(|b| b.0 < src.on_face(rf, c).0) {
+        // A reference clearly turned away (over 120 deg) gives way only to a face nearer the centre: being the nearest
+        // face, it is the surface the face lies on (a thin part's far side seen from a coarse face). An edge-on one
+        // (60-120 deg: its side of 90 deg is rounding) always gives way.
+        let edge_on = clear_facing(nr, src.normal[rf]) == 0.0;
+        if let Some((d2, g, t, w)) = best.filter(|b| edge_on || b.0 < src.on_face(rf, c).0) {
             (rf, rd, rt, rw) = (g, d2.sqrt(), t, w);
             region = set.region[g];
         }
