@@ -199,6 +199,8 @@ def issues_redo(context, index, object=None):
 
     p = _spot(index)
     plan = issue_panel.redo_plan(p, index)
+    if not plan["tries"] and not plan["todo"] and ladder.active():  # no smaller size is worked out yet (headless, or just started): remake the part for a smaller size in the background, as when there is no ladder
+        plan.update(todo=[p], why="")
     if not plan["tries"] and not plan["todo"]:
         return _plan_done(context, plan, False)
     return dict(_plan_done(context, plan, ladder.apply_sizes(context, plan["sizes"], plan["todo"], False, plan["name"]) > 0), spot=index, part=p)
