@@ -75,6 +75,9 @@ def chain_xyz(seams: dict, points) -> np.ndarray:
     points = np.asarray(points, np.float64).reshape(-1, 3)
     xyz = np.zeros((int(seams["n_welded"]), 3))
     xyz[np.asarray(seams["weld"], np.int64)] = points
+    extra = seams.get("contact_xyz")  # welded ids after the source's: the part contacts' vertices (`part_contacts`)
+    if extra is not None and len(extra):
+        xyz[len(xyz) - len(extra):] = extra
     return xyz.ravel()
 
 
@@ -94,25 +97,10 @@ def with_seam_uvs(uv, corner_uv) -> np.ndarray:
     return out
 
 
-def part_borders(seams: dict, points, indptr, flat, corner_uv, reach: float, texture_px: float = 1024.0) -> dict:
-    """The seam dict with **part borders** added as Soft chains: runs of a source part's open border that lie within
-    `reach` (model units, about one result edge) of another, unconnected part.
+def _parts(fl, ip, weld, nw):
+    """Per source face: its part (faces joined across shared welded edges; union-find)."""
 
-    Separate pieces of a source (a bolt on a plate, a cap on a body) share no edge, so they have no UV seam between
-    them, yet a result face spanning both takes texture from two places. Such a border is cut like a seam: side A is the
-    part's own UV at the border, side B the UV of the nearest vertex of the other part (its gap sets the split's damage
-    order; at least `SPLIT_GAP_PX` so it is always split). Our own rule; nearest points by brute force in chunks."""
-
-    P = np.asarray(points, np.float64).reshape(-1, 3)
-    ip = np.asarray(indptr, np.int64)
-    fl = np.asarray(flat, np.int64)
-    cuv = np.asarray(corner_uv, np.float64).reshape(-1, 2)
-    weld = np.asarray(seams["weld"], np.int64)
-    nw = int(seams["n_welded"])
-    out = dict(seams)
     nf = len(ip) - 1
-    if nf <= 0 or not reach > 0.0:
-        return out
     counts = np.diff(ip)
     face_of = np.repeat(np.arange(nf), counts)
     nxt = np.arange(len(fl)) + 1
@@ -122,10 +110,6 @@ def part_borders(seams: dict, points, indptr, flat, corner_uv, reach: float, tex
     key = np.minimum(wa, wb) * nw + np.maximum(wa, wb)
     order = np.argsort(key, kind="stable")
     ks = key[order]
-    first = np.r_[True, ks[1:] != ks[:-1]]
-    run_id = np.cumsum(first) - 1
-    uses = np.bincount(run_id)
-    # parts: faces joined across shared (welded) edges
     lab = np.arange(nf)
 
     def find(x):
@@ -135,92 +119,190 @@ def part_borders(seams: dict, points, indptr, flat, corner_uv, reach: float, tex
         return x
 
     fo = face_of[order]
-    for i in np.flatnonzero(~first).tolist():
-        a, b = find(int(fo[i - 1])), find(int(fo[i]))
-        if a != b:
-            lab[max(a, b)] = min(a, b)
-    part = np.array([find(f) for f in range(nf)], np.int64)
-    border = order[first & (uses[run_id] == 1)]  # corners whose edge (corner -> next corner) is used once
-    if not len(border):
-        return out
-    if len(np.unique(part)) < 2:
-        return out
-    wpart = np.full(nw, -1, np.int64)
-    wpart[weld[fl]] = part[face_of]
-    multi = np.zeros(nw, bool)  # a welded vertex two parts share (they touch at a point): not a border run vertex
-    np.logical_or.at(multi, weld[fl], wpart[weld[fl]] != part[face_of])
-    # nearest vertex of another part, per border vertex (welded positions)
-    xyz = np.zeros((nw, 3))
-    xyz[weld] = P
-    wuv = np.zeros((nw, 2))
-    bv = np.unique(np.r_[wa[border], wb[border]])
-    near_d = np.full(nw, np.inf)
-    near_w = np.full(nw, -1, np.int64)
-    cand = np.flatnonzero(wpart >= 0)
-    for k in range(0, len(bv), 64):
-        q = bv[k:k + 64]
-        d = np.linalg.norm(xyz[q][:, None, :] - xyz[cand][None, :, :], axis=2)
-        d[wpart[q][:, None] == wpart[cand][None, :]] = np.inf
-        j = d.argmin(1)
-        near_d[q], near_w[q] = d[np.arange(len(q)), j], cand[j]
-    # UV per welded vertex on its own side: the corner of a border edge that starts there (else any corner there)
-    wuv[weld[fl]] = cuv
-    wuv[wa[border]] = cuv[border]
-    # border edges as a graph on welded vertices; walk runs of near vertices
-    ea, eb = wa[border], wb[border]
-    adj = {}
-    for x, y in zip(ea.tolist(), eb.tolist()):
-        adj.setdefault(x, []).append(y)
-        adj.setdefault(y, []).append(x)
-    ok = {v for v in adj if near_d[v] <= reach and len(adj[v]) == 2 and not multi[v]}
+    for i in np.flatnonzero(ks[1:] == ks[:-1]).tolist():
+        x, y = find(int(fo[i])), find(int(fo[i + 1]))
+        if x != y:
+            lab[max(x, y)] = min(x, y)
+    return np.array([find(f) for f in range(nf)], np.int64)
+
+
+def _walk_runs(adj):
+    """Polylines through a graph of degree <= 2 mostly: runs between ends / branch points, then closed loops (first
+    node repeated at the end)."""
+
     seen = set()
     runs = []
-    for v0 in sorted(ok):
-        if v0 in seen:
+    for v0 in sorted(adj):
+        if len(adj[v0]) == 2:
             continue
-        # walk back to a run start (or around a loop)
-        start, prev = v0, None
-        while True:
-            nb = [w for w in adj[start] if w != prev and w in ok]
-            if not nb or nb[0] == v0:
-                break
-            prev, start = start, nb[0]
-        run, prev, cur = [start], None, start
-        seen.add(start)
-        while True:
-            nb = [w for w in adj[cur] if w != prev and w in ok]
-            if not nb:
-                break
-            if nb[0] == start:
-                run.append(start)  # closed
-                break
-            if nb[0] in seen:
-                break
-            prev, cur = cur, nb[0]
-            run.append(cur)
-            seen.add(cur)
-        if len(run) >= 2:
+        for w0 in sorted(adj[v0]):
+            e = (min(v0, w0), max(v0, w0))
+            if e in seen:
+                continue
+            seen.add(e)
+            run, prev, cur = [v0], v0, w0
+            while True:
+                run.append(cur)
+                if len(adj[cur]) != 2:
+                    break
+                nxt = next(x for x in adj[cur] if x != prev)
+                e = (min(cur, nxt), max(cur, nxt))
+                if e in seen:
+                    break
+                seen.add(e)
+                prev, cur = cur, nxt
             runs.append(run)
+    for v0 in sorted(adj):
+        for w0 in sorted(adj[v0]):
+            e = (min(v0, w0), max(v0, w0))
+            if e in seen:
+                continue
+            seen.add(e)
+            run, prev, cur = [v0], v0, w0
+            while cur != v0:
+                run.append(cur)
+                nxt = next(x for x in adj[cur] if x != prev)
+                e = (min(cur, nxt), max(cur, nxt))
+                if e in seen:
+                    break
+                seen.add(e)
+                prev, cur = cur, nxt
+            run.append(cur)
+            runs.append(run)
+    return [r for r in runs if len(r) >= 2]
+
+
+def part_contacts(seams: dict, points, indptr, flat, corner_uv, texture_px: float = 1024.0) -> dict:
+    """The seam dict with **part contacts** added as Soft chains: the curves where two unconnected pieces of the source
+    cut through each other (a bolt through a plate, a cap pushed into a body).
+
+    Such pieces share no edge, so the UV seams have no chain there, yet a result face across the crease takes its
+    texture from two places. The curve is cut like a seam: side A is the lower part's UV there, side B the other part's.
+    New chain vertices get welded ids after the source's (`chain_xyz` reads their places from `contact_xyz`).
+
+    Our own wiring of textbook pieces: candidate triangle pairs from a uniform grid, segment-triangle crossings
+    (Moller, Trumbore 1997, "Fast, minimum storage ray-triangle intersection"), each crossing keyed by (welded edge,
+    other triangle) so the segments of neighbouring triangle pairs join exactly into polylines."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    ip = np.asarray(indptr, np.int64)
+    fl = np.asarray(flat, np.int64)
+    cuv = np.asarray(corner_uv, np.float64).reshape(-1, 2)
+    weld = np.asarray(seams["weld"], np.int64)
+    nw = int(seams["n_welded"])
+    out = dict(seams)
+    nf = len(ip) - 1
+    if nf <= 1:
+        return out
+    part = _parts(fl, ip, weld, nw)
+    if part.min() == part.max():
+        return out
+    # fan triangles: corner ids (into flat / corner_uv) and their face's part
+    counts = np.diff(ip)
+    tc = []
+    for k in np.unique(counts[counts >= 3]).tolist():
+        fs = np.flatnonzero(counts == k)
+        for j in range(1, k - 1):
+            tc.append(np.stack([ip[fs], ip[fs] + j, ip[fs] + j + 1], 1))
+    if not tc:
+        return out
+    TC = np.concatenate(tc)
+    tpart = part[np.searchsorted(ip, TC[:, 0], side="right") - 1]
+    V = P[fl[TC]]  # (nt, 3, 3)
+    nt = len(TC)
+    # candidate pairs: triangles of different parts sharing a grid cell
+    elen = np.linalg.norm(V[:, 1] - V[:, 0], axis=1)
+    cell = 2.0 * float(np.median(elen[elen > 0])) if np.any(elen > 0) else 1.0
+    lo = np.floor(V.min(1) / cell).astype(np.int64)
+    hi = np.floor(V.max(1) / cell).astype(np.int64)
+    span = hi - lo + 1
+    ncell = span.prod(1)
+    tid = np.repeat(np.arange(nt), ncell)
+    k = np.arange(len(tid)) - np.repeat(np.cumsum(ncell) - ncell, ncell)
+    sx, sy = span[tid, 0], span[tid, 1]
+    cxyz = np.stack([lo[tid, 0] + k % sx, lo[tid, 1] + (k // sx) % sy, lo[tid, 2] + k // (sx * sy)], 1)
+    ckey = np.unique(cxyz, axis=0, return_inverse=True)[1].ravel()
+    order = np.lexsort((tid, ckey))
+    ck, ct = ckey[order], tid[order]
+    starts = np.flatnonzero(np.r_[True, ck[1:] != ck[:-1]])
+    ends = np.r_[starts[1:], len(ck)]
+    mixed = np.minimum.reduceat(tpart[ct], starts) != np.maximum.reduceat(tpart[ct], starts)
+    pa, pb = [], []
+    for s0, e0 in zip(starts[mixed].tolist(), ends[mixed].tolist()):
+        g = ct[s0:e0]
+        x, y = np.meshgrid(g, g, indexing="ij")
+        m = (x < y) & (tpart[x] != tpart[y])
+        pa.append(x[m])
+        pb.append(y[m])
+    if not pa:
+        return out
+    pairs = np.unique(np.stack([np.concatenate(pa), np.concatenate(pb)], 1), axis=0)
+    # crossings: each edge of one triangle against the other triangle, both ways
+    node, npos, nuv, by_pair = {}, [], [], {}
+    for one, other in ((0, 1), (1, 0)):
+        A, B = pairs[:, one], pairs[:, other]
+        b0, b1, b2 = V[B, 0], V[B, 1], V[B, 2]
+        e1, e2 = b1 - b0, b2 - b0
+        for j in range(3):
+            c0, c1 = TC[A, j], TC[A, (j + 1) % 3]
+            o = P[fl[c0]]
+            dvec = P[fl[c1]] - o
+            pv = np.cross(dvec, e2)
+            det = np.einsum("ij,ij->i", e1, pv)
+            with np.errstate(all="ignore"):
+                inv = 1.0 / det
+                tv = o - b0
+                u = np.einsum("ij,ij->i", tv, pv) * inv
+                qv = np.cross(tv, e1)
+                v = np.einsum("ij,ij->i", dvec, qv) * inv
+                t = np.einsum("ij,ij->i", e2, qv) * inv
+                ok = (np.abs(det) > 1e-300) & (u >= 0) & (v >= 0) & (u + v <= 1) & (t >= 0) & (t <= 1)
+            for i in np.flatnonzero(ok).tolist():
+                wa, wb = int(weld[fl[c0[i]]]), int(weld[fl[c1[i]]])
+                bb = int(B[i])
+                key = (min(wa, wb), max(wa, wb), bb)
+                if key not in node:
+                    ti = float(t[i])
+                    own = cuv[c0[i]] + ti * (cuv[c1[i]] - cuv[c0[i]])
+                    oth = (1.0 - u[i] - v[i]) * cuv[TC[bb, 0]] + u[i] * cuv[TC[bb, 1]] + v[i] * cuv[TC[bb, 2]]
+                    node[key] = len(npos)
+                    npos.append(o[i] + ti * dvec[i])
+                    nuv.append((own, oth) if tpart[A[i]] < tpart[bb] else (oth, own))
+                by_pair.setdefault(i, set()).add(node[key])
+    adj = {}
+    for ns in by_pair.values():
+        ns = sorted(ns)
+        if len(ns) < 2:
+            continue
+        if len(ns) > 2:  # touching at a vertex or along an edge: the two farthest crossings
+            q = np.array([npos[x] for x in ns])
+            x, y = np.unravel_index(np.linalg.norm(q[:, None] - q[None], axis=2).argmax(), (len(ns), len(ns)))
+            ns = [ns[x], ns[y]]
+        adj.setdefault(ns[0], set()).add(ns[1])
+        adj.setdefault(ns[1], set()).add(ns[0])
+    runs = _walk_runs(adj)
     if not runs:
         return out
-    rv, ua, ub, gp, ri = [], [], [], [], [0]
+    rv, ua, ub, gp, ri = [], [], [], [], []
     for run in runs:
-        for v in run:
-            a_, b_ = wuv[v], wuv[near_w[v]]
-            rv.append(v)
-            ua.append(a_)
-            ub.append(b_)
-            gp.append(max(float(np.linalg.norm(a_ - b_)) * texture_px, SPLIT_GAP_PX))
+        for x in run:
+            rv.append(nw + x)
+            ua.append(nuv[x][0])
+            ub.append(nuv[x][1])
+            gp.append(float(np.linalg.norm(nuv[x][0] - nuv[x][1])) * texture_px)
         ri.append(len(rv))
-    base = int(len(seams["run_indptr"])) - 1
-    out["run_indptr"] = np.r_[np.asarray(seams["run_indptr"], np.int64), np.asarray(ri[1:], np.int64) + int(seams["run_indptr"][-1])]
+    old_ip = np.asarray(seams["run_indptr"], np.int64)
+    cls = np.asarray(seams["class"])
+    out["run_indptr"] = np.r_[old_ip, np.asarray(ri, np.int64) + int(old_ip[-1])]
     out["run_vertex"] = np.r_[np.asarray(seams["run_vertex"], np.int64), np.asarray(rv, np.int64)]
     out["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), np.asarray(ua, np.float64).ravel()]
     out["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), np.asarray(ub, np.float64).ravel()]
     out["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), np.asarray(gp, np.float64)]
-    out["class"] = np.r_[np.asarray(seams["class"]), np.full(len(runs), SOFT, np.asarray(seams["class"]).dtype)]
-    out["part_borders"] = len(runs)
-    out["part_border_first"] = base
+    out["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
+    out["n_welded"] = nw + len(npos)
+    out["contact_xyz"] = np.asarray(npos, np.float64).reshape(-1, 3)
+    out["part_contacts"] = len(runs)
+    out["part_contact_first"] = len(cls)
     return out
 
 
