@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from .issues import components
 from .organize import MOST_DRIFT, MOST_MOVE, SHARP_DEG, WORST_TURN, _bent, _normals, _onto, _quads, _unit, _vertex_normals, half_edges, pinned
 from .tidytools import NOTHING_FREE
-from .trial import Base, Candidate, Trial, edges_of
+from .trial import Base, Candidate, Spot, Trial, edges_of
 
 STEP = 0.5  # share of the way to the pull's goal per step, at strength 1
 SQUARE_DEG = 10.0  # a quad corner this close to 90 degrees counts as square
@@ -42,6 +43,12 @@ LINE_KINDS = (("hard", "Hard Edges"), ("outline", "Outline"), ("seams", "UV Seam
 NO_SLANT = "No slanted quads here: every corner is already within 10 degrees of square."
 EVEN_BENDS = "Your mesh is about equally curved everywhere here, so sizes would not change."
 NO_LINES = "No lines to keep here: this works like Source Relax."
+LUMPY_SIDES = 1.6  # Auto Fix: a quad whose longest side is this many times its shortest is lumpy
+LUMPY_AREA = 1.4  # Auto Fix: a quad this many times bigger or smaller than the quads round it is lumpy
+MISMATCH = 1.3  # Auto Fix: a quad whose size is this far (as a ratio) from what the bend under it asks is a size mismatch
+LEAST_SQUARE = 0.5  # percentage points of corners that must get square for a spot to count as better
+LEAST_ROUGH = 0.02  # roughness (off-square share plus size spread) a spot must lose to count as better
+LEAST_SIZE = 0.02  # size mismatch (spread of log size against the bend) a spot must lose to count as better
 BAD_FACES = "Kept as it was: this would add {n} bad faces (folded or facing in)."
 
 
@@ -84,15 +91,19 @@ def bad_faces(co: np.ndarray, quads: np.ndarray, start: np.ndarray) -> int:
     return int((((_normals(co, quads) * start).sum(axis=1) < 0.0) | _bent(co, quads)).sum())
 
 
+def _off90(co: np.ndarray, quads: np.ndarray) -> np.ndarray:
+    """(k, 4): how many degrees each quad corner is from 90."""
+    p = co[quads]
+    out, back = np.roll(p, -1, axis=1) - p, np.roll(p, 1, axis=1) - p
+    cos = (out * back).sum(axis=2) / np.maximum(np.linalg.norm(out, axis=2) * np.linalg.norm(back, axis=2), 1e-30)
+    return np.abs(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))) - 90.0)
+
+
 def square_share(co: np.ndarray, quads: np.ndarray) -> float:
     """Percent of quad corners within `SQUARE_DEG` of 90 degrees."""
     if not len(quads):
         return 100.0
-    p = co[quads]
-    out, back = np.roll(p, -1, axis=1) - p, np.roll(p, 1, axis=1) - p
-    cos = (out * back).sum(axis=2) / np.maximum(np.linalg.norm(out, axis=2) * np.linalg.norm(back, axis=2), 1e-30)
-    angle = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
-    return float(100.0 * (np.abs(angle - 90.0) <= SQUARE_DEG).mean())
+    return float(100.0 * (_off90(co, quads) <= SQUARE_DEG).mean())
 
 
 def size_range(co: np.ndarray, quads: np.ndarray) -> float:
@@ -254,6 +265,142 @@ def detail_density(base: Base, mix: float) -> np.ndarray:
     return 1.0 + DETAIL_GAIN * float(mix) * base.cache["bend"]
 
 
+# --------------------------------------------------------------------------- Auto Fix: finding the spots
+
+
+def _spot_quads(faces, ids) -> np.ndarray:
+    ids = np.asarray(ids, dtype=np.int64).tolist()
+    return np.asarray([faces[i] for i in ids if len(faces[i]) == 4], dtype=np.int64).reshape(-1, 4)
+
+
+def roughness(co: np.ndarray, quads: np.ndarray) -> float:
+    """Lumpy spacing in one number, lower is better: the share of corners off square plus how far the sizes spread
+    (the same two things `tidytools._roughest_part` ranks parts by)."""
+    if not len(quads):
+        return 0.0
+    return (100.0 - square_share(co, quads)) / 100.0 + size_range(co, quads) - 1.0
+
+
+def _patches(base: Base, flag: np.ndarray, score: np.ndarray):
+    """Group flagged faces into patches. A patch is the flagged faces plus the ring of faces round them (so the corners
+    between have room to move), joined with any patch it shares a corner with, so two patches never share a corner.
+    A patch with no free corner of its own is dropped (nothing there could move). Returns ([(patch number, face ids,
+    where)], owner) where owner is the patch number of each corner (-1: none)."""
+    faces, n = base.faces, len(base.co)
+    owner = np.full(n, -1, dtype=np.int64)
+    if not flag.any():
+        return [], owner
+    fid, corner, _next = half_edges(faces)
+    mark = np.zeros(n, dtype=bool)
+    mark[corner[flag[fid]]] = True
+    region = np.zeros(len(faces), dtype=bool)
+    region[fid[mark[corner]]] = True
+    region &= base.scope
+    ids = np.flatnonzero(region)
+    local = np.full(len(faces), -1, dtype=np.int64)
+    local[ids] = np.arange(len(ids))
+    keep = region[fid]
+    f, c = local[fid[keep]], corner[keep]
+    order = np.argsort(c, kind="stable")
+    f, c = f[order], c[order]
+    same = c[1:] == c[:-1]
+    label = components(len(ids), f[:-1][same], f[1:][same])
+    lab = label[f]
+    owner[c] = lab
+    key, count = np.unique(lab * n + c, return_counts=True)
+    total = np.bincount(corner, minlength=n)
+    movable = (count == total[key % n]) & base.free[key % n]  # every face at the corner is in the patch
+    good = set(np.unique(key[movable] // n).tolist())
+    out = []
+    by = np.argsort(label, kind="stable")
+    for part in np.split(by, np.flatnonzero(np.diff(label[by])) + 1) if len(by) else []:
+        number = int(label[part[0]])
+        if number not in good:
+            owner[owner == number] = -1
+            continue
+        here = ids[part]
+        worst = here[np.argmax(np.where(flag[here], score[here], -np.inf))]
+        out.append((number, here, base.co[list(faces[worst])].mean(axis=0)))
+    return out, owner
+
+
+def _quad_numbers(base: Base):
+    """(quads of the scope, their face ids), once per base."""
+    if "relax_quads" not in base.cache:
+        quads, ids = _quads(base.faces)
+        use = base.scope[ids] if len(ids) else np.zeros(0, dtype=bool)
+        base.cache["relax_quads"] = (quads[use], ids[use])
+    return base.cache["relax_quads"]
+
+
+def _face_flags(base: Base, ids, flag, score) -> tuple[np.ndarray, np.ndarray]:
+    f = np.zeros(len(base.faces), dtype=bool)
+    sc = np.zeros(len(base.faces))
+    f[ids], sc[ids] = flag, score
+    return f, sc
+
+
+def _lines_of(base: Base) -> np.ndarray:
+    """The kept lines Keep Lines Relax holds with its own defaults, worked out once per base."""
+    if "relax_lines" not in base.cache:
+        base.cache["relax_lines"] = kept_lines(base, {k: True for k, _w in LINE_KINDS})
+    return base.cache["relax_lines"]
+
+
+def _make_spots(tool, base: Base, kind: str, flag, score, lines: bool | None = None):
+    """The Spots for `flag` (per face). lines True: only patches that hold kept lines; False: only those without."""
+    found, owner = _patches(base, flag, score)
+    if lines is not None and found:
+        ends = _lines_of(base)
+        has = set()
+        if len(ends):
+            la, lb = owner[ends[:, 0]], owner[ends[:, 1]]
+            has = set(la[(la == lb) & (la >= 0)].tolist())
+        found = [p for p in found if (p[0] in has) == lines]
+    out = []
+    for _number, ids, at in found:
+        sp = Spot(kind, ids, at, 0.0)
+        sp.bad = tool.own_number(base, base.co, base.faces, sp)
+        out.append(sp)
+    return out
+
+
+def _lumpy_flags(base: Base):
+    quads, ids = _quad_numbers(base)
+    if not len(quads):
+        return np.zeros(len(base.faces), dtype=bool), np.zeros(len(base.faces))
+    co = base.co
+    p = co[quads]
+    side = np.linalg.norm(np.roll(p, -1, axis=1) - p, axis=2)
+    ratio = side.max(axis=1) / np.maximum(side.min(axis=1), 1e-30)
+    area = np.maximum(_areas(co, quads), 1e-30)
+    flat = quads.reshape(-1)
+    around = np.bincount(flat, np.repeat(area, 4), len(co)) / np.maximum(np.bincount(flat, minlength=len(co)), 1)
+    r = area / around[quads].mean(axis=1)
+    flag = (ratio > LUMPY_SIDES) | (r > LUMPY_AREA) | (r < 1.0 / LUMPY_AREA)
+    return _face_flags(base, ids, flag, np.log(ratio) + np.abs(np.log(r)))
+
+
+class _Lumpy:
+    """Source Relax and Keep Lines Relax find the same spots: quads whose sides or sizes differ from their neighbours'.
+    Keep Lines Relax takes the patches that hold kept lines, Source Relax the rest."""
+
+    with_lines = False
+    least = LEAST_ROUGH
+    own = "rough"
+    kinds = (("lumpy", "lumpy patch", "lumpy patches"),)
+
+    def spots(self, base: Base):
+        if self.check(base):
+            return []
+        flag, score = _lumpy_flags(base)
+        yield 0.5
+        return _make_spots(self, base, "lumpy", flag, score, self.with_lines)
+
+    def own_number(self, base, co, faces, spot) -> float:
+        return roughness(co, _spot_quads(faces, spot.faces))
+
+
 class _Relax(Trial):
     """The shared guarded loop. A subclass writes `goal(x, quads, settings, base)`: where each corner is pulled."""
 
@@ -374,7 +521,7 @@ def _to_segment(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.linalg.norm(a + t[:, None] * d - p, axis=1)
 
 
-class SourceRelax(_Relax):
+class SourceRelax(_Lumpy, _Relax):
     name = "Source Relax"
     defaults = {"strength": 0.6, "steps": 8, "keep_going": False}
     stages = ("tidy", "look", "move")
@@ -383,8 +530,9 @@ class SourceRelax(_Relax):
         return _weighted_middle(x, quads, _areas(x, quads))
 
 
-class KeepLinesRelax(_Relax):
+class KeepLinesRelax(_Lumpy, _Relax):
     name = "Keep Lines Relax"
+    with_lines = True
     defaults = {"strength": 0.6, "steps": 8, "hard": True, "outline": True, "seams": True, "parts": True, "guides": True, "keep_going": False}
     toggles = LINE_KINDS
     layers = ("scope", "ghost", "wash", "arrows", "poles", "held", "kept")
@@ -451,6 +599,21 @@ class SquareUp(_Relax):
     defaults = {"strength": 0.7, "steps": 12, "keep_going": False}
     layers = ("scope", "ghost", "wash", "arrows", "held")
     stages = ("square", "look", "tidy")
+    kinds = (("slanted", "patch of slanted quads", "patches of slanted quads"),)
+    own = "square"  # percent of corners off square
+    least = LEAST_SQUARE
+
+    def spots(self, base: Base):
+        if self.check(base):
+            return []
+        quads, ids = _quad_numbers(base)
+        off = _off90(base.co, quads).max(axis=1)
+        flag, score = _face_flags(base, ids, off > SQUARE_DEG, off)
+        yield 0.5
+        return _make_spots(self, base, "slanted", flag, score)
+
+    def own_number(self, base, co, faces, spot) -> float:
+        return 100.0 - square_share(co, _spot_quads(faces, spot.faces))
 
     def check(self, base: Base) -> str:
         quads = _scope_quads(base)
@@ -480,6 +643,30 @@ class RelaxTowardDetail(_Relax):
     layers = ("scope", "ghost", "wash", "arrows", "held")
     stages = ("look", "size", "tidy")
     legend = "blue grew  orange shrank"
+    kinds = (("sizes", "patch where sizes ignore the detail", "patches where sizes ignore the detail"),)
+    own = "size"  # spread of log size against what the bend under it asks
+    least = LEAST_SIZE
+
+    def _fit(self, base: Base, co, quads) -> np.ndarray:
+        """Per quad: log of its side length plus half the log of the density asked there. Relaxing with the weight
+        area x density^2 settles sides near density^(-1/2) (centroidal cells, Du et al. 1999: side ~ weight^(-1/4)), so
+        a quad that matches sits at the same value as the rest."""
+        density = detail_density(base, float(self.defaults["mix"]))
+        return np.log(np.maximum(np.sqrt(_areas(co, quads)), 1e-30)) + 0.5 * np.log(density[quads].mean(axis=1))
+
+    def spots(self, base: Base):
+        if self.check(base):
+            return []
+        quads, ids = _quad_numbers(base)
+        yield 0.5
+        fit = self._fit(base, base.co, quads)
+        far = np.abs(fit - np.median(fit))
+        flag, score = _face_flags(base, ids, far > np.log(MISMATCH), far)
+        return _make_spots(self, base, "sizes", flag, score)
+
+    def own_number(self, base, co, faces, spot) -> float:
+        quads = _spot_quads(faces, spot.faces)
+        return float(self._fit(base, co, quads).std()) if len(quads) else 0.0
 
     def prepare(self, base: Base):
         yield from bend_steps(base)
