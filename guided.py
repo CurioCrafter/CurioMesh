@@ -3424,6 +3424,7 @@ class CURIOMESH_OT_guided_add_shape(bpy.types.Operator):
                 bm.free()
                 shape = bpy.data.objects.new("CurioBool_Sphere", mesh)
                 shape.display_type = "WIRE"
+            shape[MADE_KEY] = True
             shape.scale = (size, size, size)
             if anchor is not None:
                 shape.location = anchor.matrix_world.translation
@@ -3452,11 +3453,7 @@ class CURIOMESH_OT_guided_remove_shape(bpy.types.Operator):
         obj = gs.bool_shapes[gs.bool_index].obj
         gs.bool_shapes.remove(gs.bool_index)
         gs.bool_index = max(0, min(gs.bool_index, len(gs.bool_shapes) - 1))
-        if obj is not None and obj.name.startswith("CurioBool_"):
-            data = obj.data
-            bpy.data.objects.remove(obj, do_unlink=True)
-            if data is not None and data.users == 0 and isinstance(data, bpy.types.Mesh):
-                bpy.data.meshes.remove(data)
+        _remove_made(obj)
         return {"FINISHED"}
 
 
@@ -3498,12 +3495,24 @@ class CURIOMESH_OT_guided_remove_guide(bpy.types.Operator):
         obj = gs.guide_curves[gs.guide_index].obj
         gs.guide_curves.remove(gs.guide_index)
         gs.guide_index = max(0, min(gs.guide_index, len(gs.guide_curves) - 1))
-        if obj is not None and obj.name.startswith(("CM_Guide", "CM_Loop", "CM_Bend")):
-            data = obj.data
-            bpy.data.objects.remove(obj, do_unlink=True)
-            if data is not None and data.users == 0 and isinstance(data, bpy.types.Curve):
-                bpy.data.curves.remove(data)
+        _remove_made(obj)
         return {"FINISHED"}
+
+
+MADE_KEY = "curiomesh_made"  # custom property on a box, sphere or curve this add-on made; only those are ever deleted
+
+
+def _remove_made(obj) -> None:
+    """Delete `obj` and its unused data, but only when the add-on made it (it carries MADE_KEY). Anything else is yours."""
+    if obj is None or not obj.get(MADE_KEY):
+        return
+    data = obj.data
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data is not None and data.users == 0:
+        if isinstance(data, bpy.types.Mesh):
+            bpy.data.meshes.remove(data)
+        elif isinstance(data, bpy.types.Curve):
+            bpy.data.curves.remove(data)
 
 
 def new_curve(context, source, kind: str, points, normals=None, name: str | None = None):
@@ -3522,6 +3531,7 @@ def new_curve(context, source, kind: str, points, normals=None, name: str | None
         w = matrix @ Vector(co)
         p.co = (w.x, w.y, w.z, 1.0)
     obj = bpy.data.objects.new(name, curve)
+    obj[MADE_KEY] = True
     obj.show_in_front = True
     (context.collection or context.scene.collection).objects.link(obj)
     return obj
@@ -3560,12 +3570,7 @@ class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
         obj = new_curve(context, self.obj, self.kind, [co for co, _n in points], [n for _c, n in points])
         if self.replace and 0 <= gs.guide_index < len(gs.guide_curves):
             item = gs.guide_curves[gs.guide_index]
-            old = item.obj
-            if old is not None and old.name.startswith(("CM_Guide", "CM_Loop", "CM_Bend")):
-                data = old.data
-                bpy.data.objects.remove(old, do_unlink=True)
-                if data is not None and data.users == 0 and isinstance(data, bpy.types.Curve):
-                    bpy.data.curves.remove(data)
+            _remove_made(item.obj)
             item.obj = obj
             self.done = True
             return
