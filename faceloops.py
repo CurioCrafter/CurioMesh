@@ -207,9 +207,9 @@ def _view(points, faces):
     return 100.0 * wrong / max(shown, 1)
 
 
-def fix_all(context, rounds: int = 3, bend: float = 40.0, most: float = 0.75) -> str:
+def fix_all(context, rounds: int = 0, bend: float = 40.0, most: float = 0.75) -> str:
     """Straighten every wiggly strip of the result, worst first, a few times over, then even out the uneven ones half
-    way, as one step. Vertices where the surface bends stay, no vertex moves more than 3/4 of an edge, and it is kept only
+    way, as one step (rounds go on while the strips get straighter; `rounds` > 0 stops after that many). Vertices where the surface bends stay, no vertex moves more than 3/4 of an edge, and it is kept only
     when Loop Quality goes up."""
     sync(context)
     guided = _g()
@@ -225,10 +225,18 @@ def fix_all(context, rounds: int = 3, bend: float = 40.0, most: float = 0.75) ->
         if st.sizes[label] >= 2:
             strip = st.walk(int(np.flatnonzero(st.labels == label)[0]))
             plans.append((strip, S.rung_lines(strip, go, len(co), stay)))
-    for _ in range(rounds):
+    done, last = 0, float("inf")
+    while not rounds or done < rounds:  # 0: rounds go on while the strips still get straighter
+        moved = False
         for strip, lines in sorted(plans, key=lambda p: -S.stats(co, p[0])["turn"]):
             if lines and S.stats(co, strip)["turn"] > WIGGLY:
                 co = S.move(co, lines, S.targets(co, lines, "straighten", 1.0, strip["closed"]), stay)
+                moved = True
+        done += 1
+        turn = sum(S.stats(co, strip)["turn"] for strip, lines in plans if lines)
+        if not moved or turn >= last - 1e-9:
+            break
+        last = turn
     for strip, lines in plans:
         if lines and S.stats(co, strip)["width"] > UNEVEN:
             co = S.move(co, lines, S.targets(co, lines, "even", 0.5, strip["closed"]), stay)
