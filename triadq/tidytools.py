@@ -249,11 +249,14 @@ def slivers(base, steps: int = 8):
     found = np.flatnonzero(topology_flags(co, faces)["sliver"] & base.scope)
     if not len(found):
         return found, None, []
+    fid, corner, _next = _half_edges(faces)
+    in_found = np.zeros(len(faces), dtype=bool)
+    in_found[found] = True
     move = np.zeros(len(co), dtype=bool)
-    for f in found.tolist():
-        move[list(faces[f])] = True
+    move[corner[in_found[fid]]] = True
     move &= base.free
-    stuck = np.asarray([not move[list(faces[f])].any() for f in found.tolist()], dtype=bool)
+    moves = np.bincount(fid, move[corner], len(faces)) > 0  # per face: a corner of it may move
+    stuck = ~moves[found]
     held = [(p, "every corner is held") for p in _middles(co, faces, found[stuck])]
     if not move.any():
         return found, None, held
@@ -265,7 +268,7 @@ def slivers(base, steps: int = 8):
         out[move] += 0.5 * (middle[move] - out[move])
         if base.project is not None:
             out[move] = base.project(out[move])
-    near = np.flatnonzero(np.fromiter((move[list(f)].any() for f in faces), dtype=bool, count=len(faces)))
+    near = np.flatnonzero(moves)
     sub = [faces[i] for i in near.tolist()]
     old, new = topology_flags(co, sub), topology_flags(out, sub)
     worse = (new["concave"] & ~old["concave"]) | (new["sliver"] & ~old["sliver"])

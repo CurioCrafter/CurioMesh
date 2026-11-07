@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .organize import MOST_DRIFT, MOST_MOVE, SHARP_DEG, WORST_TURN, _bent, _normals, _onto, _quads, _unit, _vertex_normals, pinned
+from .organize import MOST_DRIFT, MOST_MOVE, SHARP_DEG, WORST_TURN, _bent, _normals, _onto, _quads, _unit, _vertex_normals, half_edges, pinned
 from .tidytools import NOTHING_FREE
 from .trial import Base, Candidate, Trial, edges_of
 
@@ -398,12 +398,12 @@ class KeepLinesRelax(_Relax):
         n = len(base.co)
         degree = np.bincount(lines.reshape(-1), minlength=n) if len(lines) else np.zeros(n, dtype=np.int64)
         # held for a reason other than a hard edge: a border, a triangle or n-gon, the scope's edge, the mirror plane
-        other = pinned(base.co, base.faces, sharp_deg=180.0, plane=base.mirror) if base.faces else np.zeros(n, dtype=bool)
+        half = half_edges(base.faces)
+        other = pinned(base.co, base.faces, sharp_deg=180.0, plane=base.mirror, half=half) if base.faces else np.zeros(n, dtype=bool)
+        fid, corner, _next = half
         used = np.zeros(n, dtype=bool)
-        for f in np.flatnonzero(base.scope).tolist():
-            used[list(base.faces[f])] = True
-        for f in np.flatnonzero(~base.scope).tolist():
-            other[list(base.faces[f])] = True
+        used[corner[base.scope[fid]]] = True
+        other[corner[~base.scope[fid]]] = True
         if base.mirror is not None:
             axis, offset = base.mirror
             size = float(np.ptp(base.co, axis=0).max()) if n else 1.0
