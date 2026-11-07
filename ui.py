@@ -354,6 +354,9 @@ class CURIOMESH_PT_scan(_SubPanel, bpy.types.Panel):
         col.label(text=f"Suggested: {names.get(settings.analysis_strategy, settings.analysis_strategy)}", icon="LIGHT")
         qualifier = "exact topology" if settings.analysis_exact else f"sampled {settings.analysis_sampled_faces:,} faces"
         col.label(text=f"Measured from {qualifier}")
+        if settings.analysis_boundary_loops >= 0:
+            col.label(text=f"Holes {settings.analysis_boundary_loops:,}   Non-manifold edges {settings.analysis_non_manifold:,}")
+        col.label(text=f"Sharp edges {settings.analysis_sharp_ratio:.0%}   Edge scale {settings.analysis_target_edge:.4g}")
         if settings.analysis_warning:
             warn = box.column(align=True)
             warn.alert = True
@@ -547,7 +550,9 @@ DETAIL_PROPS = (
     "metrics_sampling_status",
     "metrics_min_jacobian",
     "metrics_p95_aspect",
+    "metrics_quads",
     "metrics_extraordinary",
+    "metrics_extraordinary_ratio",
     "metrics_non_manifold_edges",
     "metrics_non_manifold_vertices",
     "metrics_duplicate_faces",
