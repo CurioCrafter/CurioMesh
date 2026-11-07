@@ -272,6 +272,35 @@ class VerdictTest(unittest.TestCase):
         p = trial.finish(autofix.propose(tool, base, {}, spots=trial.finish(tool.spots(base)), look=look, budget=1.0))
         self.assertEqual(p.reason, "look")
 
+    def test_dropping_parts_ends_when_the_look_does_not_drop(self):
+        """The crane hang: a part check that flags one more part each time, with a look that never gets lower,
+        rebuilt the pass once per spot. A drop step that does not lower the look change ends the dropping."""
+        n = 12
+        co, faces = _grid(n)
+        for x, y in ((2, 2), (2, 6), (2, 10), (6, 2), (6, 6), (6, 10), (10, 2), (10, 6), (10, 10)):
+            co[_v(x, y, n)] += (0.3, 0.2, 0.0)
+        base = trial.make_base(co, faces, project=_flat, labels={"piece": np.arange(len(faces))})
+        tool = type("Fixed", (Even,), {"handles": ()})()
+        builds = []
+
+        def look(co, faces):
+            builds.append(1)
+            yield
+            return 50.0
+
+        def parts(co, faces, labels, limit):
+            yield
+            moved = np.linalg.norm(co - base.co, axis=1) > 1e-9
+            return [next(f for f, face in enumerate(faces) if moved[list(face)].any())]  # one part a time
+
+        look.parts = parts
+        spots = trial.finish(tool.spots(base))
+        self.assertEqual(len(spots), 9)
+        p = trial.finish(autofix.propose(tool, base, {}, spots=spots, look=look, budget=1.0))
+        self.assertEqual(p.reason, "look")
+        self.assertEqual(len(builds), 3)  # the look before, and after two builds (was one build per spot)
+        self.assertEqual((len(p.fixed), len(p.left)), (8, 1))  # every spot accounted for once
+
     def test_new_bad_face_is_put_back(self):
         base = _bent(stay_b=False)
         tool = Flip()

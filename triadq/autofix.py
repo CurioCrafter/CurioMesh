@@ -277,12 +277,13 @@ def propose(trial, base: T.Base, settings: dict, spots=None, look=None, budget=N
     stages = tuple(trial.stages) + (() if rough else tuple(k for k in EXTRA if k not in trial.stages))
     handle = trial.handles[0] if trial.handles else ""
     halve = bool(handle) and (trial.blendable or not judged)
-    dropped: set = set()
+    dropped: set = set()  # spots put back because their part changed too much
+    live, settled, last = spots, [], None  # a rebuild runs only the spots still kept; `settled` keeps the others' reasons
     held = None
     while True:
-        live = None if spots is None else [sp for sp in spots if id(sp) not in dropped]
         cand, fixed, left = yield from _build(trial, base, settings, live, rough)
-        left = left + [(sp, "look") for sp in spots if id(sp) in dropped] if spots is not None else left
+        if spots is not None:
+            settled, left = settled + left, settled + left + [(sp, "look") for sp in spots if id(sp) in dropped]
         if cand is None or cand.refusal or cand.co is None:
             p = Proposal(cand, fixed, left, judged=judged, held=held)
             p.reason = verdict(trial, p, budget) if judged else ""
@@ -298,17 +299,19 @@ def propose(trial, base: T.Base, settings: dict, spots=None, look=None, budget=N
         top = _ceiling(budget, p.before.look)
         parts = getattr(look, "parts", None)
         pieces = _pieces(base, cand) if judged and parts is not None else None
-        if pieces is not None:
+        # each drop step must lower the look change: one that does not gains nothing, and dropping ends there
+        if pieces is not None and (last is None or p.after.look < last - 1e-9):
             changed = yield from parts(np.asarray(cand.co, dtype=np.float64), base.faces if cand.faces is None else cand.faces, pieces, max(top, 0.0) / 100.0)
             changed = set(np.asarray(changed, dtype=np.int64).tolist())
             base_piece = np.asarray(base.labels["piece"], dtype=np.int64)
-            drop = [sp for sp in fixed if changed & set(base_piece[np.asarray(sp.faces, dtype=np.int64)].tolist())]
+            drop = {id(sp) for sp in fixed if changed & set(base_piece[np.asarray(sp.faces, dtype=np.int64)].tolist())}
             if drop and len(drop) < len(fixed):
-                dropped |= {id(sp) for sp in drop}
+                dropped |= drop
+                live, last = [sp for sp in fixed if id(sp) not in drop], p.after.look
                 continue
         if halve and float(settings[handle]) >= STRENGTH_LEAST:
             settings[handle] = held = round(float(settings[handle]) * 0.5, 2)  # ponytail: halving; a search between would land closer
-            dropped = set()
+            dropped, live, settled, last = set(), spots, [], None
             continue
         break
     p.held = held
