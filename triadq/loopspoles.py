@@ -25,7 +25,7 @@ import numpy as np
 from . import strips as S
 from .organize import MOST_DRIFT
 from .tidytools import NOTHING_FREE
-from .trial import Base, Candidate, Trial, edges_of
+from .trial import Base, Candidate, Trial, edges_of, unfold
 
 NO_POLES = "No poles in this area."
 NO_PARTNER = "No pole within reach can cancel with this one."
@@ -350,6 +350,9 @@ class OpenUpPoles(Trial):
             co = base.co + strength * (co - base.co)
             moved = np.flatnonzero(np.any(co != base.co, axis=1))
             co[moved] = project(co[moved])
+        was = co.copy()
+        co = unfold(base, co)  # a face the fans would turn over keeps its corners
+        if strength < 1.0 or not np.array_equal(co, was):
             last = _mean_narrowest(co, fans)
         cand = Candidate(co, strength=strength, exact=not rough, note=f"{len(fans)} poles")
         cand.numbers["narrow"] = (f"narrowest angle {before:.0f} -> {last:.0f} degrees" + (" (mean)" if len(fans) > 1 else ""), 1 if last > before + 0.5 else -1 if last < before - 0.5 else 0)

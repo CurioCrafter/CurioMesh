@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .trial import Base, Candidate, Trial, edges_of
+from .trial import Base, Candidate, Trial, edges_of, unfold
 
 NOTHING_FREE = "Nothing can move here: every corner is held (borders, hard edges or the mirror plane)."
 
@@ -49,27 +49,7 @@ class SmoothCorners(Trial):
             if base.project is not None:
                 co[free] = base.project(co[free])
             yield (step + 1.0) / steps
-        return Candidate(_unfold(base, co), strength=strength, exact=not rough)
-
-
-def _unfold(base: Base, co: np.ndarray) -> np.ndarray:
-    """Corners of faces that turned over go back where they were, pass by pass, until no face is turned over."""
-    from .organize import half_edges
-
-    fid, corner, nxt = half_edges(base.faces)
-
-    def normals(x):  # Newell's normal per face, from the half-edges
-        c = np.cross(x[corner], x[nxt])
-        return np.stack([np.bincount(fid, c[:, k], len(base.faces)) for k in range(3)], axis=1)
-
-    before = normals(base.co)
-    while True:  # each pass puts at least one face's corners back, so it ends
-        flipped = (before * normals(co)).sum(axis=1) < 0.0
-        back = np.unique(corner[flipped[fid]])
-        back = back[(co[back] != base.co[back]).any(axis=1)]
-        if not len(back):
-            return co
-        co[back] = base.co[back]
+        return Candidate(unfold(base, co), strength=strength, exact=not rough)
 
 
 # --------------------------------------------------------------------------- shared by the Cleanup tools
@@ -292,6 +272,7 @@ def slivers(base, steps: int = 8):
     for i in np.flatnonzero(worse).tolist():
         ids = list(sub[i])
         out[ids] = co[ids]
+    out = unfold(base, out)
     still = topology_flags(out, faces)["sliver"][found] & ~stuck
     held += [(p, "could not open it up") for p in _middles(out, faces, found[still])]
     if np.allclose(out, co):

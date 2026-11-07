@@ -84,6 +84,26 @@ def make_base(co, faces, scope=None, stay=None, project=None, mirror=None, pick=
     return Base(co, faces, scope, held, project, edge, mirror, dict(pick or {}), facing=facing, labels=dict(labels or {}), kinds=kinds)
 
 
+def unfold(base: Base, co: np.ndarray) -> np.ndarray:
+    """Corners of faces that turned over go back where they were, pass by pass, until no face is turned over."""
+    from .organize import half_edges
+
+    fid, corner, nxt = half_edges(base.faces)
+
+    def normals(x):  # Newell's normal per face, from the half-edges
+        c = np.cross(x[corner], x[nxt])
+        return np.stack([np.bincount(fid, c[:, k], len(base.faces)) for k in range(3)], axis=1)
+
+    before = normals(base.co)
+    while True:  # each pass puts at least one face's corners back, so it ends
+        flipped = (before * normals(co)).sum(axis=1) < 0.0
+        back = np.unique(corner[flipped[fid]])
+        back = back[(co[back] != base.co[back]).any(axis=1)]
+        if not len(back):
+            return co
+        co[back] = base.co[back]
+
+
 def _int_faces(faces) -> list:
     """Faces as tuples of plain ints, read in one pass rather than corner by corner."""
     from itertools import accumulate, chain
