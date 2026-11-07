@@ -110,5 +110,127 @@ class HardEdgesTest(unittest.TestCase):
         self.assertIn("Strength 0.60", trial.readout(None, tidytools.SmoothCorners(), {"strength": 0.6}, "ready")[0])
 
 
+# --------------------------------------------------------------------------- Auto Fix: Hard Edges against the creases of your original
+
+
+def _fold_result(rows: int = 3, n: int = 6, lift: float = 0.15):
+    """Two flat grids meeting at a right angle along the x axis (the same fold as your original mesh), with the row of
+    corners at y = 2 lifted a little: those edges bend about 17 degrees on the result where the original is flat."""
+    points, index = [], {}
+    for x in range(n + 1):
+        for y in range(rows + 1):
+            index[(x, y, 0)] = len(points)
+            points.append((x, y, lift if y == 2 else 0.0))
+        for z in range(1, rows + 1):
+            index[(x, 0, z)] = len(points)
+            points.append((x, 0.0, z))
+    faces = []
+    for x in range(n):
+        for y in range(rows):
+            faces.append((index[(x, y, 0)], index[(x + 1, y, 0)], index[(x + 1, y + 1, 0)], index[(x, y + 1, 0)]))
+        for z in range(rows):
+            a, b = index[(x, 0, z)], index[(x + 1, 0, z)]
+            c, d = index[(x + 1, 0, z + 1)], index[(x, 0, z + 1)]
+            faces.append((d, c, b, a))
+    return np.array(points, dtype=np.float64), faces
+
+
+def _fold_facing(points):
+    """Unit normals of the original fold (z = 0 for y >= 0, y = 0 for z >= 0) at the nearest points."""
+    p = np.asarray(points, dtype=np.float64)
+    a = np.stack((p[:, 0], np.maximum(p[:, 1], 0.0), np.zeros(len(p))), axis=1)
+    b = np.stack((p[:, 0], np.zeros(len(p)), np.maximum(p[:, 2], 0.0)), axis=1)
+    use_a = np.linalg.norm(p - a, axis=1) <= np.linalg.norm(p - b, axis=1)
+    return np.where(use_a[:, None], np.array([0.0, 0.0, 1.0]), np.array([0.0, 1.0, 0.0]))
+
+
+def _hard_base(angle, **kw):
+    points, faces = _fold_result()
+    return trial.make_base(points, faces, facing=_fold_facing, pick={"angle": angle}, **kw)
+
+
+def _spots(tool, base):
+    return trial.finish(tool.spots(base))
+
+
+def _propose(tool, base, spots=None):
+    from triadq import autofix
+
+    spots = _spots(tool, base) if spots is None else spots
+    return spots, trial.finish(autofix.propose(tool, base, {}, spots=spots))
+
+
+class HardEdgesSpotsTest(unittest.TestCase):
+    def test_fields(self):
+        tool = tidytools.HardEdges()
+        self.assertEqual([k[0] for k in tool.kinds], ["marked", "missing"])
+        self.assertTrue(tool.auto)
+        self.assertFalse(tool.changes_faces)
+        self.assertIsNone(tool.fitted)
+
+    def test_the_source_creases_are_the_fold_and_nothing_else(self):
+        base = _hard_base(40.0)
+        edges, pair, angle, crease = trial.finish(tidytools.source_creases(base))
+        self.assertEqual(int(crease.sum()), 6)  # the six edges along the fold
+        self.assertTrue(np.allclose(angle[crease], 90.0))
+        self.assertTrue(((angle > 10.0) & ~crease).any())  # the lifted row bends on the result, not on the original
+
+    def test_a_mark_on_a_smooth_surface_is_fixed_by_a_higher_angle(self):
+        base = _hard_base(15.0)  # the lifted row (17 degrees) is marked as well as the fold
+        tool = tidytools.HardEdges()
+        spots, p = _propose(tool, base)
+        self.assertEqual([sp.kind for sp in spots], ["marked"])
+        self.assertEqual(spots[0].bad, 6.0)
+        self.assertGreater(tool.fitted, 17.0)
+        self.assertLess(tool.fitted, 90.0)
+        self.assertEqual(p.reason, "")
+        self.assertEqual(p.fixed, spots)
+        self.assertEqual(tool.own_number(base, base.co, base.faces, spots[0]), 6.0)
+        self.assertEqual(tool.own_number(base, p.cand.co, base.faces, spots[0]), 0.0)
+        self.assertEqual(len(p.cand.lines), 6)  # the pink layer is the fold only
+        self.assertTrue(np.array_equal(p.cand.co, base.co))  # nothing moves
+        self.assertIn(f"{tool.fitted:.0f} degrees", p.cand.note)
+
+    def test_a_crease_without_a_mark_is_fixed_by_a_lower_angle(self):
+        base = _hard_base(95.0)
+        tool = tidytools.HardEdges()
+        spots, p = _propose(tool, base)
+        self.assertEqual([sp.kind for sp in spots], ["missing"])
+        self.assertEqual(p.reason, "")
+        self.assertAlmostEqual(tool.fitted, 89.0)  # the nearest angle to the one now that marks the fold and no more
+        self.assertEqual(len(p.cand.lines), 6)
+
+    def test_marks_that_match_are_no_spot_and_so_is_no_original_to_compare_with(self):
+        points, faces = _fold_result(lift=0.0)
+        self.assertEqual(_spots(tidytools.HardEdges(), trial.make_base(points, faces, facing=_fold_facing, pick={"angle": 40.0})), [])
+        points, faces = _fold_result()
+        self.assertEqual(_spots(tidytools.HardEdges(), trial.make_base(points, faces, pick={"angle": 15.0})), [])  # no `facing`
+
+    def test_a_spot_the_angle_cannot_help_comes_back_in_left(self):
+        base = _hard_base(15.0)
+        tool = tidytools.HardEdges()
+        real = _spots(tool, base)[0]
+        fake = trial.Spot("marked", np.array([0, 1]), np.zeros(3), 1.0)  # not one of the spots it found: nothing to count
+        _s, p = _propose(tool, base, [real, fake])
+        self.assertEqual(p.fixed, [real])
+        self.assertEqual([why for sp, why in p.left if sp is fake], ["no better"])
+
+    def test_mirrored_base_empty_and_nothing_free(self):
+        spots, p = _propose(tidytools.HardEdges(), _hard_base(15.0, mirror=(0, 3.0)))
+        self.assertEqual(p.reason, "")
+        self.assertEqual(len(spots), 1)
+        self.assertEqual(_spots(tidytools.HardEdges(), trial.make_base(np.zeros((0, 3)), [], facing=_fold_facing)), [])
+        points, faces = _fold_result()
+        none = trial.make_base(points, faces, scope=np.zeros(len(faces), dtype=bool), facing=_fold_facing, pick={"angle": 15.0})
+        self.assertEqual(_spots(tidytools.HardEdges(), none), [])
+
+    def test_by_hand_the_dial_still_decides(self):
+        base = _hard_base(15.0)
+        tool = tidytools.HardEdges()
+        cand = trial.finish(tool.run(base, {"angle": tidytools.value_of(40.0)}))
+        self.assertEqual(len(cand.lines), 6)  # 40 degrees: the fold only; Auto Fix never touched the dial
+        self.assertEqual(len(trial.finish(tool.run(base, {"angle": tidytools.value_of(10.0)})).lines), 12)
+
+
 if __name__ == "__main__":
     unittest.main()

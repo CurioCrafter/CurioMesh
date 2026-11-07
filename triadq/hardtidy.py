@@ -20,6 +20,11 @@ was (a 3x3 least-squares solve), so shared borders become exact lines and corner
 
 Both hold the edge of the scope, open borders and the mirror plane, never move a corner further than `DRIFT` of an
 edge (a red X "drift" instead), and put back the corners of any face that would turn past TURN_DEG.
+
+Auto Fix (bench/tools_design/AUTO_FIX.md): True Up Edges has a spot for each chain that is off its crease (a "wavy" one
+when the creases under it line up, else an "off" one), Press Panels Flat a spot for each bumpy flat panel. Spots that
+touch are one, so a fix put back never undoes a neighbour. The own numbers are the ones the tools already show: how
+far the chain's corners are from their creases, and how far the panel's corners are from its plane, in edges.
 """
 
 from __future__ import annotations
@@ -30,7 +35,8 @@ import time
 import numpy as np
 
 from .organize import SHARP_DEG
-from .trial import Base, Candidate, Trial
+from .tidytools import join_faces
+from .trial import Base, Candidate, Spot, Trial
 
 NO_HARD_EDGES = "No hard edges in this area."
 NO_PANELS = "No flat panels found in this area."
@@ -438,6 +444,97 @@ def _taubin(points: np.ndarray, closed: bool, fixed: np.ndarray) -> np.ndarray:
     return x
 
 
+def _crease_jobs(base: Base, edges: Edges, chains, due):
+    """Generator: for each chain, the crease of your original under every corner: (corners, closed, crease line per
+    corner or None, chain length). The side planes are fitted on your original mesh near each corner."""
+    jobs = []
+    for ci, (path, closed) in enumerate(chains):
+        idx = np.asarray(path, dtype=np.int64)
+        pts = base.co[idx]
+        ring = np.vstack((pts, pts[:1])) if closed else pts
+        length = float(np.linalg.norm(np.diff(ring, axis=0), axis=1).sum()) or base.edge
+        left, right = _side_samples(base.co, base.faces, edges, path, closed)
+        sl = [np.asarray(p).reshape(-1, 3) for p in left]
+        sr = [np.asarray(p).reshape(-1, 3) for p in right]
+        flat_l = np.concatenate(sl) if sl else np.zeros((0, 3))
+        flat_r = np.concatenate(sr) if sr else np.zeros((0, 3))
+        ql = yield from _project(base, flat_l)
+        qr = yield from _project(base, flat_r)
+        cut_l = np.cumsum([0] + [len(p) for p in sl])
+        cut_r = np.cumsum([0] + [len(p) for p in sr])
+        n_edges = len(sl)
+        lines = []
+        for k in range(len(path)):
+            lo, hi = k - WINDOW, k + WINDOW  # chain edges k-WINDOW .. k+WINDOW-1 touch corner k's window
+            if closed:
+                ids = [(e % n_edges) for e in range(lo, hi)]
+            else:
+                ids = list(range(max(lo, 0), min(hi, n_edges)))
+            a = np.concatenate([ql[cut_l[e] : cut_l[e + 1]] for e in ids]) if ids else np.zeros((0, 3))
+            b = np.concatenate([qr[cut_r[e] : cut_r[e + 1]] for e in ids]) if ids else np.zeros((0, 3))
+            if len(a) < 3 or len(b) < 3:
+                lines.append(None)
+                continue
+            nl, dl, _r, _k = _fit_plane_trimmed(a)
+            nr, dr, _r, _k = _fit_plane_trimmed(b)
+            lines.append(_line_of(nl, dl, nr, dr))
+        jobs.append((idx, closed, lines, length))
+        if due():
+            yield 0.6 * (ci + 1) / max(len(chains), 1)
+    return jobs
+
+
+def _crease_points(base: Base, job, free):
+    """Generator -> (corners, crease point per corner, no crease there, chain ends, corners that stay): where each corner
+    of a chain would sit on its crease. A crease further than CREASE_REACH of an edge away, or whose point is not on your
+    original mesh (the two sides are one smooth curve), is no crease."""
+    idx, closed, lines, _length = job
+    pts = base.co[idx]
+    ends = np.zeros(len(idx), dtype=bool)
+    if not closed:
+        ends[0] = ends[-1] = True
+    fixed = ends | ~free[idx]
+    crease = pts.copy()
+    missing = np.zeros(len(idx), dtype=bool)
+    for k, line in enumerate(lines):
+        if line is None:
+            missing[k] = True
+            continue
+        c = _on_line(pts[k], line)
+        if float(np.linalg.norm(c - pts[k])) > CREASE_REACH * base.edge:
+            missing[k] = True
+            continue
+        crease[k] = c
+    found = np.flatnonzero(~missing)
+    if len(found):
+        on = yield from _project(base, crease[found])
+        off = np.linalg.norm(on - crease[found], axis=1) > ON_SOURCE * base.edge
+        missing[found[off]] = True
+    return pts, crease, missing, ends, fixed
+
+
+def _straight(crease: np.ndarray, length: float, closed: bool):
+    """(centre, direction) of the one line the creases under an open chain lie on (a principal-axis fit with a residual
+    under STRAIGHT of its length), else None."""
+    if closed:
+        return None
+    centre = crease.mean(axis=0)
+    _u, _s, vt = np.linalg.svd(crease - centre, full_matrices=False)
+    off = crease - centre - np.outer((crease - centre) @ vt[0], vt[0])
+    return (centre, vt[0]) if float(np.linalg.norm(off, axis=1).max()) < STRAIGHT * length else None
+
+
+def _around(edges: Edges, corners, n: int, reach: int = 1) -> np.ndarray:
+    """Faces that use a corner of `corners` or a corner `reach` edges from one of them (reach 0: just `corners`)."""
+    near = np.zeros(n, dtype=bool)
+    near[np.asarray(corners, dtype=np.int64)] = True
+    for _ in range(reach):
+        sel = near[edges.ab[:, 0]] | near[edges.ab[:, 1]]
+        near[edges.ab[sel].ravel()] = True
+    hit = [ids[near[idx].any(axis=1)] for ids, idx in edges.groups]
+    return np.unique(np.concatenate(hit)) if hit else np.zeros(0, dtype=np.int64)
+
+
 class TrueUpEdges(Trial):
     name = "True Up Edges"
     group = "HARD"
@@ -447,11 +544,51 @@ class TrueUpEdges(Trial):
     blendable = True
     layers = ("scope", "ghost", "arrows", "held", "kept")
     stages = ("edges", "wave", "look")
+    kinds = (("wavy", "wavy hard edge", "wavy hard edges"), ("off", "hard edge off the crease", "hard edges off the crease"))
+    own = "wave"
+    least = 0.01  # of an edge: the mean distance of a chain's corners from their creases must drop this much
 
     def check(self, base: Base) -> str:
         if not len(base.faces) or not base.scope.any():
             return NO_HARD_EDGES
         return "" if hard_mask(base.co, base.faces, base.scope, _edges(base)).any() else NO_HARD_EDGES
+
+    def spots(self, base: Base):
+        """A spot for each chain whose corners are off the crease of your original mesh by more than `least` of an edge.
+        Its faces are the ones round the chain and round its neighbours (those neighbours follow it, so they must be free)."""
+        if not len(base.faces) or not base.scope.any():
+            return []
+        edges = _edges(base)
+        free = movable(base)
+        chains = hard_chains(base.co, base.faces, base.scope, edges)
+        due = _ticker()
+        jobs = yield from _crease_jobs(base, edges, chains, due)
+        items = []
+        for job in jobs:
+            idx, closed, lines, length = job
+            pts, crease, missing, ends, fixed = yield from _crease_points(base, job, free)
+            inner = ~ends
+            if (missing & inner).sum() > 0.5 * max(int(inner.sum()), 1) or not (inner & ~fixed).any():
+                continue  # no crease under most of it: `run` would leave it
+            task = (idx, lines, ~missing, False)
+            off = _wave(base.co, [task]) / base.edge
+            if off <= self.least:
+                continue
+            kind = "wavy" if _straight(crease, length, closed) is not None else "off"
+            items.append((_around(edges, idx, len(base.co)), (kind, off, task, pts[len(pts) // 2])))
+        out = []
+        data = base.cache.setdefault("trueup_spots", {})
+        for ids, tags in join_faces(items, base.faces):
+            worst = max(tags, key=lambda t: t[1])
+            tasks = [t[2] for t in tags]
+            spot = Spot(worst[0], ids, worst[3].copy(), _wave(base.co, tasks) / base.edge)
+            data[id(spot)] = (spot, tasks)  # the spot stays in the table, so its id is never handed to another
+            out.append(spot)
+        return out
+
+    def own_number(self, base: Base, co, faces, spot: Spot) -> float:
+        _spot, tasks = base.cache.get("trueup_spots", {}).get(id(spot), (None, None))
+        return float(spot.bad) if tasks is None else _wave(np.asarray(co, dtype=np.float64), tasks) / base.edge
 
     def run(self, base: Base, settings: dict, rough: bool = False):
         strength = float(settings.get("strength", self.defaults["strength"]))
@@ -466,80 +603,22 @@ class TrueUpEdges(Trial):
         on_chain = np.zeros(len(co), dtype=bool)
         held: list = []
         trued_jobs = []  # (corners, crease line per corner, has a crease, laid straight)
-        jobs = []  # (corners, closed, crease line per corner, chain length)
-        for ci, (path, closed) in enumerate(chains):
-            idx = np.asarray(path, dtype=np.int64)
-            on_chain[idx] = True
-            pts = co[idx]
-            ring = np.vstack((pts, pts[:1])) if closed else pts
-            length = float(np.linalg.norm(np.diff(ring, axis=0), axis=1).sum()) or base.edge
-            left, right = _side_samples(base.co, base.faces, edges, path, closed)
-            sl = [np.asarray(p).reshape(-1, 3) for p in left]
-            sr = [np.asarray(p).reshape(-1, 3) for p in right]
-            flat_l = np.concatenate(sl) if sl else np.zeros((0, 3))
-            flat_r = np.concatenate(sr) if sr else np.zeros((0, 3))
-            ql = yield from _project(base, flat_l)
-            qr = yield from _project(base, flat_r)
-            cut_l = np.cumsum([0] + [len(p) for p in sl])
-            cut_r = np.cumsum([0] + [len(p) for p in sr])
-            n_edges = len(sl)
-            lines = []
-            for k in range(len(path)):
-                lo, hi = k - WINDOW, k + WINDOW  # chain edges k-WINDOW .. k+WINDOW-1 touch corner k's window
-                if closed:
-                    ids = [(e % n_edges) for e in range(lo, hi)]
-                else:
-                    ids = list(range(max(lo, 0), min(hi, n_edges)))
-                a = np.concatenate([ql[cut_l[e] : cut_l[e + 1]] for e in ids]) if ids else np.zeros((0, 3))
-                b = np.concatenate([qr[cut_r[e] : cut_r[e + 1]] for e in ids]) if ids else np.zeros((0, 3))
-                if len(a) < 3 or len(b) < 3:
-                    lines.append(None)
-                    continue
-                nl, dl, _r, _k = _fit_plane_trimmed(a)
-                nr, dr, _r, _k = _fit_plane_trimmed(b)
-                lines.append(_line_of(nl, dl, nr, dr))
-            jobs.append((idx, closed, lines, length))
-            if due():
-                yield 0.6 * (ci + 1) / max(len(chains), 1)
+        jobs = yield from _crease_jobs(base, edges, chains, due)  # (corners, closed, crease line per corner, chain length)
         for ci, (idx, closed, lines, length) in enumerate(jobs):
-            pts = co[idx]
-            ends = np.zeros(len(idx), dtype=bool)
-            if not closed:
-                ends[0] = ends[-1] = True
-            fixed = ends | ~free[idx]
-            crease = pts.copy()
-            missing = np.zeros(len(idx), dtype=bool)
-            for k, line in enumerate(lines):
-                if line is None:
-                    missing[k] = True
-                    continue
-                c = _on_line(pts[k], line)
-                if float(np.linalg.norm(c - pts[k])) > CREASE_REACH * base.edge:
-                    missing[k] = True
-                    continue
-                crease[k] = c
-            found = np.flatnonzero(~missing)
-            if len(found):
-                on = yield from _project(base, crease[found])
-                off = np.linalg.norm(on - crease[found], axis=1) > ON_SOURCE * base.edge
-                missing[found[off]] = True
+            on_chain[idx] = True
+            pts, crease, missing, ends, fixed = yield from _crease_points(base, jobs[ci], free)
             inner = ~ends
             if (missing & inner).sum() > 0.5 * max(int(inner.sum()), 1) or not (inner & ~fixed).any():
                 if (~missing & inner).any():  # a crease along part of it only
                     held.append((pts[len(pts) // 2].copy(), "no crease under it"))
                 continue
             fixed = fixed | missing
-            # straight: one principal-axis line through every crease point
-            centre = crease.mean(axis=0)
-            _u, _s, vt = np.linalg.svd(crease - centre, full_matrices=False)
-            axis = vt[0]
-            off = crease - centre - np.outer((crease - centre) @ axis, axis)
-            is_straight = False
-            if not closed and float(np.linalg.norm(off, axis=1).max()) < STRAIGHT * length:
-                new = centre + np.outer((pts - centre) @ axis, axis)
+            line = _straight(crease, length, closed)
+            is_straight = line is not None
+            if is_straight:
+                new = line[0] + np.outer((pts - line[0]) @ line[1], line[1])
                 new[fixed] = pts[fixed]
                 new = _even_between(new, fixed, False)
-                is_straight = True
             else:
                 new = _taubin(crease, closed, fixed)
                 for k, line in enumerate(lines):
@@ -640,6 +719,53 @@ def find_panels(co, faces, scope, edge: float, edges: Edges | None = None):
     return labels
 
 
+def _panel_planes(base: Base, edges: Edges, due):
+    """Generator -> (panel per face, {panel: (normal, offset, size, corners that go onto it)}, panels round each corner):
+    the flat panels of the result whose original mesh under them is flat."""
+    labels = yield from find_panels(base.co, base.faces, base.scope, base.edge, edges)
+    yield 0.1
+    planes = {}
+    middles = np.zeros((len(base.faces), 3))
+    for ids, idx in edges.groups:
+        middles[ids] = base.co[idx].mean(axis=1)
+    order = np.argsort(labels, kind="stable")
+    starts = np.searchsorted(labels[order], np.arange(int(labels.max(initial=-1)) + 2))
+    found = np.unique(labels[labels >= 0]).tolist()
+    around: list[set] = [set() for _ in base.co]
+    for j, r in enumerate(found):
+        members = order[starts[r] : starts[r + 1]]
+        corners = np.unique(np.concatenate([np.asarray(base.faces[i], dtype=np.int64) for i in members.tolist()]))
+        mids = middles[members]
+        under = yield from _project(base, np.vstack((base.co[corners], mids)))
+        n, d, res, keep = _fit_plane_trimmed(under)
+        if keep.mean() < 0.8 or float(np.percentile(res[keep], 95)) > FLAT * base.edge:
+            labels[members] = -1  # your original is not flat here
+            continue
+        # a corner goes onto this plane only when your original under it lies on the plane
+        on = corners[res[: len(corners)] <= 3.0 * FLAT * base.edge]
+        if not len(on):
+            labels[members] = -1
+            continue
+        size = float(np.linalg.norm(np.ptp(base.co[corners], axis=0))) or base.edge
+        planes[r] = (n, d, size, on)
+        for v in on.tolist():
+            around[v].add(r)
+        if due():
+            yield 0.1 + 0.6 * (j + 1) / max(len(found), 1)
+    return labels, planes, around
+
+
+def _bump(points: np.ndarray, planes, free: np.ndarray, edge: float) -> float:
+    """Mean distance of the corners that may move from their panels' planes, in edges. `planes`: (normal, offset, size,
+    corners) each."""
+    total, count = 0.0, 0
+    for n, d, _size, on in planes:
+        on = on[free[on]]
+        total += float(np.abs(points[on] @ n - d).sum())
+        count += len(on)
+    return total / count / edge if count else 0.0
+
+
 class PressPanelsFlat(Trial):
     name = "Press Panels Flat"
     group = "HARD"
@@ -649,60 +775,60 @@ class PressPanelsFlat(Trial):
     blendable = True
     layers = ("scope", "ghost", "wash", "arrows", "held", "kept")
     stages = ("bump", "panels", "look")
+    kinds = (("bumpy", "bumpy flat panel", "bumpy flat panels"),)
+    own = "bump"
+    least = 0.002  # of an edge: the mean distance of a panel's corners from its plane must drop this much
 
     def check(self, base: Base) -> str:
         if not len(base.faces) or not base.scope.any():
             return NO_PANELS
         return ""
 
+    def spots(self, base: Base):
+        """A spot for each flat panel of your original that the result's corners sit off by more than `least` of an
+        edge. Its faces are all those round the corners that go onto the plane (they all have to be free to move)."""
+        if not len(base.faces) or not base.scope.any():
+            return []
+        edges = _edges(base)
+        free = movable(base)
+        yield 0.0
+        _labels, planes, _around_panel = yield from _panel_planes(base, edges, _ticker())
+        items = []
+        for plane in planes.values():
+            on = plane[3][free[plane[3]]]
+            if not len(on):
+                continue
+            bump = _bump(base.co, [plane], free, base.edge)
+            if bump > self.least:
+                items.append((_around(edges, on, len(base.co), 0), (plane, bump)))
+        out = []
+        data = base.cache.setdefault("panel_spots", {})
+        for ids, tags in join_faces(items, base.faces):
+            these = [t[0] for t in tags]
+            worst = max(tags, key=lambda t: t[1])[0]
+            spot = Spot("bumpy", ids, base.co[worst[3]].mean(axis=0), _bump(base.co, these, free, base.edge))
+            data[id(spot)] = (spot, these, free)  # the spot stays in the table, so its id is never handed to another
+            out.append(spot)
+        return out
+
+    def own_number(self, base: Base, co, faces, spot: Spot) -> float:
+        _spot, planes, free = base.cache.get("panel_spots", {}).get(id(spot), (None, None, None))
+        return float(spot.bad) if planes is None else _bump(np.asarray(co, dtype=np.float64), planes, free, base.edge)
+
     def run(self, base: Base, settings: dict, rough: bool = False):
         strength = float(settings.get("strength", self.defaults["strength"]))
         edges = _edges(base)
         yield 0.0
         free = movable(base)
-        labels = yield from find_panels(base.co, base.faces, base.scope, base.edge, edges)
-        yield 0.1
         due = _ticker()
-        planes = {}  # label -> (normal, offset, size, corners that go onto it)
-        middles = np.zeros((len(base.faces), 3))
-        for ids, idx in edges.groups:
-            middles[ids] = base.co[idx].mean(axis=1)
-        order = np.argsort(labels, kind="stable")
-        starts = np.searchsorted(labels[order], np.arange(int(labels.max(initial=-1)) + 2))
-        found = np.unique(labels[labels >= 0]).tolist()
-        around: list[set] = [set() for _ in base.co]
-        for j, r in enumerate(found):
-            members = order[starts[r] : starts[r + 1]]
-            corners = np.unique(np.concatenate([np.asarray(base.faces[i], dtype=np.int64) for i in members.tolist()]))
-            mids = middles[members]
-            under = yield from _project(base, np.vstack((base.co[corners], mids)))
-            n, d, res, keep = _fit_plane_trimmed(under)
-            if keep.mean() < 0.8 or float(np.percentile(res[keep], 95)) > FLAT * base.edge:
-                labels[members] = -1  # your original is not flat here
-                continue
-            # a corner goes onto this plane only when your original under it lies on the plane
-            on = corners[res[: len(corners)] <= 3.0 * FLAT * base.edge]
-            if not len(on):
-                labels[members] = -1
-                continue
-            size = float(np.linalg.norm(np.ptp(base.co[corners], axis=0))) or base.edge
-            planes[r] = (n, d, size, on)
-            for v in on.tolist():
-                around[v].add(r)
-            if due():
-                yield 0.1 + 0.6 * (j + 1) / max(len(found), 1)
+        labels, planes, around = yield from _panel_planes(base, edges, due)
         cand = Candidate(base.co.copy(), strength=strength)
         if not planes:
             cand.refusal = NO_PANELS
             return cand
 
-        def bump(points):  # mean distance of the corners that may move off their panels' planes, in edges
-            total, count = 0.0, 0
-            for n, d, _size, on in planes.values():
-                on = on[free[on]]
-                total += float(np.abs(points[on] @ n - d).sum())
-                count += len(on)
-            return total / count / base.edge if count else 0.0
+        def bump(points):
+            return _bump(points, planes.values(), free, base.edge)
 
         bump_before = bump(base.co)
         co = base.co.copy()

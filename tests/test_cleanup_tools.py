@@ -163,5 +163,167 @@ class SealMiddleTest(unittest.TestCase):
         self.assertEqual(len(cand.parent), len(cand.faces))
 
 
+# --------------------------------------------------------------------------- Auto Fix: spots, own numbers, propose
+
+
+def _plant(n: int = 8):
+    """An n x n grid with a doublet (face 9), a triangle pair (face 14), a face facing in (face 49) and two sliver quads
+    (faces 45 and 53, by squeezing corners (5, 5) and (5, 6)), far apart."""
+    points, faces = _grid(n)
+    w = n + 1
+    q = faces[9]  # a corner in the middle of face 9, two quads sharing two edges
+    points = np.vstack((points, [(1.5, 1.5, 0.0)]))
+    mid = len(points) - 1
+    out = list(faces)
+    out[9] = (q[0], q[1], mid, q[3])
+    out.append((q[1], q[2], q[3], mid))
+    t = faces[14]  # a quad cut into two triangles
+    out[14] = (t[0], t[1], t[2])
+    out.append((t[0], t[2], t[3]))
+    out[49] = tuple(reversed(faces[49]))
+    points[5 * w + 5, 0] = 5.93
+    points[6 * w + 5, 0] = 5.93
+    return points, out
+
+
+def _tool():
+    return T.PreviewTidy()
+
+
+def _spots(tool, base):
+    return trial.finish(tool.spots(base))
+
+
+def _propose(tool, base, spots=None):
+    from triadq import autofix
+
+    spots = _spots(tool, base) if spots is None else spots
+    return spots, trial.finish(autofix.propose(tool, base, {}, spots=spots))
+
+
+class PreviewTidySpotsTest(unittest.TestCase):
+    def test_every_line_has_a_kind_and_the_tool_fills_the_auto_fields(self):
+        tool = _tool()
+        self.assertEqual([k[0] for k in tool.kinds], [k[0] for k in T.TIDY_LINES])
+        self.assertTrue(tool.auto and tool.changes_faces)
+        self.assertGreater(tool.least, 0.0)
+        self.assertIn("steps", tool.defaults)
+
+    def test_spots_finds_each_planted_problem(self):
+        points, faces = _plant()
+        base = trial.make_base(points, faces, project=_flat)
+        spots = _spots(_tool(), base)
+        self.assertEqual(sorted(sp.kind for sp in spots), ["doublets", "inward", "pairs", "slivers"])
+        by = {sp.kind: sp for sp in spots}
+        self.assertEqual(sorted(by["doublets"].faces.tolist()), [9, 64])
+        self.assertEqual(sorted(by["pairs"].faces.tolist()), [14, 65])
+        self.assertEqual(by["inward"].faces.tolist(), [49])
+        self.assertTrue({45, 53} <= set(by["slivers"].faces.tolist()))  # the two slivers are one spot, with the faces round them
+        for sp in spots:
+            self.assertEqual(sp.pick["row"], sp.kind)
+            self.assertEqual(sp.at.shape, (3,))
+            self.assertGreater(_tool().own_number(base, base.co, base.faces, sp), 0.0)  # something of its kind is there
+
+    def test_propose_fixes_all_of_them_and_each_own_number_drops(self):
+        points, faces = _plant()
+        base = trial.make_base(points, faces, project=_flat)
+        tool = _tool()
+        spots, p = _propose(tool, base)
+        self.assertEqual(p.reason, "")
+        self.assertEqual(len(p.fixed), 4)
+        self.assertEqual(p.left, [])
+        self.assertEqual(len(p.cand.faces), 64)  # the doublet and the triangle pair are one quad each again
+        after = trial.make_base(p.cand.co, p.cand.faces, project=_flat)
+        again = _spots(tool, after)
+        self.assertNotIn("doublets", [sp.kind for sp in again])
+        self.assertNotIn("pairs", [sp.kind for sp in again])
+        self.assertNotIn("inward", [sp.kind for sp in again])
+        self.assertGreaterEqual(p.before.bad, 1)  # the face facing in counts as a bad one ...
+        self.assertEqual(p.after.bad, 0)  # ... and turning it round repairs it
+        self.assertGreaterEqual(p.after.tidy, p.before.tidy)
+
+    def test_sliver_spot_that_cannot_move_comes_back_in_left(self):
+        points, faces = _plant()
+        stay = np.zeros(len(points), dtype=bool)
+        stay[[50, 51, 59, 60, 68, 69]] = True  # every corner of the two slivers is held
+        base = trial.make_base(points, faces, project=_flat, stay=stay)
+        spots, p = _propose(_tool(), base)
+        left = {sp.kind: why for sp, why in p.left}
+        self.assertIn("slivers", left)
+        self.assertIn(left["slivers"], ("held", "no better"))
+        self.assertEqual(len(p.fixed), 3)
+
+    def test_the_sliver_steps_are_a_setting_with_no_top(self):
+        points, faces = _plant()
+        base = trial.make_base(points, faces, project=_flat)
+        few = trial.finish(_tool().run(base, {"row": "slivers", "only": True, "steps": 1}))
+        base2 = trial.make_base(points, faces, project=_flat)
+        many = trial.finish(_tool().run(base2, {"row": "slivers", "only": True, "steps": 400}))
+        self.assertLessEqual(np.abs(few.co - points).sum(), np.abs(many.co - points).sum())
+        self.assertGreater(np.abs(many.co - points).sum(), 0.0)
+
+    def test_mirrored_base_keeps_the_plane(self):
+        points, faces = _plant()
+        base = trial.make_base(points, faces, project=_flat, mirror=(0, 4.0))
+        spots, p = _propose(_tool(), base)
+        self.assertEqual(p.reason, "")
+        on = np.isclose(points[:, 0], 4.0)
+        self.assertTrue(np.allclose(p.cand.co[on[: len(p.cand.co)]], points[: len(p.cand.co)][on[: len(p.cand.co)]]))
+
+    def test_empty_nothing_free_and_clean_meshes_have_no_spots(self):
+        tool = _tool()
+        self.assertEqual(_spots(tool, trial.make_base(np.zeros((0, 3)), [])), [])
+        points, faces = _plant()
+        self.assertEqual(_spots(tool, trial.make_base(points, faces, scope=np.zeros(len(faces), dtype=bool))), [])
+        clean, grid = _grid(4)
+        self.assertEqual(_spots(tool, trial.make_base(clean, grid, project=_flat)), [])
+        self.assertEqual(tool.own_number(trial.make_base(clean, grid), clean, grid, trial.Spot("pairs", np.zeros(0, dtype=np.int64), np.zeros(3), 0.0)), 0.0)
+
+
+class SealMiddleSpotTest(unittest.TestCase):
+    def _base(self, **kw):
+        return SealMiddleTest()._mirrored(**kw)
+
+    def test_the_seam_is_one_spot_and_fixing_it_leaves_nothing_of_the_kind(self):
+        points, faces = self._base()
+        base = trial.make_base(points, faces, project=_flat, pick={"plane": (0, 2.0)})
+        tool = T.SealMiddle()
+        spots, p = _propose(tool, base)
+        self.assertEqual([sp.kind for sp in spots], ["seam"])
+        self.assertEqual(p.reason, "")
+        self.assertEqual(len(p.fixed), 1)
+        self.assertGreater(tool.own_number(base, base.co, base.faces, spots[0]), 0.0)
+        self.assertEqual(tool.own_number(base, p.cand.co, p.cand.faces, trial.Spot("seam", np.arange(len(p.cand.faces)), np.zeros(3), 0.0, spots[0].pick)), 0.0)
+        middle = np.flatnonzero(np.abs(points[:, 0] - 2.0) < 0.1)
+        self.assertTrue(np.allclose(p.cand.co[middle, 0], 2.0))
+        self.assertEqual(_spots(tool, trial.make_base(p.cand.co, p.cand.faces, project=_flat, pick={"plane": (0, 2.0)})), [])  # nothing left
+
+    def test_doubled_corner_in_a_mirrored_base(self):
+        points, faces = self._base(wobble=0.0, double=True)
+        base = trial.make_base(points, faces, project=_flat, mirror=(0, 2.0))
+        spots, p = _propose(T.SealMiddle(), base)
+        self.assertEqual(len(spots), 1)
+        self.assertEqual(len(p.fixed), 1)
+        self.assertEqual(len(p.cand.co), len(points) - 1)
+
+    def test_a_spot_with_no_seam_in_it_comes_back_in_left(self):
+        points, faces = self._base()
+        base = trial.make_base(points, faces, project=_flat, pick={"plane": (0, 2.0)})
+        tool = T.SealMiddle()
+        real = _spots(tool, base)[0]
+        far = [i for i, f in enumerate(faces) if np.abs(points[list(f), 0] - 2.0).min() > 0.9]
+        fake = trial.Spot("seam", np.array(far), points[list(faces[far[0]])].mean(axis=0), 0.5, real.pick)
+        _spots_, p = _propose(tool, base, [real, fake])
+        self.assertEqual([why for sp, why in p.left if sp is fake], ["held"])
+        self.assertEqual(p.fixed, [real])
+
+    def test_no_plane_no_spots_and_a_tidy_seam_has_none(self):
+        points, faces = self._base()
+        self.assertEqual(_spots(T.SealMiddle(), trial.make_base(points, faces, project=_flat)), [])
+        points, faces = self._base(wobble=0.0)
+        self.assertEqual(_spots(T.SealMiddle(), trial.make_base(points, faces, project=_flat, mirror=(0, 2.0))), [])
+        self.assertEqual(_spots(T.SealMiddle(), trial.make_base(np.zeros((0, 3)), [], mirror=(0, 0.0))), [])
+
+
 if __name__ == "__main__":
     unittest.main()
