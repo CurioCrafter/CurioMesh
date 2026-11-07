@@ -50,6 +50,7 @@ WARP_COSINE = 0.5
 SKIPPED, ACCEPTED, REFUSED, NO_PATH, ON_EDGES, SHORT, PARTLY_HELD = 0, 1, 2, 3, 4, 5, 6
 KEPT, SPLIT, LEFT, CANNOT, BAKE = 0, 1, 2, 3, 4
 SOFT = 2
+CONTACT = 4  # a part contact (`part_contacts`): the snap fits it like a Soft chain, the split leaves it alone
 SLICE_S = 0.002  # one step() of a stage does about this much work (short: a loaded PC can stretch a slice several times)
 
 # Optional faster callables, set by the one adapter (uv_fast.py); the NumPy code runs when a name is missing.
@@ -173,11 +174,12 @@ def _walk_runs(adj):
 
 
 def part_contacts(seams: dict, points, indptr, flat, corner_uv, texture_px: float = 1024.0) -> dict:
-    """The seam dict with **part contacts** added as Soft chains: the curves where two unconnected pieces of the source
+    """The seam dict with **part contacts** added as chains of class `CONTACT`: the curves where two unconnected pieces of the source
     cut through each other (a bolt through a plate, a cap pushed into a body).
 
     Such pieces share no edge, so the UV seams have no chain there, yet a result face across the crease takes its
-    texture from two places. The curve is cut like a seam: side A is the lower part's UV there, side B the other part's.
+    texture from two places. The snap fits result edges onto the curve like a Soft chain (zero faces); the split leaves
+    it alone. Side A is the lower part's UV there, side B the other part's.
     New chain vertices get welded ids after the source's (`chain_xyz` reads their places from `contact_xyz`).
 
     Our own wiring of textbook pieces: candidate triangle pairs from a uniform grid, segment-triangle crossings
@@ -298,7 +300,7 @@ def part_contacts(seams: dict, points, indptr, flat, corner_uv, texture_px: floa
     out["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), np.asarray(ua, np.float64).ravel()]
     out["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), np.asarray(ub, np.float64).ravel()]
     out["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), np.asarray(gp, np.float64)]
-    out["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
+    out["class"] = np.r_[cls, np.full(len(runs), CONTACT, cls.dtype)]
     out["n_welded"] = nw + len(npos)
     out["contact_xyz"] = np.asarray(npos, np.float64).reshape(-1, 3)
     out["part_contacts"] = len(runs)
@@ -589,7 +591,7 @@ def _snap_steps(points, indptr, flat, seams, xyz, max_move, vchain_in, vparam_in
             out["done"] = False
             break
         ch = chs[c]
-        if cls[c] != SOFT or len(ch.pts) < 2 or n == 0:
+        if cls[c] not in (SOFT, CONTACT) or len(ch.pts) < 2 or n == 0:
             continue
         Pc = np.array(pos)
         near = [_nearest(Pc, p) for p in ch.pts]
