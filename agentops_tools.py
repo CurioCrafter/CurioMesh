@@ -119,10 +119,24 @@ def check_settings(schema: list, given: dict | None) -> dict:
     return out
 
 
+def _trial_mod():
+    try:
+        from .triadq import trial
+    except ImportError:  # run outside the add-on package (the unit tests)
+        from triadq import trial
+    return trial
+
+
 def gained(cand, least: float = SETTLED) -> bool:
-    """True when a candidate changed something that counts: new faces, or a corner moved further than `least` of an edge."""
+    """True when a pass made something better: any of the card's numbers on the up side (poles gone, Tidiness, Loop Quality,
+    fewer bad faces, the tool's own number). With no numbers measured, new faces or a corner moved further than `least` of an
+    edge. A pass that only moves things about, or makes them worse, gained nothing."""
     if cand is None or cand.co is None or cand.refusal:
         return False
+    numbers = getattr(cand, "numbers", None) or {}
+    if numbers:
+        number_text = _trial_mod().number_text
+        return any(number_text(k, v)[1] > 0 for k, v in numbers.items())
     if cand.faces is not None:
         return True
     moved = getattr(cand, "moved", None)
@@ -213,9 +227,15 @@ def _tool_for(name: str):
     raise ToolError("NOT_FOUND", f"no tool called {name!r}", "tools.list shows every tool", {"close": difflib.get_close_matches(str(name), names, n=3, cutoff=0.4), "tools": names})
 
 
+def _props(idname: str):
+    """Blender's description of an operator's properties (what its panel and F9 show), not of the class."""
+    import bpy
+
+    return getattr(bpy.ops.curiomesh, _short(idname)).get_rna_type()
+
+
 def _schema_of(idname: str) -> list:
-    cls = _op_class(idname)
-    return settings_schema(cls.bl_rna.properties) if cls is not None else []
+    return settings_schema(_props(idname).properties)
 
 
 def _scope_now(context) -> str:
@@ -225,7 +245,7 @@ def _scope_now(context) -> str:
     return ts.tool_scope if ts is not None else "WHOLE"
 
 
-def _plan(context, name: str, given: dict | None, every: bool = False) -> SimpleNamespace:
+def _plan(context, name: str, given: dict | None, every: bool = False, keep_going: bool = False) -> SimpleNamespace:
     """What a run needs: the Trial class, its settings (checked), the scope, a pick function and what Again remembers."""
     from . import tidytools
 
@@ -233,6 +253,8 @@ def _plan(context, name: str, given: dict | None, every: bool = False) -> Simple
     cls = _op_class(tool.idname)
     schema = _schema_of(tool.idname)
     cleaned = check_settings(schema, given)
+    if keep_going and not every and any(e["name"] == "keep_going" for e in schema):
+        cleaned.setdefault("keep_going", True)  # the Relax tools' own Keep going: one pass runs on until it settles, one History step
     if every:
         if not tidytools.finds_spots(tool.idname):
             raise ToolError("BAD_ARGS", f"{tool.label} has no spots to find", "Use tools.run for it, or pick a tool with every_spot true in tools.list")
@@ -241,7 +263,7 @@ def _plan(context, name: str, given: dict | None, every: bool = False) -> Simple
         settings = dict(base().defaults, **{k: v for k, v in cleaned.items() if k in base().defaults})
         settings.update(tool=tool.idname, keep_going=False)
         return SimpleNamespace(tool=tool, cls=cls, trial=trial, settings=settings, scope=_scope_now(context), pick=lambda: {}, idname=EVERY, stub=None)
-    values = {p.identifier: p.default for p in cls.bl_rna.properties if p.identifier != "rna_type" and p.type in ("FLOAT", "INT", "BOOLEAN", "STRING", "ENUM")}
+    values = {p.identifier: p.default for p in _props(tool.idname).properties if p.identifier != "rna_type" and p.type in ("FLOAT", "INT", "BOOLEAN", "STRING", "ENUM")}
     if tool.idname == HARD_EDGES:
         values["degrees"] = context.scene.curiomesh_guided.hs_angle  # opens on the angle Apply would use now, as the button does
     values.update(cleaned)
@@ -370,8 +392,9 @@ def tools_list(context, object=None):
         cls = _op_class(t.idname)
         if cls is None or tidytools._op(t.idname) is None:
             continue
-        schema = settings_schema(cls.bl_rna.properties)
-        rows.append(tool_entry(t, cls.bl_rna.description or cls.bl_description, schema, labels[t.group], any(e["name"] == "keep_going" for e in schema), tidytools.finds_spots(t.idname), getattr(cls.trial, "picks", ())))
+        rna = _props(t.idname)
+        schema = settings_schema(rna.properties)
+        rows.append(tool_entry(t, rna.description or cls.bl_description, schema, labels[t.group], any(e["name"] == "keep_going" for e in schema), tidytools.finds_spots(t.idname), getattr(cls.trial, "picks", ())))
     ts = history.settings(context.scene)
     return {"tools": rows, "groups": groups, "scope": ts.tool_scope if ts is not None else "WHOLE", "scopes": list(SCOPES), "last": ts.last_tool if ts is not None else ""}
 
@@ -449,7 +472,7 @@ def tools_run(context, tool, settings=None, keep_going=False, allow_worse=False,
     """Run a tool and keep it: one History step per kept pass. With keep_going it repeats until a pass gains nothing."""
     _object(object)
     _need(context)
-    plan = _plan(context, tool, settings)
+    plan = _plan(context, tool, settings, keep_going=bool(keep_going))
     if plan.tool.idname == HARD_EDGES:
         return _hard_edges(context, plan)
     return _run(context, plan, bool(keep_going), bool(allow_worse), seconds)
@@ -493,7 +516,7 @@ def tools_again(context, keep_going=False, allow_worse=False, seconds=None, obje
     if ts.last_tool.startswith("curiomesh.strip_fix_all"):
         return loops_fix_all(context, amount=kept.get("amount"), keep_going=keep_going, seconds=seconds)
     known = {e["name"] for e in _schema_of(ts.last_tool)}
-    return _run(context, _plan(context, ts.last_tool, {k: v for k, v in kept.items() if k in known}), bool(keep_going), bool(allow_worse), seconds)
+    return _run(context, _plan(context, ts.last_tool, {k: v for k, v in kept.items() if k in known}, keep_going=bool(keep_going)), bool(keep_going), bool(allow_worse), seconds)
 
 
 # --------------------------------------------------------------------------- loops.*
@@ -763,7 +786,7 @@ def autofix_groups(context, object=None):
 
     _object(object)
     pg = context.scene.curiomesh_autofix
-    props = pg.bl_rna.properties
+    props = pg.bl_rna.properties  # a property group's own class: this one is the real list
     out = []
     for key in autofix.GROUPS:
         kinds = [many for cls, only in autofix.plan({key}) for k, _o, many in cls.kinds if only is None or k in only]

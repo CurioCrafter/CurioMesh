@@ -30,8 +30,8 @@ PROPS = [
 
 
 class Cand:
-    def __init__(self, moved=None, faces=None, co=True, refusal=""):
-        self.moved, self.faces, self.refusal = moved, faces, refusal
+    def __init__(self, moved=None, faces=None, co=True, refusal="", numbers=None):
+        self.moved, self.faces, self.refusal, self.numbers = moved, faces, refusal, numbers or {}
         self.co = np.zeros((3, 3)) if co else None
 
 
@@ -78,6 +78,9 @@ class AgentOpsToolsTest(unittest.TestCase):
         self.assertTrue(A.gained(Cand(faces=[(0, 1, 2)])))
         self.assertFalse(A.gained(Cand(co=False)))
         self.assertFalse(A.gained(Cand(moved=np.array([1.0]), refusal="no")))
+        self.assertTrue(A.gained(Cand(moved=np.array([0.0]), numbers={"tidy": (25.0, 28.0)})))  # measured: the numbers decide
+        self.assertTrue(A.gained(Cand(numbers={"poles": (5, 3), "tidy": (25.0, 25.0)})))
+        self.assertFalse(A.gained(Cand(moved=np.array([2.0]), faces=[(0, 1, 2)], numbers={"tidy": (25.0, 24.0), "poles": (5, 5)})))  # moved a lot, nothing better
 
     def test_keep_going_stops_when_a_pass_gains_nothing(self):
         gains = iter([True, True, False, True])
