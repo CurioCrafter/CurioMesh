@@ -210,5 +210,137 @@ class NumberTextTest(unittest.TestCase):
         self.assertEqual(T.number_text("square", ("square corners 61% -> 78%", 1)), ("square corners 61% -> 78%", 1))
 
 
+# --------------------------------------------------------------------------- Auto Fix spots (AUTO_FIX.md 6.2)
+
+from triadq import autofix  # noqa: E402
+
+
+def flat(p):
+    q = np.asarray(p, dtype=np.float64).copy()
+    q[:, 2] = 0.0
+    return q
+
+
+def planted(n=10, at=(5, 5), by=(0.07, 0.05), **kw):
+    """A flat n x n grid with one interior corner pushed sideways: one slanted, lumpy patch."""
+    co, faces = grid(n)
+    co[at[1] * (n + 1) + at[0], :2] += by
+    return T.make_base(co, faces, project=flat, **kw), co, faces
+
+
+def spots_of(tool, base):
+    return T.finish(tool.spots(base))
+
+
+def propose(tool, base, spots):
+    return T.finish(autofix.propose(tool, base, {}, spots=spots))
+
+
+class AutoFixSpotsTest(unittest.TestCase):
+    def check_tool(self, tool, base):
+        """The planted problem is found, fixed with its own number lower, and a clean spot added by hand is put back."""
+        found = spots_of(tool, base)
+        self.assertEqual(len(found), 1)
+        sp = found[0]
+        self.assertEqual(sp.kind, tool.kinds[0][0])
+        self.assertGreater(sp.bad, 0.0)
+        quiet = next(f for f in range(len(base.faces)) if base.co[list(base.faces[f])].mean(axis=0)[0] < -0.6 and base.co[list(base.faces[f])].mean(axis=0)[1] < -0.6)
+        ring = np.array([f for f in range(len(base.faces)) if len(set(base.faces[f]) & set(base.faces[quiet])) > 0])
+        clean = T.Spot(tool.kinds[0][0], ring, base.co[list(base.faces[quiet])].mean(axis=0), 0.5)
+        p = propose(tool, base, [sp, clean])
+        self.assertEqual([id(s) for s in p.fixed], [id(sp)])
+        self.assertEqual([(id(s), why) for s, why in p.left], [(id(clean), "no better")])
+        self.assertLess(tool.own_number(base, p.cand.co, base.faces, sp), sp.bad - tool.least)
+        np.testing.assert_array_equal(p.cand.co[_corners(base.faces, ring)], base.co[_corners(base.faces, ring)])  # put back
+        self.assertEqual(p.after.bad, 0)
+
+    def test_square_up(self):
+        base, _co, _f = planted()
+        self.check_tool(R.SquareUp(), base)
+
+    def test_source_relax_and_keep_lines_split(self):
+        base, _co, _f = planted()
+        self.check_tool(R.SourceRelax(), base)
+        self.assertEqual(spots_of(R.KeepLinesRelax(), base), [])  # no kept lines on a flat grid
+        cube, faces = box(6, jitter=0.6)
+        b = T.make_base(cube, faces, project=onto_box)
+        keep, plain = spots_of(R.KeepLinesRelax(), b), spots_of(R.SourceRelax(), b)
+        self.assertGreater(len(keep), 0)
+        self.assertEqual(set(np.concatenate([s.faces for s in keep]).tolist()) & set(np.concatenate([s.faces for s in plain] or [[]]).tolist()), set())
+        p = propose(R.KeepLinesRelax(), b, keep)
+        self.assertGreater(len(p.fixed), 0)
+        for sp in p.fixed:
+            self.assertLess(R.KeepLinesRelax().own_number(b, p.cand.co, faces, sp), sp.bad)
+
+    def test_relax_toward_detail(self):
+        co, faces = grid(16)
+        co = onto_ridge(co)
+        base = T.make_base(co, faces, project=onto_ridge, facing=ridge_normals)
+        tool = R.RelaxTowardDetail()
+        found = spots_of(tool, base)
+        self.assertGreater(len(found), 0)
+        self.assertEqual(found[0].kind, "sizes")
+        p = propose(tool, base, found)
+        self.assertGreater(len(p.fixed), 0)
+        for sp in p.fixed:
+            self.assertLess(tool.own_number(base, p.cand.co, faces, sp), sp.bad - tool.least)
+        flatbase = T.make_base(*grid(6), facing=lambda q: np.tile([0.0, 0.0, 1.0], (len(q), 1)))
+        self.assertEqual(spots_of(tool, flatbase), [])  # equally curved everywhere: nothing to find
+
+    def test_spots_never_share_a_corner_and_have_room(self):
+        co, faces = grid(14)
+        for at in ((3, 3), (4, 4), (10, 10)):  # the first two touch and become one patch
+            co[at[1] * 15 + at[0], :2] += (0.06, 0.04)
+        base = T.make_base(co, faces, project=flat)
+        found = spots_of(R.SquareUp(), base)
+        self.assertEqual(len(found), 2)
+        corners = [set(_corners(faces, s.faces).tolist()) for s in found]
+        self.assertEqual(corners[0] & corners[1], set())
+
+    def test_nothing_to_find(self):
+        tools = (R.SourceRelax(), R.KeepLinesRelax(), R.SquareUp(), R.RelaxTowardDetail())
+        empty = T.make_base(np.zeros((0, 3)), [])
+        one = T.make_base(*grid(1))  # every corner on the border: nothing free
+        clean = T.make_base(*grid(6))
+        for tool in tools:
+            for base in (empty, one, clean):
+                self.assertEqual(spots_of(tool, base), [], (tool.name, len(base.faces)))
+            p = propose(tool, clean, [])  # a spot list with no spots
+            self.assertEqual((p.fixed, p.reason), ([], "no better"))
+
+    def test_scope_with_nothing_free(self):
+        base, co, faces = planted()
+        scope = np.zeros(len(faces), dtype=bool)
+        scope[0] = True  # one corner quad: its corners are all on the scope edge
+        small = T.make_base(co, faces, scope=scope, project=flat)
+        for tool in (R.SourceRelax(), R.SquareUp()):
+            self.assertEqual(spots_of(tool, small), [])
+
+    def test_mirror_plane_holds(self):
+        base, co, faces = planted(at=(7, 5), mirror=(0, 0.0))
+        tool = R.SquareUp()
+        found = spots_of(tool, base)
+        self.assertEqual(len(found), 1)
+        p = propose(tool, base, found)
+        self.assertEqual(len(p.fixed), 1)
+        plane = np.abs(co[:, 0]) < 1e-9
+        np.testing.assert_array_equal(p.cand.co[plane], co[plane])
+
+    def test_every_spot_wrapper_runs(self):
+        base, _co, _f = planted()
+        tool = autofix.every(R.SquareUp)()
+        cand = T.finish(tool.run(base, dict(tool.defaults)))
+        self.assertIsNone(cand.refusal or None)
+        self.assertGreater(np.abs(cand.co - base.co).max(), 0.0)
+
+    def test_plan_picks_them_up(self):
+        got = {c for c, _k in autofix.plan({"shape"})}
+        self.assertTrue({R.SquareUp, R.RelaxTowardDetail, R.SourceRelax, R.KeepLinesRelax} <= got)
+
+
+def _corners(faces, ids):
+    return np.unique([v for f in np.asarray(ids).tolist() for v in faces[f]])
+
+
 if __name__ == "__main__":
     unittest.main()
