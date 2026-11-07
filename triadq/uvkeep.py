@@ -575,9 +575,9 @@ class FitStage:
             remember(c)
 
 
-def has_area(points, indptr, flat) -> np.ndarray:
-    """Per result face: True when one of its fan triangles has area (twice-area above uvseams.DEGENERATE_SHARE of its
-    summed squared edges)."""
+def fans_with_area(points, indptr, flat) -> tuple:
+    """Per result face: how many of its fan triangles have area (twice-area above uvseams.DEGENERATE_SHARE of their
+    summed squared edges), and how many fan triangles it has."""
 
     P = np.asarray(points, np.float64).reshape(-1, 3)
     ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
@@ -589,14 +589,16 @@ def has_area(points, indptr, flat) -> np.ndarray:
     a, b, c = P[fl[s]], P[fl[s + k]], P[fl[s + k + 1]]
     two_area = np.linalg.norm(np.cross(b - a, c - a), axis=1)
     edges2 = ((b - a) ** 2).sum(1) + ((c - b) ** 2).sum(1) + ((a - c) ** 2).sum(1)
-    return np.bincount(tri_face, two_area > uvseams.DEGENERATE_SHARE * edges2, len(sizes)) > 0
+    return np.bincount(tri_face, two_area > uvseams.DEGENERATE_SHARE * edges2, len(sizes)).astype(np.int64), fan
 
 
 def halve_mask(points, indptr, flat, orient) -> np.ndarray:
-    """Per result face: True for a face of 4 or more corners with area that the lookup gave no common winding (orient
-    0): its fan triangles want opposite windings."""
+    """Per result face of 4 or more corners with area: True when the lookup gave it no common winding (orient 0: its fan
+    triangles want opposite windings), or when some of its fan triangles have no area (a corner on the line between two
+    others: that sliver's winding is rounding, so it is cut off and closed by `close_flat`)."""
 
-    return (np.asarray(orient) == 0) & (np.diff(np.asarray(indptr, np.int64)) > 3) & has_area(points, indptr, flat)
+    good, fan = fans_with_area(points, indptr, flat)
+    return (fan > 1) & (good > 0) & ((np.asarray(orient) == 0) | (good < fan))
 
 
 def close_flat(points, indptr, flat, uv) -> np.ndarray:
@@ -605,7 +607,7 @@ def close_flat(points, indptr, flat, uv) -> np.ndarray:
 
     ip = np.asarray(indptr, np.int64)
     out = np.asarray(uv, np.float64).reshape(-1, 2).copy()
-    for f in np.flatnonzero(~has_area(points, indptr, flat)):
+    for f in np.flatnonzero(fans_with_area(points, indptr, flat)[0] == 0):
         s, e = int(ip[f]), int(ip[f + 1])
         out[s:e] = out[s:e].mean(0)
     return out
