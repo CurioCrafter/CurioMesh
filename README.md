@@ -530,7 +530,8 @@ changed, bad faces per part) and retries with other settings.
 | `curiomesh-retopo` | Turn a file (.obj .fbx .glb .blend) into a clean quad mesh, pick the Use and Detail, check the report, retry. |
 | `curiomesh-fix-bad-faces` | Find inward, folded, crossing and flat faces, fix them (Clean Up, Flip Inward, Untangle, Relax, Patch), measure again, and never keep a change that makes it worse. |
 | `curiomesh-batch-and-lods` | Many files in a row, `_LOD0` to `_LOD2` sets, normal-map baking. |
-| `curiomesh-blender-mcp` | Drive CurioMesh in a Blender that is already open, through the Blender MCP server. |
+| `curiomesh-blender-mcp` | Drive CurioMesh in a Blender that is already open, through the Blender MCP server and CurioMesh's own command layer. |
+| `curiomesh-agent` | Steer CurioMesh command by command (every option, Auto, the tools, Auto Fix, parts, History, export) through a small MCP server, and send bad parts out and bring better ones back. |
 
 Install, in Claude Code:
 
@@ -540,10 +541,12 @@ Install, in Claude Code:
 ```
 
 Any other agent (or Claude Code without plugins): download `curiomesh-<version>-agent-skills.zip` from the [latest release](https://github.com/CurioCrafter/CurioMesh/releases/latest)
-and unzip it into your skills folder, or copy all four `skills/curiomesh-*` folders there yourself (`~/.claude/skills/` for Claude Code). The skills share one set of
-scripts, so keep the four folders together. You still need CurioMesh installed in Blender ([Install](#install)), and Blender 3.6 to 5.2.
+and unzip it into your skills folder, or copy all five `skills/curiomesh-*` folders there yourself (`~/.claude/skills/` for Claude Code). The skills share one set of
+scripts, so keep the five folders together. You still need CurioMesh installed in Blender ([Install](#install)), and Blender 3.6 to 5.2.
 
 Then ask, for example: *"Retopologise `crate.fbx` for a game with CurioMesh, about 3,000 faces, and fix any bad faces."*
+
+Agent tools (one command for everything a person can do, plus sending bad parts out and bringing better ones back) are in the GitHub add-on only: see [docs/AGENTS.md](docs/AGENTS.md) and [docs/PARTS_EXCHANGE.md](docs/PARTS_EXCHANGE.md).
 
 The scripts also work by hand: `blender -b --factory-startup --python skills/curiomesh-retopo/scripts/curiomesh_run.py -- model.obj --use GAME --detail 6 --out model_low.glb --report report.json`.
 

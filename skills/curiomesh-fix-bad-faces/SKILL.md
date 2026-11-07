@@ -37,8 +37,9 @@ Use `.obj` or `.blend` for the result you fix (retopo with `--out result.obj`). 
 4. Read `m1.json`: `before`, `after`, `steps` (each with `kept`, `bad_before`, `bad_after`). The script keeps a step only when it lowers `bad`, so `after.bad` is never above `before.bad`.
 5. Loop: take `fixed1.obj` as the new RESULT and go to step 3 with a different fix list (for example what is left: if folds remain, `UNTANGLE,PATCH`). Stop when:
    - `after.bad` is 0, or
-   - a round does not lower `bad` (`improved` is false), or
-   - you have done 4 rounds.
+   - a round does not lower `bad` (`improved` is false).
+
+   There is no round cap: keep going while the bad-face count drops, and stop when a round gains nothing. (`curiomesh_fix.py` does this itself with a `--fix` list: it runs the list again after every round that gained something, and the report shows `rounds`.)
 6. Keep the best file. Never overwrite the original or the last good result; write each round to a new file and compare `after.bad`.
 
 ## When fixes do not help
@@ -47,6 +48,7 @@ Use `.obj` or `.blend` for the result you fix (retopo with `--out result.obj`). 
 - Many defects everywhere: the Detail is too high for this model. Rerun `curiomesh-retopo` with a lower Detail.
 - `--fix` steps all show `kept: false` and bad faces remain: report the count and kinds to the user and stop. Do not loop.
 - No `--original`: Flip Inward and Untangle cannot run (the report says so). Ask for the original file.
+- For a Blender that is open, `curiomesh-agent` has the same fixes as commands (`fix.run`, `autofix.run`) with History to step back.
 
 ## Report back
 
