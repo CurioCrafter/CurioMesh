@@ -33,11 +33,11 @@ def _signature(obj: bpy.types.Object) -> tuple:
 
 
 def _is_preview(obj) -> bool:
-    return obj is not None and obj.name == overlay.PREVIEW_NAME
+    return overlay.is_preview(obj, overlay.LIVE)
 
 
 def remove_preview() -> None:
-    obj = bpy.data.objects.get(overlay.PREVIEW_NAME)
+    obj = overlay.preview_object(overlay.LIVE)
     if obj is None:
         return
     mesh = obj.data
@@ -77,6 +77,17 @@ def on_live_toggled(settings, context) -> None:
         remove_preview()
         state["message"] = ""
     overlay.tag_redraw()
+
+
+def on_load() -> None:
+    """After a file loads: its saved preview is gone (overlay.remove_saved_previews). A scene saved with Live on gets a
+    fresh preview, so the switch never shows on while nothing is shown."""
+    if bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.unregister(_tick)
+    state.update(source="", sig=None, message="", faces=0, ms=0.0)
+    settings = getattr(bpy.context.scene, "curiomesh_settings", None)
+    if settings is not None and settings.live_enabled:
+        schedule(0.05)
 
 
 def _on_geometry() -> None:
@@ -136,6 +147,7 @@ def run_preview(context) -> bool:
     remove_preview()
     out.name = overlay.PREVIEW_NAME
     out.data.name = overlay.PREVIEW_NAME + "_Mesh"
+    overlay.tag_preview(out, overlay.LIVE)
     out.select_set(False)
     out.location = source.location.copy()
     out.location.x += max(source.dimensions.x, 0.1) * 1.25

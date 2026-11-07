@@ -161,7 +161,7 @@ def _split(layout):
 
 
 def _is_preview(obj) -> bool:
-    return obj is not None and obj.name in (overlay.PREVIEW_NAME, region.PREVIEW_NAME)
+    return overlay.is_preview(obj, overlay.LIVE) or overlay.is_preview(obj, overlay.REGION)
 
 
 # --------------------------------------------------------------------------- quick start
@@ -224,7 +224,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         has_mesh = obj is not None and obj.type == "MESH"
         usable = has_mesh and not _is_preview(obj)
 
-        if not has_mesh and bpy.data.objects.get(region.PREVIEW_NAME) is not None:
+        if not has_mesh and overlay.preview_object(overlay.REGION) is not None:
             box = layout.box()
             box.label(text="Region preview in progress", icon="INFO")
             if not compact:
@@ -300,7 +300,7 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         if settings.live_enabled:
             box = layout.box()
             box.label(text=live.status() or "Live: waiting for a change...", icon="TIME")
-            if has_mesh and len(obj.data.polygons) > live.LIVE_FACE_CAP and obj.name != overlay.PREVIEW_NAME:
+            if has_mesh and len(obj.data.polygons) > live.LIVE_FACE_CAP and not overlay.is_preview(obj, overlay.LIVE):
                 box.label(text=f"Live needs <= {live.LIVE_FACE_CAP:,} faces", icon="ERROR")
 
 

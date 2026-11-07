@@ -1057,7 +1057,7 @@ class CURIOMESH_PT_pro_classic(_Pro, bpy.types.Panel):
 def draw_classic(layout, context, gs) -> None:
     compact = _compact()
     obj = G._source_mesh(context)
-    previewing = G.state["res"] is not None and bpy.data.objects.get(G.PREVIEW_NAME) is not None
+    previewing = G.state["res"] is not None and G.preview_object() is not None
     if obj is None:
         layout.box().label(text="Select a mesh to begin", icon="INFO")
     layout.label(text="1. Choose a preset & place points", icon="PIVOT_ACTIVE")

@@ -27,7 +27,7 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from . import guides, overlay, region, segments, symmetry, textures
+from . import guides, live, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
 from . import autoretopo, blockout, flowedit, hard_surface, hardware, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
@@ -317,7 +317,7 @@ def _cleanup_set(self, value: int) -> None:
 
 
 def _shape_poll(self, obj) -> bool:
-    return obj.type in {"EMPTY", "LATTICE", "MESH"} and obj.name != PREVIEW_NAME and obj.name != state["source"]
+    return obj.type in {"EMPTY", "LATTICE", "MESH"} and not overlay.is_preview(obj) and obj.name != state["source"]
 
 
 class CURIOMESH_PG_guided_shape(bpy.types.PropertyGroup):
@@ -326,7 +326,7 @@ class CURIOMESH_PG_guided_shape(bpy.types.PropertyGroup):
 
 
 def _guide_poll(self, obj) -> bool:
-    return guides.is_guide_object(obj) and obj.name != PREVIEW_NAME and obj.name != state["source"]
+    return guides.is_guide_object(obj) and not overlay.is_preview(obj) and obj.name != state["source"]
 
 
 class CURIOMESH_PG_guided_guide(bpy.types.PropertyGroup):
@@ -1129,7 +1129,7 @@ def state_source():
 
 def _source_mesh(context):
     o = context.object
-    if o is not None and o.type == "MESH" and o.name != PREVIEW_NAME:
+    if o is not None and o.type == "MESH" and not overlay.is_preview(o):
         return o
     return state_source()
 
@@ -1164,8 +1164,13 @@ def _signature(context, src_obj) -> tuple:
     return tuple(parts)
 
 
+def preview_object():
+    """The Auto Segments / Guided preview object, or None. Found by the add-on's mark, never by its name."""
+    return overlay.preview_object(overlay.GUIDED)
+
+
 def remove_preview() -> None:
-    obj = bpy.data.objects.get(PREVIEW_NAME)
+    obj = preview_object()
     if obj is not None:
         mesh = obj.data
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -1180,7 +1185,7 @@ def remove_preview() -> None:
 class _PreviewOp:
     @classmethod
     def poll(cls, context):
-        return bpy.data.objects.get(PREVIEW_NAME) is not None and state["res"] is not None
+        return preview_object() is not None and state["res"] is not None
 
 
 def library_path() -> str | None:
@@ -1310,7 +1315,7 @@ class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
 
     def execute(self, context):
         source, res = state_source(), state["res"]
-        preview = bpy.data.objects[PREVIEW_NAME]
+        preview = preview_object()
         if preview.mode == "EDIT":
             preview.update_from_editmode()
         mesh = preview.data
@@ -1511,10 +1516,11 @@ def _shade_by_angle(mesh) -> None:
 
 def _build_preview(context, source, res, uvs=True, mesh=None) -> None:
     """Show `res` as the preview object. `mesh`: one already made for it (the size ladder keeps one per size)."""
-    obj = bpy.data.objects.get(PREVIEW_NAME)
+    obj = preview_object()
     mesh = _make_mesh(PREVIEW_NAME + "_Mesh", source, res, uvs) if mesh is None else mesh
     if obj is None:
         obj = bpy.data.objects.new(PREVIEW_NAME, mesh)
+        overlay.tag_preview(obj, overlay.GUIDED)
         (source.users_collection[0] if source.users_collection else context.scene.collection).objects.link(obj)
     else:
         old = obj.data
@@ -1905,7 +1911,7 @@ def _shape_mask(context, source, base, shapes) -> np.ndarray:
     """Faces of the base result inside the shapes. A shape works over the result and over your original mesh alike."""
     depsgraph = context.evaluated_depsgraph_get()
     frames = [source.matrix_world]
-    preview = bpy.data.objects.get(PREVIEW_NAME)
+    preview = preview_object()
     if preview is not None:
         frames.append(preview.matrix_world)
     local = _centroids(base["out"]["co"], base["out"]["faces"])
@@ -2140,7 +2146,7 @@ def run_update(context, force: bool = False) -> bool:
 
 def _start(context) -> None:
     obj = context.object
-    if obj is not None and obj.type == "MESH" and obj.name != PREVIEW_NAME:
+    if obj is not None and obj.type == "MESH" and not overlay.is_preview(obj):
         state["source"] = obj.name
     state.update(sig=None, dirty=True, changed_at=0.0)
     gs = context.scene.curiomesh_guided
@@ -2170,13 +2176,13 @@ def _poll():
         if gs is None or not gs.enabled:
             return None
         active = context.object
-        if active is not None and active.type == "MESH" and active.name not in (PREVIEW_NAME, state["source"]) and active.mode == "OBJECT":
+        if active is not None and active.type == "MESH" and not overlay.is_preview(active) and active.name != state["source"] and active.mode == "OBJECT":
             state.update(source=active.name, lock=None, sig=None, auto_base=None)
             stop_work()
             ladder.cancel()
             remove_preview()
         source = state_source()
-        preview = bpy.data.objects.get(PREVIEW_NAME)
+        preview = preview_object()
         if source is None or source.mode != "OBJECT" or (preview is not None and preview.mode != "OBJECT"):
             return POLL_SECONDS
         _collect_work(context)
@@ -2282,7 +2288,7 @@ def _world(matrix, arr):
 def _draw_data(source, gs):
     global _SPHERE
     pts = gather(source, gs)
-    preview = bpy.data.objects.get(PREVIEW_NAME)
+    preview = preview_object()
     key = (state["sig"], id(state["res"]), id(state["spot"]), gs.scope, gs.show_cage)
     if state["draw_key"] == key and state["draw"] is not None:
         return state["draw"]
@@ -2374,7 +2380,7 @@ def _draw() -> None:
             gpu.state.line_width_set(2.5)
             shader.uniform_float("color", colors[hv["kind"]])
             batch("LINES", _world(source.matrix_world, _ring(hv["co"], hv["nrm"], hv["r"])).astype(np.float32)).draw(shader)
-            preview = bpy.data.objects.get(PREVIEW_NAME)
+            preview = preview_object()
             if preview is not None:
                 batch("LINES", _world(preview.matrix_world, _ring(hv["co"], hv["nrm"], hv["r"])).astype(np.float32)).draw(shader)
         work = state["work"]
@@ -2384,7 +2390,7 @@ def _draw() -> None:
             gpu.state.depth_test_set("ALWAYS")
             gpu.state.line_width_set(4.0)
             shader.uniform_float("color", (*spot_color[:3], pulse))
-            preview = bpy.data.objects.get(PREVIEW_NAME)
+            preview = preview_object()
             for i in running:
                 if i < len(work["areas"]):
                     p = work["areas"][i]
@@ -2429,7 +2435,7 @@ class _SurfaceTool:
     @classmethod
     def poll(cls, context):
         o = context.object
-        return o is not None and o.type == "MESH" and o.name != PREVIEW_NAME and o.mode == "OBJECT" and context.area is not None and context.area.type == "VIEW_3D"
+        return o is not None and o.type == "MESH" and not overlay.is_preview(o) and o.mode == "OBJECT" and context.area is not None and context.area.type == "VIEW_3D"
 
     def invoke(self, context, event):
         gs = _gs(context)
@@ -2567,7 +2573,7 @@ class CURIOMESH_OT_guided_work(_SurfaceTool, bpy.types.Operator):
 
     def _ray(self, region_, event):
         hit = super()._ray(region_, event)
-        preview = bpy.data.objects.get(PREVIEW_NAME)
+        preview = preview_object()
         if hit is not None or preview is None:
             return hit
         from bpy_extras import view3d_utils
@@ -2806,7 +2812,7 @@ class CURIOMESH_OT_guided_edit_preview(_PreviewOp, bpy.types.Operator):
     bl_options = {"INTERNAL"}
 
     def execute(self, context):
-        preview = bpy.data.objects[PREVIEW_NAME]
+        preview = preview_object()
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         bpy.ops.object.select_all(action="DESELECT")
@@ -2819,7 +2825,7 @@ class CURIOMESH_OT_guided_edit_preview(_PreviewOp, bpy.types.Operator):
 
 
 def _preview_selection():
-    preview = bpy.data.objects[PREVIEW_NAME]
+    preview = preview_object()
     if preview.mode == "EDIT":
         preview.update_from_editmode()
     sel = np.zeros(len(preview.data.polygons), dtype=bool)
@@ -2920,13 +2926,13 @@ class CURIOMESH_OT_guided_frame(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return state["spot"] is not None and bpy.data.objects.get(PREVIEW_NAME) is not None
+        return state["spot"] is not None and preview_object() is not None
 
     def execute(self, context):
         rv3d = getattr(context.space_data, "region_3d", None) or context.region_data
         if rv3d is None:
             return {"CANCELLED"}
-        preview = bpy.data.objects[PREVIEW_NAME]
+        preview = preview_object()
         rv3d.view_location = preview.matrix_world @ Vector(state["spot"]["pos"])
         rv3d.view_distance = max(12.0 * state["L0"] * float(np.mean(preview.matrix_world.to_scale())), 1e-3)
         return {"FINISHED"}
@@ -3394,7 +3400,7 @@ class CURIOMESH_OT_guided_add_shape(bpy.types.Operator):
     def execute(self, context):
         gs = _gs(context)
         source = state_source()
-        preview = bpy.data.objects.get(PREVIEW_NAME)
+        preview = preview_object()
         if self.kind == "SELECTED":
             picked = [o for o in context.selected_objects if o != source and _shape_poll(None, o)]
             if not picked:
@@ -3967,6 +3973,9 @@ def _on_load_post(*_args):
     segments.seglive.add_handlers()  # Blender drops the add-on's other handlers when a file loads
     stop_work()
     remove_preview()  # a preview saved with the file: nothing can apply it after a load
+    overlay.remove_saved_previews()  # the Live and Region ones too (only objects carrying the add-on's mark)
+    live.on_load()
+    region.on_load()
     ladder.cancel()
     segments.reset()
     flowedit.cancel()

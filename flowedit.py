@@ -344,9 +344,8 @@ class _FlowTool:
 
     @classmethod
     def poll(cls, context):
-        guided = _g()
         o = context.object
-        return o is not None and o.type == "MESH" and o.name != guided.PREVIEW_NAME and o.mode == "OBJECT" and context.area is not None and context.area.type == "VIEW_3D"
+        return o is not None and o.type == "MESH" and not overlay.is_preview(o) and o.mode == "OBJECT" and context.area is not None and context.area.type == "VIEW_3D"
 
     def invoke(self, context, event):
         guided = _g()

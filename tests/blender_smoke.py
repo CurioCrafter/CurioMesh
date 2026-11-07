@@ -1124,6 +1124,7 @@ def run_ui_prefs_case(module):
     source.select_set(True)
     ghost = bpy.data.objects.new(region.PREVIEW_NAME, bpy.data.meshes.new("CurioSmoke_GhostMesh"))
     bpy.context.scene.collection.objects.link(ghost)
+    overlay.tag_preview(ghost, overlay.REGION)  # previews are found by the add-on's mark, not by name
     region.state["message"] = "Select faces first"
     _draw_all_panels("previewing")
     region.state["message"] = ""

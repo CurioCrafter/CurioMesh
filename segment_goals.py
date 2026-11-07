@@ -1146,7 +1146,7 @@ def _hit_object(context, region_, event):
     origin = view3d_utils.region_2d_to_origin_3d(region_, context.region_data, point)
     direction = view3d_utils.region_2d_to_vector_3d(region_, context.region_data, point)
     best = None
-    for obj in (bpy.data.objects.get(guided.PREVIEW_NAME), guided.state_source()):
+    for obj in (guided.preview_object(), guided.state_source()):
         if obj is None:
             continue
         inverse = obj.matrix_world.inverted()
