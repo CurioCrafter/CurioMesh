@@ -146,8 +146,9 @@ class AutoFixPass(unittest.TestCase):
         finally:
             sys.modules.pop(spec.name, None)
         site_names = [cls.__name__ for cls, _k in site.plan(set(site.GROUPS))]
-        self.assertNotIn("SeamSnap", site_names)
-        self.assertEqual(site_names, [n for n in names if n != "SeamSnap"])
+        uv_rows = ("SeamSnap", "SeamFit", "BakeSpots")  # A4's row and A3's two rows, all marked
+        self.assertFalse(set(uv_rows) & set(site_names))
+        self.assertEqual(site_names, [n for n in names if n not in uv_rows])
 
     def test_seam_snap_made_by_the_plan_uses_the_last_search(self):
         sa, plan, p, faces = setup()
