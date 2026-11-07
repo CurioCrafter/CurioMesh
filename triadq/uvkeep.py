@@ -527,8 +527,10 @@ class FitStage:
         # per-side transfer: the active layer's lookup first (folds fixed after the split's seam UVs are laid over it),
         # the other layers through the same lookup. A face whose fan triangles want opposite windings (orient 0: folded
         # in 3D, or across a crease with one half leaning into a wall) shows the texture mirrored on part of it under any
-        # one winding; it is cut into its fan triangles, which can each wind their own way, and read again.
+        # one winding; it is cut into its fan triangles, which can each wind their own way, and read again. So is a face
+        # the fold fix leaves folded, and a face with a zero-area fan triangle (closed by `close_flat`).
         name, uv = sa.layers[sa.active]
+        ready = None
         for again in (False, True):
             tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, seams["class"], False, self.use_fast)
             if tr._job is not None:
@@ -543,16 +545,22 @@ class FitStage:
             look = tr.result
             if again:
                 break
-            halve = halve_mask(P, ip, fl, look["orient"])
+            ready = {}
+            yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, ready)
+            if self._stopped:
+                return
+            halve = halve_mask(P, ip, fl, look["orient"]) | still_folded(ip, ready["uv"], ready["expected"])
             if not halve.any():
                 break
+            ready = None
             ip, fl, origin = fan_split(ip, fl, origin, halve)
             added = len(ip) - 1 - len(halve)
             numbers.update(extra_faces=numbers["extra_faces"] + added, faces_halved=int(halve.sum()))
         out = {}
         for i, (nm, luv) in enumerate(sa.layers):
-            got = {}
-            yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+            got = ready if i == sa.active and ready is not None else {}
+            if not got:
+                yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
             if self._stopped:
                 return
             out[i] = close_flat(P, ip, fl, got["uv"], s.texture_px)
@@ -601,6 +609,23 @@ def halve_mask(points, indptr, flat, orient) -> np.ndarray:
     return (fan > 1) & (good > 0) & ((np.asarray(orient) == 0) | (good < fan))
 
 
+def still_folded(indptr, uv, expected) -> np.ndarray:
+    """Per result face of 4 or more corners: True when a fan triangle winds against its expected winding (or has no UV
+    area) after the fold fix."""
+
+    ip = np.asarray(indptr, np.int64)
+    q = np.asarray(uv, np.float64).reshape(-1, 2)
+    x = np.asarray(expected, np.float64)
+    sizes = np.diff(ip)
+    fan = np.maximum(sizes - 2, 0)
+    tri_face = np.repeat(np.arange(len(sizes)), fan)
+    k = np.arange(len(tri_face)) - np.repeat(np.cumsum(fan) - fan, fan) + 1
+    s = ip[tri_face]
+    a, b = q[s + k] - q[s], q[s + k + 1] - q[s]
+    bad = (a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1]) * x[tri_face] <= 0.0
+    return (fan > 1) & (x != 0.0) & (np.bincount(tri_face, bad, len(sizes)) > 0)
+
+
 SLIVER_UV_PX2 = 1e-3  # a fan triangle with twice its UV area below this many texels squared shows nothing (and its winding is rounding)
 
 
@@ -644,18 +669,18 @@ def fan_split(indptr, flat, origin, mask) -> tuple:
 
 
 def _layer_steps(sa: Source, luv, P, ip, fl, look: dict, texture_px: float, use_fast: bool, got: dict):
-    """Generator: one UV layer through the lookup with the fold fix (`uvseams.layer`), polling the faster job when there is one so no slice blocks. Fills got[uv], got[fold]."""
+    """Generator: one UV layer through the lookup with the fold fix (`uvseams.layer`), polling the faster job when there is one so no slice blocks. Fills got[uv], got[expected], got[fold]."""
 
     fast = uvseams.FAST.get("layer") if use_fast else None
     job = fast(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, sa.points) if fast is not None else None
     if job is not None:
         while not job.done():
             yield
-        u, _e, fold = job.result()
+        u, e, fold = job.result()
     else:
-        u, _e, fold = uvseams.layer(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, False, sa.points)
+        u, e, fold = uvseams.layer(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, False, sa.points)
         yield
-    got.update(uv=u, fold=fold)
+    got.update(uv=u, expected=e, fold=fold)
 
 
 def fit_stage(source, src, res, gs, only_transfer: bool = False, use_fast: bool = True):
