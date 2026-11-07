@@ -156,6 +156,11 @@
   4,880".
 - Part records in History are copied (a swap changes them in place), so Ctrl+Z also puts back which try each part card
   shows.
+- Opening a tool on a big result no longer stalls Blender: the holds, edges and mean edge are read without a Python
+  step per face, your original's lookup and its camera pictures are worked out once per original instead of once per
+  tool, and Relax Toward Detail reads your original's bends a chunk at a time.
+- Dragging the ring back to where it started shows the exact result again; Enter used to wait forever there.
+- Smooth Corners puts back the corners of any face it would turn over. Start on a mesh with no faces says so.
 
 ## 0.9.8 - 2026-11-06
 
