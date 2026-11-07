@@ -3985,7 +3985,8 @@ def register() -> None:
     segments.register()
     organize.register()
     flowedit.register()
-    bpy.app.handlers.load_post.append(_on_load_post)
+    if _on_load_post not in bpy.app.handlers.load_post:  # registering twice must not run it twice
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister() -> None:
