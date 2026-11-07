@@ -201,7 +201,7 @@ class AutoFixJob:
             if kept:
                 self._first_step(context)
                 numbers = p.words.split(": ", 1)[1] if ": " in p.words else p.words
-                if not tidylive.commit(context, p.cand, f"Auto Fix: {name}", numbers, push=True):
+                if not tidylive.commit(context, p.cand, f"Auto Fix: {name}", numbers, push=True, trial=ev.trial):
                     kept = False
                     p.reason = "held"
             if kept and getattr(ev.trial, "fitted", None) is not None:  # Hard Edges moves nothing: its pick is the angle

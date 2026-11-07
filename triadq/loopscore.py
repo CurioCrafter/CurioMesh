@@ -69,16 +69,37 @@ def _continuations(topo: Topology) -> dict[int, int]:
     return out
 
 
+def _drain(work):
+    while True:
+        try:
+            next(work)
+        except StopIteration as done:
+            return done.value
+
+
+WIDTH_SLICE = 40  # loops whose widths are read between two yields of `measure_steps`
+WALK_SLICE = 1500  # loop corners walked between two yields of `walk_steps` (about 2 ms)
+
+
 def walk(topo: Topology) -> tuple[list[list[int]], list[bool], np.ndarray]:
     """(loops as vertex lists, closed per loop, loop id per edge of `topo.edges`). A closed loop lists its start once."""
+    return _drain(walk_steps(topo))
+
+
+def walk_steps(topo: Topology):
+    """`walk` as a generator: yields (nothing) every `WALK_SLICE` corners walked. Returns what `walk` returns."""
     n = len(topo.points)
     go = _continuations(topo)
     edge_id = {int(k): i for i, k in enumerate(topo.edges.tolist())}
     label = np.full(len(topo.edges), -1, dtype=np.int64)
     loops, closed = [], []
+    walked = 0
     for e in range(len(topo.edges)):
         if label[e] >= 0:
             continue
+        if walked >= WALK_SLICE:
+            walked = 0
+            yield
         a0, b0 = int(topo.edge_a[e]), int(topo.edge_b[e])
         ahead = [a0, b0]
         ring = False
@@ -104,6 +125,7 @@ def walk(topo: Topology) -> tuple[list[list[int]], list[bool], np.ndarray]:
                     break
             ahead = behind[:1:-1] + ahead
         k = len(loops)
+        walked += len(ahead)
         verts = ahead + ahead[:1] if ring else ahead
         for u, v in zip(verts[:-1], verts[1:]):
             label[edge_id[min(u, v) * n + max(u, v)]] = k
@@ -182,14 +204,22 @@ def symmetry(points: np.ndarray, valence: np.ndarray, used: np.ndarray, length: 
 
 def measure(co, faces, plane=None, with_symmetry: bool = True) -> dict:
     """The loop numbers of a mesh (see the module text). `plane`: (axis, offset) of a known mirror."""
+    return _drain(measure_steps(co, faces, plane, with_symmetry))
+
+
+def measure_steps(co, faces, plane=None, with_symmetry: bool = True):
+    """`measure` as a generator: yields (nothing) between its pieces and inside the loop walk, each a few milliseconds.
+    Returns the same dict. (The symmetry check, when asked for, is one piece.)"""
     topo = Topology(co, faces)
+    yield
     out = {"loops": 0}
     if not len(topo.quads):
         return out
     p, vn = topo.points, topo.vertex_normal
-    loops, closed, label = walk(topo)
+    loops, closed, label = yield from walk_steps(topo)
     length = np.linalg.norm(p[topo.edge_a] - p[topo.edge_b], axis=1)
     mean_edge = float(length.mean())
+    yield
     # Turn at each loop corner, in the tangent plane of the corner.
     prev, mid, nxt, owner, seq = [], [], [], [], []
     for k, (vs, ring) in enumerate(zip(loops, closed)):
@@ -220,6 +250,8 @@ def measure(co, faces, plane=None, with_symmetry: bool = True) -> dict:
     # Width along loops: the edge lengths of each loop.
     widths, jumps, pairs = [], 0, 0
     for k, (vs, ring) in enumerate(zip(loops, closed)):
+        if k % WIDTH_SLICE == WIDTH_SLICE - 1:
+            yield
         chain = vs + vs[:1] if ring else vs
         if len(chain) < 5:
             continue
@@ -229,6 +261,7 @@ def measure(co, faces, plane=None, with_symmetry: bool = True) -> dict:
         jumps += int((ratio > 1.5).sum())
         pairs += len(ratio)
     width_cv = _weighted_median(widths)
+    yield
     # Spacing between neighbouring loops: the rungs of the quads between them.
     q_edges = topo.edge_of.reshape(-1, 4)
     lab, ln = label[q_edges], length[q_edges]
@@ -247,6 +280,7 @@ def measure(co, faces, plane=None, with_symmetry: bool = True) -> dict:
     cv = np.sqrt(np.maximum(s2 / np.maximum(cnt, 1) - mean * mean, 0.0)) / np.maximum(mean, 1e-30)
     long = cnt >= 6  # three quads or more between the two loops
     spacing_cv = _weighted_median(list(zip(cv[long].tolist(), cnt[long].tolist())))
+    yield
     # Quad shape.
     qp = p[topo.quads]
     out_e, back_e = np.roll(qp, -1, axis=1) - qp, np.roll(qp, 1, axis=1) - qp
@@ -255,6 +289,7 @@ def measure(co, faces, plane=None, with_symmetry: bool = True) -> dict:
     side = np.linalg.norm(out_e, axis=2)
     s_a, s_b = side[:, 0] + side[:, 2], side[:, 1] + side[:, 3]
     aspect = np.maximum(s_a, s_b) / np.maximum(np.minimum(s_a, s_b), 1e-30)
+    yield
     # Poles and loop ends.
     gaps = _pole_gaps(topo)
     sizes = np.asarray([len(vs) if ring else len(vs) - 1 for vs, ring in zip(loops, closed)])
@@ -288,6 +323,7 @@ def measure(co, faces, plane=None, with_symmetry: bool = True) -> dict:
         worst=worst.tolist(),
     )
     if with_symmetry:
+        yield
         out["symmetry"] = symmetry(p, topo.valence, topo.used, mean_edge, plane)
     return out
 
@@ -322,7 +358,12 @@ def score(m: dict) -> dict:
 
 def loop_quality(co, faces, plane=None, with_symmetry: bool = False) -> dict:
     """`measure` and `score` in one: {"quality", "parts", "numbers"}."""
-    m = measure(co, faces, plane, with_symmetry)
+    return _drain(loop_quality_steps(co, faces, plane, with_symmetry))
+
+
+def loop_quality_steps(co, faces, plane=None, with_symmetry: bool = False):
+    """`loop_quality` as a generator (see `measure_steps`)."""
+    m = yield from measure_steps(co, faces, plane, with_symmetry)
     return dict(score(m), numbers=m)
 
 

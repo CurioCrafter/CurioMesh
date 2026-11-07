@@ -206,13 +206,26 @@ def _class_row(topo: Topology, chosen, angles, aspect, flow, anisotropy, short, 
 
 def measure(vertices, faces) -> dict:
     """Numbers for one mesh, overall (`all`) and per local shape class."""
+    work = measure_steps(vertices, faces)
+    while True:
+        try:
+            next(work)
+        except StopIteration as done:
+            return done.value
+
+
+def measure_steps(vertices, faces):
+    """`measure` as a generator: yields (nothing) between its pieces, so a caller can keep slices to a few milliseconds.
+    Returns the same dict."""
 
     topo = Topology(vertices, faces)
+    yield
     if not len(topo.quads):
         return {"quads": 0, "tris": topo.tris, "ngons": topo.ngons, "classes": {}}
     k1, k2, flow = topo.shape()
     dihedral = topo.dihedral()
     labels = topo.classes(k1, k2, dihedral)
+    yield
     angles = topo.corner_angles()
     p, q = topo.points, topo.quads
     lengths = np.linalg.norm(p[np.roll(q, -1, axis=1)] - p[q], axis=2)
@@ -220,6 +233,7 @@ def measure(vertices, faces) -> dict:
     aspect = np.maximum(across, along) / np.maximum(np.minimum(across, along), 1e-30)
     anisotropy = np.abs(k1 - k2)
     anisotropy = np.where(anisotropy > 0.05, anisotropy, 0.0)
+    yield
     loop_size = topo.loops()
     per_quad_edges = topo.edge_of.reshape(-1, 4)
     short = (loop_size[per_quad_edges] <= 3).mean(axis=1)
@@ -228,10 +242,16 @@ def measure(vertices, faces) -> dict:
     total = np.bincount(fa, jump, len(q)) + np.bincount(fb, jump, len(q))
     uses = np.bincount(fa, minlength=len(q)) + np.bincount(fb, minlength=len(q))
     neighbour_ratio = total / np.maximum(uses, 1)
+    yield
     codes = topo.quad_codes()
+    yield
     args = (topo, angles, aspect, flow, anisotropy, short, neighbour_ratio, codes)
     row = _class_row(args[0], np.ones(len(q), dtype=bool), *args[1:])
-    classes = {name: _class_row(args[0], labels == i, *args[1:]) for i, name in enumerate(CLASSES) if (labels == i).any()}
+    classes = {}
+    for i, name in enumerate(CLASSES):
+        if (labels == i).any():
+            classes[name] = _class_row(args[0], labels == i, *args[1:])
+            yield
     # Whether quads shrink where the surface turns. Only curved quads: flat ones say nothing either way.
     curved = np.maximum(np.abs(k1), np.abs(k2)) / topo.size
     mask = (curved > 0.0) & (labels != CLASSES.index("flat")) & (topo.area > 0.0)
