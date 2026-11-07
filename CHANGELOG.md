@@ -78,6 +78,90 @@
   Attempts, Grow and Suggestions. Hard Edge Angle goes to 180 degrees in both places (it was 150 in one, 170 in the
   other).
 
+### Tidy Tools
+- **You can always go back.** Ctrl+Z and Ctrl+Shift+Z now also take back and bring back what CurioMesh keeps outside
+  Blender: each Tidy Up slider move, switch, Again, Keep Tidying pass and Undo Pass, each Quad Size and Rows move, a
+  new result, and each tool you keep is one step. A **History** list under the result shows every step with its
+  numbers; click one to go back to it (Ctrl+Z takes the jump back again). Steps keep references, not copies; only
+  when the computer runs short of memory are the oldest let go, and History says how many.
+- **Look First**, the preview every Tidy Tool shares: the change is drawn on the mesh before anything is kept (teal
+  new edges over the old wire, a purple-to-yellow tint for how far corners move, arrows, poles that go or come, a red
+  X where something was held back), with one ring near the middle of the view to drag for strength and a card with
+  up to three numbers, Apply (Enter), Cancel (Esc or right-click) and After / Before (B). Dragging shows a blend at
+  once and the exact result when the mouse rests; big areas get a quick preview first. The result is not touched
+  until Apply, which is one Undo step. Most Detail Loss holds a tool back ("held at 0.45").
+- **Tools** section between Adjust and Fix: Work on (Selection, Part, Whole Result), five groups that show only once
+  they have a tool, and a Last line with Again and Undo. While a tool is open the Adjust sliders wait.
+- Smooth Corners is the small example tool that proves the system (shown with Blender's Developer Extras on).
+- **Relax tools**, the first real tools in the Relax group, each with the Look First preview, Again, Keep Going (F9)
+  and one Undo step per Apply:
+  - **Source Relax** evens out the spacing of the corners by sliding them on your original mesh, so nothing shrinks.
+    The first-time button "Even out the roughest patch" opens it on the roughest part, framed in the view.
+  - **Keep Lines Relax** does the same while hard edges, the outline, UV seams, part borders and guides stay put;
+    corners on them only slide along them. One chip per kind on the card turns it off.
+  - **Square Up** turns slanted quads toward square corners and keeps each quad's size and place in its rows.
+  - **Relax Toward Detail** moves corners so quads get smaller where your mesh bends and bigger where it is flat, with
+    the same faces. Its ring goes from Flat to Detail; the preview tints quads blue where they grew, orange where they
+    shrank.
+- **Even the Band** (Loops & Strips): click a strip, and it and the strips beside it, out to the next pole or border,
+  get the same width. Points slide only along the lines that run across the strips, so no quad turns; the first and
+  last strip ease in so the band's edge does not kink. The card shows the width spread before and after.
+- **Cancel Pole Pair** (Poles): click a pole (dots show every pole with its edge count), then one of the numbered poles
+  of the other kind near it; edges are spun inside their quads to walk the two together until both have four edges,
+  with the same face count. Each spin is relaxed and checked like Tidy Up's; if no walk works, nothing changes and the
+  card says to try the next one. Esc goes back a click. Reach, Steps and Tries in the redo panel go as high as you like
+  (higher can take longer). Not on mirrored results yet.
+- **Open Up Poles** (Poles): the edges round every pole in the area turn toward even angles and equal lengths, held on
+  your original mesh, and the rings round them ease the change out. It keeps going round by round while the poles
+  still open up, so Again only finds more when something changed. The card shows the narrowest angle at the poles
+  before and after.
+- Tools that need a click first (a strip, a pole) wait for it with the ask in the header and on the card; the thing
+  under the mouse lights white and the picked one orange. Again opens the tool for a new click.
+- **Preview Tidy** (Cleanup): a report of the problems found in the area, one line each, only those found: corners
+  with two edges, doublets, triangle pairs that make quads, slivers and faces facing in. Each line has its count, how
+  much its fix would change the look, **Show** (the spots get a dashed ring and the view steps from one to the next)
+  and **Fix These** (its ghost shows; Enter keeps it). Each kept line is its own Ctrl+Z step and the list refreshes
+  and stays open for the next; Esc closes it. Nothing changes the outline, and no faces are joined across a
+  material or UV border.
+- **Seal the Middle** (Cleanup): puts every corner near the mirror plane onto it and merges the doubled ones, then
+  says what it did ("14 seam vertices put on the plane, 3 merged, 0 gaps left"). The plane shows as a pink grid with
+  arrows for the moves, and gaps or faces still crossing it get a red X. Works on a mirrored result, or on one whose
+  plane CurioMesh can find. One Ctrl+Z takes it back.
+- Look First can now draw dashed Found rings, pink Kept lines and a list of lines on the card, and a tool can stay
+  open after Enter. A mirrored result's tools now project onto the whole original, not one half of it, and blockout
+  results no longer stop a tool from opening.
+- **True Up Edges** (Hard Surface): finds the hard edges of the result and lays each on the crease of your original
+  mesh, straight ones on one line and curved ones smooth, evenly spaced, with the quads beside them following. Only
+  edges that end up nearer their crease are changed; the card shows how far off the creases they were and are.
+- **Press Panels Flat** (Hard Surface): finds the flat panels of your original mesh under the result and lays each
+  exactly flat; corners shared by two or three panels go to the point on all of them, so panel borders become clean
+  lines. The kept hard edges and panel borders are drawn in pink in the preview.
+- **Smaller and Bigger Quads, Redo This Spot, Keep Original Here and Put Reduced Back** now open Look First: the
+  part's new faces are drawn teal over the old ones with "this part 412 -> 655 faces", the face count, poles and the
+  look change on the card, and Enter keeps it (Keep Original no longer asks first: the card shows the cost). Each is
+  one Ctrl+Z step and one History entry, and so is every part try you switch to and every part redone in the
+  background when it finishes. Again on the Last line makes the part one step smaller (or bigger) again from the
+  result as it is now, with no end. A size not worked out yet is still redone in the background, without a preview.
+- **Detail Markers** (Ball + and Ball -) are placed by clicking your mesh instead of at the 3D cursor. Inside the
+  ball's ring a sample grid of quads at the size it asks for lies on the surface and follows the small ring (strength,
+  new: each ball has its own) and the big ring's edge (reach) live, with "quads here about 2.0x smaller, about +340
+  faces" on the card. Enter adds the ball; Esc adds nothing. F9 and scripts still put it at the 3D cursor.
+- **Hard Edges**: the eye button next to Hard Edge Angle (and Hard Edges in the Tools section's Hard Surface group)
+  shows in pink which edges Apply will mark sharp or hold, while you drag the angle. Enter keeps the angle; nothing on
+  the result moves. One Ctrl+Z step; Again opens it on the angle you kept.
+- **Fine-tune Tweak sliders, Mirror and Symmetrize** are each a History step that the search they start fills in, so
+  one Ctrl+Z goes back to the setting and the result before it together, and undoing no longer starts the search
+  again. A Detail Marker you add is a step the same way.
+- **Quad Size and Rows**: while the slider moves and for 1.5 s after, the HUD's bottom line says "faces 6,210 ->
+  4,880".
+- Part records in History are copied (a swap changes them in place), so Ctrl+Z also puts back which try each part card
+  shows.
+- Opening a tool on a big result no longer stalls Blender: the holds, edges and mean edge are read without a Python
+  step per face, your original's lookup and its camera pictures are worked out once per original instead of once per
+  tool, and Relax Toward Detail reads your original's bends a chunk at a time.
+- Dragging the ring back to where it started shows the exact result again; Enter used to wait forever there.
+- Smooth Corners puts back the corners of any face it would turn over. Start on a mesh with no faces says so.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

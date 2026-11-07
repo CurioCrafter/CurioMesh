@@ -22,7 +22,7 @@ from .operators import (
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
-from . import batch, fix_select, game_export, guided, live, overlay, panel, region
+from . import batch, fix_select, game_export, guided, history, live, overlay, panel, region, tidytools
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
 D = overlay.PREF_DEFAULTS
@@ -100,6 +100,11 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         name="Pro Tab",
         description="Shows the CurioMesh Pro tab: every setting and the classic tools. You never need it for a good result",
         default=D["pro_mode"],
+    )
+    tools_tried: bpy.props.BoolProperty(
+        name="Tools Tried",
+        description="Off until you keep a change with a Tidy Tool or hide the first-time button. While off, Tools shows its first-time button",
+        default=False,
     )
     flow_editor: bpy.props.BoolProperty(
         name="Flow Editor (Experimental)",
@@ -290,6 +295,8 @@ def register():
     live.register()
     region.register()
     guided.register()
+    history.register()
+    tidytools.register()
     fix_select.register()
     game_export.register()
     panel.register()
@@ -304,6 +311,8 @@ def unregister():
     panel.unregister()
     game_export.unregister()
     fix_select.unregister()
+    tidytools.unregister()
+    history.unregister()
     guided.unregister()
     region.unregister()
     live.unregister()

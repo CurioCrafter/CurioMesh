@@ -68,31 +68,59 @@ def _edges(faces):
     return out
 
 
+def half_edges(faces):
+    """(face of each corner, corner, next corner) over every face, as arrays in face order, with no per-face Python,
+    so a big result opens a tool without a stall."""
+    from itertools import chain
+
+    sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
+    if not len(faces) or not sizes.sum():
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty, empty
+    a = np.fromiter(chain.from_iterable(faces), dtype=np.int64, count=int(sizes.sum()))
+    fid = np.repeat(np.arange(len(faces), dtype=np.int64), sizes)
+    starts = np.cumsum(sizes) - sizes
+    nxt = np.arange(1, len(a) + 1)
+    nxt[starts[sizes > 0] + sizes[sizes > 0] - 1] = starts[sizes > 0]  # each face's last corner goes round to its first
+    return fid, a, a[nxt]
+
+
 def _normals(co: np.ndarray, quads: np.ndarray) -> np.ndarray:
     p = co[quads]
     return _unit(np.cross(p[:, 2] - p[:, 0], p[:, 3] - p[:, 1]))
 
 
-def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None) -> np.ndarray:
-    """Vertices that must not move: on a border (unless on the mirror plane), on a hard edge, or on a face that isn't a quad."""
+def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None, half=None) -> np.ndarray:
+    """Vertices that must not move: on a border (unless on the mirror plane), on a hard edge, or on a face that isn't a quad.
+    `half`: `half_edges(faces)` when the caller has it already."""
     co = np.asarray(co, dtype=np.float64)
     out = np.zeros(len(co), dtype=bool)
-    for f in faces:
-        if len(f) != 4:
-            out[list(f)] = True
-    normal = {}
-    for i, f in enumerate(faces):
-        p = co[list(f)]
-        n = np.cross(p[2] - p[0], p[-1] - p[1]) if len(f) >= 4 else np.cross(p[1] - p[0], p[2] - p[0])
-        normal[i] = n / max(float(np.linalg.norm(n)), 1e-30)
+    fid, a, b = half_edges(faces) if half is None else half
+    if not len(a):
+        return out
+    sizes = np.bincount(fid, minlength=len(faces))
+    out[a[sizes[fid] != 4]] = True
+    # one normal per face from its diagonals (for a triangle this is its plain normal), with no per-face Python
+    starts = np.cumsum(sizes) - sizes
+    ok = sizes >= 3
+    normal = np.zeros((len(faces), 3))
+    s0 = starts[ok]
+    normal[ok] = np.cross(co[a[s0 + 2]] - co[a[s0]], co[a[s0 + sizes[ok] - 1]] - co[a[s0 + 1]])
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
     on_plane = np.zeros(len(co), dtype=bool) if plane is None else on_mirror(co, *plane)
     limit = np.cos(np.radians(sharp_deg))
-    for (a, b), users in _edges(faces).items():
-        if len(users) != 2:
-            if not (on_plane[a] and on_plane[b]):
-                out[a] = out[b] = True
-        elif float(normal[users[0]] @ normal[users[1]]) < limit:
-            out[a] = out[b] = True
+    lo, hi = np.minimum(a, b), np.maximum(a, b)
+    order = np.lexsort((fid, hi, lo))
+    lo, hi, fid = lo[order], hi[order], fid[order]
+    start = np.flatnonzero(np.r_[True, (lo[1:] != lo[:-1]) | (hi[1:] != hi[:-1])])
+    users = np.diff(np.r_[start, len(lo)])
+    el, eh = lo[start], hi[start]
+    border = (users != 2) & ~(on_plane[el] & on_plane[eh])
+    two = np.flatnonzero(users == 2)
+    sharp = two[(normal[fid[start[two]]] * normal[fid[start[two] + 1]]).sum(axis=1) < limit]
+    for ids in (np.flatnonzero(border), sharp):
+        out[el[ids]] = True
+        out[eh[ids]] = True
     return out
 
 

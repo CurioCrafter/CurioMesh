@@ -769,12 +769,16 @@ class GoalJob(view.PartJob):
         self.fraction = 1.0
 
 
-def start_goal(context, pieces) -> bool:
+def start_goal(context, pieces, name: str = "Redo Part") -> bool:
+    from . import history
+
     guided = _g()
     if guided.state["auto_base"] is None or not pieces:
         return False
+    history.before(context)  # the result before the redo is the step Ctrl+Z goes back to
     guided.stop_work()
     runner = GoalJob(context, pieces)
+    runner.step_name = name  # the History entry when it finishes
     guided.state["work"] = {"key": guided.state["auto_base"].get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     guided.state["message"] = runner.status()
     if not bpy.app.timers.is_registered(guided._auto_slice):
