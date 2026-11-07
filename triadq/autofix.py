@@ -420,6 +420,7 @@ PASSES = (  # AUTO_FIX.md 3.2: (group switch, module, class, kinds or None for a
     ("leftovers", "tidytools", "PreviewTidy", ("slivers",)),
 )
 GROUPS = ("leftovers", "seam", "poles", "patches", "hard", "rows", "shape")
+GROUPS = GROUPS + ("uv",)  # main-only: uv
 
 
 def plan(on) -> list:
@@ -427,7 +428,6 @@ def plan(on) -> list:
     built yet, is manual only, or cannot find spots yet is left out; it joins the day it can."""
     import importlib
 
-    on = set(on) | ({"uv"} if on else set())  # main-only: uv
     out = []
     for group, module, name, kinds in PASSES:
         if group not in on:

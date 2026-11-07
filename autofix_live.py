@@ -26,7 +26,7 @@ from .triadq import trial as T
 GAP = 0.01  # seconds between timer ticks while working: the interface stays usable
 REDRAW = 0.25  # seconds between panel redraws while working
 WIDTH = 36
-GROUP_TEXT = {  # the seven ticks of the popover: (label, what it fixes), AUTO_FIX.md 5.1
+GROUP_TEXT = {  # the ticks of the popover: (label, what it fixes), AUTO_FIX.md 5.1
     "leftovers": ("Leftovers", "faces facing in, two-edge corners, triangle pairs, thin quads"),
     "seam": ("Mirror seam", "puts the middle back on the mirror plane"),
     "poles": ("Poles", "removes stray pairs and short dead-end strips"),
@@ -35,6 +35,7 @@ GROUP_TEXT = {  # the seven ticks of the popover: (label, what it fixes), AUTO_F
     "rows": ("Rows", "wiggly strips, uneven widths, bunched bands"),
     "shape": ("Quad shape", "pinched poles, slanted quads, sizes, lumpy spacing"),
 }
+GROUP_TEXT["uv"] = ("UV seams", "moves edges onto your mesh's UV seams")  # main-only: uv
 GROUP_TIPS = {
     "patches": "Redraws small patches full of poles as clean rows of quads. Changes the faces there; off keeps the faces as the search made them",
 }
@@ -59,6 +60,7 @@ class CURIOMESH_PG_autofix(bpy.types.PropertyGroup):
     hard: bpy.props.BoolProperty(name="Hard edges", description="Straightens wavy hard edges, moves edges back onto the crease and presses bumpy flat panels flat", default=True)
     rows: bpy.props.BoolProperty(name="Rows", description="Straightens wiggly strips, evens uneven strip widths and bunched bands", default=True)
     shape: bpy.props.BoolProperty(name="Quad shape", description="Opens up pinched poles and evens slanted quads, sizes and lumpy spacing", default=True)
+    uv: bpy.props.BoolProperty(name="UV seams", description="Moves edges onto the UV seams of your mesh where the look allows", default=True)  # main-only: uv
     seen: bpy.props.BoolProperty(name="Seen", description="The first-time note under the Auto Fix result was read", default=False, options={"HIDDEN"})
     open: bpy.props.BoolProperty(name="Details", description="Show what each fix did", default=False)
 
