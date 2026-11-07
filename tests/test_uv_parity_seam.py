@@ -78,8 +78,11 @@ def crease():
     for j in range(3):
         for k in range(1, 3):
             pts.append((4.0, float(j), float(k)))
-    fid = lambda i, j: j * 5 + i
-    wid = lambda k, j: fid(4, j) if k == 0 else 15 + j * 2 + (k - 1)
+    def fid(i, j):
+        return j * 5 + i
+
+    def wid(k, j):
+        return fid(4, j) if k == 0 else 15 + j * 2 + (k - 1)
     for j in range(2):
         for i in range(4):
             ids = (fid(i, j), fid(i + 1, j), fid(i + 1, j + 1), fid(i, j + 1))

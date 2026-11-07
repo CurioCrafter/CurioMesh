@@ -1051,7 +1051,8 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
         for f in ball:
             if _has_area(src, f):
                 wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, f))
-                w = _facing(nt, src.normal[f], scale_t + _rounding_scale([tuple(src.P[v]) for v in src.flat[int(src.indptr[f]):int(src.indptr[f + 1])]])) * wind * ref_wind
+                corners = [tuple(src.P[v]) for v in src.flat[int(src.indptr[f]):int(src.indptr[f + 1])]]
+                w = _facing(nt, src.normal[f], scale_t + _rounding_scale(corners)) * wind * ref_wind
                 allowed |= 3 if wind == 0.0 else (1 if w > 0.0 else (2 if w < 0.0 else 0))
         if allowed:
             common &= allowed
