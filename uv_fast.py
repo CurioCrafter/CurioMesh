@@ -47,14 +47,27 @@ class _DrawJob:
     def stop(self) -> None:
         self._job.stop()
 
+    # Cells copied per slice: about 2 ms (two 4 MB copies), so a large picture never holds the caller's thread.
+    CELLS_PER_SLICE = 1 << 20
+
     def result(self):
+        """Generator: copies the pictures a slice at a time (yields between slices); returns (faces, depths)."""
+
         self._job.result()
         import numpy as np
 
         n = self._pictures.frame()[0]
         count = int(self._pictures.drawn)
-        faces = [self._pictures.face(k).reshape(n, n) for k in range(count)]
-        depths = [self._pictures.depth(k).astype(np.float32).reshape(n, n) for k in range(count)]
+        faces, depths = [], []
+        for k in range(count):
+            face, depth = np.empty(n * n, np.int32), np.empty(n * n, np.float32)
+            for lo in range(0, n * n, self.CELLS_PER_SLICE):
+                hi = min(n * n, lo + self.CELLS_PER_SLICE)
+                face[lo:hi] = self._pictures.face_cells(k, lo, hi)
+                depth[lo:hi] = self._pictures.depth_cells(k, lo, hi)
+                yield
+            faces.append(face.reshape(n, n))
+            depths.append(depth.reshape(n, n))
         return faces, depths
 
 

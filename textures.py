@@ -10,6 +10,7 @@ import bpy
 import numpy as np
 
 from .triadq import texsets
+from .triadq import uvbake  # main-only: uv
 from .triadq.uvs import is_see_through, uv_overlap
 
 BAKE_LAYER = "CurioMesh_Bake"
@@ -19,6 +20,7 @@ MOST_OVERLAP = 0.01  # share of texels a UV map may reuse and still hold a bake
 
 def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02) -> None:
     """Unwrap a mesh with no UVs. With new_layer, always unwrap, into a new layer that becomes the active one."""
+    if uvbake.ensure_target_uvs(obj, method, new_layer, island_margin): return  # main-only: uv
     if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
         return
     if new_layer:
@@ -212,7 +214,7 @@ def bake_detail(
     """
     mesh = target_obj.data
     glass = {i: m for i, m in enumerate(mesh.materials) if with_color and is_see_through(m)}
-    margin = max(4, int(resolution) // 128)  # padding that survives the texture's smaller mip levels
+    margin = uvbake.gap_px(resolution)  # main-only: uv
     if new_uvs or not _uv_layer_can_hold_bake(mesh):
         while True:
             ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
@@ -230,6 +232,7 @@ def bake_detail(
         source_obj, target_obj, maps=("NORMAL", "COLOR") if with_color else ("NORMAL",),
         resolution=resolution, margin=margin, cage=cage, ray_limit=3.0 * cage,
     )
+    uvbake.after_bake(target_obj, images)  # main-only: uv
     normal = images[0]
     if with_color:
         private = [m for m in mesh.materials if m is not None]
@@ -471,7 +474,7 @@ def bake_selected_to_active(
     maps: Iterable[str],
     resolution: int = 2048,
     margin: int = 8,
-    uv_method: str = "SMART",
+    uv_method: str = "CURIO",  # main-only: uv
     cage: float = 0.04,
     ray_limit: float = 0.0,
 ) -> list[bpy.types.Image]:
