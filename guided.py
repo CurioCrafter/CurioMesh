@@ -1304,7 +1304,7 @@ def _restore_kept(context, source) -> None:
 class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
     bl_idname = "curiomesh.teach_remember"
     bl_label = "Remember This Fix"
-    bl_description = "Remember the area you fixed by hand on the preview, and offer the same fix where the pattern shows up again. Kept on this PC only; nothing is uploaded"
+    bl_description = "Remember the area you fixed by hand on the preview, and offer the same fix where the pattern shows up again. Kept on this mesh (custom property curiomesh_kept, saved in the .blend) and in the add-on's user folder; nothing is uploaded"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -3633,7 +3633,7 @@ class CURIOMESH_OT_guided_edit_guide(bpy.types.Operator):
 class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
     bl_idname = "curiomesh.guided_paint_density"
     bl_label = "Paint"
-    bl_description = "Go to Weight Paint on the mesh with a vertex group for the markers. Paint red where you want more (or fewer) quads, then leave Weight Paint (Tab) and press Start"
+    bl_description = "Go to Weight Paint on the mesh with a vertex group for the markers. Paint red where you want more (or fewer) quads, then leave Weight Paint (Tab) and press Start. Turns on unified weight in the tool settings and sets the brush weight to 1"
     bl_options = {"REGISTER", "UNDO"}
 
     less: bpy.props.BoolProperty(name="Less Detail", description="On: bigger quads there (Less Detail). Off: smaller quads there (More Detail)", default=False, options={"SKIP_SAVE"})
@@ -3641,8 +3641,8 @@ class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.less:
-            return "Weight Paint the Less Detail group: red areas get bigger quads, so the faces go elsewhere. Leave Weight Paint (Tab) and press Start"
-        return "Weight Paint the More Detail group: red areas keep more, smaller quads at every Quad Size. Leave Weight Paint (Tab) and press Start"
+            return "Weight Paint the Less Detail group: red areas get bigger quads, so the faces go elsewhere. Leave Weight Paint (Tab) and press Start. Turns on unified weight in the tool settings and sets the brush weight to 1"
+        return "Weight Paint the More Detail group: red areas keep more, smaller quads at every Quad Size. Leave Weight Paint (Tab) and press Start. Turns on unified weight in the tool settings and sets the brush weight to 1"
 
     @classmethod
     def poll(cls, context):
