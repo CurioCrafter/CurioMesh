@@ -231,7 +231,7 @@ def _tick():
         if now != fe["sig"]:
             request(context)
     fe["batch"] = None
-    return GAP
+    return GAP if fe["job"] is not None or (gs is not None and gs.flow_live) else None  # idle and not Live: the timer ends (request starts it again)
 
 
 # --------------------------------------------------------------------------- creases of your mesh (for Draw)
@@ -720,4 +720,6 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_handles.pop(), "WINDOW")
         except Exception:
             pass
+    if bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.unregister(_tick)
     cancel()
