@@ -207,6 +207,11 @@ def returned(folder, part: int, default_mat: int = 0):
 # --------------------------------------------------------------------------- checks
 
 
+def _label(part) -> str:
+    """The name the panel shows for part id `part` (ids count from 0, names from 1)."""
+    return f"Part {part + 1}" if isinstance(part, int) else "The part"
+
+
 def _tolerance(size: float, border: np.ndarray) -> float:
     # the files hold float32: far from the origin its rounding is bigger than a share of the size
     reach = float(np.abs(border).max()) if len(border) else 0.0
@@ -226,15 +231,15 @@ def match_border(points, faces, border_points, size: float, part=None):
     tol = _tolerance(size, every)
     loops, pinched = boundary_loops(faces, range(len(faces)))
     if pinched:
-        raise BorderMoved(f"Part {part}: the returned border touches itself at {len(pinched)} vertex(es)", details={"part": part, "points": points[pinched[:5]].tolist()})
+        raise BorderMoved(f"{_label(part)}: the returned border touches itself at {len(pinched)} vertex(es)", details={"part": part, "points": points[pinched[:5]].tolist()})
     if not stored:
         if loops:
-            raise BorderMoved(f"Part {part} had no border, the returned one has {len(loops)} open loop(s)", details={"part": part, "loops": len(loops)})
+            raise BorderMoved(f"{_label(part)} had no border, the returned one has {len(loops)} open loop(s)", details={"part": part, "loops": len(loops)})
         return points, list(faces)
     on_border = np.asarray([v for loop in loops for v in loop], dtype=np.int64)
     loop_of = {v: (k, i) for k, loop in enumerate(loops) for i, v in enumerate(loop)}
     if not len(on_border):
-        raise BorderMoved(f"Part {part}: the returned part has no open border; its border has to stay where it was", details={"part": part, "loop": 0, "point": 0})
+        raise BorderMoved(f"{_label(part)}: the returned part has no open border; its border has to stay where it was", details={"part": part, "loop": 0, "point": 0})
     # ponytail: brute-force distances, border x border; a k-d tree if parts with tens of thousands of border points show up
     matched, owner = [], {}
     for k, loop in enumerate(stored):
@@ -245,31 +250,31 @@ def match_border(points, faces, border_points, size: float, part=None):
             where = {"part": part, "loop": k, "point": i, "at": p.tolist()}
             if len(near) != 1:
                 if not len(near):
-                    raise BorderMoved(f"Part {part}: border point {i} of loop {k + 1} moved {float(dist.min()):.3g}", details=dict(where, off=float(dist.min())))
-                raise BorderMoved(f"Part {part}: border point {i} of loop {k + 1} is there {len(near)} times", details=dict(where, off=0.0, copies=int(len(near))))
+                    raise BorderMoved(f"{_label(part)}: border point {i} of loop {k + 1} moved {float(dist.min()):.3g}", details=dict(where, off=float(dist.min())))
+                raise BorderMoved(f"{_label(part)}: border point {i} of loop {k + 1} is there {len(near)} times", details=dict(where, off=0.0, copies=int(len(near))))
             v = int(on_border[near[0]])
             if v in owner:
-                raise BorderMoved(f"Part {part}: border points {owner[v][1]} and {i} land on the same returned vertex", details=dict(where, off=0.0))
+                raise BorderMoved(f"{_label(part)}: border points {owner[v][1]} and {i} land on the same returned vertex", details=dict(where, off=0.0))
             owner[v] = (k, i)
             found.append(v)
         matched.append(found)
     extra = [v for v in on_border.tolist() if v not in owner]
     if extra:
-        raise BorderMoved(f"Part {part}: {len(extra)} returned vertex(es) on the border were not in the exported border", details={"part": part, "loop": loop_of[extra[0]][0], "point": None, "extra": points[extra[:5]].tolist(), "off": None})
+        raise BorderMoved(f"{_label(part)}: {len(extra)} returned vertex(es) on the border were not in the exported border", details={"part": part, "loop": loop_of[extra[0]][0], "point": None, "extra": points[extra[:5]].tolist(), "off": None})
     turned = []
     for k, found in enumerate(matched):
         ring = loops[loop_of[found[0]][0]]
         if len(ring) != len(found):
-            raise BorderMoved(f"Part {part}: loop {k + 1} is split or joined with another loop", details={"part": part, "loop": k, "point": 0, "off": 0.0})
+            raise BorderMoved(f"{_label(part)}: loop {k + 1} is split or joined with another loop", details={"part": part, "loop": k, "point": 0, "off": 0.0})
         start = ring.index(found[0])
         forward = [ring[(start + i) % len(ring)] for i in range(len(ring))]
         backward = [ring[(start - i) % len(ring)] for i in range(len(ring))]
         if found not in (forward, backward):
             bad = next(i for i, (a, b) in enumerate(zip(found, forward if found[1] == forward[1] else backward)) if a != b)
-            raise BorderMoved(f"Part {part}: loop {k + 1} visits its points in another order from point {bad}", details={"part": part, "loop": k, "point": bad, "off": 0.0})
+            raise BorderMoved(f"{_label(part)}: loop {k + 1} visits its points in another order from point {bad}", details={"part": part, "loop": k, "point": bad, "off": 0.0})
         turned.append(found != forward)
     if any(turned) and not all(turned):
-        raise BorderMoved(f"Part {part}: some border loops run the other way round, so some faces are turned over", details={"part": part, "loop": turned.index(True), "point": 0, "off": 0.0})
+        raise BorderMoved(f"{_label(part)}: some border loops run the other way round, so some faces are turned over", details={"part": part, "loop": turned.index(True), "point": 0, "off": 0.0})
     for found, loop in zip(matched, stored):
         points[found] = loop  # exactly the stored values, so the seams weld
     faces = [tuple(reversed(f)) for f in faces] if all(turned) else list(faces)
@@ -280,7 +285,7 @@ def check_no_hole(old_faces, new_faces, part=None) -> None:
     """HOLE when the result has more open edges after the part was spliced in and welded than before."""
     before, after = S.open_edges(old_faces), S.open_edges(new_faces)
     if after > before:
-        raise HoleError(f"Part {part}: {after - before} new open edge(s) after stitching", details={"part": part, "open_before": before, "open_after": after})
+        raise HoleError(f"{_label(part)}: {after - before} new open edge(s) after stitching", details={"part": part, "open_before": before, "open_after": after})
 
 
 def check_shape(src_points, src_faces, points, faces, part=None) -> None:
@@ -292,7 +297,7 @@ def check_shape(src_points, src_faces, points, faces, part=None) -> None:
     extent, made_extent = np.ptp(np.asarray(src_points, dtype=np.float64), axis=0), np.ptp(np.asarray(points, dtype=np.float64), axis=0)
     real = extent > 0.01 * float(np.linalg.norm(extent))
     share = float((made_extent[real] / extent[real]).min()) if real.any() else 1.0
-    raise ShapeLost(f"Part {part}: the returned faces cover {100 * made / max(area, 1e-30):.0f}% of the area, and {100 * share:.0f}% of the size along its shortest side", details={"part": part, "area_share": made / max(area, 1e-30), "extent_share": share})
+    raise ShapeLost(f"{_label(part)}: the returned faces cover {100 * made / max(area, 1e-30):.0f}% of the area, and {100 * share:.0f}% of the size along its shortest side", details={"part": part, "area_share": made / max(area, 1e-30), "extent_share": share})
 
 
 def error_reply(exc: Exception) -> dict:
