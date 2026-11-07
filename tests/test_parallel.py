@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
+import ast
+import inspect
 import os
 import sys
 import time
@@ -126,6 +128,36 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(command[6:], ["--", "folder", "0", "3"])
         self.assertEqual((env["PYTHONPATH"], env["PYTHONNOUSERSITE"]), (str(code.parent), "1"))
         self.assertNotIn("PYTHONHOME", env)
+
+
+def _autojob_signature() -> inspect.Signature:
+    """AutoJob.__init__'s parameters, read from autoretopo.py (it needs bpy, so it can't be imported here)."""
+    source = (Path(__file__).resolve().parents[1] / "autoretopo.py").read_text(encoding="utf-8")
+    cls = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == "AutoJob")
+    args = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__").args
+    first_default = len(args.args) - len(args.defaults)
+    params = [inspect.Parameter(a.arg, inspect.Parameter.POSITIONAL_OR_KEYWORD, **({"default": None} if k >= first_default else {})) for k, a in enumerate(args.args)]
+    params += [inspect.Parameter(a.arg, inspect.Parameter.KEYWORD_ONLY, default=None) for a in args.kwonlyargs]
+    return inspect.Signature(params)
+
+
+class WorkerJobTests(unittest.TestCase):
+    def test_a_helper_builds_the_job_with_autojobs_own_arguments(self):
+        signature = _autojob_signature()
+
+        class Job:
+            def __init__(self, *args, **kwargs):
+                self.given = signature.bind(self, *args, **kwargs).arguments  # TypeError when the call doesn't fit
+
+        co = np.zeros((4, 3))
+        setup = {  # the keys setup_of sends (it needs the add-on package, so it isn't called here)
+            "co": co, "faces": [(0, 1, 2, 3)], "materials": np.zeros(1, dtype=np.int32), "detail": 0.5, "target_faces": 100, "mirror": None, "drop": None, "method": "AUTO", "output": "QUADS",
+            "methods": {}, "style": "DETAIL", "settings": hardware.EFFORTS["LIGHT"], "rough": False, "baked": False, "hard": None, "pieces": [[0]], "locked": [], "chunks": [], "names": ["a"], "picture_sizes": [64],
+        }
+        job = parallel.worker_job(Job, None, setup)
+        self.assertIs(job.given["co"], co)
+        self.assertEqual((job.given["detail"], job.given["target_faces"], job.given["output"]), (0.5, 100, "QUADS"))
+        self.assertEqual((job.pieces, job.names, job.spot_copies), ([[0]], ["a"], False))
 
 
 class MergeTests(unittest.TestCase):
