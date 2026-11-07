@@ -538,12 +538,24 @@ class FitStage:
         # out of the extra-face allowance: when they do not fit beside the split, the split runs again with less.
         name, uv = sa.layers[sa.active]
         P0, ip0, fl0 = P, ip, fl
+        cut_seams, cut_xyz = seams, xyz
+        if soft and s.split and self.use_fast:  # part switches: cut faces spanning two unconnected source pieces
+            from .topology import _turbo as turbo
+            if turbo is not None:
+                tree = turbo.face_tree(sa.points, FlatFaces(sa.indptr, sa.flat))
+                got = {}
+                yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got)
+                if self._stopped:
+                    return
+                cut_seams = got["seams"]
+                cut_xyz = uvsnap.chain_xyz(cut_seams, sa.points)
+                numbers.update(part_switches=int(cut_seams.get("part_switches", 0)))
         reserve = 0
         while True:
             P, ip, fl, origin = P0, ip0, fl0, np.arange(nf, dtype=np.int64)
             if soft and s.split:
                 give = budget if budget < 0 else max(0.0, budget - reserve)
-                cut = uvsnap.Split(P, ip, fl, seams, xyz, vchain, vparam, (), give, use_fast=self.use_fast)
+                cut = uvsnap.Split(P, ip, fl, cut_seams, cut_xyz, vchain, vparam, (), give, use_fast=self.use_fast)
                 yield from self._drive(cut)
                 if self._stopped:
                     return
