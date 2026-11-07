@@ -555,7 +555,7 @@ class FitStage:
             yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
             if self._stopped:
                 return
-            out[i] = close_flat(P, ip, fl, got["uv"])
+            out[i] = close_flat(P, ip, fl, got["uv"], s.texture_px)
             if i == sa.active:
                 f = got["fold"]
                 numbers.update(folded_before=int(f["folded_before"]), folded_after=int(f["folded_after"]), fold_stuck=int(f["fold_stuck"]),
@@ -601,15 +601,28 @@ def halve_mask(points, indptr, flat, orient) -> np.ndarray:
     return (fan > 1) & (good > 0) & ((np.asarray(orient) == 0) | (good < fan))
 
 
-def close_flat(points, indptr, flat, uv) -> np.ndarray:
-    """`uv` (2 per corner) with every corner of a face that has no area (a zero-area sliver) at the mean of its UVs, so
-    the face has no UV area either: it shows nothing, and a winding read off its rounding-noise normal cannot flip it."""
+SLIVER_UV_PX2 = 1e-3  # a fan triangle with twice its UV area below this many texels squared shows nothing (and its winding is rounding)
+
+
+def close_flat(points, indptr, flat, uv, texture_px: float = 1024.0) -> np.ndarray:
+    """`uv` (2 per corner) with the slivers closed. Every corner of a face with no 3D area goes to the mean of its UVs; an
+    end fan triangle (the first or last of its face) with next to no UV area (SLIVER_UV_PX2) gets its own corner onto
+    the nearer of its two neighbours in the face. Such a triangle shows no texture, but a single-precision rounding of
+    its UVs, or its rounding-noise normal, would give it a winding against the source's."""
 
     ip = np.asarray(indptr, np.int64)
     out = np.asarray(uv, np.float64).reshape(-1, 2).copy()
-    for f in np.flatnonzero(fans_with_area(points, indptr, flat)[0] == 0):
-        s, e = int(ip[f]), int(ip[f + 1])
-        out[s:e] = out[s:e].mean(0)
+    good, fan = fans_with_area(points, indptr, flat)
+    for f in np.flatnonzero(good == 0):
+        out[ip[f]:ip[f + 1]] = out[ip[f]:ip[f + 1]].mean(0)
+    tiny = SLIVER_UV_PX2 / (float(texture_px) ** 2)
+    s, e = ip[:-1], ip[1:]
+    for own, a, c in ((s + 1, s, s + 2), (e - 1, s, e - 2)):  # first fan triangle (0, 1, 2), last (0, n-2, n-1)
+        u0, u1, u2 = out[a], out[own], out[c]
+        area = np.abs((u1[:, 0] - u0[:, 0]) * (u2[:, 1] - u0[:, 1]) - (u2[:, 0] - u0[:, 0]) * (u1[:, 1] - u0[:, 1]))
+        for f in np.flatnonzero((fan > 0) & (good > 0) & (area <= tiny)):
+            near = a[f] if np.sum((out[a[f]] - out[own[f]]) ** 2) <= np.sum((out[c[f]] - out[own[f]]) ** 2) else c[f]
+            out[own[f]] = out[near]
     return out
 
 
