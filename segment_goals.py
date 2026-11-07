@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import time
 
+import bmesh
 import bpy
 import numpy as np
 from mathutils import Vector
@@ -72,14 +73,23 @@ def save() -> None:
     if source is None or src is None or labels is None or len(src.get("keep", ())) != len(labels):
         return
     mesh = source.data
-    values = np.zeros(len(mesh.polygons), dtype=np.int32)
-    values[src["keep"]] = labels
     attribute = mesh.attributes.get(ATTRIBUTE)
     if attribute is not None and (attribute.domain != "FACE" or attribute.data_type != "INT"):
         return  # an attribute of that name that isn't ours: never overwrite or remove it
-    if attribute is None:
-        attribute = mesh.attributes.new(ATTRIBUTE, "INT", "FACE")
-    attribute.data.foreach_set("value", values)
+    bm = bmesh.from_edit_mesh(mesh) if mesh.is_editmode else None  # in Edit Mode the faces live in the edit mesh
+    values = np.zeros(len(bm.faces) if bm is not None else len(mesh.polygons), dtype=np.int32)
+    if len(values) <= int(src["keep"].max(initial=-1)):
+        return  # the mesh was edited since the segments were found
+    values[src["keep"]] = labels
+    if bm is not None:
+        layer = bm.faces.layers.int.get(ATTRIBUTE) or bm.faces.layers.int.new(ATTRIBUTE)
+        for face, value in zip(bm.faces, values.tolist()):
+            face[layer] = value
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+    else:
+        if attribute is None:
+            attribute = mesh.attributes.new(ATTRIBUTE, "INT", "FACE")
+        attribute.data.foreach_set("value", values)
     source[SAVED] = json.dumps({
         "names": [r["name"] for r in view.seg["parts"]],
         "goals": [r["goal"] for r in view.seg["parts"]],
@@ -98,8 +108,15 @@ def load(source, src, count: int):
     text = source.get(SAVED)
     if attribute is None or attribute.domain != "FACE" or attribute.data_type != "INT" or not text or len(src.get("keep", ())) != count:
         return None, None
-    values = np.zeros(len(mesh.polygons), dtype=np.int32)
-    attribute.data.foreach_get("value", values)
+    if mesh.is_editmode:  # in Edit Mode the faces live in the edit mesh
+        bm = bmesh.from_edit_mesh(mesh)
+        layer = bm.faces.layers.int.get(ATTRIBUTE)
+        values = np.fromiter((face[layer] for face in bm.faces), dtype=np.int32, count=len(bm.faces)) if layer is not None else np.zeros(0, dtype=np.int32)
+    else:
+        values = np.zeros(len(mesh.polygons), dtype=np.int32)
+        attribute.data.foreach_get("value", values)
+    if len(values) <= int(src["keep"].max(initial=-1)):
+        return None, None
     try:
         data = json.loads(text)
     except ValueError:
