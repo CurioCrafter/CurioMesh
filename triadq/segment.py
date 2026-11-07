@@ -40,7 +40,7 @@ from .patch import (
     tutte_embedding,
 )
 from .topology import parity_path_quad_closure_steps
-from .types import MeshData, drain
+from .types import MeshData
 
 from . import fieldmesh, patterns, smoothgrid
 
@@ -1321,13 +1321,10 @@ def _fill_holes(co, faces, holes):
     return co, faces
 
 
-def field_on_seams(points, polys, seams, target: float, project=None, lines=None, settle=None):
-    """Rows from the field mesher, joined to the seams: its last row comes off and one row of quads ties what's left to the seam's own vertices. Returns (points, faces). Raises ValueError where it can't."""
-    return drain(field_on_seams_steps(points, polys, seams, target, project, lines, settle))
-
-
 def field_on_seams_steps(points, polys, seams, target: float, project=None, lines=None, settle=None):
-    """Generator: `field_on_seams`, a slice per sweep of the field mesher and per step after it."""
+    """Generator: rows from the field mesher, joined to the seams: its last row comes off and one row of quads ties
+    what's left to the seam's own vertices. Returns (points, faces). Raises ValueError where it can't. A slice per
+    sweep of the field mesher and per step after it."""
 
     co, faces = yield from fieldmesh.field_quad_steps(np.asarray(points, dtype=np.float64), polys, max(target, fieldmesh.SMALLEST_TARGET), turn=FIELD_TURN, lines=lines)
     yield
@@ -1502,17 +1499,14 @@ def _cap_disk(seam, points, normals, step: float):
     return _fill_holes(co, faces, loops)
 
 
-def field_with_rings(points, polys, rings, seams, target: float, project=None, lines=None, settle=None, rows: int = RING_ROWS):
-    """Rows from the field mesher with each closed line as a true edge loop: Loop Select follows it all the way round.
+def field_with_rings_steps(points, polys, rings, seams, target: float, project=None, lines=None, settle=None, rows: int = RING_ROWS):
+    """Generator: rows from the field mesher with each closed line as a true edge loop: Loop Select follows it all the
+    way round.
 
     Each line gets rows of the same count on both sides, laid first. The field mesher fills what's left and is tied to the
     outermost rows, so its poles stay outside. Returns (points, faces). Raises ValueError where a line can't be done.
+    The field mesher of each side is sliced as in `field_on_seams_steps`.
     """
-    return drain(field_with_rings_steps(points, polys, rings, seams, target, project, lines, settle, rows))
-
-
-def field_with_rings_steps(points, polys, rings, seams, target: float, project=None, lines=None, settle=None, rows: int = RING_ROWS):
-    """Generator: `field_with_rings`, the field mesher of each side sliced as in `field_on_seams_steps`."""
 
     if not rings:
         return (yield from field_on_seams_steps(points, polys, seams, target, project, lines, settle))

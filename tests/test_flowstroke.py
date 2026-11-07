@@ -13,6 +13,7 @@ import _addon  # noqa: E402
 
 F = _addon.load("flowstroke")
 from triadq import loopscore as L  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 def _arc(degrees, rx=1.0, ry=1.0, start=0.0, n=120, wobble=0.0, seed=0, tilt=0.0):
@@ -120,7 +121,7 @@ class RedoTest(unittest.TestCase):
         self.assertEqual(len(found), 1)
         ids, inside = found[0]
         flat = lambda p: np.asarray(p) * (1, 1, 0)  # noqa: E731
-        made = F.redo(co, faces, ids, inside, flat)
+        made = drain(F.redo_steps(co, faces, ids, inside, flat))
         co2, faces2, _mat, new = F.splice(co, faces, np.zeros(len(faces), dtype=np.int32), [(ids, made)])
         self.assertTrue(all(len(f) == 4 for f in faces2))
         from triadq import segment as S

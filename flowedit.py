@@ -149,7 +149,7 @@ def _issues(co, faces, mask, src_co, src_tris):
 def _job(box, origin, plan, project, src_co, src_tris):
     """Generator, stepped by the timer in short slices: each patch redone (or taken from the cache), then put in and
     measured, a slice at a time."""
-    from .segment_goals import in_step, in_steps
+    from .segment_goals import in_steps
 
     co, faces = origin["co"], origin["faces"]
     builds, timings, failed = [], [], []
@@ -158,7 +158,7 @@ def _job(box, origin, plan, project, src_co, src_tris):
         made = fe["cache"].get(key)
         if made is None:
             t = time.perf_counter()
-            done = yield from in_step(lambda ids=ids, items=items: F.redo(co, faces, ids, items, project))
+            done = yield from in_steps(F.redo_steps(co, faces, ids, items, project))
             if "out" not in done:
                 failed.append(done.get("error", "no result"))
                 continue

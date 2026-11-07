@@ -2896,7 +2896,8 @@ class CURIOMESH_OT_guided_redraw_strip(_PreviewOp, bpy.types.Operator):
         source = state_source()
         co, faces = res["co"], res["faces"]
         edge = float(np.mean([np.linalg.norm(co[f[k]] - co[f[(k + 1) % len(f)]]) for i, f in enumerate(faces) if sel[i] for k in range(len(f))]))
-        new, warns = _region_pass(co, faces, sel, [], state["L0"], gs, region._projector(_bvh(_source_data(source))), res["locked"], res.get("mat"), fixed_target=edge)
+        with tasks.busy_cursor():  # the strip is redone in one go
+            new, warns = _region_pass(co, faces, sel, [], state["L0"], gs, region._projector(_bvh(_source_data(source))), res["locked"], res.get("mat"), fixed_target=edge)
         if new is None:
             self.report({"WARNING"}, warns[0] if warns else "Could not redraw that strip")
             return {"CANCELLED"}
@@ -3850,8 +3851,9 @@ class CURIOMESH_OT_multires_detail(bpy.types.Operator):
     def execute(self, context):
         cage = context.active_object
         source = next(o for o in context.selected_objects if o is not cage and o.type == "MESH")
-        tree = multires.source_tree(source, cage.matrix_world.inverted() @ source.matrix_world)
-        words = multires.add_to_result(context, cage, tree, _gs(context).multires_levels)
+        with tasks.busy_cursor():  # Blender's own Multires steps: one call
+            tree = multires.source_tree(source, cage.matrix_world.inverted() @ source.matrix_world)
+            words = multires.add_to_result(context, cage, tree, _gs(context).multires_levels)
         self.report({"WARNING"} if "failed" in words else {"INFO"}, f"{cage.name}{words}, read from {source.name}")
         return {"FINISHED"}
 

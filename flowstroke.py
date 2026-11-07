@@ -11,7 +11,7 @@ A stroke is one of three kinds:
 
 `recognise` tells them apart from the drawing alone, `tidy` turns a hand-drawn stroke into a clean one, `ellipse` and
 `template` make clicked shapes. `areas` picks the faces of a result around the strokes, and `redo` remakes them on
-their seams with the existing field mesher (`triadq.segment.field_with_rings`), so the rest of the result is untouched.
+their seams with the existing field mesher (`triadq.segment.field_with_rings_steps`), so the rest of the result is untouched.
 `record` gives each stroke as surface points, unit directions and its kind: plain data any other solver can read as
 a constraint. Plain NumPy.
 """
@@ -326,9 +326,9 @@ def piece(co, faces, ids, project=None):
     return points, [tuple(order[v] for v in t) for t in tris]
 
 
-def redo(co, faces, ids, strokes, project=None, target: int | None = None):
-    """The faces `ids` of a result remade to follow `strokes` on the same seams. Returns (points, faces). Raises
-    ValueError where the field mesher can't."""
+def redo_steps(co, faces, ids, strokes, project=None, target: int | None = None):
+    """Generator, in the field mesher's slices: the faces `ids` of a result remade to follow `strokes` on the same
+    seams. Returns (points, faces). Raises ValueError where the field mesher can't."""
     seams = S.seam_loops(co, faces, ids)
     points, tris = piece(co, faces, ids, project)
     target = len(ids) if target is None else target
@@ -338,13 +338,13 @@ def redo(co, faces, ids, strokes, project=None, target: int | None = None):
     marks = (lambda pts, t: on_lines(pts, t, lines)) if lines else None
     settle = (lambda c, f, pinned: lay_edges(c, f, pinned, edges, project)) if edges and project is not None else None
     try:
-        return S.field_with_rings(points, tris, rings, seams, target, project, marks, settle)
+        return (yield from S.field_with_rings_steps(points, tris, rings, seams, target, project, marks, settle))
     except ValueError:
         if not rings:
             raise
     lines = lines + rings  # a loop that can't be a true one still steers the rows
     marks = lambda pts, t: on_lines(pts, t, lines)  # noqa: E731
-    return S.field_on_seams(points, tris, seams, target, project, marks, settle)
+    return (yield from S.field_on_seams_steps(points, tris, seams, target, project, marks, settle))
 
 
 def splice(co, faces, mat, builds: list[tuple[np.ndarray, tuple]]):
@@ -360,4 +360,4 @@ def splice(co, faces, mat, builds: list[tuple[np.ndarray, tuple]]):
     return co2, faces2, mat2, piece2 > 0
 
 
-__all__ = ["KINDS", "areas", "ellipse", "fit_ring", "recognise", "record", "redo", "splice", "template", "tidy"]
+__all__ = ["KINDS", "areas", "ellipse", "fit_ring", "recognise", "record", "redo_steps", "splice", "template", "tidy"]

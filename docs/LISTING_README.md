@@ -53,16 +53,17 @@ CurioMesh contains Python code only and no compiled or third-party code.
   tenth of a second. The longest Auto steps we measured were about half a second on a 60,000-face mesh with the
   Styles, Methods and Uses we tried (Fewest Faces, Even Rows, Flat Quads, Subdivision, Blockout), and up to about 1.5
   seconds on an 86,000-face mesh or with the Field Rows method. Blender's own Decimate on a whole part is one call
-  that can't be cut up; the wait cursor shows while it runs.
-- Some tools run in one go, like Blender's own Remesh, with the wait cursor, and Blender is busy until they finish:
-  the Advanced tab's Classic Remesh and Batch (about 10-20 seconds per 20,000-60,000-face mesh; Batch reads Esc
-  between meshes), Classic Guided's Whole Mesh and Points Only updates, Lock Faces, Unlock All and Redraw Strip,
-  Redo Inside Shapes, Fix Selection, Bake Detail (Blender's own bake) and the Multires Detail step of Apply. **Stop** takes effect right after the step that is running.
-  **Apply** is available once the job has finished, or after **Stop**. The other sizes for the Quad Size and Rows
+  that can't be cut up; the wait cursor shows while it runs. **Stop** takes effect right after the step that is
+  running. **Apply** is available once the job has finished, or after **Stop**. The other sizes for the Quad Size and Rows
   sliders are worked out only when you press **Work Out Other Sizes** under the sliders; neither Auto nor moving a
   slider starts it. While it runs the panel says so. It works in the same short steps and leaves Blender idle at
   least twice as long as each step took, so it uses about a third of Blender's time at most. Working out all the
   sizes can take several minutes; **Stop Working Out Sizes** ends it at any time (the sizes already made stay).
+- Some tools run in one go, like Blender's own Remesh, with the wait cursor, and Blender is busy until they finish:
+  the Advanced tab's Classic Remesh and Batch (about 10-20 seconds per 20,000-60,000-face mesh; Batch reads Esc
+  between meshes), Classic Guided's Whole Mesh and Points Only updates, Lock Faces, Unlock All and Redraw Strip,
+  Redo Inside Shapes, Fix Selection, Bake Detail (Blender's own bake), Add Multires Detail and the Multires Detail
+  step of Apply.
 - A Classic Remesh result carries a few CurioMesh custom properties (such as `curiomesh_engine`,
   `curiomesh_elapsed_ms`, `curiomesh_quad_ratio`, `curiomesh_strategy`) that the HUD reads; Debug Console Logs adds a
   few more. Auto's Apply writes none of these.

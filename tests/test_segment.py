@@ -221,7 +221,7 @@ class TrueLoopTests(unittest.TestCase):
                 faces += [(at(i, j), at(i, j + 1), at(i + 1, j + 1)), (at(i, j), at(i + 1, j + 1), at(i + 1, j))]
         points = np.asarray(points)
         stroke = np.stack((np.cos(np.linspace(0, 2 * np.pi, 41)), np.sin(np.linspace(0, 2 * np.pi, 41)), np.full(41, 0.3)), axis=1)
-        co, quads = segment.field_with_rings(points, faces, [stroke], [], 500)
+        co, quads = drain(segment.field_with_rings_steps(points, faces, [stroke], [], 500))
         self.assertEqual(segment._crowded_edges(quads), 0)
         self.assertEqual(segment.open_edges(quads), 0)
         neighbours: dict[int, set[int]] = {}

@@ -15,7 +15,7 @@ import numpy as np
 from mathutils.bvhtree import BVHTree
 
 from . import overlay
-from .triadq import checks, repair
+from .triadq import checks, repair, tasks
 
 KIND_WORDS = {"inward": "inward", "sunk": "sunk", "crossing": "crossing", "folded_over": "folded over", "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping", "touching": "touching parts"}
 
@@ -195,6 +195,10 @@ class _FixOp:
     def poll(cls, context):
         return context.mode == "EDIT_MESH" and context.edit_object is not None and context.edit_object.type == "MESH"
 
+    def execute(self, context):
+        with tasks.busy_cursor():  # one operator call: the checks and fixes run in one go
+            return self._run(context)
+
     def _begin(self, context):
         obj = context.edit_object
         bm = bmesh.from_edit_mesh(obj.data)
@@ -219,7 +223,7 @@ class CURIOMESH_OT_fix_find(_FixOp, bpy.types.Operator):
     bl_label = "Find Bad Faces"
     bl_description = "Check the selected faces (and the rings around them) and leave only the bad ones selected. Nothing selected: the whole mesh"
 
-    def execute(self, context):
+    def _run(self, context):
         obj, bm, source = self._begin(context)
         area = _area(bm, context.scene.curiomesh_fix.grow)
         found, bad = measure(area, source)
@@ -248,7 +252,7 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
     def description(cls, context, props):
         return FIXES[props.how][2] if props.how in FIXES else "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad"
 
-    def execute(self, context):
+    def _run(self, context):
         obj, bm, source = self._begin(context)
         area = _area(bm, context.scene.curiomesh_fix.grow)
         had = set(bm.faces)

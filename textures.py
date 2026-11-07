@@ -9,7 +9,7 @@ import bmesh
 import bpy
 import numpy as np
 
-from .triadq import texsets
+from .triadq import tasks, texsets
 from .triadq.uvs import is_see_through, uv_overlap
 
 BAKE_LAYER = "CurioMesh_Bake"
@@ -384,7 +384,8 @@ def _bake_jobs(maps: Iterable[str]) -> list[tuple[str, str, bool]]:
 
 
 def _execute_bake(bake_type: str) -> set[str]:
-    return bpy.ops.object.bake(type=bake_type)
+    with tasks.busy_cursor():  # Blender's own bake: one call, Blender is busy until it is done
+        return bpy.ops.object.bake(type=bake_type)
 
 
 def _snapshot_bake_settings(scene: bpy.types.Scene) -> list[tuple[object, str, object]]:
