@@ -75,6 +75,22 @@ class SeamFitTrial(unittest.TestCase):
         got = keep.candidate_hash(pts, iptr, flat, mat, [(x.name, layers.read_uv(mesh, x.name)) for x in mesh.uv_layers])
         self.assertEqual(got, cand.fit.key)
 
+    def test_auto_fix_spot_is_found_and_fixed(self):
+        """Auto Fix's pattern: SeamFit made with its inputs, one spot, own number to 0 after the fit."""
+        af = common.addon_module("triadq.autofix")
+        p, ip, fl = grid(5)
+        base = T.make_base(p, faces_of(ip, fl))
+        trial = UT.SeamFit(UT.FIT["inputs"]())
+        UT.FIT["inputs"] = None  # the trial needs nothing the panel sets
+        spots = UT.finish(trial.spots(base))
+        self.assertEqual(len(spots), 1)
+        self.assertGreater(spots[0].bad, trial.least)
+        prop = UT.finish(af.propose(trial, base, {}, spots))
+        self.assertEqual(len(prop.fixed), 1, prop.left)
+        for cls in (UT.SeamFit, UT.BakeSpots):  # what autofix.plan asks of a pass
+            self.assertTrue(cls.auto and cls.spots is not T.Trial.spots)
+        self.assertEqual(UT.finish(UT.BakeSpots().spots(base)), [])  # no UVs before Apply: no spots
+
     def test_no_uvs_refuses_with_the_message(self):
         UT.FIT["inputs"] = lambda: None
         p, ip, fl = grid(3)
@@ -150,7 +166,7 @@ class UVOnly(unittest.TestCase):
         alone = keep.run(keep.FitStage(sa, plan, p, ip, fl, None, s, only_transfer=True, use_fast=False))  # UVs carried over, no fit
         src = uvscore.mesh(sa.points, sa.indptr, sa.flat, sa.layers[0][1], sa.material)
         base = UT.make_uv_base(alone.points, alone.indptr, alone.flat, uv=alone.layers[0][1], texture_px=1024, source=src)
-        trial = UT.BakeSpots()
+        trial = UT.BakeSpotsUV()
         self.assertEqual(trial.check(base), "")
         cand, _, _ = run_sliced(trial.run(base, dict(trial.defaults)))
         self.assertFalse(cand.refusal, cand.refusal)

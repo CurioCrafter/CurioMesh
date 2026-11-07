@@ -23,13 +23,15 @@ import time
 import numpy as np
 
 from . import trial as T
-from . import uvkeep, uvnew, uvpack, uvscore
+from . import uvkeep, uvnew, uvpack, uvscore, uvseams, uvsnap
 from .types import FlatFaces
 
 # What the panel hands Seam Fit before it opens: a callable returning dict(source, plan, settings, material, extra) or None.
 FIT: dict = {"inputs": None}
 APPLIED_EXTRA: dict = {}  # result key -> extra faces Seam Fit already spent on it (Again counts them against the allowance)
 
+SEAM_STEP = 0.25  # Soft chains are sampled every this many edges for Seam Fit's own number
+SEAM_LEAST = 0.05  # the smallest drop of that number (in quads) that counts as better: a tolerance, not a cap
 NO_UVS = "Your mesh has no UVs to keep. New will make some."
 NOT_LIGHT = "Seam Fit runs when UVs are set to keep the source's (Seam Fit: Light)."
 CHECK_PX = 1024.0
@@ -75,24 +77,100 @@ class SeamFit(T.Trial):
     stages = ("split", "faces", "left")
     toggles = (("split", "Split faces on seams"), ("keep_going", "Keep going"))
     legend = ""
-    auto = False  # Auto runs it after every search (uv_panel's pump), not as an Auto Fix pass
-    kinds = ()
+    # Auto Fix (AUTO_FIX.md 2.1): one spot holds every face the fit changes; its own number is the seams' length off
+    # the spot's edges, in quads (0 when every seam runs along edges)
+    auto = True
+    kinds = (("across", "face across a UV seam", "faces across UV seams"),)
+    own = "seam_off"
+    least = SEAM_LEAST
+
+    def __init__(self, inputs: dict | None = None):
+        self._inputs = inputs  # dict(source, plan, settings, material); None: the panel's provider (FIT["inputs"])
+
+    def inputs(self):
+        if self._inputs is not None:
+            return self._inputs
+        get = FIT.get("inputs")
+        return get() if get is not None else None
 
     def value_text(self, value: float) -> str:
         a = allowance_of(value)
         return "Extra faces any" if a is None else f"Extra faces {100 * a:.0f}%"
 
     def check(self, base: T.Base) -> str:
-        get = FIT.get("inputs")
-        got = get() if get is not None else None
+        got = self.inputs()
         if got is None:
             return NO_UVS
         if got.get("refusal"):
             return got["refusal"]
+        mat = got.get("material")
+        if mat is not None and len(mat) != len(base.faces):
+            return "The result changed since Seam Fit was set up. Open it again."
         return ""
 
+    def _samples(self, base: T.Base):
+        """(k, 3) points along the Soft chains, SEAM_STEP edges apart, worked out once per base."""
+        if "seam_samples" not in base.cache:
+            got = self.inputs()
+            seams = got["plan"].seams
+            xyz = uvsnap.chain_xyz(seams, got["source"].points).reshape(-1, 3)
+            ptr, run = np.asarray(seams["run_indptr"], np.int64), np.asarray(seams["run_vertex"], np.int64)
+            out = []
+            for c in np.flatnonzero(np.asarray(seams["class"]) == uvseams.SOFT).tolist():
+                line = xyz[run[ptr[c]:ptr[c + 1]]]
+                if len(line) < 2:
+                    continue
+                seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
+                at = np.concatenate([[0.0], np.cumsum(seg)])
+                t = np.linspace(0.0, at[-1], max(2, int(np.ceil(at[-1] / (SEAM_STEP * base.edge))) + 1))
+                out.append(np.stack([np.interp(t, at, line[:, k]) for k in range(3)], axis=1))
+            base.cache["seam_samples"] = np.vstack(out) if out else np.zeros((0, 3))
+        return base.cache["seam_samples"]
+
+    def own_number(self, base: T.Base, co, faces, spot) -> float:
+        """Seam length off the edges of the spot's faces, in quads: the samples within one edge of the spot's corners,
+        each counted by how far it lies from the nearest edge (lower is better)."""
+        ids = np.asarray(spot.faces, np.int64)
+        if not len(ids):
+            return float(spot.bad)
+        co = np.asarray(co, np.float64)
+        sub = [faces[f] for f in ids.tolist()]
+        corners = co[np.unique(np.fromiter((v for f in sub for v in f), np.int64))]
+        q = self._samples(base)
+        lo, hi = corners.min(0) - base.edge, corners.max(0) + base.edge
+        q = q[np.all((q >= lo) & (q <= hi), axis=1)]
+        if not len(q):
+            return 0.0
+        e = T.edges_of(sub)
+        return float(_to_segments(q, co[e[:, 0]], co[e[:, 1]]).sum() * SEAM_STEP / base.edge)
+
+    def spots(self, base: T.Base):
+        """One spot: every face the fit at any allowance changes (moved corners, split faces)."""
+        if self.check(base):
+            return []
+        allowance = self.inputs()["settings"].allowance
+        faces = 1.0 if allowance is None else min(1.0, float(allowance))  # the popover's Extra faces for seams
+        cand = yield from self.run(base, dict(self.defaults, faces=faces))
+        if cand.refusal or cand.co is None:
+            return []
+        moved = np.zeros(len(base.co), bool)
+        n = min(len(base.co), len(cand.co))
+        moved[:n] = np.linalg.norm(np.asarray(cand.co[:n]) - base.co[:n], axis=1) > 1e-9 * base.edge
+        f = FlatFaces.of(base.faces)
+        owner = np.repeat(np.arange(len(base.faces)), np.diff(f.indptr))
+        changed = np.zeros(len(base.faces), bool)
+        changed[owner[moved[f.flat]]] = True
+        changed |= np.bincount(np.asarray(cand.parent, np.int64), minlength=len(base.faces)) > 1
+        ids = np.flatnonzero(changed & base.scope)
+        if not len(ids):
+            return []
+        at = base.co[np.unique(f.flat[np.isin(owner, ids)])].mean(axis=0)
+        sp = T.Spot("across", ids, at, 0.0, pick={"faces": faces})  # its run uses the same allowance
+        sp.bad = self.own_number(base, base.co, base.faces, sp)
+        return [sp] if sp.bad > self.least else []
+
     def run(self, base: T.Base, settings: dict, rough: bool = False):
-        got = FIT["inputs"]()
+        got = self.inputs()
         sa, plan = got["source"], got["plan"]
         s = replace(got["settings"], mode="light", allowance=allowance_of(float(settings.get("faces", uvkeep.DEFAULT_ALLOWANCE))), split=bool(settings.get("split", True)))
         faces = FlatFaces.of(base.faces)
@@ -142,6 +220,18 @@ class SeamFit(T.Trial):
         cand.note = "; ".join(notes)
         remember_applied(cand)  # filed now, so whichever path keeps it (the modal, F9, a script) is written by Apply
         return cand
+
+
+def _to_segments(q, a, b):
+    """Distance of each point of `q` (m, 3) to the nearest segment a[i]-b[i] (closest point on a segment), in blocks."""
+    ab = b - a
+    l2 = np.maximum((ab * ab).sum(1), 1e-30)
+    best = np.full(len(q), np.inf)
+    for s in range(0, len(a), 256):
+        A, AB = a[None, s:s + 256], ab[None, s:s + 256]
+        t = np.clip(((q[:, None, :] - A) * AB).sum(2) / l2[None, s:s + 256], 0.0, 1.0)
+        best = np.minimum(best, np.linalg.norm(q[:, None, :] - (A + t[..., None] * AB), axis=2).min(1))
+    return best
 
 
 def remember_applied(cand) -> str:
@@ -586,7 +676,7 @@ def _pack_into(page, k, seed, tris, tri_chart, charts):
     return [(bool(a), int(b), int(c), int(d)) for a, b, c, d in zip(ok, dx, dy, q)]
 
 
-class BakeSpots(UVTrial):
+class BakeSpotsUV(UVTrial):
     """Bake those spots: the faces that still straddle a seam each get a small new island in the page's free space, and
     the bake fills just those islands from your original mesh. The rest of the texture is untouched."""
 
@@ -663,7 +753,75 @@ class BakeSpots(UVTrial):
         return cand
 
 
-TRIALS = {"new": NewUVs, "layout": PageLayout, "cut": CutHere, "bake": BakeSpots}
+BAKE: dict = {"inputs": None}  # () -> UVBase of the mesh the spots are on (with your original mesh), or None
+
+
+class BakeSpots(T.Trial):
+    """Bake those spots in Look First's shape, for Auto Fix's spot pattern. It needs UVs and a texture, which a result
+    has only after Apply, so on a result before Apply it finds no spots. Its candidate keeps the corners where they are
+    and carries the new UVs (`cand.uv`, `cand.uv_cand`)."""
+
+    name = "Bake those spots"
+    group = "CLEANUP"
+    handles = ("share",)
+    words = ("worst", "all")
+    defaults = {"share": 1.0}
+    blendable = False
+    stages = ("across",)
+    auto = True
+    kinds = (("bake", "face across a UV seam to bake", "faces across UV seams to bake"),)
+    own = "across"
+    least = 0.5  # one face fewer across a seam
+    changes_faces = False
+
+    def __init__(self, uv_base: UVBase | None = None):
+        self._uv_base = uv_base
+        self._baked = None
+
+    def uv_base(self, base: T.Base):
+        ub = self._uv_base
+        if ub is None and BAKE.get("inputs") is not None:
+            ub = BAKE["inputs"]()
+        return ub if ub is not None and ub.faces == len(base.faces) and ub.uv is not None else None
+
+    def check(self, base: T.Base) -> str:
+        ub = self.uv_base(base)
+        if ub is None:
+            return "Bake those spots works on an applied mesh with UVs and a baked texture."
+        return BakeSpotsUV().check(ub)
+
+    def spots(self, base: T.Base):
+        ub = self.uv_base(base)
+        if ub is None or BakeSpotsUV().check(ub):
+            return []
+        straddle = yield from straddlers(ub)
+        ids = np.flatnonzero(straddle & base.scope)
+        if not len(ids):
+            return []
+        f = FlatFaces.of(base.faces)
+        owner = np.repeat(np.arange(len(base.faces)), np.diff(f.indptr))
+        return [T.Spot("bake", ids, base.co[np.unique(f.flat[np.isin(owner, ids)])].mean(0), float(len(ids)))]
+
+    def own_number(self, base, co, faces, spot) -> float:
+        """Faces of the spot still across a seam and not yet given their own island (lower is better)."""
+        done = self._baked
+        return float(len(spot.faces) - (0 if done is None else int(np.isin(spot.faces, done).sum())))
+
+    def run(self, base: T.Base, settings: dict, rough: bool = False):
+        ub = self.uv_base(base)
+        if ub is None:
+            return T.Candidate(None, refusal=self.check(base))
+        c = yield from BakeSpotsUV().run(ub, dict(settings))
+        if c.refusal:
+            return T.Candidate(None, refusal=c.refusal)
+        cand = T.Candidate(base.co.copy(), exact=not rough, note=c.note, found=c.found)
+        cand.uv, cand.uv_cand = c.uv, c
+        self._baked = c.faces
+        cand.numbers["across"] = (f"{len(c.faces)} faces get their own island", 1)
+        return cand
+
+
+TRIALS = {"new": NewUVs, "layout": PageLayout, "cut": CutHere, "bake": BakeSpotsUV}
 
 
 _STEP = {}  # generator id -> its longest step so far (s), so a slice stops before a step would overrun it
