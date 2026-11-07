@@ -30,6 +30,7 @@ from .atlasq import (
 )
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from .textures import bake_selected_to_active, ensure_target_uvs
+from .triadq import uvclassic  # main-only: uv
 from .triadq.flatquad import FlatQuadOptions, flatten_regions, pair_and_close
 from .triadq import (
     MeshData,
@@ -1602,6 +1603,7 @@ def _preserve_textures(
     *,
     allow_python_bvh: bool = True,
 ) -> str:
+    if (_uv := uvclassic.preserve_textures(source, target, config)) is not None and uv_mapping_is_valid(target): return _uv  # main-only: uv
     mode = str(config.texture_mode or "PROJECT").upper()
     if mode == "NONE":
         return "SKIPPED"
