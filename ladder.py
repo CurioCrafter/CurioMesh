@@ -276,6 +276,9 @@ def _make_mesh(name, out, source):
     mesh.polygons.add(len(faces))
     mesh.polygons.foreach_set("loop_start", (np.cumsum(sizes) - sizes).astype(np.int32))
     mesh.update(calc_edges=True)
+    # flat, as the first preview (from_pydata) is: raw arrays come out smooth from Blender 4.1 on, and every kept size,
+    # Tidy Up pass and tool would suddenly shade the hard edges round
+    mesh.polygons.foreach_set("use_smooth", np.zeros(len(faces), dtype=bool))
     for m in source.data.materials:
         mesh.materials.append(m)
     if out.get("mat") is not None and len(out["mat"]) == len(faces):

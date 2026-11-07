@@ -75,6 +75,7 @@ WHITE = (1.0, 1.0, 1.0, 0.8)
 GONE = (0.243, 0.812, 0.431, 1.0)
 NEW = (1.0, 0.788, 0.302, 1.0)
 HELD = (1.0, 0.353, 0.373, 1.0)
+PINK = (1.0, 0.373, 0.635, 1.0)  # kept lines: hard edges, panel borders (the Sharp marker colour)
 HALO = (0.02, 0.02, 0.03, 0.55)
 GREW, SHRANK = np.array((0.231, 0.510, 0.965)), np.array((0.976, 0.502, 0.141))  # size tint: blue grew, orange shrank
 ROW4_H = 22.0
@@ -608,6 +609,8 @@ class Session:
                     out["wash"] = batch_for_shader(smooth, "TRIS", {"pos": world(co + 0.5 * lift), "color": tint}, indices=tris.astype(np.int32))
             if cand.arrows is not None and len(cand.arrows):
                 out["arrows"] = _lines(flat, batch_for_shader, world(cand.arrows.reshape(-1, 3)), WHITE)
+            if cand.lines is not None and len(cand.lines):
+                out["kept"] = _lines(flat, batch_for_shader, world(np.asarray(cand.lines).reshape(-1, 3)[: 2 * GHOST_MOST]), PINK)
         if cand is not None and cand.kept is not None and len(cand.kept) and np.asarray(cand.kept).dtype.kind == "f":
             out["kept"] = _lines(flat, batch_for_shader, world(np.asarray(cand.kept, dtype=np.float64).reshape(-1, 3)), PINK)
         self.batch_key, self.batches = key, out
