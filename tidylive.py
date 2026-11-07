@@ -346,7 +346,7 @@ class Session:
         yield
         facing = _facer(src_co, src_faces) if src_co is not None else None
         labels = _labels(self.res, co) if self.trial.toggles or self.trial.kinds else None  # Auto Fix drops spots by part
-        self.base = T.make_base(co, faces, scope=mask, project=project, mirror=plane, pick=self.pick, facing=facing, labels=labels, kinds=self.kinds)
+        self.base = yield from T.make_base_steps(co, faces, scope=mask, project=project, mirror=plane, pick=self.pick, facing=facing, labels=labels, kinds=self.kinds)
         self.look = _looker(src_co, src_faces) if src_co is not None and "look" in self.trial.stages else None
         yield
         yield from self.trial.prepare(self.base)
@@ -1076,10 +1076,12 @@ def _draw_card(shader, s, region, dial, scale) -> None:
 FACE_ARRAYS = ("mat", "piece", "parts", "new", "locked", "chart")
 
 
-def commit(context, cand: T.Candidate, name: str, numbers: str = "", push: bool = False) -> bool:
+def commit(context, cand: T.Candidate, name: str, numbers: str = "", push: bool = False, trial=None, obj=None) -> bool:
     """Make `cand` the result on screen and keep it as a History step (the operator's UNDO flag pushes Blender's;
     `push`: push it here and name the step `name` as given, for a timer such as Auto Fix's). The Tidy Up passes of
-    the result before it are let go (History still has them)."""
+    the result before it are let go (History still has them). `trial`: its `after_commit(obj, cand)` is called once the
+    geometry is written, on the applied mesh `obj` (default: the active mesh object once the result has been applied);
+    before Apply there is no such object and nothing is called."""
     from . import organize, segments
 
     guided = _g()
@@ -1111,6 +1113,11 @@ def commit(context, cand: T.Candidate, name: str, numbers: str = "", push: bool 
     guided.state["draw_key"] = None
     history.record(context, name if push else f"Tidy: {name}", numbers, push=push)
     overlay.tag_redraw()
+    if trial is not None:
+        if obj is None:
+            active = getattr(context, "active_object", None)
+            obj = active if guided.state.get("applied") and active is not None and active.type == "MESH" else None
+        T.run_after_commit(trial, obj, cand)
     return True
 
 
@@ -1222,7 +1229,7 @@ class LiveTool:
                 setattr(self, k, v)  # what F9 shows and redoes
         name = s.trial.name
         numbers = numbers_text(s.cand, s.trial, s.cap)
-        if not commit(context, s.cand, name, numbers):
+        if not commit(context, s.cand, name, numbers, trial=s.trial):
             self.report({"WARNING"}, f"{name}: nothing to keep")
             close("")
             self._finish(context)
@@ -1403,7 +1410,7 @@ class LiveTool:
             self.report({"WARNING"}, s.error or f"{s.trial.name} did not finish")
             return {"CANCELLED"}
         numbers = numbers_text(s.cand, s.trial, s.cap)
-        if not commit(context, s.cand, s.trial.name, numbers):
+        if not commit(context, s.cand, s.trial.name, numbers, trial=s.trial):
             return {"CANCELLED"}
         if s.trial.stay_open:  # no UNDO flag on these operators (one step per Enter instead): push it here
             history._push(f"Tidy: {s.trial.name}")
@@ -1411,7 +1418,7 @@ class LiveTool:
         while _keeps_going(s):  # Keep going: again on the kept result until a run makes nothing better
             s = Session(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
             s.finish()
-            if s.error or not s.ready_to_keep() or not commit(context, s.cand, s.trial.name, numbers_text(s.cand, s.trial, s.cap)):  # one Undo step for the whole run (F9), one History entry each
+            if s.error or not s.ready_to_keep() or not commit(context, s.cand, s.trial.name, numbers_text(s.cand, s.trial, s.cap), trial=s.trial):  # one Undo step for the whole run (F9), one History entry each
                 break
         return {"FINISHED"}
 
