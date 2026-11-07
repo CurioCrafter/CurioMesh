@@ -49,6 +49,29 @@ class Rules(unittest.TestCase):
         uv[4:] += 5.0  # the second face moves away: its shared edge is now a seam
         self.assertEqual(int(uvnew.cut_edges(mesh[1], mesh[2], uv).sum()), 1)
 
+    def test_exact_overlap_finds_a_small_fold_and_not_shared_edges(self):
+        g = grid(6, 6)
+        uv = g[0][g[2]][:, :2].copy()
+        t = uv[uvnew._fan(g[1], np.arange(36))]
+        self.assertFalse(any(uvnew.overlap_pairs(t, 1e-9)))  # neighbours share edges and corners only
+        t2 = np.concatenate([t, t[:1] + [0.3, 0.3]])  # one triangle laid over another by a fraction of a face
+        self.assertTrue(any(uvnew.overlap_pairs(t2, 1e-9)))
+
+    def test_a_small_chart_joins_its_neighbour_without_overlap(self):
+        points, indptr, flat = grid(20, 1)  # twenty faces in a row
+        stage = uvnew.NewUVs(points, indptr, flat)
+        uv = points[flat][:, :2].copy()
+        uv[76:] = uv[76:] @ np.array([[0.0, -1.0], [1.0, 0.0]]) + [9.0, 9.0]  # the last face: its own chart, turned and moved
+        chart = np.array([0] * 19 + [1])
+        gen = stage._attach_small(chart, uv, np.array([1, 1]))
+        try:
+            while True:
+                next(gen)
+        except StopIteration as fin:
+            chart2, uv2, rows2 = fin.value
+        self.assertEqual(len(rows2), 1)
+        self.assertFalse(uvnew.cut_edges(indptr, flat, uv2).any())  # glued back: no seam left
+
     def test_seam_step_reads_both_sides_of_a_cut(self):
         points, indptr, flat = grid(2, 1)
         uv = np.zeros((8, 2))
