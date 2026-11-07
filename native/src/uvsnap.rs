@@ -642,13 +642,6 @@ pub fn snap(points: &[f64], faces: &Faces, chains: &Chains, max_move: MaxMove, v
         };
     }
     // Tangential relax of the rings around snapped vertices (snapped and held vertices stay where they are).
-    let mut border = vec![false; n]; // vertices on an open border stay on it
-    for e in 0..mesh.ea.len() {
-        if mesh.efaces[e].len() == 1 {
-            border[mesh.ea[e]] = true;
-            border[mesh.eb[e]] = true;
-        }
-    }
     let mut ring: Vec<usize> = (0..n).filter(|&v| out.snapped[v]).collect();
     let mut seen: Vec<bool> = out.snapped.clone();
     for _ in 0..rings {
@@ -667,7 +660,7 @@ pub fn snap(points: &[f64], faces: &Faces, chains: &Chains, max_move: MaxMove, v
         }
         next.sort_unstable();
         for &v in &next {
-            if out.held[v] || out.vchain[v] >= 0 || mesh.nbrs(v).is_empty() || !(limit(v) > 0.0) || border[v] {
+            if out.held[v] || out.vchain[v] >= 0 || mesh.nbrs(v).is_empty() || !(limit(v) > 0.0) {
                 continue;
             }
             let mut m = [0.0; 3];
@@ -689,51 +682,6 @@ pub fn snap(points: &[f64], faces: &Faces, chains: &Chains, max_move: MaxMove, v
             }
         }
         ring = next;
-    }
-    // Near vertices (ours, after the paths and their relax): a free vertex closer than `REUSE_EDGE` of its own mean
-    // edge to a Soft chain goes to the chain's closest point, under the same guard as a path vertex. The split would
-    // reuse such a vertex unmoved as a seam vertex, and a face on the far side would keep a corner across the seam.
-    if !out.stopped {
-        let mut segs: Vec<(usize, usize)> = Vec::new();
-        let mut sgrid = Grid::new(mesh.mean_edge);
-        for c in 0..nc {
-            if chains.seams.class[c] != 2 {
-                continue;
-            }
-            for j in 0..chs[c].pts.len().saturating_sub(1) {
-                let (lo, hi) = bbox(&chs[c].pts[j..=j + 1], 0.0);
-                sgrid.insert(segs.len() as u32, lo, hi);
-                segs.push((c, j));
-            }
-        }
-        for v in 0..n {
-            if v % 1024 == 0 && stop.load(Ordering::Relaxed) {
-                out.stopped = true;
-                break;
-            }
-            if segs.is_empty() || out.vchain[v] >= 0 || out.held[v] {
-                continue;
-            }
-            let r = REUSE_EDGE * mesh.vedge[v];
-            let mut best: Option<(f64, usize, f64)> = None;
-            for s in sgrid.query(sub(pos[v], [r; 3]), add(pos[v], [r; 3])) {
-                let (c, j) = segs[s as usize];
-                let (d2, prm) = chs[c].closest(j, j + 1, pos[v]);
-                if d2 <= r * r && best.is_none_or(|b| d2 < b.0) {
-                    best = Some((d2, c, prm));
-                }
-            }
-            let Some((_, c, prm)) = best else { continue };
-            let to = chs[c].at(prm);
-            if norm(sub(to, orig[v])) > limit(v) || !move_ok(&mut pos, faces, &mesh, v, to) {
-                continue;
-            }
-            pos[v] = to;
-            out.snapped[v] = true;
-            out.vchain[v] = c as i64;
-            out.vparam[v] = prm;
-            out.moved += 1;
-        }
     }
     out.points = pos.iter().flatten().cloned().collect();
     out

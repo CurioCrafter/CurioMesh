@@ -87,16 +87,11 @@ def vertex_edge(points, indptr, flat) -> np.ndarray:
     return _Mesh(points, indptr, flat).vedge.copy()
 
 
-def with_seam_uvs(uv, corner_uv, flat=None, vchain=None, first: int = 0) -> np.ndarray:
-    """A transfer's per-corner UVs with the seam corners replaced by the split's chain-polyline UVs (NaN = keep).
-    With the split's `flat` and `vchain`, only corners on chains `first` and up (e.g. `part_switch_first`: the
-    transfer gives a vertex between two unconnected pieces one UV for all its faces, the chain gives each side its own)."""
+def with_seam_uvs(uv, corner_uv) -> np.ndarray:
+    """A transfer's per-corner UVs with the seam corners replaced by the split's chain-polyline UVs (NaN = keep)."""
 
     out = np.array(uv, np.float64).ravel()
-    seam = np.asarray(corner_uv, np.float64).ravel().copy()
-    if flat is not None and vchain is not None:
-        on = np.asarray(vchain, np.int64)[np.asarray(flat, np.int64)] >= first
-        seam[np.repeat(~on, 2)] = np.nan
+    seam = np.asarray(corner_uv, np.float64).ravel()
     keep = ~np.isnan(seam)
     out[keep] = seam[keep]
     return out
@@ -347,7 +342,7 @@ def part_switches(seams: dict, src_points, src_indptr, src_flat, src_uv, points,
     piece changes (bisection along the edge, `steps` halvings), and the points of a face's two such edges are joined, so
     the chains run on the result surface itself and the split cuts exactly where the texture changes owner. Side A is
     the UV of the piece left of the chain direction, side B the other's (the split's damage order uses their gap; the
-    corners' own UVs come from `side_uvs`, which picks each face's side). New chain vertices get welded ids after the source's
+    corners keep the per-side transfer's UVs, measured better than these). New chain vertices get welded ids after the source's
     (`chain_xyz` reads their places from `extra_xyz`). `nearest(points) -> (closest (N, 3), polygon, distance)` is the
     caller's lookup on the source polygons (the add-on's face tree). Our own rule; bisection is textbook."""
 
@@ -429,48 +424,9 @@ def part_switches(seams: dict, src_points, src_indptr, src_flat, src_uv, points,
     out["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
     out["n_welded"] = base + len(x)
     out["extra_xyz"] = x if old_extra is None else np.r_[np.asarray(old_extra, np.float64).reshape(-1, 3), x]
-    out["switch_base"] = base
-    out["switch_xyz"], out["switch_uv_lo"], out["switch_uv_hi"], out["switch_part_lo"] = x, uva, uvb, first
-    out["face_part"] = part
     out["part_switches"] = len(runs)
     out["part_switch_first"] = len(cls)
     return out
-
-
-def side_uvs(uv, points, indptr, flat, vchain, vparam, seams: dict, nearest, nudge: float = 0.02) -> np.ndarray:
-    """A transfer's per-corner UVs with the corners at part switch points (`part_switches`) set to their own face's side:
-    the transfer gives such a vertex one UV for all its faces. The side is the piece nearest to the corner moved `nudge`
-    of the way toward its face's centre; the UV is that piece's UV at the switch point (from the bisection)."""
-
-    out = np.array(uv, np.float64).reshape(-1, 2)
-    if not seams.get("part_switches"):
-        return out.ravel()
-    P = np.asarray(points, np.float64).reshape(-1, 3)
-    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
-    vc, vp = np.asarray(vchain, np.int64), np.asarray(vparam, np.float64)
-    first, base = int(seams["part_switch_first"]), int(seams["switch_base"])
-    rip, rvx = np.asarray(seams["run_indptr"], np.int64), np.asarray(seams["run_vertex"], np.int64)
-    sx, lo_uv, hi_uv, lo_part = seams["switch_xyz"], seams["switch_uv_lo"], seams["switch_uv_hi"], seams["switch_part_lo"]
-    h = np.flatnonzero(vc[fl] >= first)
-    if not len(h):
-        return out.ravel()
-    v = fl[h]
-    c = vc[v]
-    i = np.clip(np.rint(vp[v]).astype(np.int64), 0, rip[c + 1] - rip[c] - 1)
-    k = rvx[rip[c] + i] - base
-    at_point = np.linalg.norm(P[v] - sx[k], axis=1) <= 1e-9 + 1e-6 * float(np.ptp(P, 0).max()) if len(P) else np.zeros(0, bool)
-    h, v, k = h[at_point], v[at_point], k[at_point]
-    if not len(h):
-        return out.ravel()
-    face = np.searchsorted(ip, h, side="right") - 1
-    counts = np.diff(ip)
-    cen = np.zeros((len(ip) - 1, 3))
-    nz = counts > 0
-    cen[nz] = np.add.reduceat(P[fl], ip[:-1][nz], axis=0) / counts[nz][:, None]
-    _, f, _ = nearest(P[v] + nudge * (cen[face] - P[v]))
-    side = np.asarray(seams["face_part"], np.int64)[np.asarray(f, np.int64)]
-    out[h] = np.where((side == lo_part[k])[:, None], lo_uv[k], hi_uv[k])
-    return out.ravel()
 
 
 def _edge_index(mesh, a, b):
@@ -862,10 +818,6 @@ def _snap_steps(points, indptr, flat, seams, xyz, max_move, vchain_in, vparam_in
         else:
             out["state"][c] = states[0]
         yield
-    border = np.zeros(n, bool)  # vertices on an open border stay on it
-    for e, fs in enumerate(mesh.efaces):
-        if len(fs) == 1:
-            border[mesh.ea[e]] = border[mesh.eb[e]] = True
     ring = [v for v in range(n) if snapped[v]]
     seen = snapped.copy()
     for _ in range(int(rings)):
@@ -880,7 +832,7 @@ def _snap_steps(points, indptr, flat, seams, xyz, max_move, vchain_in, vparam_in
                     nxt.append(w)
         nxt.sort()
         for v in nxt:
-            if held[v] or vchain[v] >= 0 or not mesh.nbr[v] or not limit(v) > 0.0 or border[v]:
+            if held[v] or vchain[v] >= 0 or not mesh.nbr[v] or not limit(v) > 0.0:
                 continue
             m = (0.0, 0.0, 0.0)
             for w in mesh.nbr[v]:
@@ -898,41 +850,6 @@ def _snap_steps(points, indptr, flat, seams, xyz, max_move, vchain_in, vparam_in
                 out["relaxed"] += 1
             yield
         ring = nxt
-    # Near vertices (ours, after the paths and their relax): a free vertex closer than REUSE_EDGE of its own mean edge
-    # to a Soft chain goes to the chain's closest point, under the same guard as a path vertex (the split would reuse
-    # it unmoved).
-    segs = [(c, j) for c in range(nc) if cls[c] == SOFT for j in range(len(chs[c].pts) - 1)]
-    if segs and out["done"]:
-        SA = np.array([chs[c].P[j] for c, j in segs], np.float64).reshape(-1, 3)
-        SB = np.array([chs[c].P[j + 1] for c, j in segs], np.float64).reshape(-1, 3)
-        SLO, SHI = np.minimum(SA, SB), np.maximum(SA, SB)
-        for v in range(n):
-            if v % 1024 == 0:
-                if stopped():
-                    out["done"] = False
-                    break
-                yield
-            if vchain[v] >= 0 or held[v]:
-                continue
-            r = REUSE_EDGE * vedge[v]
-            q = np.asarray(pos[v])
-            cand = np.flatnonzero(np.all((SLO <= q + r) & (SHI >= q - r), axis=1))
-            best = None
-            for s_ in cand.tolist():
-                c, j = segs[s_]
-                d2, prm = chs[c].closest(j, j + 1, pos[v])
-                if d2 <= r * r and (best is None or d2 < best[0]):
-                    best = (d2, c, prm)
-            if best is None:
-                continue
-            _, c, prm = best
-            to = chs[c].at(prm)
-            if _norm(_sub(to, orig[v])) > limit(v) or not _move_ok(pos, mesh, v, to):
-                continue
-            pos[v] = to
-            snapped[v] = True
-            vchain[v], vparam[v] = c, prm
-            out["moved"] += 1
     out["points"] = np.array(pos, np.float64).ravel()
 
 
