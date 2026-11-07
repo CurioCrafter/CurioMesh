@@ -206,6 +206,7 @@ pub struct Run {
     tris: Vec<u32>,
     collapses: Vec<Collapse>,
     faces: u32,
+    seams: Option<crate::uvqem::Seams>,
 }
 
 struct State {
@@ -227,10 +228,14 @@ struct State {
     grid: Grid,          // the live triangles by place, for the crossing test
     tri_mark: Vec<u32>,  // scratch: the triangles a collapse changes, by generation
     thin: Vec<bool>,     // near a surface facing the other way: only here can a collapse push through the piece
+    seams: Option<crate::uvqem::Seams>, // UV seams to keep (None: none given, the run is exactly as before)
 }
 
 impl State {
     fn target(&self, a: u32, b: u32, way: u8) -> Option<[f64; 3]> {
+        if self.seams.as_ref().is_some_and(|m| !m.way_ok(a, b, way)) {
+            return None;
+        }
         let (pa, pb) = (self.p[a as usize], self.p[b as usize]);
         let middle = || [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5];
         if self.locked[a as usize] {
@@ -592,8 +597,30 @@ fn thin_vertices(p: &[[f64; 3]], tris: &[[u32; 3]]) -> Vec<bool> {
     thin
 }
 
+/// The heavy plane through edge x-y square to triangle t (Decimate's border constraint).
+fn edge_plane(s: &mut State, x: usize, y: usize, t: u32) {
+    let tri = s.tris[t as usize];
+    let (pa, pb, pc) = (s.p[tri[0] as usize], s.p[tri[1] as usize], s.p[tri[2] as usize]);
+    let normal = cross(sub(pb, pa), sub(pc, pa));
+    let along = sub(s.p[y], s.p[x]);
+    let side = cross(along, normal);
+    let length = dot(side, side).sqrt();
+    if length > 0.0 {
+        let unit = [side[0] / length, side[1] / length, side[2] / length];
+        let plane = q_plane(unit, -dot(unit, s.p[x]), BORDER_WEIGHT * dot(along, along));
+        q_add(&mut s.q[x], &plane);
+        q_add(&mut s.q[y], &plane);
+    }
+}
+
 /// Run everything down to `least` triangles. `locked` vertices (may be empty) never move or go.
 pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
+    run_seams(points, tris, locked, &[], None, crate::uvqem::SEAM_PX, least)
+}
+
+/// `run` keeping UV seams (`seam_pairs`, 2 vertex ids per edge; `seam_uv` K1's runs for the UV-side check, within
+/// `seam_px`): the rules live in `uvqem`. With no seams it is `run`, bit for bit.
+pub fn run_seams(points: &[f64], tris: &[u32], locked: &[bool], seam_pairs: &[u32], seam_uv: Option<&crate::uvseam::SeamUv>, seam_px: f64, least: u32) -> Run {
     let watch = crate::near::Watch::now(); // from the moment the call starts
     let nv = points.len() / 3;
     let nf = tris.len() / 3;
@@ -632,6 +659,7 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         grid: Grid { base: 1.0, levels: Vec::new(), home: vec![(Grid::NOWHERE, [0; 3]); nf] },
         tri_mark: vec![0; nf],
         thin: Vec::new(),
+        seams: crate::uvqem::Seams::new(points, seam_pairs, seam_uv, seam_px),
     };
     // Cells about as big as the piece's triangles are at the start.
     let edge: f64 = s.tris.iter().map(|t| dot(sub(s.p[t[1] as usize], s.p[t[0] as usize]), sub(s.p[t[1] as usize], s.p[t[0] as usize])).sqrt()).sum::<f64>() / nf.max(1) as f64;
@@ -680,18 +708,11 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
             1 => {
                 s.border[x] = true;
                 s.border[y] = true;
-                let tri = s.tris[edges[i].2 as usize];
-                let (pa, pb, pc) = (s.p[tri[0] as usize], s.p[tri[1] as usize], s.p[tri[2] as usize]);
-                let normal = cross(sub(pb, pa), sub(pc, pa));
-                let along = sub(s.p[y], s.p[x]);
-                let side = cross(along, normal);
-                let length = dot(side, side).sqrt();
-                if length > 0.0 {
-                    let unit = [side[0] / length, side[1] / length, side[2] / length];
-                    let plane = q_plane(unit, -dot(unit, s.p[x]), BORDER_WEIGHT * dot(along, along));
-                    q_add(&mut s.q[x], &plane);
-                    q_add(&mut s.q[y], &plane);
-                }
+                edge_plane(&mut s, x, y, edges[i].2);
+            }
+            2 if s.seams.as_ref().is_some_and(|m| m.is_edge(x as u32, y as u32)) => {
+                edge_plane(&mut s, x, y, edges[i].2); // a UV seam holds its 3D line like a border, from both sides
+                edge_plane(&mut s, x, y, edges[i + 1].2);
             }
             2 => {}
             _ => {
@@ -700,6 +721,9 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
             }
         }
         i = j;
+    }
+    if let Some(m) = &s.seams {
+        m.lock(&mut s.locked, &s.border);
     }
     let mut start = Vec::with_capacity(edges.len() / 2);
     let mut i = 0;
@@ -735,7 +759,7 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
         let Some(at) = s.target(a, b, entry.way) else {
             continue;
         };
-        if s.flips(a, b, at) || ((s.thin[a as usize] || s.thin[b as usize]) && s.crosses(a, b, at)) {
+        if s.seams.as_ref().is_some_and(|m| !m.uv_ok(a, b, entry.way)) || s.flips(a, b, at) || ((s.thin[a as usize] || s.thin[b as usize]) && s.crosses(a, b, at)) {
             match s.entry(a, b, entry.way + 1) {
                 Some(next) if entry.way < 3 => s.heap.push(next),
                 _ => {
@@ -744,15 +768,22 @@ pub fn run(points: &[f64], tris: &[u32], locked: &[bool], least: u32) -> Run {
             }
             continue;
         }
-        // Stay on the kept end when it is locked.
-        let (keep, gone) = if s.locked[b as usize] { (b, a) } else { (a, b) };
+        // Stay on the kept end when it is locked (with seams, also when it is the end whose place is taken).
+        let (keep, gone) = if s.locked[b as usize] || (entry.way == 3 && s.seams.is_some()) { (b, a) } else { (a, b) };
         s.apply(keep, gone, at, &mut collapses, &mut alive, shared);
+        if let Some(m) = &mut s.seams {
+            m.collapse(keep, gone);
+            if entry.way >= 2 {
+                collapses.last_mut().unwrap().at = [f64::NAN; 3]; // half-edge: the kept point stays exactly, UVs and all
+            }
+        }
     }
     Run {
         points: points.to_vec(),
         tris: tris.to_vec(),
         collapses,
         faces: nf as u32,
+        seams: s.seams,
     }
     .with_span(low, span)
 }
@@ -771,6 +802,12 @@ impl Run {
 
     /// The first collapses that bring the piece down to `wanted` triangles: (points, triangles, the source triangle each is).
     pub fn level(&self, wanted: u32) -> (Vec<f64>, Vec<i64>, Vec<i64>) {
+        let (points, tris, owner, _) = self.level_seams(wanted);
+        (points, tris, owner)
+    }
+
+    /// `level`, plus the seam edges left (pairs of its point ids; empty without seams).
+    pub fn level_seams(&self, wanted: u32) -> (Vec<f64>, Vec<i64>, Vec<i64>, Vec<i64>) {
         let nv = self.points.len() / 3;
         let mut parent: Vec<u32> = (0..nv as u32).collect();
         let mut points = self.points.clone();
@@ -817,6 +854,64 @@ impl Run {
         for v in &mut flat {
             *v = number[*v as usize];
         }
-        (out, flat, owner)
+        let seams = self.seams.as_ref().map_or_else(Vec::new, |m| m.reduced(|v| number[root(&mut parent, v) as usize]));
+        (out, flat, owner, seams)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A bumpy 24x24 grid with a second sheet close under part of it (so the thin-spot rules run too).
+    fn bumpy() -> (Vec<f64>, Vec<u32>) {
+        let n = 24u32;
+        let mut points = Vec::new();
+        let mut tris = Vec::new();
+        for sheet in 0..2u32 {
+            let base = (points.len() / 3) as u32;
+            for j in 0..=n {
+                for i in 0..=n {
+                    let (x, y) = (i as f64 / n as f64, j as f64 / n as f64);
+                    let z = 0.05 * (7.0 * x).sin() * (5.0 * y).cos() + 0.003 * ((i * 7 + j * 13) % 5) as f64;
+                    points.extend_from_slice(&if sheet == 0 { [x, y, z] } else { [x * 0.5 + 0.25, y * 0.5 + 0.25, z * 0.2 - 0.02] });
+                }
+            }
+            for j in 0..n {
+                for i in 0..n {
+                    let v = base + j * (n + 1) + i;
+                    let (a, b, c, d) = (v, v + 1, v + n + 2, v + n + 1);
+                    if sheet == 0 { tris.extend_from_slice(&[a, b, c, a, c, d]) } else { tris.extend_from_slice(&[a, c, b, a, d, c]) }
+                }
+            }
+        }
+        (points, tris)
+    }
+
+    /// FNV-1a over every collapse and the 10 % level.
+    fn fingerprint(run: &super::Run) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut eat = |x: u64| h = (h ^ x).wrapping_mul(0x100000001b3);
+        for c in &run.collapses {
+            eat(c.keep as u64);
+            eat(c.drop as u64);
+            c.at.iter().for_each(|x| eat(x.to_bits()));
+            eat(c.faces_left as u64);
+        }
+        let (p, t, o) = run.level(run.faces / 10);
+        p.iter().for_each(|x| eat(x.to_bits()));
+        t.iter().chain(&o).for_each(|&x| eat(x as u64));
+        h
+    }
+
+    const GOLDEN: u64 = 0x13d0_2a2b_d9a8_55e1; // this branch's copy (main); measured on the code before K2
+
+    /// Golden: the reduction as it was before UV seams came in (K2), bit for bit; `run_seams` with no seams is `run`.
+    #[test]
+    fn golden_without_seams() {
+        let (points, tris) = bumpy();
+        let run = super::run(&points, &tris, &[], 4);
+        assert_eq!(fingerprint(&run), GOLDEN);
+        let again = super::run_seams(&points, &tris, &[], &[], None, 0.5, 4);
+        assert_eq!(fingerprint(&again), GOLDEN);
+    }
+}
+

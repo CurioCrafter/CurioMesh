@@ -857,3 +857,402 @@ def cross_field_gl(
         int(steps),
     )
     return out
+
+
+# main-only: uv begin common
+class UvJob:
+    """A long UV kernel running on a worker thread: `done()`, `result()`, `stop()`. Creating one never blocks the caller.
+
+    `call(stop)` is the one-call kernel (it gets the StopFlag, or None). A stopped kernel ends with InterruptedError;
+    `result()` then raises it too. Any other error is raised from `result()` as well.
+    """
+
+    def __init__(self, call, stop=None, name: str = "CurioMeshUV"):
+        self._stop, self._out, self._error = stop, None, None
+        self._thread = threading.Thread(target=self._run, args=(call,), daemon=True, name=name)
+        self._thread.start()
+
+    def _run(self, call) -> None:
+        try:
+            self._out = call(self._stop)
+        except BaseException as exc:  # handed to result(); a worker must never die silently
+            self._error = exc
+
+    def done(self) -> bool:
+        return not self._thread.is_alive()
+
+    def stop(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+
+    def result(self):
+        if not self.done():
+            raise RuntimeError("the kernel is still running")
+        if self._error is not None:
+            raise self._error
+        return self._out
+
+
+def uv_job(function: str, *args, name: str = "CurioMeshUV") -> "UvJob | None":
+    """Start native `function(*args, stop)` on a worker thread, or None for "use the NumPy path"."""
+
+    module = native()
+    if module is None or not hasattr(module, function) or not hasattr(module, "StopFlag"):
+        return None
+    fn, stop = getattr(module, function), module.StopFlag()
+    return UvJob(lambda flag: fn(*args, flag), stop=stop, name=name)
+
+
+def _uv_probe(function: str) -> "int | None":
+    module = native()
+    if module is None or not hasattr(module, function):
+        return None
+    return int(getattr(module, function)())
+# main-only: uv end common
+
+# main-only: uv begin seam
+def uvseam_probe() -> "int | None":
+    """1 when the compiled `uvseam` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvseam_probe")
+
+
+def _uvseam_f64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
+
+
+def _uvseam_i64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.int64).ravel())
+
+
+def _uvseam_bool(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=bool).ravel())
+
+
+def _uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px) -> tuple:
+    return (_uvseam_f64(points), _uvseam_i64(indptr), _uvseam_i64(flat), _uvseam_f64(corner_uv), _uvseam_i64(material),
+            _uvseam_bool(repeat), float(texture_px), float(uv_tol_px))
+
+
+def uvseam_extract(points, indptr, flat, corner_uv, material=(), repeat=(), texture_px: float = 1024.0, uv_tol_px: float = 0.01,
+                   cut_here=()) -> "UvJob | None":
+    """Seams of a source as a worker-thread job: `result()` = dict (island, region, chains, classes...). None: use NumPy."""
+
+    return uv_job("uvseam_extract", *_uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px),
+                  _uvseam_i64(cut_here), name="CurioMeshUVSeams")
+
+
+def uvseam_triage(points, indptr, flat, corner_uv, f_target: float, allowance: float, material=(), repeat=(), texture_px: float = 1024.0,
+                  uv_tol_px: float = 0.01, cut_here=(), seen_face=(), cost_a: float = 1.0, cost_b: float = 4.0) -> "UvJob | None":
+    """Pre-search Hard choice as a job: `result()` = the extract dict with the new classes plus the triage numbers."""
+
+    return uv_job("uvseam_triage", *_uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px),
+                  _uvseam_i64(cut_here), float(f_target), float(allowance), _uvseam_f64(seen_face), float(cost_a), float(cost_b),
+                  name="CurioMeshUVTriage")
+
+
+def uvseam_transfer(points, indptr, flat, corner_uv, res_points, res_indptr, res_flat, material=(), repeat=(), texture_px: float = 1024.0,
+                    uv_tol_px: float = 0.01, classes=(), fix_folds: bool = True) -> "UvJob | None":
+    """Per-side transfer as a job: `result()` = dict with uv (2 per result corner), the lookup and the fold report."""
+
+    return uv_job("uvseam_transfer", *_uvseam_source(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px),
+                  _uvseam_i64(classes), _uvseam_f64(res_points), _uvseam_i64(res_indptr), _uvseam_i64(res_flat), bool(fix_folds),
+                  name="CurioMeshUVTransfer")
+
+
+def uvseam_layer(src_indptr, src_flat, layer, res_points, res_indptr, res_flat, lookup: dict, texture_px: float = 1024.0,
+                 fix_folds: bool = True) -> "UvJob | None":
+    """Another UV layer through a transfer's lookup as a job: `result()` = (uv, expected, fold dict)."""
+
+    keys = {"ids": _uvseam_i64, "w": _uvseam_f64, "shift": _uvseam_bool, "slid": _uvseam_bool, "ref_ids": _uvseam_i64, "ref_w": _uvseam_f64,
+            "ref_face": _uvseam_i64, "orient": _uvseam_f64, "region": _uvseam_i64, "join": _uvseam_f64}
+    look = {key: cast(lookup[key]) for key, cast in keys.items()}
+    return uv_job("uvseam_layer", _uvseam_i64(src_indptr), _uvseam_i64(src_flat), _uvseam_f64(layer), _uvseam_f64(res_points),
+                  _uvseam_i64(res_indptr), _uvseam_i64(res_flat), look, float(texture_px), bool(fix_folds), name="CurioMeshUVLayer")
+# main-only: uv end seam
+
+# main-only: uv begin snap
+def uvsnap_probe() -> "int | None":
+    """1 when the compiled `uvsnap` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvsnap_probe")
+
+
+def _uvsnap_chains(seams: dict, xyz) -> tuple:
+    return (_uvseam_i64(seams["run_indptr"]), _uvseam_i64(seams["run_vertex"]), _uvseam_f64(seams["uv_a"]), _uvseam_f64(seams["uv_b"]),
+            _uvseam_i64(seams["class"]), _uvseam_f64(seams["gap_px"]), _uvseam_f64(xyz))
+
+
+def uvsnap_snap(points, indptr, flat, seams: dict, xyz, max_move=(), vchain=(), vparam=(), rings: int = 1) -> "UvJob | None":
+    """Seam snap as a worker-thread job: `result()` = dict (points, held, snapped, vchain, vparam, per-chain state...).
+
+    `seams` is the extract dict (chains and classes), `xyz` the welded source positions (3 per welded vertex)."""
+
+    return uv_job("uvsnap_snap", _uvseam_f64(points), _uvseam_i64(indptr), _uvseam_i64(flat), *_uvsnap_chains(seams, xyz), _uvseam_f64(max_move),
+                  _uvseam_i64(vchain), _uvseam_f64(vparam), int(rings), name="CurioMeshUVSnap")
+
+
+def uvsnap_split(points, indptr, flat, seams: dict, xyz, vchain=(), vparam=(), seen_face=(), budget: float = -1.0) -> "UvJob | None":
+    """Split leftovers as a job: `result()` = dict (new mesh, origin, face_state, seam vertex tags, corner_uv, counts)."""
+
+    return uv_job("uvsnap_split", _uvseam_f64(points), _uvseam_i64(indptr), _uvseam_i64(flat), *_uvsnap_chains(seams, xyz), _uvseam_i64(vchain),
+                  _uvseam_f64(vparam), _uvseam_f64(seen_face), float(budget), name="CurioMeshUVSplit")
+# main-only: uv end snap
+
+# main-only: uv begin qem
+def uvqem_probe() -> "int | None":
+    """1 when the compiled `uvqem` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvqem_probe")
+# main-only: uv end qem
+
+# main-only: uv begin score
+def uvscore_probe() -> "int | None":
+    """1 when the compiled `uvscore` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvscore_probe")
+
+
+def uvscore_names() -> "list | None":
+    """The card names of the numbers `uvscore_check` returns, in order; None for "use NumPy"."""
+
+    module = native()
+    if module is None or not hasattr(module, "uvscore_names"):
+        return None
+    return list(module.uvscore_names())
+
+
+def uvscore_check(points, indptr, flat, uv, material=(), src_points=(), src_indptr=(), src_flat=(), src_uv=(), src_material=(),
+                  src_region=(), seen_face=(), seen_edge_px=(), allow_overlap=(), col=(), row=(), on_chart=(), density=(),
+                  faces_off: int = 0, split=(), texture_px: float = 1024.0) -> "UvJob | None":
+    """UV Check numbers as a worker-thread job (never blocks): `result()` = (numbers, straddling faces, flipped faces).
+
+    Every empty array means "not given" (no source: no straddle, drift or seam fit). None: use the NumPy twin."""
+
+    def f(a):
+        return np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
+
+    def i(a):
+        return np.ascontiguousarray(np.asarray(a, dtype=np.int64).ravel())
+
+    def b(a):
+        return np.ascontiguousarray(np.asarray(a, dtype=bool).ravel())
+
+    return uv_job("uvscore_check", f(points), i(indptr), i(flat), f(uv), i(material),
+                  f(src_points), i(src_indptr), i(src_flat), f(src_uv), i(src_material), i(src_region),
+                  f(seen_face), f(seen_edge_px), b(allow_overlap), i(col), i(row), b(on_chart), f(density),
+                  int(faces_off), b(split), float(texture_px), name="CurioMeshUVScore")
+# main-only: uv end score
+
+# main-only: uv begin sight
+def uvsight_probe() -> "int | None":
+    """1 when the compiled `uvsight` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvsight_probe")
+
+
+def uvsight_pictures(points, polys, views: int = 6, pixels: int = 0, all_sides: bool = True):
+    """Pictures held between passes (nothing drawn yet; cheap): the native object, or None for "use NumPy".
+
+    `views` is any count (6 axes, then 8 corners, 12 edge middles, then a spiral); `pixels` 0 = about 4 px across the
+    median edge, at least 512. `all_sides` False lowers the view from below. Raises ValueError for arrays that
+    disagree or pictures that would not fit in memory.
+    """
+
+    module = native()
+    if module is None or not hasattr(module, "SightPictures"):
+        return None
+    indptr, flat = polys if isinstance(polys, tuple) and len(polys) == 2 and isinstance(polys[0], np.ndarray) else _csr(polys)
+    return module.SightPictures(
+        np.ascontiguousarray(points, dtype=np.float64).reshape(-1),
+        np.ascontiguousarray(indptr, dtype=np.int64),
+        np.ascontiguousarray(flat, dtype=np.int64),
+        int(views),
+        int(pixels),
+        bool(all_sides),
+    )
+
+
+def uvsight_fill(pictures) -> "UvJob | None":
+    """Draw the views not drawn yet, on a worker thread; `result()` is None. Stopped: drawn views stay, call again."""
+
+    return uv_job("uvsight_fill", pictures, name="CurioMeshSight")
+
+
+def uvsight_seen(pictures) -> "UvJob | None":
+    """Read the drawn pictures on a worker thread, drawing nothing: `result()` is (seen per face, inside px per edge,
+    outline px per edge)."""
+
+    return uv_job("uvsight_seen", pictures, name="CurioMeshSight")
+# main-only: uv end sight
+
+# main-only: uv begin flat
+def uvflat_probe() -> "int | None":
+    """1 when the compiled `uvflat` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvflat_probe")
+
+
+UV_FACTOR_RAM_SHARE = 0.25  # one direct factor may use this share of the free memory; above it the iterative path runs
+
+
+def _uv_free_ram() -> float:
+    """Free physical memory in bytes, or 0 when unknown (the kernel then uses its own constant)."""
+
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _Status(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)] + [
+                    (name, ctypes.c_ulonglong) for name in ("total", "avail", "page_total", "page_avail", "virt_total", "virt_avail", "ext_avail")
+                ]
+
+            status = _Status()
+            status.dwLength = ctypes.sizeof(_Status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return float(status.avail)
+            return 0.0
+        return float(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        return 0.0
+
+
+def _uv_factor_bytes(max_factor_bytes: float) -> float:
+    return float(max_factor_bytes) if max_factor_bytes > 0 else UV_FACTOR_RAM_SHARE * _uv_free_ram()
+
+
+def _uv_f64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
+
+
+def _uv_i64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.int64).ravel())
+
+
+def uvflat_flatten(points, indptr, flat, chart, start, col, row, rows: int = 3, start_mode: int = 0, stretch_allowed: float = 0.10,
+                   steps: int = 0, max_factor_bytes: float = 0.0, texture_px: float = 1024.0) -> "UvJob | None":
+    """Flatten every chart in one worker-thread job (never blocks): `result()` = (UVs per corner (2C,), stats rows).
+
+    chart per face (< 0 skips), start per corner (2C, NaN = none) or empty, col / row per corner (-1 = none) or empty.
+    rows 0 Off / 1 Soft / 2 On / 3 Auto; start_mode 0 given / 1 pull / 2 free. None: use the NumPy twin.
+    """
+
+    return uv_job("uvflat_flatten", _uv_f64(points), _uv_i64(indptr), _uv_i64(flat), _uv_i64(chart), _uv_f64(start), _uv_i64(col), _uv_i64(row),
+                  int(rows), int(start_mode), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
+                  name="CurioMeshUVFlatten")
+
+
+def uvflat_grid_layout(points, indptr, flat) -> "UvJob | None":
+    """Exact grid UVs of the given quad faces as a job: `result()` = (uv (2N,), col, row) or None when not a grid."""
+
+    return uv_job("uvflat_grid_layout", _uv_f64(points), _uv_i64(indptr), _uv_i64(flat), name="CurioMeshUVGrid")
+
+
+def uvflat_quick_stretch(points, indptr, flat, uv, free, max_factor_bytes: float = 0.0) -> "UvJob | None":
+    """Band stretch of a merge candidate as a job: `result()` = (band stretch, chart stretch, uv (2N,))."""
+
+    free = np.ascontiguousarray(np.asarray(free, dtype=bool).ravel())
+    return uv_job("uvflat_quick_stretch", _uv_f64(points), _uv_i64(indptr), _uv_i64(flat), _uv_f64(uv), free, _uv_factor_bytes(max_factor_bytes), name="CurioMeshUVBand")
+
+
+def uvflat_stretch(points, indptr, flat, uv) -> "UvJob | None":
+    """Chart stretch as a job: `result()` = (stretch quantile, per face)."""
+
+    return uv_job("uvflat_stretch", _uv_f64(points), _uv_i64(indptr), _uv_i64(flat), _uv_f64(uv), name="CurioMeshUVStretch")
+# main-only: uv end flat
+
+# main-only: uv begin chart
+def uvchart_probe() -> "int | None":
+    """1 when the compiled `uvchart` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvchart_probe")
+
+
+def uvchart_build(points, indptr, flat, part_label=None, forced=None, seen_edge_px=None, px_per_unit: float = 0.0, out_of_sight: bool = False,
+                  hidden_l: float = 0.0, build_stretch: float = 0.0) -> "UvJob | None":
+    """Build the Row Charts tree as a job (never blocks): `result()` = a `UvChartTree` (patches, segments, merges, level(x)).
+
+    part_label per face or None, forced vertex pairs or None, seen_edge_px per edge (uvsight order) or None.
+    hidden_l / build_stretch 0 = the kernel's defaults. None: use the NumPy twin.
+    """
+
+    empty_i, empty_f = np.zeros(0, np.int64), np.zeros(0, np.float64)
+    return uv_job("uvchart_build", _uv_f64(points), _uv_i64(indptr), _uv_i64(flat), empty_i if part_label is None else _uv_i64(part_label),
+                  empty_i if forced is None else _uv_i64(forced), empty_f if seen_edge_px is None else _uv_f64(seen_edge_px), float(px_per_unit),
+                  bool(out_of_sight), float(hidden_l), float(build_stretch), name="CurioMeshUVCharts")
+
+
+def uvchart_level(tree, x: float) -> "UvJob | None":
+    """Charts at Stretch allowed x percent as a job: `result()` = (chart per face, cut per edge, numbers)."""
+
+    return uv_job("uvchart_level", tree, float(x), name="CurioMeshUVLevel")
+
+
+def uvchart_uvs(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,
+                texture_px: float = 1024.0) -> "UvJob | None":
+    """New UVs of level x as a job: `result()` = (UVs per corner (2C,), chart per face, stats rows, stretch per face)."""
+
+    return uv_job("uvchart_uvs", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
+                  name="CurioMeshUVNew")
+
+
+def uvchart_cuts(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,
+                 texture_px: float = 1024.0) -> "UvJob | None":
+    """Keep going state from level x as a job: `result()` = a `UvChartCuts` (`state()`)."""
+
+    return uv_job("uvchart_cuts", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
+                  name="CurioMeshUVCuts")
+
+
+def uvchart_pass(tree, cuts) -> "UvJob | None":
+    """One Keep going pass as a job: `result()` = (kind 0/1 cut/2 close, accepted, score before, after, ms)."""
+
+    return uv_job("uvchart_pass", tree, cuts, name="CurioMeshUVPass")
+# main-only: uv end chart
+
+# main-only: uv begin pack
+def uvpack_probe() -> "int | None":
+    """1 when the compiled `uvpack` kernel is there and its compile probe passes; None for "use NumPy"."""
+
+    return _uv_probe("uvpack_probe")
+
+
+def _pk_f64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
+
+
+def _pk_i64(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=np.int64).ravel())
+
+
+def _pk_flag(a) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(a, dtype=bool).ravel())
+
+
+def uvpack_fill_page(w, h, turn_ok, weight, page_w: int, page_h: int, k: int, order=None, policy: int = 0, scale: float = 0.0,
+                     passes: int = 0, budget: float = 0.0) -> "UvJob | None":
+    """Fill one page as a job (never blocks): `result()` = (info, x, y, turned, order).
+
+    info = [scale, space used, policy, passes done, budget hit, stopped, ok]. k < 0 means no gap. `order`, `policy` and
+    `scale` from an earlier result resume it (Keep going); passes = swap passes after the variants (0 none, negative until a pass gains nothing). None: use the NumPy twin.
+    """
+
+    start = np.zeros(0, np.int64) if order is None else _pk_i64(order)
+    return uv_job("uvpack_fill_page", _pk_f64(w), _pk_f64(h), _pk_flag(turn_ok), _pk_f64(weight),
+                  int(page_w), int(page_h), int(k), start, int(policy), float(scale), int(passes), float(budget), name="CurioMeshUVPack")
+
+
+def uvpack_pack_boxes(w, h, turn_ok, order, policy: int, scale: float, page_w: int, page_h: int, k: int) -> "UvJob | None":
+    """Pack boxes at one scale as a job: `result()` = (ok, x, y, turned)."""
+
+    return uv_job("uvpack_pack_boxes", _pk_f64(w), _pk_f64(h), _pk_flag(turn_ok), _pk_i64(order),
+                  int(policy), float(scale), int(page_w), int(page_h), int(k), name="CurioMeshUVPackBoxes")
+
+
+def uvpack_pack_into(seed, tris, tri_chart, charts: int, as_box, turn_ok, page_w: int, page_h: int, k: int) -> "UvJob | None":
+    """Pack charts into a page that may hold others, as a job: `result()` = (ok, dx, dy, quarter turns) per chart."""
+
+    return uv_job("uvpack_pack_into", _pk_f64(seed), _pk_f64(tris), _pk_i64(tri_chart), int(charts), _pk_flag(as_box), _pk_flag(turn_ok),
+                  int(page_w), int(page_h), int(k), name="CurioMeshUVPackInto")
+# main-only: uv end pack
