@@ -355,7 +355,10 @@ def blend(base: Base, full: Candidate, s: float) -> Candidate:
 def _tidiness_steps(co, faces):
     from . import patterns
 
-    return float(patterns.score((yield from patterns.measure_steps(co, faces)))["score"])
+    yield  # the first import of a module can take longer than a slice
+    m = yield from patterns.measure_steps(co, faces)
+    yield
+    return float(patterns.score(m)["score"])
 
 
 def _tidiness(co, faces) -> float:
@@ -374,7 +377,7 @@ def face_normals(co, faces) -> np.ndarray:
     return np.stack([np.bincount(fid, c[:, k], len(faces)) for k in range(3)], axis=1)
 
 
-BAD_CHUNK = 1000  # faces checked between two yields of `bad_faces_steps` (about 3 ms)
+BAD_CHUNK = 400  # faces checked between two yields of `bad_faces_steps` (about 2 ms)
 
 
 DEGENERATE = 1e-6  # a piece of a split with less than this share of its parent's area has no direction: it is not "turned over"
@@ -392,6 +395,7 @@ def bad_faces_steps(base: Base, co, faces=None, parent=None, splits=False):
     """`bad_faces` as a generator: yields (nothing) every `BAD_CHUNK` faces, so no slice runs long. Same answer."""
     from .checks import folded_quads
 
+    yield
     faces = base.faces if faces is None else faces
     if not len(faces):
         return np.zeros(0, dtype=bool)
@@ -431,6 +435,7 @@ def bad_by_parent(bad: np.ndarray, parent) -> int:
 def _loops_steps(co, faces, plane):
     from .loopscore import loop_quality_steps
 
+    yield
     return float((yield from loop_quality_steps(co, faces, plane))["quality"]) if len(faces) else None
 
 
