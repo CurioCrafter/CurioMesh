@@ -269,6 +269,8 @@ and the experiment branches are not in this release.
 - No made-up limits in the agent paths: Keep going stops when a pass gains nothing or its time budget (a setting)
   runs out, and says which. The fix skill no longer stops after 4 rounds, nor the retopo skill after three retries.
 - Docs: `docs/AGENTS.md`, `docs/PARTS_EXCHANGE.md` and the `curiomesh-agent` skill.
+- Fix (all builds): Ctrl+Z back to "New result" showed the mesh from before the parts were found, not the one
+  on screen. That step now keeps the result with its parts.
 
 ## 0.9.8 - 2026-11-06
 
