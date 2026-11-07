@@ -2479,7 +2479,7 @@ class AutoJob:
         try:
             return (yield from tasks.run(work, "CurioMeshRows", stopped=lambda: self._stopped))
         except Exception as exc:
-            self.warnings = [f"Clean Rows: {exc}"]
+            self.warnings = [f"Even Rows: {exc}"]
             return None
 
     def _drop_hidden_pieces(self):

@@ -1495,7 +1495,7 @@ def draw_selected(layout, gs) -> None:
         if known:
             box.label(text=f"Least alike looks {view.alike(max(known))}", icon="BLANK1")
     if view.mirrored():
-        overlay.wrap_label(box, "Redo is off on this result (Mirror, Clean Rows, a very large piece or an imported job)", icon="INFO", width=32, limit=3)
+        overlay.wrap_label(box, "Redo is off on this result (Mirror, Even Rows, a very large piece or an imported job)", icon="INFO", width=32, limit=3)
         return
     col = box.column(align=True)
     col.prop(gs, "seg_goal", text="Use")
