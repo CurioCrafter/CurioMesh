@@ -2263,8 +2263,7 @@ class AutoJob:
 
     def _kill_worker(self) -> None:
         if self._worker is not None:
-            self._worker.kill()
-            self._worker.wait()
+            parallel._kill(self._worker)  # the same bounded wait as the Use Several Cores helpers
             self._worker = None
 
     def _rows_once(self, areas, target: int):
