@@ -234,6 +234,8 @@ class Sight:
                 while not job.done():
                     yield
                 got = job.result()
+                if hasattr(got, "__next__"):  # copied a slice at a time
+                    got = yield from got
                 pic.face, pic.depth = list(got[0]), list(got[1])
                 self.renders += len(pic.face)
             else:

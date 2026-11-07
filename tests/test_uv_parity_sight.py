@@ -245,6 +245,28 @@ class Speed(unittest.TestCase):
         self.assertLess(time.perf_counter() - t, 0.01)
         run(job)
 
+    def test_draw_job_hands_over_pictures_in_short_slices(self):
+        pts, quads = lumpy_sphere(152, 152)
+        uv_fast = common.addon_module("uv_fast")
+        job = uv_fast._DrawJob(pts, quads, 6, 2048, None)
+        while not job.done():
+            time.sleep(0.001)
+        gen, worst = job.result(), 0.0
+        while True:
+            t = time.perf_counter()
+            try:
+                next(gen)
+            except StopIteration as end:
+                faces, depths = end.value
+                break
+            finally:
+                worst = max(worst, time.perf_counter() - t)
+        print(f"picture hand-over: longest slice {worst * 1000:.2f} ms")
+        self.assertLess(worst, 0.010)
+        self.assertEqual(len(faces), 6)
+        np.testing.assert_array_equal(faces[3].ravel(), job._pictures.face(3))
+        np.testing.assert_array_equal(depths[3].ravel(), job._pictures.depth(3).astype(np.float32))
+
 
 if __name__ == "__main__":
     unittest.main()

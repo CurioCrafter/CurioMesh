@@ -11,6 +11,10 @@ forced line or another trace (motorcycle graphs: Eppstein, Goodrich, Kim, Tamsto
 (greedy pair merges after Garland, Willmott, Heckbert 2001; grid unions measured exactly from the glued grid) and
 `level(x)`, which applies every recorded merge whose stretch fits and skips the others.
 
+A union is refused when its layout would lie over itself (a flip-free disk layout is one-to-one exactly when its
+border does not cross itself: Floater 2003, "One-to-one piecewise linear mappings over triangulations"). The merge
+tree runs in rounds of rising stretch (`round_caps`), like the kernel.
+
 Subset: a pole union (no grid) is measured here by flattening the whole union (start: the two layouts fitted onto
 each other) instead of the band-only solve, so on meshes with poles its merge order can differ; its numbers say
 "estimate". Keep going's cut moves have no twin: they run through the faster callable only.
@@ -33,15 +37,17 @@ from . import uvflat
 HIDDEN_L = 20.0
 STRETCH_ALLOWED_PCT = 10.0
 BUILD_STRETCH = 1.0
+ROUND_FACTOR = 2.0
+ROUND_LOWEST = 0.01
 BAND_RINGS = 2
 PX_PER_DIAGONAL = 1024.0
 GRID_SLACK = 0.01
 SAME_STRETCH = 1e-9
-NUMBERS_LEN = 20
+NUMBERS_LEN = 21
 
 NUMBER_COLUMNS = ("patches", "irregular", "turning", "traces", "euler_cut_patches", "euler_cut_edges", "not_disk_patches", "segments",
                   "merges", "grid_merges", "pole_merges", "quick_calls", "exact_evals", "build_ms", "stopped", "grid_patches", "dropped",
-                  "top_stretch", "forced_edges", "px_per_unit")
+                  "top_stretch", "forced_edges", "px_per_unit", "lay_over")
 LEVEL_COLUMNS = ("charts", "not_disk", "merges_used", "segments_glued", "above_build", "ms")
 
 # Optional faster callables, set by the one adapter (uv_fast.py); the NumPy code runs when a name is missing.
@@ -310,6 +316,97 @@ def _align(pairs) -> tuple:
 def _rigid(r, uv: np.ndarray) -> np.ndarray:
     (c, s), t = r
     return np.stack([c * uv[:, 0] - s * uv[:, 1] + t[0], s * uv[:, 0] + c * uv[:, 1] + t[1]], 1)
+
+
+def round_caps(build: float) -> list:
+    """Stretch caps of the merge rounds (as stretch - 1), rising, the last one `build` (kernel: `round_caps`)."""
+
+    x = STRETCH_ALLOWED_PCT / 100.0
+    while x / ROUND_FACTOR >= ROUND_LOWEST:
+        x /= ROUND_FACTOR
+    caps = []
+    while x < build:
+        caps.append(x)
+        x *= ROUND_FACTOR
+    caps.append(build)
+    return caps
+
+
+def _sides_cross(p: np.ndarray, q: np.ndarray, v: np.ndarray) -> bool:
+    """Do two border sides (p[i] to q[i], wedge ids v[i]) cross, each one's ends strictly on both sides of the other?
+    Sides sharing a wedge touch and are not tested. Broad phase: a cell grid no finer than the longest side."""
+
+    m = len(p)
+    if m < 2:
+        return False
+    if not (np.isfinite(p).all() and np.isfinite(q).all()):
+        return True  # a side without a position: the layout failed
+    lo, hi = np.minimum(p, q), np.maximum(p, q)
+    org = lo.min(0)
+    span = float((hi.max(0) - org).max())
+    cell = max(float((hi - lo).max()), span / max(np.sqrt(m), 1.0), 1e-300)
+    c0, c1 = np.floor((lo - org) / cell).astype(np.int64), np.floor((hi - org) / cell).astype(np.int64)
+    nx = int(c1[:, 0].max()) + 1
+    ids, cells = [], []
+    for dx in (0, 1):  # a side spans at most two cells per axis
+        for dy in (0, 1):
+            x, y = c0[:, 0] + dx, c0[:, 1] + dy
+            ok = (x <= c1[:, 0]) & (y <= c1[:, 1])
+            ids.append(np.nonzero(ok)[0])
+            cells.append(y[ok] * nx + x[ok])
+    ids, cells = np.concatenate(ids), np.concatenate(cells)
+    order = np.argsort(cells, kind="stable")
+    ids, cells = ids[order], cells[order]
+    starts = np.flatnonzero(np.r_[True, cells[1:] != cells[:-1]])
+    ends = np.r_[starts[1:], len(cells)]
+    ii, jj = [], []
+    for a, b in zip(starts, ends):
+        if b - a > 1:
+            i, j = np.triu_indices(b - a, 1)
+            ii.append(ids[a + i])
+            jj.append(ids[a + j])
+    if not ii:
+        return False
+    i, j = np.concatenate(ii), np.concatenate(jj)
+    share = (v[i, 0] == v[j, 0]) | (v[i, 0] == v[j, 1]) | (v[i, 1] == v[j, 0]) | (v[i, 1] == v[j, 1])
+    i, j = i[~share], j[~share]
+
+    def orient(a, b, c):
+        return (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+
+    tol = 1e-7 * np.linalg.norm(q[i] - p[i], axis=1) * np.linalg.norm(q[j] - p[j], axis=1)
+
+    def apart(x, y):
+        return ((x > tol) & (y < -tol)) | ((x < -tol) & (y > tol))
+
+    hit = apart(orient(p[i], q[i], p[j]), orient(p[i], q[i], q[j])) & apart(orient(p[j], q[j], p[i]), orient(p[j], q[j], q[i]))
+    return bool(hit.any())
+
+
+def _lies_over(local, uv: np.ndarray, before: np.ndarray) -> bool:
+    """Would a union laid out as `uv` (per local vertex) lie over itself? More faces turned over than `before` (per
+    corner, the two layouts placed as the union starts), or two border sides cross."""
+
+    ip, fl = local.indptr, local.flat
+    if len(fl) == 0:
+        return False
+    sizes = np.diff(ip)
+    nxt = np.arange(1, len(fl) + 1)
+    nxt[ip[1:] - 1] = ip[:-1]
+    now = np.asarray(uv, float)[fl]
+
+    def turned(c):
+        cr = c[:, 0] * c[nxt, 1] - c[nxt, 0] * c[:, 1]
+        area = np.add.reduceat(cr, ip[:-1])
+        return int(((sizes >= 3) & ~(area > 0)).sum())
+
+    if turned(now) > turned(np.asarray(before, float)):
+        return True
+    a, b = fl, fl[nxt]
+    key = np.minimum(a, b) * (local.n + 1) + np.maximum(a, b)
+    _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
+    open_ = cnt[inv.reshape(-1)] == 1
+    return _sides_cross(now[open_], now[nxt][open_], np.stack([a[open_], b[open_]], 1))
 
 
 def _key(added: float, cost: float) -> tuple:
@@ -749,6 +846,11 @@ class Charts:
 
         heap: list = []
         seq = [0]
+        refused: dict = {}  # pairs whose union lay over itself: (smaller chart, its version then)
+        last_st: dict = {}  # last measured stretch per pair
+        parked: list = []  # candidates measured above the round's cap, waiting for the round they fit
+        caps = round_caps(tree.build_stretch)
+        cap = [caps[0]]
 
         def push_for(r):
             if chi[r] != 1:
@@ -757,12 +859,19 @@ class Charts:
                 if chi[o] != 1:
                     continue
                 a, b = min(r, o), max(r, o)
+                ref = refused.get((a, b))
+                if ref is not None and ver[ref[0]] == ref[1]:
+                    continue
                 key = last.get((a, b))
                 if key is None:
                     mis, c = estimate(lst)
                     key = _key(mis, c)
                 seq[0] += 1
-                heapq.heappush(heap, (key, a, b, seq[0], ver[a], ver[b], False))
+                st = last_st.get((a, b))
+                if st is not None and st > 1.0 + cap[0]:
+                    parked.append(((key, a, b, seq[0], ver[a], ver[b], True), st))
+                else:
+                    heapq.heappush(heap, (key, a, b, seq[0], ver[a], ver[b], False))
 
         def evaluate(a, b, lst):
             mark = dsu.mark()
@@ -780,7 +889,7 @@ class Charts:
                     q = _quantile(per)
                     if q <= 1.0 + GRID_SLACK or q <= max(stretch[a], stretch[b]) + GRID_SLACK:
                         dsu.undo(mark)
-                        return dict(glued=glued, cost=c, stretch=q, pole=False, local=local, uv=g[0], per=per)
+                        return dict(glued=glued, cost=c, stretch=q, pole=False, local=local, uv=g[0], per=per, before=corner_uv[local.corner])
             # Pole union (subset): B fitted onto A along the glue, then the whole union flattened.
             pairs = []
             for s in glued:
@@ -797,66 +906,89 @@ class Charts:
             uv = yield from self._flatten(local, start)
             per = self._face_stretch(tree, local, uv)
             dsu.undo(mark)
-            return dict(glued=glued, cost=c, stretch=_quantile(per), pole=True, local=local, uv=uv, per=per)
+            return dict(glued=glued, cost=c, stretch=_quantile(per), pole=True, local=local, uv=uv, per=per, before=moved[local.corner])
 
         for p in range(np_):
             push_for(p)
             yield 0.35
-        exact_evals = dropped = grid_merges = pole_merges = 0
+        exact_evals = dropped = grid_merges = pole_merges = lay_over = 0
         top = 1.0
         cached = None
-        while heap:
-            if self._stop:
-                break
-            key, a, b, _, va, vb, exact = heapq.heappop(heap)
-            if find(a) != a or find(b) != b or ver[a] != va or ver[b] != vb:
-                continue
-            if cached is not None and cached[0] == (a, b, va, vb):
-                ev, cached = cached[1], None
-            else:
-                exact_evals += 1
-                ev = yield from evaluate(a, b, between(a, b))
-                yield 0.5
-                if ev is None:
+        for ri, cap_now in enumerate(caps):
+            cap[0] = cap_now
+            if ri > 0:
+                waiting, parked[:] = parked[:], []
+                for c_, st in waiting:
+                    if find(c_[1]) != c_[1] or find(c_[2]) != c_[2] or ver[c_[1]] != c_[4] or ver[c_[2]] != c_[5]:
+                        continue
+                    if st <= 1.0 + cap_now:
+                        heapq.heappush(heap, c_)
+                    else:
+                        parked.append((c_, st))
+            while heap:
+                if self._stop:
+                    break
+                key, a, b, _, va, vb, exact = heapq.heappop(heap)
+                if find(a) != a or find(b) != b or ver[a] != va or ver[b] != vb:
                     continue
-            added = ev["stretch"] - max(stretch[a], stretch[b])
-            if not exact:
-                k2 = _key(added, ev["cost"])
-                last[(a, b)] = k2
-                seq[0] += 1
-                heapq.heappush(heap, (k2, a, b, seq[0], va, vb, True))
-                cached = ((a, b, va, vb), ev)
-                continue
-            if not ev["stretch"] <= 1.0 + tree.build_stretch:
-                dropped += 1
-                continue
-            for s in ev["glued"]:
-                _glue(t, dsu, tree.segments[s].edges)
-                glued_seg[s] = True
-            dsu.commit()
-            ev["local"].scatter(ev["uv"], corner_uv)
-            for f, x in zip(ev["local"].faces, ev["per"]):
-                face_str[f] = x
-            r, o = (a, b) if len(faces[a]) >= len(faces[b]) else (b, a)
-            cpar[o] = r
-            for f in faces[o]:
-                owner[f] = r
-            faces[r].extend(faces[o])
-            faces[o] = []
-            segs[r] = [s for s in segs[r] + segs[o] if not glued_seg[s]]
-            segs[o] = []
-            stretch[r], grid[r], chi[r] = ev["stretch"], not ev["pole"], 1
-            ver[a] += 1
-            ver[b] += 1
-            top = max(top, ev["stretch"])
-            if ev["pole"]:
-                pole_merges += 1
-            else:
-                grid_merges += 1
-            tree.merges.append((ev["glued"], ev["stretch"], ev["cost"], ev["pole"]))
-            push_for(r)
+                if cached is not None and cached[0] == (a, b, va, vb):
+                    ev, cached = cached[1], None
+                else:
+                    exact_evals += 1
+                    ev = yield from evaluate(a, b, between(a, b))
+                    yield 0.5
+                    if ev is None:
+                        continue
+                added = ev["stretch"] - max(stretch[a], stretch[b])
+                if not exact:
+                    k2 = _key(added, ev["cost"])
+                    last[(a, b)] = k2
+                    seq[0] += 1
+                    heapq.heappush(heap, (k2, a, b, seq[0], va, vb, True))
+                    cached = ((a, b, va, vb), ev)
+                    continue
+                if not ev["stretch"] <= 1.0 + tree.build_stretch:
+                    dropped += 1
+                    continue
+                last_st[(a, b)] = ev["stretch"]
+                if ev["stretch"] > 1.0 + cap[0]:
+                    cached = ((a, b, va, vb), ev)
+                    parked.append(((key, a, b, _, va, vb, True), ev["stretch"]))
+                    continue
+                if _lies_over(ev["local"], ev["uv"], ev["before"]):
+                    lay_over += 1
+                    # Not tried again until the smaller chart changes (as the kernel).
+                    small = a if len(faces[a]) <= len(faces[b]) else b
+                    refused[(a, b)] = (small, ver[small])
+                    continue
+                for s in ev["glued"]:
+                    _glue(t, dsu, tree.segments[s].edges)
+                    glued_seg[s] = True
+                dsu.commit()
+                ev["local"].scatter(ev["uv"], corner_uv)
+                for f, x in zip(ev["local"].faces, ev["per"]):
+                    face_str[f] = x
+                r, o = (a, b) if len(faces[a]) >= len(faces[b]) else (b, a)
+                cpar[o] = r
+                for f in faces[o]:
+                    owner[f] = r
+                faces[r].extend(faces[o])
+                faces[o] = []
+                segs[r] = [s for s in segs[r] + segs[o] if not glued_seg[s]]
+                segs[o] = []
+                stretch[r], grid[r], chi[r] = ev["stretch"], not ev["pole"], 1
+                ver[a] += 1
+                ver[b] += 1
+                top = max(top, ev["stretch"])
+                if ev["pole"]:
+                    pole_merges += 1
+                else:
+                    grid_merges += 1
+                tree.merges.append((ev["glued"], ev["stretch"], ev["cost"], ev["pole"]))
+                push_for(r)
         n = tree._numbers
         n[8], n[9], n[10], n[11], n[12], n[16], n[17] = len(tree.merges), grid_merges, pole_merges, 0, exact_evals, dropped, top
+        n[20] = lay_over
         tree.start_uv = corner_uv
 
 

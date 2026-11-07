@@ -1599,6 +1599,19 @@ impl SightPictures {
         let out = self.busy(|p| p.depth.get(view).map(|f| f.iter().map(|&v| v as f64).collect::<Vec<f64>>()))?;
         out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
     }
+
+    /// Face ids of cells `lo..hi` of one view (-1 for empty), so a reader on the UI thread copies a picture in
+    /// short slices.
+    fn face_cells<'py>(&self, py: Python<'py>, view: usize, lo: usize, hi: usize) -> PyResult<Bound<'py, PyArray1<i32>>> {
+        let out = self.busy(|p| p.face.get(view).map(|f| f[lo.min(f.len())..hi.min(f.len())].iter().map(|&v| v as i32).collect::<Vec<i32>>()))?;
+        out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
+    }
+
+    /// Depth of cells `lo..hi` of one view (see `depth`), as stored (float32).
+    fn depth_cells<'py>(&self, py: Python<'py>, view: usize, lo: usize, hi: usize) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let out = self.busy(|p| p.depth.get(view).map(|f| f[lo.min(f.len())..hi.min(f.len())].to_vec()))?;
+        out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
+    }
 }
 
 /// Draw the views that are not drawn yet. A stop ends it with InterruptedError; what is drawn stays for the next call.
@@ -1830,6 +1843,11 @@ impl UvChartTree {
     /// `uvchart::num` columns: patches, irregular, turning, traces, Euler-cut patches and edges, ..., build ms.
     fn numbers<'py>(&self, py: Python<'py>) -> F64Array<'py> {
         self.0.numbers.to_vec().into_pyarray(py)
+    }
+
+    /// The merge tree's layout per corner when it ended (every level's charts start from it).
+    fn start_uv<'py>(&self, py: Python<'py>) -> F64Array<'py> {
+        self.0.start_uv.clone().into_pyarray(py)
     }
 
     /// Patch per face.
