@@ -33,8 +33,10 @@ WAIT = "wait"  # a stage yields this while a faster job runs: step() returns at 
 LEVEL_STEP = 0.5  # a chart that lies over itself is redone at this share of the Stretch allowed it had
 SELF_CHECK_FACES = 4  # charts smaller than this are not checked for lying over themselves (a pole of valence 5 needs 5 faces)
 CHECK_BATCH = 24  # charts checked in one call
-CHECK_PAIRS = 20000  # triangle pairs tested in one go (a slice)
+CHECK_PAIRS = 5000  # triangle pairs tested in one go (a slice)
 OVERLAP_EPS = 1e-4  # triangles overlapping by less than this share of a median triangle's side count as touching
+REDO_FACES = 64  # charts this small are laid out again on their own when their layout stretches too much
+REDO_MEDIAN = 1.25  # ... or when more than half their area stretches more than this (L2 stretch)
 ATTACH_FACES = 16  # charts this small are hinged onto a neighbour when that overlaps nothing (a setting; 0 = never)
 ATTACH_TOL = 0.05  # border layouts that agree within this share of an edge are glued along the whole shared border
 BOX_LIKE = 0.85  # a chart covering this share of its box is packed as a box (on the block grid, half the gap of an outline)
@@ -362,6 +364,10 @@ class NewUVs:
         chart, corner_uv, chart_rows, back = yield from self._split_overlapping(tree, chart, corner_uv, chart_rows, x_now)
         if back:
             res.messages.append(f"{back} chart{'s' if back != 1 else ''} lay over themselves and were redone at a lower Stretch allowed.")
+        self._tick("repair", 0.62)
+        corner_uv, chart_rows, fixed = yield from self._redo_stretched(chart, corner_uv, chart_rows, x_now)
+        if fixed:
+            res.messages.append(f"{fixed} small chart{'s' if fixed != 1 else ''} laid out again with less stretch.")
         self._tick("attach", 0.65)
         chart, corner_uv, chart_rows = yield from self._attach_small(chart, corner_uv, chart_rows)
         nchart = int(chart.max()) + 1 if len(chart) else 0
@@ -484,6 +490,76 @@ class NewUVs:
         self.result = res
         self._tick("done", 1.0)
         yield
+
+    def _redo_stretched(self, chart, corner_uv, rows, x):
+        """A small chart (at most `REDO_FACES` faces) whose layout stretches more than Stretch allowed somewhere, or more
+        than `REDO_MEDIAN` on half its area, is laid out again on its own (`uvflat.Flatten`, free start, rows off: Tutte
+        then quad ARAP with the injective step) and kept when its worst stretch drops and nothing overlaps. Such charts
+        come from patches whose grid or band layout did not fit them (thin planks, slivers). Returns (corner UV, rows per
+        chart, number laid out again)."""
+
+        indptr, flat = self.indptr, self.flat
+        nf = len(indptr) - 1
+        size = np.bincount(chart, minlength=len(rows))
+        tri = _fan(indptr, np.arange(nf))
+        tface = np.repeat(np.arange(nf), np.maximum(np.diff(indptr) - 2, 0))
+        yield
+        L = _l2_stretch(self.points[flat[tri]], corner_uv[tri], chart[tface], len(rows))
+        a3 = 0.5 * np.linalg.norm(np.cross(*(self.points[flat[tri[:, k]]] - self.points[flat[tri[:, 0]]] for k in (1, 2))), axis=1)
+        yield
+        tch = chart[tface]
+        worst = np.zeros(len(rows))
+        np.maximum.at(worst, tch, np.where(np.isfinite(L), L, np.inf))
+        over = np.bincount(tch, weights=a3 * (L > REDO_MEDIAN), minlength=len(rows)) > 0.5 * np.bincount(tch, weights=a3, minlength=len(rows))
+        todo = np.flatnonzero((size > 0) & (size <= REDO_FACES) & ((worst > 1.0 + x / 100.0) | over))
+        if not len(todo):
+            return corner_uv, rows, 0
+        corner_uv, rows = corner_uv.copy(), np.asarray(rows).copy()
+        order = np.argsort(chart, kind="stable")
+        bounds = np.searchsorted(chart[order], np.arange(len(rows) + 1))
+        fixed = 0
+        for c in todo:
+            faces = order[bounds[c] : bounds[c + 1]]
+            corners = self._sub(faces)[0]
+            key = np.column_stack((flat[corners], np.round(corner_uv[corners] * 1e9).astype(np.int64)))
+            _, local = np.unique(key, axis=0, return_inverse=True)
+            local = local.reshape(-1)
+            lpts = np.zeros((int(local.max()) + 1, 3))
+            lpts[local] = self.points[flat[corners]]
+            lptr = np.concatenate([[0], np.cumsum(np.diff(indptr)[faces])])
+            lt = _fan(lptr, np.arange(len(faces)))  # local corner order is the order of `corners`
+            best, best_w = None, worst[c]
+            # 1. the chart's own best-fit plane (a small chart is nearly flat); 2. a free flatten (Tutte, then ARAP)
+            centred = lpts - lpts.mean(axis=0)
+            axes = np.linalg.svd(centred, full_matrices=False)[2]
+            tries = [(centred @ axes[0], centred @ axes[1])]
+            stage = uvflat.Flatten(lpts, lptr, local, None, rows="off", start_mode="free", stretch_allowed=x / 100.0, texture_px=float(self.settings.texture_px),
+                                   budget=self.budget, use_fast=False)
+            while not stage.done:
+                stage.step()
+                yield
+            if stage.uv is not None and np.isfinite(stage.uv).all():
+                tries.append(tuple(np.asarray(stage.uv, dtype=np.float64).T))
+            for u, v in tries:
+                new = np.column_stack((u, v))[local]
+                ar = _tri_area2(new[lt])
+                if ar.sum() < 0:
+                    new[:, 1] *= -1.0  # the projection may look from behind
+                    ar = -ar
+                if not np.all(ar > 0):
+                    continue
+                got = _l2_stretch(lpts[local[lt]], new[lt], np.zeros(len(lt), np.int64), 1)
+                if not (np.isfinite(got).all() and got.max() < best_w):
+                    continue
+                if any(overlap_pairs(new[lt], OVERLAP_EPS * float(np.median(ar)) ** 0.5)):
+                    continue
+                best, best_w = new, got.max()
+            if best is None:
+                continue
+            corner_uv[corners] = best
+            rows[c] = 0
+            fixed += 1
+        return corner_uv, rows, fixed
 
     def _attach_small(self, chart, corner_uv, rows):
         """Small charts hinged onto a neighbour (ours): a chart of at most `ATTACH_FACES` faces is turned and moved onto
@@ -645,6 +721,9 @@ class NewUVs:
 
         until = time.perf_counter() + self.budget
         for faces in groups:
+            if time.perf_counter() > until:
+                yield
+                until = time.perf_counter() + self.budget
             t = corner_uv[_fan(self.indptr, faces)]
             if not len(t):
                 continue
@@ -694,18 +773,23 @@ class NewUVs:
         while pending and x > 0:
             x = x * LEVEL_STEP if x >= 1 else 0.0
             luv, lchart, lrows, _ = yield from self._flatten(tree, x)
-            lby = {}
+            yield
             order = np.argsort(lchart, kind="stable")
             ids, start = np.unique(lchart[order], return_index=True)
             lby = {int(i): order[a:b] for i, a, b in zip(ids, start, list(start[1:]) + [len(order)])}
             still = []
+            yield
+            until = time.perf_counter() + self.budget
             for c in pending:
+                if time.perf_counter() > until:
+                    yield
+                    until = time.perf_counter() + self.budget
                 faces = np.flatnonzero(chart == c)
                 inside = np.unique(lchart[faces])
                 if not all(np.all(chart[lby[int(i)]] == c) for i in inside):  # not nested: try a lower level
                     still.append(c)
                     continue
-                corners = np.concatenate([np.arange(indptr[f], indptr[f + 1]) for f in faces])
+                corners = self._sub(faces)[0]
                 corner_uv[corners] = luv[corners]
                 rows.pop(c, None)
                 for i in inside:
@@ -771,12 +855,12 @@ class NewUVs:
                     yield WAIT
                 self._active = None
                 uv, chart, stats, ratio = job.result()
+                yield
                 stats = np.asarray(stats, dtype=np.float64).reshape(-1, uvflat.STATS_LEN)
                 chart = np.asarray(chart, dtype=np.int64)
                 rows = np.zeros(int(chart.max()) + 1 if len(chart) else 0, np.int64)
-                for r in stats:
-                    if 0 <= int(r[0]) < len(rows) and np.isfinite(r[4]):
-                        rows[int(r[0])] = int(r[4])
+                ok = np.isfinite(stats[:, 4]) & (stats[:, 0] >= 0) & (stats[:, 0] < len(rows))
+                rows[stats[ok, 0].astype(np.int64)] = stats[ok, 4].astype(np.int64)
                 return np.asarray(uv, dtype=np.float64).reshape(-1, 2), chart, rows, np.asarray(ratio, dtype=np.float64)
         # NumPy twin: chart by chart.
         chart, cut, _ = tree.level(float(x))
@@ -851,22 +935,21 @@ def _fit_rigid(p: np.ndarray, q: np.ndarray) -> tuple:
 def _fan(indptr, faces, local: bool = False) -> np.ndarray:
     """Fan triangles of `faces` as corner indices: mesh corners, or (local) positions in the faces' own corner order."""
 
-    out, pos = [], 0
-    for f in faces:
-        a, n = int(indptr[f]), int(indptr[f + 1] - indptr[f])
-        base = pos if local else a
-        out += [(base, base + i, base + i + 1) for i in range(1, n - 1)]
-        pos += n
-    return np.array(out, dtype=np.int64).reshape(-1, 3)
+    faces = np.asarray(faces, dtype=np.int64)
+    n = (indptr[faces + 1] - indptr[faces]).astype(np.int64)
+    base = (np.cumsum(n) - n) if local else indptr[faces].astype(np.int64)
+    nt = np.maximum(n - 2, 0)
+    b = np.repeat(base, nt)
+    i = np.arange(int(nt.sum())) - np.repeat(np.cumsum(nt) - nt, nt) + 1
+    return np.stack([b, b + i, b + i + 1], 1) if len(b) else np.zeros((0, 3), np.int64)
 
 
 def _signed_areas(uv, indptr, faces, local: bool = False) -> np.ndarray:
     """Twice the signed UV area of every face of `faces` (uv per mesh corner, or per local corner when `local`)."""
 
     t = _fan(indptr, faces, local)
-    a, b, c = uv[t[:, 0]], uv[t[:, 1]], uv[t[:, 2]]
-    tri = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
-    n = np.array([int(indptr[f + 1] - indptr[f]) - 2 for f in faces])
+    tri = _tri_area2(uv[t])
+    n = np.maximum(indptr[np.asarray(faces) + 1] - indptr[np.asarray(faces)] - 2, 0)
     return np.add.reduceat(tri, np.concatenate([[0], np.cumsum(n)[:-1]])) if len(tri) else tri
 
 
@@ -883,6 +966,22 @@ def _tris_overlap(new, faces, indptr, corner_uv, hfaces, eps) -> bool:
         return False
     i, j = np.meshgrid(np.arange(len(t1)), np.arange(len(t2)), indexing="ij")
     return bool(_sat_overlap(t1[i.ravel()], t2[j.ravel()], eps).any())
+
+
+def _l2_stretch(q: np.ndarray, t: np.ndarray, chart: np.ndarray, nchart: int) -> np.ndarray:
+    """Per triangle (3D corners q (n, 3, 3), UV t (n, 3, 2)): the L2 stretch of Sander, Snyder, Gortler, Hoppe 2001,
+    each chart scaled to its 3D area (the UV Check's stretch); inf for a triangle with no UV area."""
+
+    a2s = 0.5 * _tri_area2(t)
+    a3 = 0.5 * np.linalg.norm(np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]), axis=1)
+    a2i = np.bincount(chart, weights=np.abs(a2s), minlength=nchart)
+    a3i = np.bincount(chart, weights=a3, minlength=nchart)
+    s_, t_ = t[:, :, 0], t[:, :, 1]
+    d = np.where(a2s == 0, np.nan, 2 * a2s)[:, None]
+    ss = (q[:, 0] * (t_[:, 1] - t_[:, 2])[:, None] + q[:, 1] * (t_[:, 2] - t_[:, 0])[:, None] + q[:, 2] * (t_[:, 0] - t_[:, 1])[:, None]) / d
+    st = (q[:, 0] * (s_[:, 2] - s_[:, 1])[:, None] + q[:, 1] * (s_[:, 0] - s_[:, 2])[:, None] + q[:, 2] * (s_[:, 1] - s_[:, 0])[:, None]) / d
+    out = np.sqrt(0.5 * ((ss * ss).sum(1) + (st * st).sum(1)) * (a2i / np.maximum(a3i, 1e-30))[chart])
+    return np.where(np.isfinite(out), out, np.inf)
 
 
 def _tri_area2(t: np.ndarray) -> np.ndarray:
@@ -915,7 +1014,8 @@ def overlap_pairs(t: np.ndarray, eps: float, chunk: int = CHECK_PAIRS):
     if n < 2:
         return
     lo, hi = t.min(axis=1), t.max(axis=1)
-    cell = max(float(np.median(hi - lo)) * 2.0, 1e-300)
+    cell = max(float(np.median(hi - lo)), 1e-300)
+    yield False
     c0 = np.floor((lo - lo.min(axis=0)) / cell).astype(np.int64)
     c1 = np.floor((hi - lo.min(axis=0)) / cell).astype(np.int64)
     span = c1 - c0 + 1
@@ -933,9 +1033,15 @@ def overlap_pairs(t: np.ndarray, eps: float, chunk: int = CHECK_PAIRS):
         if not len(same):
             break
         pairs.append(np.stack([tri[same], tri[same + d]], 1))
+        if d % 8 == 0:
+            yield False
     if not pairs:
         return
-    pr = np.unique(np.sort(np.concatenate(pairs), axis=1), axis=0)
+    yield False
+    pr = np.sort(np.concatenate(pairs), axis=1)
+    code = np.unique(pr[:, 0] * n + pr[:, 1])
+    yield False
+    pr = np.stack([code // n, code % n], 1)
     box = (hi[pr[:, 0]] >= lo[pr[:, 1]]).all(axis=1) & (hi[pr[:, 1]] >= lo[pr[:, 0]]).all(axis=1)
     pr = pr[box]
     for i in range(0, len(pr), chunk):

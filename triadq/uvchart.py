@@ -409,13 +409,12 @@ def _lies_over(local, uv: np.ndarray, before: np.ndarray) -> bool:
     return _sides_cross(now[open_], now[nxt][open_], np.stack([a[open_], b[open_]], 1))
 
 
-def _key(added: float, share: float) -> tuple:
-    """Rank of a merge (as the kernel's `key_of`): share of the smaller chart's border cost removed, stretch added <= 0 first."""
+def _key(added: float, cost: float) -> tuple:
     if not np.isfinite(added):
-        return (2, 0.0, -share)
+        return (2, 0.0, -cost)
     if added <= SAME_STRETCH:
-        return (0, 0.0, -share)
-    return (1, -(share / added), 0.0)
+        return (0, 0.0 if abs(added) <= SAME_STRETCH else added, -cost)
+    return (1, -(cost / added), 0.0)
 
 
 class Segment:
@@ -831,12 +830,6 @@ class Charts:
                     out.append(s)
             return ordered(out)
 
-        def border(r):
-            return sum(tree.segments[s].cost for s in segs[r] if not glued_seg[s])
-
-        def share(a, b, cost):
-            return cost / max(min(border(a), border(b)), np.finfo(float).tiny)
-
         def estimate(lst):
             diff = total = c = 0.0
             for s in lst:
@@ -872,7 +865,7 @@ class Charts:
                 key = last.get((a, b))
                 if key is None:
                     mis, c = estimate(lst)
-                    key = _key(mis, share(r, o, c))
+                    key = _key(mis, c)
                 seq[0] += 1
                 st = last_st.get((a, b))
                 if st is not None and st > 1.0 + cap[0]:
@@ -948,7 +941,7 @@ class Charts:
                         continue
                 added = ev["stretch"] - max(stretch[a], stretch[b])
                 if not exact:
-                    k2 = _key(added, share(a, b, ev["cost"]))
+                    k2 = _key(added, ev["cost"])
                     last[(a, b)] = k2
                     seq[0] += 1
                     heapq.heappush(heap, (k2, a, b, seq[0], va, vb, True))
