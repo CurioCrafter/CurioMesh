@@ -105,6 +105,14 @@ class Twin(unittest.TestCase):
         used = tree.level(10.0)[2][2]
         self.assertEqual(used, len(tree.merges) - 1)
 
+    def test_border_crossing_found_and_touching_ignored(self):
+        p, q = np.array([[0.0, 0.0], [1.0, -1.0]]), np.array([[2.0, 0.0], [1.0, 1.0]])
+        self.assertTrue(uvchart._sides_cross(p, q, np.array([[0, 1], [2, 3]])))
+        q2 = np.array([[2.0, 0.0], [2.0, 1.0]])
+        self.assertFalse(uvchart._sides_cross(np.array([[0.0, 0.0], [2.0, 0.0]]), q2, np.array([[0, 1], [1, 3]])))
+        self.assertEqual(uvchart.round_caps(1.0)[0], 0.0125)
+        self.assertEqual(uvchart.round_caps(1.0)[-1], 1.0)
+
     def test_slices_stay_short(self):
         stage = uvchart.Charts(*cube(4), use_fast=False)
         longest = 0.0

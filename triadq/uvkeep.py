@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 import hashlib
 import math
 
+import threading
+
 import numpy as np
 
 from . import uvseams, uvsnap
@@ -31,6 +33,10 @@ MOVE_SHARE = 0.5  # the snap may move a vertex this share of its local edge, unl
 FALLBACK_TARGET_SHARE = 0.015  # faces the result is expected to have, as a share of the source's, when the aim is "keep detail"
 TEXTURE_PX = 1024.0
 CACHED_CANDIDATES = 8  # finished fits kept so Apply can write exactly what was previewed
+VIEW_PIXELS = 192  # a side of one source picture for the snap's camera check (higher can take longer)
+VIEW_TURNED_DEG = 20.0  # a drawn face turned further than this from the picture's normal counts as wrong (the camera check's rule)
+VIEW_BEHIND_PIXELS = 6.0  # a face this far behind the picture is hidden by something in front of it
+DEFAULT_DETAIL = 6.0  # Most Detail Loss in percent when the settings give none
 
 HARD, SOFT = uvseams.HARD, uvseams.SOFT
 
@@ -48,6 +54,9 @@ class Settings:
     texture_px: float = TEXTURE_PX
     repeat: tuple = ()
     cut_here: tuple = ()
+    view_check: bool = True  # the camera check holds snap moves that would spend more than Most Detail Loss allows
+    detail: float = DEFAULT_DETAIL  # Most Detail Loss, percent of the source's picture pixels
+    view_pixels: int = VIEW_PIXELS
 
 
 def settings_of(gs) -> Settings:
@@ -56,7 +65,10 @@ def settings_of(gs) -> Settings:
     ov = OVERRIDE
     mode = ov.get("mode") or ("exact" if getattr(gs, "keep_uvs", False) else "off")
     s = Settings(mode=mode)
-    for key in ("allowance", "split", "snap", "move_share", "texture_px", "repeat", "cut_here"):
+    detail = getattr(gs, "auto_detail", None)
+    if isinstance(detail, (int, float)) and detail > 0:
+        s.detail = float(detail)
+    for key in ("allowance", "split", "snap", "move_share", "texture_px", "repeat", "cut_here", "view_check", "detail", "view_pixels"):
         if key in ov:
             setattr(s, key, ov[key])
     return s
@@ -325,6 +337,86 @@ def result_key(points, indptr, flat) -> str:
 
 
 CANDIDATES: OrderedDict = OrderedDict()
+_JUDGES: OrderedDict = OrderedDict()
+
+
+def view_judge(sa: Source, pixels: int = VIEW_PIXELS):
+    """The camera check's judge over the source's six pictures (native pictures, the chords PictureJudge), or None
+    without the native pictures. Kept per source."""
+
+    key = (sa.key, int(pixels))
+    if key in _JUDGES:
+        return _JUDGES[key]
+    from .chords import PictureJudge
+    from .topology import _turbo as turbo
+
+    if turbo is None:
+        return None
+
+    pts = np.ascontiguousarray(sa.points, np.float64).reshape(-1, 3)
+    ip, fl = sa.indptr, sa.flat
+    tris = [(int(fl[a]), int(fl[k]), int(fl[k + 1])) for a, b in zip(ip[:-1], ip[1:]) for k in range(a + 1, b - 1)]
+    if not len(tris) or not len(pts):
+        return None
+    low, high = pts.min(0), pts.max(0)
+    center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
+    pictures = turbo.pictures(pts, tris, center, half, int(pixels))
+    judge = None if pictures is None else PictureJudge(pictures, center, half, int(pixels), VIEW_TURNED_DEG)
+    _JUDGES[key] = judge
+    while len(_JUDGES) > 2:
+        _JUDGES.popitem(last=False)
+    return judge
+
+
+def _face_wrong(judge, P, ip, fl, f) -> float:
+    s, e = int(ip[f]), int(ip[f + 1])
+    c = [P[int(v)].tolist() for v in fl[s:e]]
+    if len(c) == 4:
+        return judge.wrong(c)
+    return sum(judge.wrong([c[0], c[k], c[k + 1], c[k + 1]]) for k in range(1, len(c) - 1))
+
+
+def view_limit(judge, P0, P1, ip, fl, edge_move, detail: float, out: dict):
+    """Generator: per-vertex allowed move for the snap from the camera check. `P1` is a snap with the plain limit
+    `edge_move`; each moved vertex is priced by the wrong pixels its faces gain there (shared out between the moved
+    vertices of a face), and moves are kept cheapest first while what they add stays within Most Detail Loss
+    (`detail` percent) of the pixels the touched faces show (their area's share of the pictures). Only the change is
+    priced: the remesh's own loss was judged by Auto's camera check already, and these pictures are coarser. A move
+    that costs nothing or wins pixels back is always kept; the rest get 0 (held; split takes over). Fills `out` with
+    limit, held, room, spent."""
+
+    P0 = np.asarray(P0, np.float64).reshape(-1, 3)
+    P1 = np.asarray(P1, np.float64).reshape(-1, 3)
+    ip, fl = np.asarray(ip, np.int64), np.asarray(fl, np.int64)
+    nf = len(ip) - 1
+    moved = np.any(P1 != P0, axis=1)
+    face_of = np.repeat(np.arange(nf), np.diff(ip))
+    touched = np.zeros(nf, bool)
+    touched[face_of[moved[fl]]] = True
+    nxt = np.arange(len(fl)) + 1
+    nxt[ip[1:] - 1] = ip[:-1]
+    area = np.linalg.norm(np.add.reduceat(np.cross(P0[fl], P0[fl[nxt]]), ip[:-1], axis=0), axis=1) if nf else np.zeros(0)  # Newell
+    delta = {}
+    for count, f in enumerate(np.flatnonzero(touched).tolist()):
+        delta[f] = _face_wrong(judge, P1, ip, fl, f) - _face_wrong(judge, P0, ip, fl, f)
+        if count % 32 == 31:
+            yield
+    cost = np.zeros(len(P0))
+    for f, d in delta.items():
+        vs = [int(v) for v in fl[ip[f]:ip[f + 1]] if moved[v]]
+        for v in vs:
+            cost[v] += d / len(vs)
+    shown = judge.total * float(area[touched].sum()) / max(float(area.sum()), 1e-30)
+    room = detail / 100.0 * shown
+    limit = np.asarray(edge_move, np.float64).copy()
+    spent, held = 0.0, 0
+    for v in sorted(np.flatnonzero(moved).tolist(), key=lambda v: (cost[v], v)):
+        if cost[v] <= 0.0 or spent + cost[v] <= room:
+            spent += max(cost[v], 0.0)
+        else:
+            limit[v] = 0.0
+            held += 1
+    out.update(limit=limit, held=held, room=room, spent=spent)
 
 
 def remember(candidate: Candidate) -> None:
@@ -384,9 +476,34 @@ class FitStage:
         vchain = vparam = ()
         soft = numbers["soft_chains"] > 0 and not self.only_transfer
         if soft and s.snap:
-            move = self.view_limit if self.view_limit is not None else s.move_share * uvsnap.vertex_edge(P, ip, fl)
-            snap = uvsnap.Snap(P, ip, fl, seams, xyz, max_move=move, use_fast=self.use_fast)
-            yield from self._drive(snap)
+            move = self.view_limit
+            snap = None
+            if move is None:
+                move = s.move_share * uvsnap.vertex_edge(P, ip, fl)
+                judge = None
+                if s.view_check and self.use_fast:  # the pictures are native only; drawn on a thread while the first pass runs
+                    got = {}
+                    worker = threading.Thread(target=lambda: got.update(judge=view_judge(sa, s.view_pixels)), name="CurioMeshUVView", daemon=True)
+                    worker.start()
+                    first = uvsnap.Snap(P, ip, fl, seams, xyz, max_move=move, use_fast=self.use_fast)
+                    yield from self._drive(first)
+                    while worker.is_alive():
+                        yield
+                    if self._stopped:
+                        return
+                    judge = got.get("judge")
+                    snap = None if judge is not None else first
+                if judge is not None:  # the first pass had the plain limit; priced by the camera check, then the real pass
+                    view = {}
+                    yield from view_limit(judge, P, first.result["points"], ip, fl, move, s.detail, view)
+                    numbers.update(view_held=int(view["held"]), view_room_px=round(float(view["room"]), 1), view_spent_px=round(float(view["spent"]), 1))
+                    if view["held"]:
+                        move = view["limit"]
+                    else:
+                        snap = first
+            if snap is None:
+                snap = uvsnap.Snap(P, ip, fl, seams, xyz, max_move=move, use_fast=self.use_fast)
+                yield from self._drive(snap)
             if self._stopped:
                 return
             r = snap.result
@@ -407,9 +524,10 @@ class FitStage:
             numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
                            faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
                            split_budget=budget)
-        # per-side transfer: the active layer first, the others through its lookup
+        # per-side transfer: the active layer's lookup first (folds fixed after the split's seam UVs are laid over it),
+        # the other layers through the same lookup
         name, uv = sa.layers[sa.active]
-        tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, seams["class"], True, self.use_fast)
+        tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, seams["class"], False, self.use_fast)
         if tr._job is not None:
             self._now = tr
         while not tr.done:
@@ -420,14 +538,17 @@ class FitStage:
                 return
         self._now = None
         look = tr.result
-        out = {sa.active: np.asarray(look["uv"], np.float64).reshape(-1, 2)}
-        numbers.update(folded_before=int(look["folded_before"]), folded_after=int(look["folded_after"]), fold_stuck=int(look["fold_stuck"]))
+        out = {}
         for i, (nm, luv) in enumerate(sa.layers):
+            got = {}
+            yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+            if self._stopped:
+                return
+            out[i] = np.asarray(got["uv"], np.float64).reshape(-1, 2)
             if i == sa.active:
-                continue
-            u, _e, _f = uvseams.layer(sa.indptr, sa.flat, luv, P, ip, fl, look, s.texture_px, True, self.use_fast)
-            out[i] = np.asarray(u, np.float64).reshape(-1, 2)
-            yield
+                f = got["fold"]
+                numbers.update(folded_before=int(f["folded_before"]), folded_after=int(f["folded_after"]), fold_stuck=int(f["fold_stuck"]),
+                               fold_untangled=int(f.get("fold_untangled", 0)), fold_reread=int(f.get("fold_reread", 0)))
         layers = [(nm, out[i]) for i, (nm, _u) in enumerate(sa.layers)]
         mat = (self.material if self.material is not None else np.zeros(nf, np.int64))[origin]
         pts = P.reshape(-1, 3)
@@ -441,6 +562,21 @@ class FitStage:
         self.candidate, self.numbers = c, numbers
         if not self.only_transfer:
             remember(c)
+
+
+def _layer_steps(sa: Source, luv, P, ip, fl, look: dict, texture_px: float, use_fast: bool, got: dict):
+    """Generator: one UV layer through the lookup with the fold fix (`uvseams.layer`), polling the faster job when there is one so no slice blocks. Fills got[uv], got[fold]."""
+
+    fast = uvseams.FAST.get("layer") if use_fast else None
+    job = fast(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, sa.points) if fast is not None else None
+    if job is not None:
+        while not job.done():
+            yield
+        u, _e, fold = job.result()
+    else:
+        u, _e, fold = uvseams.layer(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, False, sa.points)
+        yield
+    got.update(uv=u, fold=fold)
 
 
 def fit_stage(source, src, res, gs, only_transfer: bool = False, use_fast: bool = True):

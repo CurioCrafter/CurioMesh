@@ -961,14 +961,15 @@ def uvseam_transfer(points, indptr, flat, corner_uv, res_points, res_indptr, res
 
 
 def uvseam_layer(src_indptr, src_flat, layer, res_points, res_indptr, res_flat, lookup: dict, texture_px: float = 1024.0,
-                 fix_folds: bool = True) -> "UvJob | None":
-    """Another UV layer through a transfer's lookup as a job: `result()` = (uv, expected, fold dict)."""
+                 fix_folds: bool = True, src_points=()) -> "UvJob | None":
+    """Another UV layer through a transfer's lookup as a job: `result()` = (uv, expected, fold dict). `src_points` (3 per
+    source vertex; empty = none) turns on the fold fix's last layer (re-reading faces that still fold)."""
 
     keys = {"ids": _uvseam_i64, "w": _uvseam_f64, "shift": _uvseam_bool, "slid": _uvseam_bool, "ref_ids": _uvseam_i64, "ref_w": _uvseam_f64,
             "ref_face": _uvseam_i64, "orient": _uvseam_f64, "region": _uvseam_i64, "join": _uvseam_f64}
     look = {key: cast(lookup[key]) for key, cast in keys.items()}
     return uv_job("uvseam_layer", _uvseam_i64(src_indptr), _uvseam_i64(src_flat), _uvseam_f64(layer), _uvseam_f64(res_points),
-                  _uvseam_i64(res_indptr), _uvseam_i64(res_flat), look, float(texture_px), bool(fix_folds), name="CurioMeshUVLayer")
+                  _uvseam_i64(res_indptr), _uvseam_i64(res_flat), look, float(texture_px), bool(fix_folds), _uvseam_f64(src_points), name="CurioMeshUVLayer")
 # main-only: uv end seam
 
 # main-only: uv begin snap

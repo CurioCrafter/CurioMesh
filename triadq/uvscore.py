@@ -31,6 +31,8 @@ ROW_LINE_TEXEL = 0.25
 RASTER_MAX_PX = 8192.0
 GRID_EDGES = 2.0
 GRID_MAX_DIM = 4096.0
+# A nearest-distance probe starts at this share of the cell edge (a speed setting only: the answer is exact either way).
+PROBE_START = 0.0625
 STRETCH_BAD = 4.0
 DRIFT_BAD_PX = 8.0
 AREA_MIN = 1e-14

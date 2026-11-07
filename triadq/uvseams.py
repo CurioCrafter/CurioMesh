@@ -36,11 +36,13 @@ COST_A = 1.0
 COST_B = 4.0
 HARD_BUDGET_SHARE = 0.5
 WALK_REACH = 2.0
+WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
 STOP_TEXEL_SHARE = 0.02
 STALL_WINDOW = 50
 STALL_DROP = 0.01
+UNTANGLE_STALL = 3
 
 IGNORE, SHIFT, SOFT, HARD = 0, 1, 2, 3
 SLICE_S = 0.004  # one step() of a stage does about this much work
@@ -771,8 +773,9 @@ def _cut(P, face):
 
 
 class _Source:
-    def __init__(self, P, indptr, flat, seams):
+    def __init__(self, P, indptr, flat, seams, uv=None):
         self.P, self.indptr, self.flat, self.seams = P, indptr, flat, seams
+        self.uv = None if uv is None or len(uv) == 0 else np.asarray(uv, np.float64).reshape(-1, 2)
 
     def build(self):
         """Generator: the fan triangles, centres, normals, crossings and the global lookup grid."""
@@ -802,6 +805,21 @@ class _Source:
             if f % 1024 == 1023:
                 yield
         self.cp = P[flat]  # corner points
+        if self.uv is not None:  # per face: UV centre and 3D radius, for the walk's UV check
+            self.uv_centre, self.radius = [], []
+            Ul = self.uv.tolist()
+            for f in range(nf):
+                s, e = int(indptr[f]), int(indptr[f + 1])
+                u0 = u1 = 0.0
+                for h in range(s, e):
+                    u0 += Ul[h][0] / (e - s)
+                    u1 += Ul[h][1] / (e - s)
+                self.uv_centre.append((u0, u1))
+                c = self.centre[f]
+                r = 0.0
+                for v in flat[s:e].tolist():
+                    r = max(r, _dist(Pl[v], c))
+                self.radius.append(r)
         weld = seams["weld"]
         wflat = weld[flat]
         nxt = _next_corners(indptr)
@@ -920,6 +938,19 @@ def _read_face(src: _Source, region, Pr, face):
     ref = n if region[hits[n][0]] == win[0] else next((s for s in range(n) if region[hits[s][0]] == win[0]), n)
     rf, rd, rt, rw = hits[ref]
     reach = WALK_REACH * diameter + rd
+    # The walk's UV check: a face whose UV offset from the reference UV, taken back to 3D through the reference
+    # triangle's map, is much longer than its 3D distance lies on the far side of a seam reached the long way round (a
+    # thin tube or plate inside one island); it is not walked.
+    uv_reach = None
+    if src.uv is not None:
+        tri = src.tri[rt]
+        p0, p1, p2 = (tuple(src.cp[tri[k]]) for k in range(3))
+        q0, q1, q2 = (tuple(src.uv[tri[k]]) for k in range(3))
+        u_ref = (rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1])
+        p_ref = _mix(rw, p0, p1, p2)
+        inverse = _uv_to_3d(p0, p1, p2, q0, q1, q2)
+        if inverse is not None:
+            uv_reach = (u_ref, p_ref, inverse)
     order = [(rf, False)]
     seen = {rf}
     queue = deque([0])
@@ -930,8 +961,11 @@ def _read_face(src: _Source, region, Pr, face):
             g = int(src.across[h])
             if g < 0 or src.crossing[h] == 2 or g in seen or _dist(src.centre[g], c) > reach:
                 continue
+            sh = shifted or src.crossing[h] == 1
+            if uv_reach is not None and not _uv_near(src, g, sh, uv_reach):
+                continue
             seen.add(g)
-            order.append((g, shifted or src.crossing[h] == 1))
+            order.append((g, sh))
             queue.append(len(order) - 1)
     reached = [f for f, _ in order]
     nr = _newell(Pr, face)
@@ -951,14 +985,49 @@ def _read_face(src: _Source, region, Pr, face):
     return out
 
 
-def _lookup_steps(seams, src_points, src_indptr, src_flat, res_points, res_indptr, res_flat, look: dict):
-    """Generator: fills `look` face by face (yields after each face)."""
+def _uv_to_3d(p0, p1, p2, q0, q1, q2):
+    """The inverse of a triangle's 3D-to-UV map as (k00, k01, k10, k11): UV offsets to 3D lengths in the triangle's
+    plane. None when either side has no area."""
+
+    e1, e2 = _sub(p1, p0), _sub(p2, p0)
+    l1 = math.sqrt(_dot(e1, e1))
+    if l1 <= 0.0:
+        return None
+    x = (e1[0] / l1, e1[1] / l1, e1[2] / l1)
+    bx = _dot(e2, x)
+    y3 = (e2[0] - bx * x[0], e2[1] - bx * x[1], e2[2] - bx * x[2])
+    by = math.sqrt(_dot(y3, y3))
+    if by <= 0.0:
+        return None
+    du1, dv1, du2, dv2 = q1[0] - q0[0], q1[1] - q0[1], q2[0] - q0[0], q2[1] - q0[1]
+    # J = [du1 du2; dv1 dv2] * inverse([l1 bx; 0 by])
+    j00, j10 = du1 / l1, dv1 / l1
+    j01, j11 = (du2 - j00 * bx) / by, (dv2 - j10 * bx) / by
+    det = j00 * j11 - j01 * j10
+    if det == 0.0:
+        return None
+    return (j11 / det, -j01 / det, -j10 / det, j00 / det)
+
+
+def _uv_near(src, g, shifted, uv_reach) -> bool:
+    u_ref, p_ref, k = uv_reach
+    u = src.uv_centre[g]
+    du, dv = u[0] - u_ref[0], u[1] - u_ref[1]
+    if shifted:
+        du, dv = du + _whole(-du), dv + _whole(-dv)
+    lx, ly = k[0] * du + k[1] * dv, k[2] * du + k[3] * dv
+    return math.sqrt(lx * lx + ly * ly) <= WALK_UV_SLACK * (_dist(src.centre[g], p_ref) + src.radius[g])
+
+
+def _lookup_steps(seams, src_points, src_indptr, src_flat, res_points, res_indptr, res_flat, look: dict, uv=None):
+    """Generator: fills `look` face by face (yields after each face). `uv` (the active layer, per source corner) turns
+    on the walk's UV check."""
 
     P = np.asarray(src_points, np.float64).reshape(-1, 3)
     si, sf = np.asarray(src_indptr, np.int64), np.asarray(src_flat, np.int64)
     Pr = np.asarray(res_points, np.float64).reshape(-1, 3).tolist()
     ri, rf = np.asarray(res_indptr, np.int64), np.asarray(res_flat, np.int64)
-    src = _Source(P, si, sf, seams)
+    src = _Source(P, si, sf, seams, uv)
     yield from src.build()
     region = seams["region"]
     for f in range(len(ri) - 1):
@@ -1044,7 +1113,182 @@ def _uv_gap(uv, h, g):
 
 
 def _fold_fix_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report: dict):
-    """Generator twin of the kernel's fold fix: changes `uv` (a NumPy array) in place, fills `report`."""
+    """Generator twin of the kernel's fold fix: untangling, the ring fills for what is left, untangling again. Changes
+    `uv` (a NumPy array) in place, fills `report`."""
+
+    ri = [int(x) for x in res_indptr]
+    nf = len(ri) - 1
+    ex = [float(x) for x in expected]
+    before = sum(folded(ri, uv, ex, f) for f in range(nf))
+    report.update(before=before, after=before, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False, untangled=0)
+    if before == 0:
+        report["after"] = 0
+        return
+    moves = [0]
+    yield from _untangle_steps(res_indptr, res_flat, uv, region, ex, join, moves)
+    yield from _ring_fill_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report)
+    if report["after"] > 0:
+        yield from _untangle_steps(res_indptr, res_flat, uv, region, ex, join, moves)
+        report["after"] = sum(folded(ri, uv, ex, f) for f in range(nf))
+    report["before"] = before
+    report["untangled"] = moves[0]
+
+
+def _det3(m):
+    return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+
+
+def _chebyshev(g, h):
+    """Largest t with g_l . x + h_l >= t for every row (unit rows): (x, t) by trying every triple as the active set."""
+
+    n = len(g)
+    best = None
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(j + 1, n):
+                m = [[g[i][0], g[i][1], -1.0], [g[j][0], g[j][1], -1.0], [g[k][0], g[k][1], -1.0]]
+                det = _det3(m)
+                if abs(det) < 1e-12:
+                    continue
+                r = [-h[i], -h[j], -h[k]]
+                sol = []
+                for c in range(3):
+                    a = [row[:] for row in m]
+                    for row in range(3):
+                        a[row][c] = r[row]
+                    sol.append(_det3(a) / det)
+                x0, x1, t = sol
+                tol = 1e-12 * (1.0 + abs(t))
+                if all(g[l][0] * x0 + g[l][1] * x1 + h[l] >= t - tol for l in range(n)) and (best is None or t > best[1]):
+                    best = ((x0, x1), t)
+    return best
+
+
+def _untangle_steps(res_indptr, res_flat, uv, region, expected, join, moves: list):
+    """Generator twin of the kernel's untangling (moves[0] counts the vertex moves)."""
+
+    ri = [int(x) for x in res_indptr]
+    rf = [int(x) for x in res_flat]
+    nf = len(ri) - 1
+    region = [int(x) for x in region]
+    join = [float(x) for x in join]
+    n_points = max(rf) + 1 if rf else 0
+    vc = [[] for _ in range(n_points)]
+    for h, v in enumerate(rf):
+        vc[v].append(h)
+    face_of = [0] * len(rf)
+    for f in range(nf):
+        for h in range(ri[f], ri[f + 1]):
+            face_of[h] = f
+    edge_use = {}
+    for f in range(nf):
+        face = rf[ri[f]:ri[f + 1]]
+        for i in range(len(face)):
+            a, b = face[i], face[(i + 1) % len(face)]
+            key = (min(a, b), max(a, b))
+            edge_use[key] = edge_use.get(key, 0) + 1
+
+    def join_of(r):
+        return join[r] if 0 <= r < len(join) else math.inf
+
+    best, stall = None, 0
+    while True:
+        bad = [f for f in range(nf) if folded(ri, uv, expected, f)]
+        if not bad:
+            break
+        if best is None or len(bad) < best:
+            best, stall = len(bad), 0
+        else:
+            stall += 1
+            if stall >= UNTANGLE_STALL:
+                break
+        verts = sorted({rf[h] for f in bad for h in range(ri[f], ri[f + 1])})
+        moved = 0
+        for count, v in enumerate(verts):
+            if count % 256 == 255:
+                yield
+            alls = vc[v]
+            wedges = []  # the vertex's corners grouped by side region and shared UV (within join)
+            for h in alls:
+                r = region[face_of[h]]
+                if r < 0:
+                    continue
+                w = next((w for w in wedges if region[face_of[w[0]]] == r and _uv_gap(uv, h, w[0]) <= join_of(r)), None)
+                if w is None:
+                    wedges.append([h])
+                else:
+                    w.append(h)
+
+            def closed(h):
+                f = face_of[h]
+                s, e = ri[f], ri[f + 1]
+                n, i = e - s, h - s
+                me = rf[h]
+                return all(edge_use.get((min(me, o), max(me, o))) == 2 for o in (rf[s + (i + n - 1) % n], rf[s + (i + 1) % n]))
+
+            whole = len(wedges) == 1 and len(wedges[0]) == len(alls) and all(closed(h) for h in alls)
+            for cs in wedges:
+                if not whole and not any(folded(ri, uv, expected, face_of[h]) for h in cs):
+                    continue
+                g, hh = [], []
+                shortest = math.inf
+                for h in cs:
+                    f = face_of[h]
+                    s, e = ri[f], ri[f + 1]
+                    n, i = e - s, h - s
+                    for o in (s + (i + n - 1) % n, s + (i + 1) % n):
+                        shortest = min(shortest, math.sqrt((float(uv[2 * o]) - float(uv[2 * h])) ** 2 + (float(uv[2 * o + 1]) - float(uv[2 * h + 1])) ** 2))
+                    if expected[f] == 0.0:
+                        continue
+                    for k in range(1, n - 1):
+                        tri = (0, k, k + 1)
+                        if i not in tri:
+                            continue
+                        p = tri.index(i)
+                        a, b = s + tri[(p + 1) % 3], s + tri[(p + 2) % 3]
+                        a0, a1, b0, b1 = float(uv[2 * a]), float(uv[2 * a + 1]), float(uv[2 * b]), float(uv[2 * b + 1])
+                        d0, d1 = a0 - b0, a1 - b1
+                        g0, g1, h0 = expected[f] * d1, expected[f] * -d0, expected[f] * (a0 * b1 - a1 * b0)
+                        norm = math.sqrt(g0 * g0 + g1 * g1)
+                        if norm < 1e-15:
+                            continue
+                        g.append((g0 / norm, g1 / norm))
+                        hh.append(h0 / norm)
+                x = (float(uv[2 * cs[0]]), float(uv[2 * cs[0] + 1]))
+                m0 = [g[l][0] * x[0] + g[l][1] * x[1] + hh[l] for l in range(len(g))]
+                if not whole:
+                    if not (0.0 < shortest < math.inf) or not g:
+                        continue
+                    g += [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
+                    hh += [shortest - x[0], shortest + x[0], shortest - x[1], shortest + x[1]]
+                elif len(g) < 3:
+                    continue
+                worst = min(m0)
+                sol = _chebyshev(g, hh)
+                if sol is None:
+                    continue
+                xs, t = sol
+                if t <= max(worst, 0.0):
+                    continue
+                goal = 0.5 * t
+                step = 0.0
+                for l in range(len(m0)):
+                    m1 = g[l][0] * xs[0] + g[l][1] * xs[1] + hh[l]
+                    if m0[l] < goal and m1 > m0[l]:
+                        step = max(step, (goal - m0[l]) / (m1 - m0[l]))
+                step = min(step, 1.0)
+                xn = (x[0] + step * (xs[0] - x[0]), x[1] + step * (xs[1] - x[1]))
+                for h in cs:
+                    uv[2 * h], uv[2 * h + 1] = xn
+                moved += 1
+        moves[0] += moved
+        yield
+        if moved == 0:
+            break
+
+
+def _ring_fill_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report: dict):
+    """Generator twin of the kernel's ring fills (the fold fix's second layer)."""
 
     Pr = np.asarray(res_points, np.float64).reshape(-1, 3).tolist()
     ri = [int(x) for x in res_indptr]
@@ -1262,6 +1506,44 @@ def fold_fix(res_points, res_indptr, res_flat, uv, region, expected, join=(), te
     return report
 
 
+def reread_folded(src_points, src_flat, layer_uv, look: dict, res_points, res_indptr, res_flat, uv, expected) -> int:
+    """Twin of the kernel's last fold-fix layer: a face that still folds reads its corners again through its reference
+    triangle's own (affine) map; kept only when that unfolds it. Changes `uv` in place; returns the faces read again."""
+
+    if src_points is None or len(src_points) == 0:
+        return 0
+    SP = np.asarray(src_points, np.float64).reshape(-1, 3)
+    sf = np.asarray(src_flat, np.int64)
+    L = np.asarray(layer_uv, np.float64).ravel()
+    RP = np.asarray(res_points, np.float64).reshape(-1, 3)
+    ri, rf = np.asarray(res_indptr, np.int64), np.asarray(res_flat, np.int64)
+    done = 0
+    for f in range(len(ri) - 1):
+        if look["ref_face"][f] < 0 or not folded(ri, uv, expected, f):
+            continue
+        c = [int(x) for x in look["ref_ids"][3 * f:3 * f + 3]]
+        p = [tuple(SP[sf[h]]) for h in c]
+        q = [(L[2 * h], L[2 * h + 1]) for h in c]
+        e1, e2 = _sub(p[1], p[0]), _sub(p[2], p[0])
+        g11, g12, g22 = _dot(e1, e1), _dot(e1, e2), _dot(e2, e2)
+        det = g11 * g22 - g12 * g12
+        if not abs(det) > 1e-30:
+            continue
+        s, e = int(ri[f]), int(ri[f + 1])
+        old = uv[2 * s:2 * e].copy()
+        for h in range(s, e):
+            x = _sub(tuple(RP[rf[h]]), p[0])
+            r1, r2 = _dot(x, e1), _dot(x, e2)
+            b1, b2 = (g22 * r1 - g12 * r2) / det, (g11 * r2 - g12 * r1) / det
+            for k in range(2):
+                uv[2 * h + k] = q[0][k] + b1 * (q[1][k] - q[0][k]) + b2 * (q[2][k] - q[0][k])
+        if folded(ri, uv, expected, f):
+            uv[2 * s:2 * e] = old
+        else:
+            done += 1
+    return done
+
+
 # ---------------------------------------------------------------- the sliced stage
 class Transfer:
     """Per-side transfer as a sliced stage: `step()` does about 4 ms of work (or polls the faster job), `done` turns
@@ -1319,19 +1601,22 @@ class Transfer:
         ri = np.asarray(ri, np.int64)
         n_corners = int(ri[-1])
         look = _empty_lookup(seams, ri, n_corners)
-        for _ in _lookup_steps(seams, sp, si, sf, rp, ri, rf, look):
+        for _ in _lookup_steps(seams, sp, si, sf, rp, ri, rf, look, suv):
             if self._stopped:
                 break
             yield
         look["done"] = not self._stopped
         uv, expected = evaluate(look, si, sf, np.asarray(suv, np.float64).ravel(), ri)
-        report = dict(before=0, after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False)
+        report = dict(before=0, after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False, untangled=0, reread=0)
         if self.fix_folds and look["done"]:
             for _ in _fold_fix_steps(rp, ri, rf, uv, look["region"], expected, look["join"], seams["texture_px"], report):
                 if self._stopped:
                     report["stopped"] = True
                     break
                 yield
+            if report["after"] > 0 and not self._stopped:
+                report["reread"] = reread_folded(sp, sf, suv, look, rp, ri, rf, uv, expected)
+                report["after"] -= report["reread"]
         self.result = dict(uv=uv, expected=expected, **look, **{f"fold_{k}" if k not in ("before", "after") else f"folded_{k}": v for k, v in report.items()})
 
 
@@ -1349,19 +1634,23 @@ def transfer(src_points, src_indptr, src_flat, corner_uv, res_points, res_indptr
 
 
 def layer(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look: dict, texture_px: float = TEXTURE_PX_DEFAULT,
-          fix_folds: bool = True, use_fast: bool = True) -> tuple:
-    """Another UV layer through a transfer's lookup: (uv, expected, fold report)."""
+          fix_folds: bool = True, use_fast: bool = True, src_points=()) -> tuple:
+    """Another UV layer through a transfer's lookup: (uv, expected, fold report). `src_points` (empty =
+    none) turns on the fold fix's last layer (`reread_folded`)."""
 
     fast = FAST.get("layer") if use_fast else None
     if fast is not None:
-        job = fast(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look, texture_px, fix_folds)
+        job = fast(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look, texture_px, fix_folds, src_points)
         if job is not None:
             job._thread.join()
             uv, expected, fold = job.result()
             return uv, expected, fold
     uv, expected = evaluate(look, src_indptr, src_flat, layer_uv, res_indptr)
-    report = dict(before=0, after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False)
+    report = dict(before=0, after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False, untangled=0, reread=0)
     if fix_folds:
         for _ in _fold_fix_steps(res_points, res_indptr, res_flat, uv, look["region"], expected, look["join"], texture_px, report):
             pass
+        if report["after"] > 0:
+            report["reread"] = reread_folded(src_points, src_flat, layer_uv, look, res_points, res_indptr, res_flat, uv, expected)
+            report["after"] -= report["reread"]
     return uv, expected, {f"fold_{k}" if k not in ("before", "after") else f"folded_{k}": v for k, v in report.items()}

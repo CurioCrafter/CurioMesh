@@ -22,6 +22,7 @@ from .topology import (
     topology_summary,
 )
 from .types import Face, MeshData, check_cancelled
+from . import uvclassic  # main-only: uv
 
 
 @dataclass(slots=True)
@@ -158,7 +159,7 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
     best_report: RemeshReport | None = None
     candidate_reports: list[dict[str, Any]] = []
     seed_count = max(1, int(options.seed_count))
-    tri_mesh.cache["paired"] = _pair_natively(tri_mesh, _pairing_prep(tri_mesh, _options_for_mode(options, mode), mode), list(range(seed_count)))
+    tri_mesh.cache["paired"] = uvclassic.pair(tri_mesh, _pairing_prep(tri_mesh, _options_for_mode(options, mode), mode), list(range(seed_count)))  # main-only: uv
 
     for seed in range(seed_count):
         check_cancelled()

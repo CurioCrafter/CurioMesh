@@ -17,6 +17,10 @@
 //!   Lischinski 2002, "Bounded-distortion piecewise mesh parameterization"). Grid unions are measured exactly from the
 //!   glued grid, no solve; pole unions sit in a lazy queue and get a band-only ARAP (`uvflat::quick_stretch`) when they
 //!   reach the top (ours). `level(x)` applies every recorded merge whose stretch fits, skipping the others (ours).
+//!   A union is refused when its layout would lie over itself (a cap closing around a pole of valence 5 or more):
+//!   a flip-free disk layout is one-to-one exactly when its border does not cross itself (the border condition for
+//!   one-to-one piecewise linear maps, Floater 2003, "One-to-one piecewise linear mappings over triangulations"),
+//!   so only border sides that moved are tested, against a cell grid (ours).
 //! - Keep going: one discrete cut move per pass on patch borders, accepted only when the score drops (idea of
 //!   discrete cut moves: Li, Kaufman, Kim, Sorkine-Hornung, Jacobson, Sheffer 2018, "OptCuts"; our moves and score).
 
@@ -44,6 +48,11 @@ pub const STRETCH_ALLOWED_PCT: f64 = 10.0;
 /// The merge tree records merges up to a chart stretch of `1 + BUILD_STRETCH`. A setting, not a cap: a level above it
 /// says so and Again with a higher value records more ("Higher can take longer").
 pub const BUILD_STRETCH: f64 = 1.0;
+/// The merge tree runs in rounds of rising stretch: the default Stretch allowed times powers of this factor, from
+/// `ROUND_LOWEST` up to the build stretch. A level at a round's stretch is then that round's greedy result, with no
+/// patch left alone because its merge came after a chart had grown past the level (ours).
+pub const ROUND_FACTOR: f64 = 2.0;
+pub const ROUND_LOWEST: f64 = 0.01;
 /// Rings around the glued border that a pole union's band ARAP frees.
 pub const BAND_RINGS: usize = 2;
 /// Pixels per mesh unit when the caller gives none: this many across the bounding box diagonal.
@@ -53,7 +62,7 @@ pub const GRID_SLACK: f64 = 0.01;
 /// Stretch changes this small count as none (rounding noise must not reorder the queue).
 pub const SAME_STRETCH: f64 = 1e-9;
 /// Numbers in `Tree::numbers` (see `num`).
-pub const NUMBERS_LEN: usize = 20;
+pub const NUMBERS_LEN: usize = 21;
 
 /// Columns of `Tree::numbers`.
 pub mod num {
@@ -77,6 +86,7 @@ pub mod num {
     pub const TOP_STRETCH: usize = 17; // largest recorded merge stretch
     pub const FORCED_EDGES: usize = 18;
     pub const PX_PER_UNIT: usize = 19;
+    pub const LAY_OVER: usize = 20; // candidates refused because the union would lie over itself (pole cones)
 }
 
 const NONE: u32 = u32::MAX;
@@ -281,8 +291,72 @@ impl Undo {
     }
 }
 
+/// The union-find a glue runs on: the build's own `Undo`, or an `Overlay` of tentative unions over it.
+trait Uf {
+    fn find(&self, x: u32) -> u32;
+    fn union(&mut self, a: u32, b: u32) -> bool;
+    fn mark(&self) -> usize;
+    fn undo(&mut self, mark: usize);
+}
+
+impl Uf for Undo {
+    fn find(&self, x: u32) -> u32 {
+        Undo::find(self, x)
+    }
+    fn union(&mut self, a: u32, b: u32) -> bool {
+        Undo::union(self, a, b)
+    }
+    fn mark(&self) -> usize {
+        Undo::mark(self)
+    }
+    fn undo(&mut self, mark: usize) {
+        Undo::undo(self, mark)
+    }
+}
+
+/// Tentative unions over a fixed `Undo`, kept in a small map, so measures can run on worker threads.
+struct Overlay<'a> {
+    base: &'a Undo,
+    par: HashMap<u32, u32, FxBuild>,
+    log: Vec<u32>,
+}
+
+impl<'a> Overlay<'a> {
+    fn new(base: &'a Undo) -> Overlay<'a> {
+        Overlay { base, par: HashMap::default(), log: Vec::new() }
+    }
+}
+
+impl Uf for Overlay<'_> {
+    fn find(&self, x: u32) -> u32 {
+        let mut r = self.base.find(x);
+        while let Some(&p) = self.par.get(&r) {
+            r = p;
+        }
+        r
+    }
+    fn union(&mut self, a: u32, b: u32) -> bool {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra == rb {
+            return false;
+        }
+        self.par.insert(rb, ra);
+        self.log.push(rb);
+        true
+    }
+    fn mark(&self) -> usize {
+        self.log.len()
+    }
+    fn undo(&mut self, mark: usize) {
+        while self.log.len() > mark {
+            let rb = self.log.pop().unwrap();
+            self.par.remove(&rb);
+        }
+    }
+}
+
 /// Glue edges (join the corner wedges on both sides): (edges glued, wedge unions that joined two classes).
-fn glue(t: &Topo, dsu: &mut Undo, list: &[u32]) -> (i64, i64) {
+fn glue<D: Uf>(t: &Topo, dsu: &mut D, list: &[u32]) -> (i64, i64) {
     let mut m = 0i64;
     for &e in list {
         let e = e as usize;
@@ -887,13 +961,26 @@ impl Tree {
             chi: self.patch_chi.clone(),
             ver: vec![0; np],
             glued_seg: vec![false; self.segments.len()],
-            vstamp: vec![0; t.nv],
-            fstamp: vec![0; t.nf],
-            stamp: 0,
             quick: 0,
             vals: vec![BTreeSet::new(); np],
             last: HashMap::default(),
+            bnd: vec![Vec::new(); np],
+            refused: HashMap::default(),
+            cap: f64::INFINITY,
+            last_st: HashMap::default(),
+            parked: Vec::new(),
+            cloc: vec![0; t.corners()],
+            eglue: vec![0; t.ne()],
         };
+        for (p, m) in members.iter().enumerate() {
+            for &f in m {
+                for h in t.face_corners(f as usize) {
+                    if self.cut_base[t.cedge[h] as usize] {
+                        b.bnd[p].push(h as u32);
+                    }
+                }
+            }
+        }
         // Patch layouts.
         let layouts: Vec<(Local, bool, Vec<f64>)> = {
             let dsu = &b.dsu;
@@ -902,7 +989,7 @@ impl Tree {
                 let (g, uv) = self.patch_layout(&local, stop);
                 (local, g, uv)
             };
-            if t.nf >= PARALLEL_MIN { (0..np).into_par_iter().map(one).collect() } else { (0..np).map(one).collect() }
+            if t.nf >= PARALLEL_FACES { (0..np).into_par_iter().map(one).collect() } else { (0..np).map(one).collect() }
         };
         for (p, (local, g, uv)) in layouts.into_iter().enumerate() {
             local.scatter(&uv, &mut b.corner_uv);
@@ -921,52 +1008,90 @@ impl Tree {
                 b.segs[seg.q as usize].push(s as u32);
             }
         }
-        let mut heap: BinaryHeap<Cand> = BinaryHeap::new();
+        let mut heap = Queue::default();
         let mut seq = 0u64;
-        let (mut exact_evals, mut dropped, mut grid_merges, mut pole_merges) = (0usize, 0usize, 0usize, 0usize);
+        let (mut exact_evals, mut dropped, mut grid_merges, mut pole_merges, mut lay_over) = (0usize, 0usize, 0usize, 0usize, 0usize);
         let mut top = 1.0f64;
         let mut merges: Vec<Merge> = Vec::new();
         for p in 0..np as u32 {
             b.push_for(&mut heap, &mut seq, p);
         }
-        let mut cached: Option<(u32, u32, u32, u32, Eval)> = None;
-        while let Some(c) = heap.pop() {
+        // Measured candidates by chart pair, with the versions they were measured at: a measure stays valid while both
+        // charts are unchanged, so a candidate that comes back (queued again, or parked to a later round) is not
+        // measured twice. Entries of charts that changed are dropped when the store outgrows the live pairs.
+        let mut memo: Memo = HashMap::default();
+        let mut memo_live = 0usize;
+        // Candidates measured above the round's cap wait for the round whose cap they fit (their measure stays valid
+        // while both charts are unchanged).
+        for (round, &cap) in round_caps(self.build_stretch).iter().enumerate() {
+            b.cap = cap;
+            if round > 0 {
+                for (c, st) in std::mem::take(&mut b.parked) {
+                    if b.find(c.a) != c.a || b.find(c.b) != c.b || b.ver[c.a as usize] != c.va || b.ver[c.b as usize] != c.vb {
+                        continue;
+                    }
+                    if st <= 1.0 + cap { heap.push(c) } else { b.parked.push((c, st)) }
+                }
+            }
+            while let Some(c) = heap.pop() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if b.find(c.a) != c.a || b.find(c.b) != c.b || b.ver[c.a as usize] != c.va || b.ver[c.b as usize] != c.vb {
+                    continue; // stale: the new chart pushed its own candidates
+                }
+                let hit = matches!(memo.get(&(c.a, c.b)), Some(&(va, vb, _)) if (va, vb) == (c.va, c.vb));
+                let ev = if hit {
+                    memo.remove(&(c.a, c.b)).unwrap().2
+                } else {
+                    exact_evals += b.prefetch(&mut heap, &c, &mut memo, stop);
+                    match memo.remove(&(c.a, c.b)) {
+                        Some((va, vb, ev)) if (va, vb) == (c.va, c.vb) => ev,
+                        _ => continue, // the segments cannot be glued into a disk
+                    }
+                };
+                let added = ev.stretch - b.stretch[c.a as usize].max(b.stretch[c.b as usize]);
+                if !c.exact {
+                    seq += 1;
+                    let key = key_of(added, ev.cost);
+                    b.last.insert((c.a, c.b), key);
+                    heap.push(Cand { key, exact: true, seq, ..c });
+                    memo.insert((c.a, c.b), (c.va, c.vb, ev));
+                    continue;
+                }
+                if !(ev.stretch <= 1.0 + self.build_stretch) {
+                    dropped += 1;
+                    continue;
+                }
+                b.last_st.insert((c.a, c.b), ev.stretch);
+                if ev.stretch > 1.0 + cap {
+                    memo.insert((c.a, c.b), (c.va, c.vb, ev));
+                    let st = memo[&(c.a, c.b)].2.stretch;
+                    b.parked.push((c, st));
+                    if memo.len() > 2 * memo_live + 4096 {
+                        let ok = |b: &mut Build, k: &(u32, u32), v: &(u32, u32, Eval)| b.find(k.0) == k.0 && b.find(k.1) == k.1 && b.ver[k.0 as usize] == v.0 && b.ver[k.1 as usize] == v.1;
+                        memo.retain(|k, v| ok(&mut b, k, v));
+                        memo_live = memo.len();
+                    }
+                    continue;
+                }
+                if b.lies_over(c.a, c.b, &ev) {
+                    lay_over += 1;
+                    // Not tried again until the smaller chart changes: the bigger one growing elsewhere seldom frees it.
+                    let small = if b.faces[c.a as usize].len() <= b.faces[c.b as usize].len() { c.a } else { c.b };
+                    b.refused.insert((c.a, c.b), (small, b.ver[small as usize]));
+                    continue;
+                }
+                top = top.max(ev.stretch);
+                if ev.pole { pole_merges += 1 } else { grid_merges += 1 }
+                let (stretch, cost, pole, glued) = (ev.stretch, ev.cost, ev.pole, ev.glued.clone());
+                let r = b.apply(c.a, c.b, ev);
+                merges.push(Merge { segs: glued, stretch, cost, pole });
+                b.push_for(&mut heap, &mut seq, r);
+            }
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            if b.find(c.a) != c.a || b.find(c.b) != c.b || b.ver[c.a as usize] != c.va || b.ver[c.b as usize] != c.vb {
-                continue; // stale: the new chart pushed its own candidates
-            }
-            let hit = matches!(&cached, Some((a, bb, va, vb, _)) if (*a, *bb, *va, *vb) == (c.a, c.b, c.va, c.vb));
-            let ev = if hit {
-                cached.take().unwrap().4
-            } else {
-                exact_evals += 1;
-                let list = b.between(c.a, c.b);
-                match b.evaluate(c.a, c.b, &list, stop) {
-                    Some(ev) => ev,
-                    None => continue,
-                }
-            };
-            let added = ev.stretch - b.stretch[c.a as usize].max(b.stretch[c.b as usize]);
-            if !c.exact {
-                seq += 1;
-                let key = key_of(added, ev.cost);
-                b.last.insert((c.a, c.b), key);
-                heap.push(Cand { key, exact: true, seq, ..c });
-                cached = Some((c.a, c.b, c.va, c.vb, ev));
-                continue;
-            }
-            if !(ev.stretch <= 1.0 + self.build_stretch) {
-                dropped += 1;
-                continue;
-            }
-            top = top.max(ev.stretch);
-            if ev.pole { pole_merges += 1 } else { grid_merges += 1 }
-            let (stretch, cost, pole, glued) = (ev.stretch, ev.cost, ev.pole, ev.glued.clone());
-            let r = b.apply(c.a, c.b, ev);
-            merges.push(Merge { segs: glued, stretch, cost, pole });
-            b.push_for(&mut heap, &mut seq, r);
         }
         let found = vec![
             (num::GRID_PATCHES, grid_patches),
@@ -977,6 +1102,7 @@ impl Tree {
             (num::EXACT_EVALS, exact_evals as f64),
             (num::DROPPED, dropped as f64),
             (num::TOP_STRETCH, top),
+            (num::LAY_OVER, lay_over as f64),
         ];
         (merges, found, b.corner_uv)
     }
@@ -988,6 +1114,21 @@ impl Tree {
         }
         uvflat::stretch(&local.chart(), uv).1
     }
+}
+
+/// Stretch caps of the merge rounds (as `stretch - 1`), rising, the last one `build`.
+pub fn round_caps(build: f64) -> Vec<f64> {
+    let mut x = STRETCH_ALLOWED_PCT / 100.0;
+    while x / ROUND_FACTOR >= ROUND_LOWEST {
+        x /= ROUND_FACTOR;
+    }
+    let mut caps = Vec::new();
+    while x < build {
+        caps.push(x);
+        x *= ROUND_FACTOR;
+    }
+    caps.push(build);
+    caps
 }
 
 fn quantile(values: &[f64], q: f64) -> f64 {
@@ -1015,15 +1156,81 @@ struct Build<'t> {
     chi: Vec<i64>,
     ver: Vec<u32>,
     glued_seg: Vec<bool>,
-    vstamp: Vec<u32>,
-    fstamp: Vec<u32>,
-    stamp: u32,
     quick: usize,
     /// Per chart: (stretch bits, face) of its faces, so the worst 1 % is read from the top end only.
     vals: Vec<BTreeSet<(u64, u32)>>,
     /// The last measured key of a chart pair: a pair whose chart grew is queued again under it, not re-measured
     /// at once.
     last: HashMap<(u32, u32), Key, FxBuild>,
+    /// Per chart: its border sides (corner h = the side from h to the next corner of its face).
+    bnd: Vec<Vec<u32>>,
+    /// Pairs refused because the union lay over itself: (smaller chart, its version then).
+    refused: HashMap<(u32, u32), (u32, u32), FxBuild>,
+    /// The round's cap (as `stretch - 1`), the last measured stretch per pair, and the candidates waiting for a later
+    /// round. A pair measured above the cap waits again when one of its charts grows, without a new measure: unions
+    /// only stretch more as charts grow, and the round whose cap it fits measures it again.
+    cap: f64,
+    last_st: HashMap<(u32, u32), f64, FxBuild>,
+    parked: Vec<(Cand, f64)>,
+    /// Per corner: local vertex + 1 in the union under test (0 = not among the measured faces); per edge: 1 glued by
+    /// the union under test, 2 glued for good.
+    cloc: Vec<u32>,
+    eglue: Vec<u32>,
+}
+
+/// The candidate queue in two heaps, not measured yet (`open`) and measured (`done`), popped as one: measuring ahead
+/// then takes the top of `open` without wading through measured candidates.
+#[derive(Default)]
+struct Queue {
+    open: BinaryHeap<Cand>,
+    done: BinaryHeap<Cand>,
+}
+
+impl Queue {
+    fn push(&mut self, c: Cand) {
+        if c.exact { self.done.push(c) } else { self.open.push(c) }
+    }
+    fn pop(&mut self) -> Option<Cand> {
+        match (self.open.peek(), self.done.peek()) {
+            (Some(x), Some(y)) => if x > y { self.open.pop() } else { self.done.pop() },
+            (Some(_), None) => self.open.pop(),
+            _ => self.done.pop(),
+        }
+    }
+}
+
+/// Measured candidates by chart pair: (versions of a and b when measured, the measure).
+type Memo = HashMap<(u32, u32), (u32, u32, Eval), FxBuild>;
+
+/// Candidates measured ahead together on worker threads (`Build::prefetch`).
+const PREFETCH: usize = 24;
+/// Meshes from this many faces measure ahead and lay out patches on worker threads (each measure is a small band
+/// solve, so the crate-wide `PARALLEL_MIN` for array-wide loops is far too high here).
+const PARALLEL_FACES: usize = 2048;
+
+/// Per-thread stamps of one measure (vertices and faces of its band).
+#[derive(Default)]
+struct Scratch {
+    vstamp: Vec<u32>,
+    fstamp: Vec<u32>,
+    stamp: u32,
+}
+
+impl Scratch {
+    fn fit(&mut self, nv: usize, nf: usize) {
+        if self.vstamp.len() != nv || self.fstamp.len() != nf {
+            *self = Scratch { vstamp: vec![0; nv], fstamp: vec![0; nf], stamp: 0 };
+        }
+        if self.stamp == u32::MAX {
+            self.vstamp.iter_mut().for_each(|x| *x = 0);
+            self.fstamp.iter_mut().for_each(|x| *x = 0);
+            self.stamp = 0;
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
 }
 
 /// Order key of a stretch value (>= 0, or +inf): its bits.
@@ -1033,7 +1240,7 @@ fn bits(x: f64) -> u64 {
 
 impl Build<'_> {
     /// `quantile(STRETCH_QUANTILE)` over the union of charts a and b where the faces stamped now take `fresh`.
-    fn union_quantile(&self, a: u32, b: u32, fresh: &[f64], stamp: u32) -> f64 {
+    fn union_quantile(&self, a: u32, b: u32, fresh: &[f64], fstamp: &[u32], stamp: u32) -> f64 {
         let n = self.faces[a as usize].len() + self.faces[b as usize].len();
         if n == 0 {
             return f64::NAN;
@@ -1042,7 +1249,7 @@ impl Build<'_> {
         let r = n - idx; // the r-th largest
         let mut top: Vec<f64> = fresh.to_vec();
         for c in [a, b] {
-            top.extend(self.vals[c as usize].iter().rev().filter(|x| self.fstamp[x.1 as usize] != stamp).take(r).map(|x| f64::from_bits(x.0)));
+            top.extend(self.vals[c as usize].iter().rev().filter(|x| fstamp[x.1 as usize] != stamp).take(r).map(|x| f64::from_bits(x.0)));
         }
         let at = r - 1;
         top.select_nth_unstable_by(at, |x, y| y.total_cmp(x));
@@ -1133,7 +1340,7 @@ impl Build<'_> {
         (if total > 0.0 && diff.is_finite() { diff / total } else { f64::INFINITY }, c)
     }
 
-    fn push_for(&mut self, heap: &mut BinaryHeap<Cand>, seq: &mut u64, r: u32) {
+    fn push_for(&mut self, heap: &mut Queue, seq: &mut u64, r: u32) {
         if self.chi[r as usize] != 1 {
             return;
         }
@@ -1142,6 +1349,9 @@ impl Build<'_> {
                 continue;
             }
             let (a, b) = (r.min(o), r.max(o));
+            if matches!(self.refused.get(&(a, b)), Some(&(c, v)) if self.ver[c as usize] == v) {
+                continue;
+            }
             let key = match self.last.get(&(a, b)) {
                 Some(k) => *k,
                 None => {
@@ -1150,47 +1360,96 @@ impl Build<'_> {
                 }
             };
             *seq += 1;
-            heap.push(Cand { key, a, b, va: self.ver[a as usize], vb: self.ver[b as usize], exact: false, seq: *seq });
+            let c = Cand { key, a, b, va: self.ver[a as usize], vb: self.ver[b as usize], exact: false, seq: *seq };
+            match self.last_st.get(&(a, b)) {
+                Some(&st) if st > 1.0 + self.cap => self.parked.push((Cand { exact: true, ..c }, st)),
+                _ => heap.push(c),
+            }
         }
     }
 
-    /// Measure the union of charts a and b glued along `list` (tentatively; undone before returning).
-    fn evaluate(&mut self, a: u32, b: u32, list: &[u32], stop: &AtomicBool) -> Option<Eval> {
+    /// Measure ahead: the candidate `first` and up to `PREFETCH - 1` more from the top of the open queue (current, not
+    /// measured yet) are measured on worker threads into `memo`; the queue keeps every candidate. A measure depends only
+    /// on its two charts, so the build makes the same merges as measuring one at a time (a measure whose chart changes
+    /// first is simply not used).
+    /// Returns the number measured.
+    fn prefetch(&mut self, heap: &mut Queue, first: &Cand, memo: &mut Memo, stop: &AtomicBool) -> usize {
+        let parallel = self.tree.topo.nf >= PARALLEL_FACES;
+        let want = if parallel { PREFETCH } else { 1 };
+        let mut batch = vec![(first.a, first.b, first.va, first.vb)];
+        let mut back: Vec<Cand> = Vec::new();
+        while batch.len() < want && back.len() < want {
+            let Some(c) = heap.open.pop() else { break };
+            if self.find(c.a) != c.a || self.find(c.b) != c.b || self.ver[c.a as usize] != c.va || self.ver[c.b as usize] != c.vb {
+                continue; // stale for good
+            }
+            let measured = matches!(memo.get(&(c.a, c.b)), Some(&(va, vb, _)) if (va, vb) == (c.va, c.vb));
+            if !measured && !batch.iter().any(|x| (x.0, x.1) == (c.a, c.b)) {
+                batch.push((c.a, c.b, c.va, c.vb));
+            }
+            back.push(c);
+        }
+        heap.open.extend(back);
+        let lists: Vec<Vec<u32>> = batch.iter().map(|&(a, b, _, _)| self.between(a, b)).collect();
+        let me = &*self;
+        let one = |k: usize| {
+            SCRATCH.with(|sc| {
+                let mut sc = sc.borrow_mut();
+                sc.fit(me.tree.topo.nv, me.tree.topo.nf);
+                let mut dsu = Overlay::new(&me.dsu);
+                let (a, b, _, _) = batch[k];
+                me.measure(&mut dsu, &mut sc, a, b, &lists[k], stop)
+            })
+        };
+        let out: Vec<(Option<Eval>, usize)> = if parallel && batch.len() > 1 { (0..batch.len()).into_par_iter().map(one).collect() } else { (0..batch.len()).map(one).collect() };
+        let n = out.len();
+        for ((a, b, va, vb), (ev, quick)) in batch.into_iter().zip(out) {
+            self.quick += quick;
+            if let Some(ev) = ev {
+                memo.insert((a, b), (va, vb, ev));
+            }
+        }
+        n
+    }
+
+    /// Measure the union of charts a and b glued along `list` (tentatively on `dsu`; undone before returning), and
+    /// the number of band ARAP calls it made.
+    fn measure<D: Uf>(&self, dsu: &mut D, sc: &mut Scratch, a: u32, b: u32, list: &[u32], stop: &AtomicBool) -> (Option<Eval>, usize) {
         let tree = self.tree;
         let t = &tree.topo;
-        let mark = self.dsu.mark();
-        let (glued, cost) = glue_disk(t, &mut self.dsu, &tree.segments, list, 2);
+        let mark = dsu.mark();
+        let (glued, cost) = glue_disk(t, dsu, &tree.segments, list, 2);
         if glued.is_empty() {
-            self.dsu.undo(mark);
-            return None;
+            dsu.undo(mark);
+            return (None, 0);
         }
         if self.grid[a as usize] && self.grid[b as usize] {
             // Grid union: the glued grid measured exactly, no solve.
             let union: Vec<u32> = self.faces[a as usize].iter().chain(self.faces[b as usize].iter()).copied().collect();
-            let dsu = &self.dsu;
             let local = Local::new(t, &tree.points, &union, |c| dsu.find(c));
             if let Ok(g) = uvflat::grid_layout(&local.chart()) {
                 let per = tree.face_stretch(&local, &g.uv);
                 let q = quantile(&per, uvflat::STRETCH_QUANTILE);
                 let parts = self.stretch[a as usize].max(self.stretch[b as usize]);
                 if q <= 1.0 + GRID_SLACK || q <= parts + GRID_SLACK {
-                    self.dsu.undo(mark);
-                    return Some(Eval { glued, cost, stretch: q, pole: false, local, uv: g.uv, rigid: None, face_str: per });
+                    dsu.undo(mark);
+                    return (Some(Eval { glued, cost, stretch: q, pole: false, local, uv: g.uv, rigid: None, face_str: per }), 0);
                 }
                 // The glued grid stretches: measure the band ARAP too and keep the better.
                 let grid_eval = Eval { glued: glued.clone(), cost, stretch: q, pole: false, local, uv: g.uv, rigid: None, face_str: per };
-                let band = self.band_eval(a, b, glued, cost, stop);
-                self.dsu.undo(mark);
-                return Some(if band.stretch < grid_eval.stretch * (1.0 - GRID_SLACK) { band } else { grid_eval });
+                let band = self.band_eval(&*dsu, sc, a, b, glued, cost, stop);
+                dsu.undo(mark);
+                return (Some(if band.stretch < grid_eval.stretch * (1.0 - GRID_SLACK) { band } else { grid_eval }), 1);
             }
         }
-        let ev = self.band_eval(a, b, glued, cost, stop);
-        self.dsu.undo(mark);
-        Some(ev)
+        let ev = self.band_eval(&*dsu, sc, a, b, glued, cost, stop);
+        dsu.undo(mark);
+        (Some(ev), 1)
     }
 
     /// Pole union (with the glue in place): B onto A by a rigid fit along the glued edges, then ARAP on the band.
-    fn band_eval(&mut self, a: u32, b: u32, glued: Vec<u32>, cost: f64, stop: &AtomicBool) -> Eval {
+    #[allow(clippy::too_many_arguments)]
+    fn band_eval<D: Uf>(&self, dsu: &D, sc: &mut Scratch, a: u32, b: u32, glued: Vec<u32>, cost: f64, stop: &AtomicBool) -> Eval {
         let tree = self.tree;
         let t = &tree.topo;
         let mut pairs = Vec::new();
@@ -1206,15 +1465,15 @@ impl Build<'_> {
             }
         }
         let rigid = align(&pairs);
-        self.stamp += 1;
-        let stamp = self.stamp;
+        sc.stamp += 1;
+        let stamp = sc.stamp;
         let in_union = |owner: &[u32], f: u32| owner[f as usize] == a || owner[f as usize] == b;
         let mut front: Vec<u32> = Vec::new();
         for &s in &glued {
             for &e in &tree.segments[s as usize].edges {
                 for v in [t.ea[e as usize], t.eb[e as usize]] {
-                    if self.vstamp[v as usize] != stamp {
-                        self.vstamp[v as usize] = stamp;
+                    if sc.vstamp[v as usize] != stamp {
+                        sc.vstamp[v as usize] = stamp;
                         front.push(v);
                     }
                 }
@@ -1230,8 +1489,8 @@ impl Build<'_> {
                     }
                     for h in t.face_corners(f as usize) {
                         let w = t.flat[h];
-                        if self.vstamp[w as usize] != stamp {
-                            self.vstamp[w as usize] = stamp;
+                        if sc.vstamp[w as usize] != stamp {
+                            sc.vstamp[w as usize] = stamp;
                             next.push(w);
                         }
                     }
@@ -1243,13 +1502,12 @@ impl Build<'_> {
         let mut sub: Vec<u32> = Vec::new();
         for &v in &band_v {
             for &f in t.vfaces(v as usize) {
-                if in_union(&self.owner, f) && self.fstamp[f as usize] != stamp {
-                    self.fstamp[f as usize] = stamp;
+                if in_union(&self.owner, f) && sc.fstamp[f as usize] != stamp {
+                    sc.fstamp[f as usize] = stamp;
                     sub.push(f);
                 }
             }
         }
-        let dsu = &self.dsu;
         let local = Local::new(t, &tree.points, &sub, |c| dsu.find(c));
         let n = local.n();
         let (mut uv, mut cnt) = (vec![0f64; 2 * n], vec![0f64; n]);
@@ -1261,20 +1519,93 @@ impl Build<'_> {
             uv[2 * v] += x;
             uv[2 * v + 1] += y;
             cnt[v] += 1.0;
-            free[v] = self.vstamp[t.flat[h as usize] as usize] == stamp;
+            free[v] = sc.vstamp[t.flat[h as usize] as usize] == stamp;
         }
         for v in 0..n {
             uv[2 * v] /= cnt[v].max(1.0);
             uv[2 * v + 1] /= cnt[v].max(1.0);
         }
-        self.quick += 1;
         let ok = uvflat::quick_stretch(&local.chart(), &mut uv, &free, 0.0, stop).is_ok();
         if !ok {
             uv.iter_mut().for_each(|x| *x = f64::NAN);
         }
         let per = tree.face_stretch(&local, &uv);
-        let q = self.union_quantile(a, b, &per, stamp);
+        let q = self.union_quantile(a, b, &per, &sc.fstamp, stamp);
         Eval { glued, cost, stretch: q, pole: true, local, uv, rigid: Some(rigid), face_str: per }
+    }
+
+    /// Would the union of charts a and b, laid out as `ev` says, lie over itself? True when more band faces are
+    /// turned over than before, or two border sides cross. Unmoved sides of a alone (or b alone) are not tested
+    /// against each other: each chart was tested when it was made.
+    fn lies_over(&mut self, a: u32, b: u32, ev: &Eval) -> bool {
+        let tree = self.tree;
+        let t = &tree.topo;
+        let local = &ev.local;
+        for (k, &h) in local.corner.iter().enumerate() {
+            self.cloc[h as usize] = local.fl[k] as u32 + 1;
+        }
+        let old = |owner: &[u32], uv: &[f64], h: usize| -> [f64; 2] {
+            match ev.rigid {
+                Some(r) if owner[t.cface[h] as usize] == b => {
+                    let (x, y) = apply_rigid(r, uv[2 * h], uv[2 * h + 1]);
+                    [x, y]
+                }
+                _ => [uv[2 * h], uv[2 * h + 1]],
+            }
+        };
+        // Band faces turned over now and before (b placed rigidly), so a face that was already turned does not
+        // refuse the merge.
+        let (mut now, mut before) = (0usize, 0usize);
+        for k in 0..local.faces.len() {
+            let (lo, hi) = (local.ip[k] as usize, local.ip[k + 1] as usize);
+            let (mut s_now, mut s_before) = (0.0, 0.0);
+            for i in lo..hi {
+                let j = if i + 1 == hi { lo } else { i + 1 };
+                let (p, q) = (local.fl[i] as usize, local.fl[j] as usize);
+                s_now += ev.uv[2 * p] * ev.uv[2 * q + 1] - ev.uv[2 * q] * ev.uv[2 * p + 1];
+                let (u, w) = (old(&self.owner, &self.corner_uv, local.corner[i] as usize), old(&self.owner, &self.corner_uv, local.corner[j] as usize));
+                s_before += u[0] * w[1] - w[0] * u[1];
+            }
+            now += usize::from(hi - lo >= 3 && !(s_now > 0.0));
+            before += usize::from(hi - lo >= 3 && !(s_before > 0.0));
+        }
+        let mut sides: Vec<Side> = Vec::new();
+        if now <= before {
+            // Sides meeting at one UV point (one wedge once the union is glued) touch, they do not cross; two sides of
+            // a cut share mesh vertices but not wedges, and are tested (a cone closing too far crosses there).
+            let mark = self.dsu.mark();
+            for &s in &ev.glued {
+                glue(t, &mut self.dsu, &tree.segments[s as usize].edges);
+                for &e in &tree.segments[s as usize].edges {
+                    self.eglue[e as usize] = 1;
+                }
+            }
+            for (c, cls) in [(a, 0u8), (b, 1u8)] {
+                for &h in &self.bnd[c as usize] {
+                    let h = h as usize;
+                    if self.eglue[t.cedge[h] as usize] != 0 {
+                        continue;
+                    }
+                    let n = t.next(h);
+                    let at = |x: usize| {
+                        let k = self.cloc[x];
+                        if k > 0 { [ev.uv[2 * (k - 1) as usize], ev.uv[2 * (k - 1) as usize + 1]] } else { old(&self.owner, &self.corner_uv, x) }
+                    };
+                    let moved = self.cloc[h] > 0 || self.cloc[n] > 0;
+                    sides.push(Side { p: at(h), q: at(n), v: [self.dsu.find(h as u32), self.dsu.find(n as u32)], class: if moved { 2 } else { cls } });
+                }
+            }
+            self.dsu.undo(mark);
+            for &s in &ev.glued {
+                for &e in &tree.segments[s as usize].edges {
+                    self.eglue[e as usize] = 0;
+                }
+            }
+        }
+        for &h in &local.corner {
+            self.cloc[h as usize] = 0;
+        }
+        now > before || sides_cross(&mut sides)
     }
 
     /// Glue an evaluated union for good and take its layout; returns the surviving chart.
@@ -1318,6 +1649,15 @@ impl Build<'_> {
         self.segs[r as usize].extend(moved);
         let gs = &self.glued_seg;
         self.segs[r as usize].retain(|&s| !gs[s as usize]);
+        let moved = std::mem::take(&mut self.bnd[o as usize]);
+        self.bnd[r as usize].extend(moved);
+        for &s in &ev.glued {
+            for &e in &tree.segments[s as usize].edges {
+                self.eglue[e as usize] = 2; // glued for good
+            }
+        }
+        let eg = &self.eglue;
+        self.bnd[r as usize].retain(|&h| eg[t.cedge[h as usize] as usize] != 2);
         self.stretch[r as usize] = ev.stretch;
         self.grid[r as usize] = !ev.pole;
         self.chi[r as usize] = 1;
@@ -1325,6 +1665,93 @@ impl Build<'_> {
         self.ver[b as usize] += 1;
         r
     }
+}
+
+/// One border side of a union under test: its UV ends, the wedges of its ends, and whether it moved (2) or is an
+/// unmoved side of chart a (0) or b (1).
+struct Side {
+    p: [f64; 2],
+    q: [f64; 2],
+    v: [u32; 2],
+    class: u8,
+}
+
+fn side_box<'s>(it: impl Iterator<Item = &'s Side>) -> [f64; 4] {
+    let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    for s in it {
+        for p in [s.p, s.q] {
+            b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
+        }
+    }
+    b
+}
+
+/// Do two sides cross (each one's ends strictly on both sides of the other, beyond rounding)? Sides that share a
+/// wedge, or are unmoved sides of the same chart, are not tested. Broad phase: only sides inside the box of the
+/// sides they could meet, then a cell grid no finer than the longest side.
+fn sides_cross(sides: &mut Vec<Side>) -> bool {
+    let not0 = side_box(sides.iter().filter(|s| s.class != 0));
+    let not1 = side_box(sides.iter().filter(|s| s.class != 1));
+    let inside = |b: &[f64; 4], s: &Side| s.p[0].max(s.q[0]) >= b[0] && s.p[0].min(s.q[0]) <= b[2] && s.p[1].max(s.q[1]) >= b[1] && s.p[1].min(s.q[1]) <= b[3];
+    sides.retain(|s| match s.class {
+        0 => inside(&not0, s),
+        1 => inside(&not1, s),
+        _ => true,
+    });
+    if sides.len() < 2 {
+        return false;
+    }
+    if !sides.iter().all(|s| s.p.iter().chain(s.q.iter()).all(|x| x.is_finite())) {
+        return true; // a side without a position: the layout failed
+    }
+    let all = side_box(sides.iter());
+    let longest = sides.iter().map(|s| (s.q[0] - s.p[0]).abs().max((s.q[1] - s.p[1]).abs())).fold(0.0, f64::max);
+    let span = (all[2] - all[0]).max(all[3] - all[1]);
+    // cells no smaller than the longest side, and about as many cells across as the square root of the side count
+    let cell = longest.max(span / (sides.len() as f64).sqrt().max(1.0)).max(1e-300);
+    let nx = ((all[2] - all[0]) / cell).floor() as i64 + 1;
+    let mut entries: Vec<(i64, u32)> = Vec::with_capacity(4 * sides.len());
+    for (i, s) in sides.iter().enumerate() {
+        let x0 = ((s.p[0].min(s.q[0]) - all[0]) / cell).floor() as i64;
+        let x1 = ((s.p[0].max(s.q[0]) - all[0]) / cell).floor() as i64;
+        let y0 = ((s.p[1].min(s.q[1]) - all[1]) / cell).floor() as i64;
+        let y1 = ((s.p[1].max(s.q[1]) - all[1]) / cell).floor() as i64;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                entries.push((y * nx + x, i as u32));
+            }
+        }
+    }
+    entries.sort_unstable();
+    let mut lo = 0;
+    while lo < entries.len() {
+        let mut hi = lo + 1;
+        while hi < entries.len() && entries[hi].0 == entries[lo].0 {
+            hi += 1;
+        }
+        for i in lo..hi {
+            for j in i + 1..hi {
+                let (s, u) = (&sides[entries[i].1 as usize], &sides[entries[j].1 as usize]);
+                if (s.class == u.class && s.class != 2) || s.v.iter().any(|v| u.v.contains(v)) {
+                    continue;
+                }
+                if cross_proper(s, u) {
+                    return true;
+                }
+            }
+        }
+        lo = hi;
+    }
+    false
+}
+
+fn cross_proper(s: &Side, u: &Side) -> bool {
+    let orient = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    let ls = ((s.q[0] - s.p[0]).powi(2) + (s.q[1] - s.p[1]).powi(2)).sqrt();
+    let lu = ((u.q[0] - u.p[0]).powi(2) + (u.q[1] - u.p[1]).powi(2)).sqrt();
+    let tol = 1e-7 * ls * lu;
+    let apart = |x: f64, y: f64| (x > tol && y < -tol) || (x < -tol && y > tol);
+    apart(orient(s.p, s.q, u.p), orient(s.p, s.q, u.q)) && apart(orient(u.p, u.q, s.p), orient(u.p, u.q, s.q))
 }
 
 fn apply_rigid(r: ([f64; 2], [f64; 2]), x: f64, y: f64) -> (f64, f64) {
@@ -1687,7 +2114,7 @@ impl Tree {
 /// Glue segments one by one (in the given order), keeping each only when the charts stay one disk (Euler
 /// characteristic 1); retried until nothing changes (a segment between two kept ones may fit later). `chi` is the
 /// characteristic before (2 for two separate disks). Returns (glued segments, their cost).
-fn glue_disk(t: &Topo, dsu: &mut Undo, segments: &[Segment], list: &[u32], mut chi: i64) -> (Vec<u32>, f64) {
+fn glue_disk<D: Uf>(t: &Topo, dsu: &mut D, segments: &[Segment], list: &[u32], mut chi: i64) -> (Vec<u32>, f64) {
     let mut pending: Vec<u32> = list.to_vec();
     let mut glued = Vec::new();
     let mut cost = 0.0;
@@ -1984,6 +2411,20 @@ pub mod tests {
             }
         }
         (pts, ip, fl)
+    }
+
+    #[test]
+    fn border_sides_that_cross_are_found_and_touching_ones_are_not() {
+        let side = |p: [f64; 2], q: [f64; 2], v: [u32; 2]| Side { p, q, v, class: 2 };
+        // A border folded over itself: the side 2-3 crosses the side 0-1.
+        let mut crossing = vec![side([0.0, 0.0], [2.0, 0.0], [0, 1]), side([1.0, -1.0], [1.0, 1.0], [2, 3])];
+        assert!(sides_cross(&mut crossing));
+        // Sides meeting at a shared wedge touch, they do not cross.
+        let mut touching = vec![side([0.0, 0.0], [2.0, 0.0], [0, 1]), side([2.0, 0.0], [1.0, 1.0], [1, 3])];
+        assert!(!sides_cross(&mut touching));
+        // Unmoved sides of one chart are not tested against each other (each chart was tested when it was made).
+        let mut same = vec![Side { class: 0, ..side([0.0, 0.0], [2.0, 0.0], [0, 1]) }, Side { class: 0, ..side([1.0, -1.0], [1.0, 1.0], [2, 3]) }];
+        assert!(!sides_cross(&mut same));
     }
 
     #[test]

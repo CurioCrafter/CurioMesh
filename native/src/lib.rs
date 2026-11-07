@@ -1003,6 +1003,8 @@ fn uvseam_put_fold(d: &Bound<'_, PyDict>, fold: uvseam::FoldReport) -> PyResult<
     d.set_item("fold_stuck", fold.stuck)?;
     d.set_item("fold_stalled", fold.stalled)?;
     d.set_item("fold_stopped", fold.stopped)?;
+    d.set_item("fold_untangled", fold.untangled)?;
+    d.set_item("fold_reread", fold.reread)?;
     Ok(())
 }
 
@@ -1142,6 +1144,7 @@ fn uvseam_item<T: numpy::Element + Copy>(lookup: &Bound<'_, PyDict>, key: &str) 
 }
 
 /// Another UV layer through an existing lookup (`uvseam::evaluate` + fold fix): (uv, expected, fold dict).
+/// `src_points` (3 per source vertex; empty = none) turns on the fold fix's last layer, `uvseam::reread_folded`.
 #[pyfunction]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn uvseam_layer<'py>(
@@ -1155,8 +1158,10 @@ fn uvseam_layer<'py>(
     lookup: &Bound<'py, PyDict>,
     texture_px: f64,
     fix_folds: bool,
+    src_points: PyReadonlyArray1<'py, f64>,
     stop: &StopFlag,
 ) -> PyResult<(F64Array<'py>, F64Array<'py>, Bound<'py, PyDict>)> {
+    let src_points = slice(&src_points, "src_points")?;
     let (si, sf, layer) = (slice(&src_indptr, "src_indptr")?, slice(&src_flat, "src_flat")?, slice(&layer, "layer")?);
     check_faces(si, sf)?;
     let (rp, ri, rf) = (slice(&res_points, "res_points")?, slice(&res_indptr, "res_indptr")?, slice(&res_flat, "res_flat")?);
@@ -1185,14 +1190,19 @@ fn uvseam_layer<'py>(
         && look.region.len() == nf
         && layer.len() == 2 * n_src
         && look.ids.iter().chain(&look.ref_ids).all(|&h| h >= 0 && (h as usize) < n_src.max(1))
-        && look.ref_face.iter().all(|&f| f < si.len() as i64 - 1);
+        && look.ref_face.iter().all(|&f| f < si.len() as i64 - 1)
+        && (src_points.is_empty() || sf.iter().all(|&v| v >= 0 && 3 * (v as usize) + 2 < src_points.len()));
     if !ok {
         return Err(PyValueError::new_err("lookup, layer and meshes do not match"));
     }
     let src_faces = topo::Faces { indptr: si, flat: sf };
     let (uv, expected, fold) = py.detach(|| {
         let (mut uv, expected) = uvseam::evaluate(&look, &src_faces, layer, &res);
-        let fold = if fix_folds { uvseam::fold_fix(rp, &res, &mut uv, &look.region, &expected, &look.join, texture_px, &stop.0) } else { uvseam::FoldReport::default() };
+        let mut fold = if fix_folds { uvseam::fold_fix(rp, &res, &mut uv, &look.region, &expected, &look.join, texture_px, &stop.0) } else { uvseam::FoldReport::default() };
+        if fix_folds && fold.after > 0 && !stop.0.load(std::sync::atomic::Ordering::Relaxed) {
+            fold.reread = uvseam::reread_folded(src_points, &src_faces, layer, &look, rp, &res, &mut uv, &expected);
+            fold.after -= fold.reread;
+        }
         (uv, expected, fold)
     });
     let d = PyDict::new(py);
@@ -1599,6 +1609,19 @@ impl SightPictures {
         let out = self.busy(|p| p.depth.get(view).map(|f| f.iter().map(|&v| v as f64).collect::<Vec<f64>>()))?;
         out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
     }
+
+    /// Face ids of cells `lo..hi` of one view (-1 for empty), so a reader on the UI thread copies a picture in
+    /// short slices.
+    fn face_cells<'py>(&self, py: Python<'py>, view: usize, lo: usize, hi: usize) -> PyResult<Bound<'py, PyArray1<i32>>> {
+        let out = self.busy(|p| p.face.get(view).map(|f| f[lo.min(f.len())..hi.min(f.len())].iter().map(|&v| v as i32).collect::<Vec<i32>>()))?;
+        out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
+    }
+
+    /// Depth of cells `lo..hi` of one view (see `depth`), as stored (float32).
+    fn depth_cells<'py>(&self, py: Python<'py>, view: usize, lo: usize, hi: usize) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let out = self.busy(|p| p.depth.get(view).map(|f| f[lo.min(f.len())..hi.min(f.len())].to_vec()))?;
+        out.map(|v| v.into_pyarray(py)).ok_or_else(|| PyValueError::new_err("no such view"))
+    }
 }
 
 /// Draw the views that are not drawn yet. A stop ends it with InterruptedError; what is drawn stays for the next call.
@@ -1830,6 +1853,11 @@ impl UvChartTree {
     /// `uvchart::num` columns: patches, irregular, turning, traces, Euler-cut patches and edges, ..., build ms.
     fn numbers<'py>(&self, py: Python<'py>) -> F64Array<'py> {
         self.0.numbers.to_vec().into_pyarray(py)
+    }
+
+    /// The merge tree's layout per corner when it ended (every level's charts start from it).
+    fn start_uv<'py>(&self, py: Python<'py>) -> F64Array<'py> {
+        self.0.start_uv.clone().into_pyarray(py)
     }
 
     /// Patch per face.

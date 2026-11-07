@@ -6,7 +6,9 @@
 NumPy-free pure Python, no bpy. The reference is the kernel source `uvpack.rs`; this twin covers the same algorithm for
 boxes and for charts packed into an existing layout, step for step, so the two give the same layouts:
 
-- MaxRects best-short-side-fit (Jylanki 2010, "A thousand ways to pack the bin"), 90 degree steps only.
+- MaxRects best-short-side-fit (Jylanki 2010, "A thousand ways to pack the bin"), 90 degree steps only; a second placement
+  rule, bottom-left (Baker, Coffman and Rivest 1980): the place whose box ends lowest, then leftmost. A policy is an
+  orientation policy plus a rule (`policy % ORIENTS`, `policy // ORIENTS`); both rules are tried and the better kept.
 - The gap rule: a mip-k texel is a block of G = 2^k texels. Two neighbours are mip-clean when the blocks they touch, each
   grown by one block, do not meet. A box *aligned* on a block edge needs G of gap on each side, any other (an outline, a
   chart of an existing layout) 2G - 1: aligned + aligned = 2G, aligned + loose = 3G - 1, loose + loose = 4G - 2. The box
@@ -32,7 +34,9 @@ GROW = 1.25
 SCALE_TOL = 0.00001
 MIN_GAIN = 0.0001
 ORDERS = 5
-POLICIES = 4
+ORIENTS = 4
+RULES = 2
+POLICIES = 8
 MAX_K = 20
 
 SLICE_SECONDS = 0.003  # one step() of a stage works about this long
@@ -79,8 +83,9 @@ def _gap_axis(f0: int, flen: int, length: int, g: int):
 
 
 class MaxRects:
-    def __init__(self, w: int, h: int, k: int):
+    def __init__(self, w: int, h: int, k: int, bottom_left: bool = False):
         self.g = block(k)
+        self.bottom_left = bottom_left
         self.free = [(0, 0, w, h)]
 
     def insert(self, w: int, h: int, can_turn: bool):
@@ -97,7 +102,7 @@ class MaxRects:
                 if ax is None or ay is None:
                     continue
                 rx, ry = f[2] - f[0] - (ax[1] - f[0]), f[3] - f[1] - (ay[1] - f[1])
-                score = (min(rx, ry), max(rx, ry), ay[1], ax[1])
+                score = (ay[1], ax[1], 0, 0) if self.bottom_left else (min(rx, ry), max(rx, ry), ay[1], ax[1])
                 if best is None or score < best[0]:
                     best = (score, (ax[0], ay[0], ax[1], ay[1]), (ax[2], ay[2]), turned)
         if best is None:
@@ -105,6 +110,12 @@ class MaxRects:
         _, p, (cx, cy), turned = best
         self._split(p)
         return cx, cy, turned
+
+    def prune(self, side: int) -> None:
+        """Forget free rectangles in which no box of `side` texels or more can sit (the layout stays the same, only faster)."""
+
+        need = side + 2 * self.g
+        self.free = [f for f in self.free if f[2] - f[0] >= need and f[3] - f[1] >= need]
 
     def _split(self, p):
         keep, news = [], []
@@ -155,8 +166,15 @@ def make_order(w, h, weight, mode: int) -> list[int]:
 def _pack_gen(w, h, turn_ok, order, pol: int, s: float, page, k: int):
     """Generator form of one pack: yields now and then, returns [(x, y, turned)] or None."""
 
-    mr = MaxRects(page[0], page[1], k)
+    mr = MaxRects(page[0], page[1], k, pol >= ORIENTS)
+    pol %= ORIENTS
     out = [(0, 0, False)] * len(w)
+    rest = [0] * (len(order) + 1)  # shortest side among the boxes still to place, from each position on
+    rest[len(order)] = None
+    for count in range(len(order) - 1, -1, -1):
+        i = order[count]
+        side = min(snap(w[i] * s), snap(h[i] * s))
+        rest[count] = side if rest[count + 1] is None else min(side, rest[count + 1])
     for count, i in enumerate(order):
         bw, bh = snap(w[i] * s), snap(h[i] * s)
         ok = bool(turn_ok[i])
@@ -168,6 +186,8 @@ def _pack_gen(w, h, turn_ok, order, pol: int, s: float, page, k: int):
         if got is None:
             return None
         out[i] = (got[0], got[1], pre != got[2])
+        if rest[count + 1] is not None:
+            mr.prune(rest[count + 1])
         if count % YIELD_EVERY == YIELD_EVERY - 1:
             yield
     return out
