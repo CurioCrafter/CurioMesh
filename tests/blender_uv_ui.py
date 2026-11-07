@@ -164,6 +164,15 @@ ok(np.allclose(res_co(), before) and len(guided.state["res"]["faces"]) == before
 cand = s.cand
 fit_key = cand.fit.key
 
+# Auto Fix's pattern on the real result: SeamFit made with no arguments, its spot, and the shared accept rule
+AF = importlib.import_module(pkg.__name__ + ".triadq.autofix")
+af_trial = UT.SeamFit()
+af_spots = UT.finish(af_trial.spots(s.base))
+ok(len(af_spots) == 1, f"Auto Fix finds Seam Fit's spot: {[(sp.kind, len(sp.faces), round(sp.bad, 2)) for sp in af_spots]}")
+if af_spots:
+    prop = UT.finish(AF.propose(af_trial, s.base, {}, af_spots))
+    print(f"INFO Auto Fix on Seam Fit: fixed {len(prop.fixed)}, left {[w for _, w in prop.left]}, verdict {prop.reason!r}; before {prop.before}; after {prop.after}", flush=True)
+
 # Keep going: on, then Esc (the Session closes at once and the result is untouched)
 s2 = TL.Session(bpy.context, UT.SeamFit(), {"faces": 0.05, "split": True, "keep_going": True}, "WHOLE")
 for _ in range(20):
