@@ -10,7 +10,7 @@ import numpy as np
 from . import topology
 from .patch import quad_quality
 from .shading import corner_table
-from .types import MeshData
+from .types import MeshData, drain
 
 FEATURE_TRIANGLES = 6  # with fewer source triangles around a vertex, their planes say more about noise than about shape
 MIN_QUALITY = 0.05  # a snap may not push a quad below this, unless it was already lower
@@ -122,7 +122,12 @@ def _ease(moved: np.ndarray, faces: list, find_nearest, rounds: int, wider: int)
 
 
 def unfold(points: np.ndarray, faces, find_nearest, rounds: int = 6, cycles: int = 6) -> tuple[np.ndarray, list[tuple[int, ...]], list[int]]:
-    """Leave no quad folded. Returns (points, faces, source index per face).
+    """`unfold_steps` in one go."""
+    return drain(unfold_steps(points, faces, find_nearest, rounds, cycles))
+
+
+def unfold_steps(points: np.ndarray, faces, find_nearest, rounds: int = 6, cycles: int = 6):
+    """Generator, a slice per cycle: leave no quad folded. Returns (points, faces, source index per face).
 
     Easing costs a little shape on the first rounds and a little more later. A quad it can't open becomes two triangles
     along the diagonal that bends least: on badly crumpled spots that's the honest shape, and they show in the face
@@ -136,6 +141,7 @@ def unfold(points: np.ndarray, faces, find_nearest, rounds: int = 6, cycles: int
     if not len(array) or not (quad_quality(moved[array]) <= 0.0).any():
         return moved, all_faces, list(range(len(all_faces)))
     for cycle in range(cycles):
+        yield
         _ease(moved, working, find_nearest, rounds, 1 + cycle)
     stuck = quad_quality(moved[array]) <= 0.0
     if not stuck.any():
@@ -192,12 +198,17 @@ def split_faces(mesh: MeshData, marked: set[int]) -> MeshData:
 
     Triangles are split too, whether marked or not. New vertices lie on the old faces, so the shape doesn't change yet.
     """
+    return drain(split_face_steps(mesh, marked))
+
+
+def split_face_steps(mesh: MeshData, marked: set[int]):
+    """Generator: `split_faces`, in slices of a few thousand faces."""
 
     faces = mesh.faces
     wanted = frozenset(
         tuple(sorted((faces[f][k], faces[f][(k + 1) % len(faces[f])]))) for f in marked for k in range(len(faces[f]))
     )
-    selected = topology._parity_path_edges(mesh, wanted)
+    selected = yield from topology._parity_path_edge_steps(mesh, wanted)
     points = np.asarray(mesh.vertices, dtype=np.float64)
     new_points: list[np.ndarray] = []
     middle: dict[tuple[int, int], int] = {}
@@ -207,6 +218,8 @@ def split_faces(mesh: MeshData, marked: set[int]) -> MeshData:
     output: list[tuple[int, ...]] = []
     materials: list[str] = []
     for index, face in enumerate(faces):
+        if index % topology.STEP_ROWS == topology.STEP_ROWS - 1:
+            yield
         ring: list[int] = []
         for k, v in enumerate(face):
             ring.append(v)

@@ -20,7 +20,9 @@ import time
 import numpy as np
 
 from .quadreduce import MIN_QUALITY, MOST_TURNED, QuadReducer, _cross, _dot, _normal, _quality, _sub
-from .types import MeshData
+from .types import MeshData, drain
+
+TURN_CORNERS = 500  # corners looked at per slice in `turn_pole_steps`
 
 SMOOTH_COS = math.cos(math.radians(45.0))  # a corner with faces further apart than this sits on an edge of the shape
 LONGEST_WALK = 44
@@ -235,6 +237,10 @@ class ChordReducer(QuadReducer):
     def __init__(self, mesh: MeshData, judge=None):
         """`judge.wrong(corners)`, if given, is how much of this quad a viewer would see as wrong."""
 
+        self._fields(mesh, judge)
+        super().__init__(mesh)
+
+    def _fields(self, mesh: MeshData, judge=None) -> None:
         self.judge = judge
         self._refused_patches: set[tuple] = set()
         self._seen_stamps: list[int] = []
@@ -245,7 +251,6 @@ class ChordReducer(QuadReducer):
         self.home: list[int] = list(range(len(mesh.vertices)))  # per corner, a corner of the mesh it was made from
         self._judged: dict[tuple, float] = {}
         self._unit_area = judge.total / max(len(mesh.faces), 1) if judge is not None else 1.0  # pixels per quad
-        super().__init__(mesh)
 
     def _wrong(self, corners) -> float:
         """What the judge says of this quad, remembered by its corners."""
@@ -698,9 +703,15 @@ class ChordReducer(QuadReducer):
 
     def turn_poles(self, depth: int = 1, seeds=None) -> int:
         """Spin edges around poles (Tarini et al. 2010's edge rotation): cheap, and it picks up what redrawing leaves. Returns the energy taken away."""
+        return drain(self.turn_pole_steps(depth, seeds))
+
+    def turn_pole_steps(self, depth: int = 1, seeds=None):
+        """Generator: `turn_poles`, yielding every TURN_CORNERS corners."""
 
         total = 0
-        for v in range(len(self.users)) if seeds is None else seeds:
+        for count, v in enumerate(range(len(self.users)) if seeds is None else seeds):
+            if count % TURN_CORNERS == TURN_CORNERS - 1:
+                yield
             around = self.users[v]
             while around and len(around) != 4 and not self.border[v]:
                 gain = self._turn_from(v, depth)

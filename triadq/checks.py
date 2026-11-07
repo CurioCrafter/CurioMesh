@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .topology import topology_summary
-from .types import MeshData
+from .topology import STEP_ROWS, non_manifold_vertex_steps
+from .types import FlatFaces, corners_of, drain
 
 CHUNK = 50_000
 TILE = 20_000  # faces tested per slice, so a big mesh never blocks Blender for long
@@ -37,11 +37,18 @@ class Inspect:
 
 def edge_flags(faces) -> tuple[np.ndarray, int, int, int]:
     """(broken per face, non-manifold edges, flipped edges, duplicate faces)."""
+    return drain(edge_flag_steps(faces))
+
+
+def edge_flag_steps(faces):
+    """Generator: `edge_flags`, yielding every STEP_ROWS faces or edges."""
     users: dict[tuple[int, int], list[tuple[int, bool]]] = {}
     seen: set[tuple[int, ...]] = set()
     broken = np.zeros(len(faces), bool)
     dups = 0
     for f, face in enumerate(faces):
+        if f % STEP_ROWS == STEP_ROWS - 1:
+            yield
         key = tuple(sorted(face))
         if key in seen:
             dups += 1
@@ -52,7 +59,9 @@ def edge_flags(faces) -> tuple[np.ndarray, int, int, int]:
             b = face[(i + 1) % n]
             users.setdefault((a, b) if a < b else (b, a), []).append((f, a < b))
     nm = flipped = 0
-    for items in users.values():
+    for count, items in enumerate(users.values()):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
         if len(items) > 2:
             nm += 1
             for f, _ in items:
@@ -65,9 +74,16 @@ def edge_flags(faces) -> tuple[np.ndarray, int, int, int]:
 
 def hole_counts(faces, piece: np.ndarray) -> tuple[int, dict[int, int]]:
     """Boundary loops overall and per piece."""
+    return drain(hole_count_steps(faces, piece))
+
+
+def hole_count_steps(faces, piece: np.ndarray):
+    """Generator: `hole_counts`, yielding every STEP_ROWS faces or edges."""
     count: dict[tuple[int, int], int] = {}
     owner: dict[tuple[int, int], int] = {}
     for f, face in enumerate(faces):
+        if f % STEP_ROWS == STEP_ROWS - 1:
+            yield
         n = len(face)
         for i, a in enumerate(face):
             b = face[(i + 1) % n]
@@ -82,11 +98,15 @@ def hole_counts(faces, piece: np.ndarray) -> tuple[int, dict[int, int]]:
             x = parent[x]
         return x
 
-    for key, c in count.items():
+    for k, (key, c) in enumerate(count.items()):
+        if k % STEP_ROWS == STEP_ROWS - 1:
+            yield
         if c == 1:
             parent[find(key[0])] = find(key[1])
     roots: dict[int, int] = {}
-    for key, c in count.items():
+    for k, (key, c) in enumerate(count.items()):
+        if k % STEP_ROWS == STEP_ROWS - 1:
+            yield
         if c == 1:
             roots[find(key[0])] = owner[key]
     per: dict[int, int] = {}
@@ -130,6 +150,13 @@ def face_boxes(co: np.ndarray, pad: np.ndarray) -> tuple[np.ndarray, np.ndarray]
 
 def corner_table(faces) -> np.ndarray:
     """Faces as a rectangular table, short faces padded with their own first corner."""
+    if isinstance(faces, FlatFaces):  # the same table by the arrays alone
+        sizes = np.diff(faces.indptr)
+        width = int(sizes.max()) if len(sizes) else 3
+        table = np.repeat(faces.flat[faces.indptr[:-1]][:, None], width, axis=1) if len(sizes) else np.zeros((0, width), dtype=np.int64)
+        rows = np.repeat(np.arange(len(sizes)), sizes)
+        table[rows, np.arange(len(faces.flat)) - faces.indptr[:-1][rows]] = faces.flat
+        return table
     width = max((len(f) for f in faces), default=3)
     return np.asarray([tuple(f) + (f[0],) * (width - len(f)) for f in faces], dtype=np.int64).reshape(-1, width)
 
@@ -138,13 +165,10 @@ def tree_of(co: np.ndarray, faces, ids: np.ndarray):
     """A search tree of just these faces, whose numbers are positions in `ids`."""
     from mathutils.bvhtree import BVHTree  # only inside Blender
 
-    corners = np.fromiter((v for f in ids.tolist() for v in faces[f]), dtype=np.int64)
-    used, flat = np.unique(corners, return_inverse=True)
-    polys, at = [], 0
-    for f in ids.tolist():
-        size = len(faces[f])
-        polys.append(flat[at : at + size].tolist())
-        at += size
+    used, flat = np.unique(corners_of(faces, ids), return_inverse=True)
+    sizes = np.diff(faces.indptr)[ids] if isinstance(faces, FlatFaces) else np.fromiter((len(faces[f]) for f in ids.tolist()), dtype=np.int64, count=len(ids))
+    ends, values = np.concatenate(([0], np.cumsum(sizes))).tolist(), flat.reshape(-1).tolist()
+    polys = [values[a:b] for a, b in zip(ends[:-1], ends[1:])]
     return BVHTree.FromPolygons(co[used].tolist(), polys, epsilon=0.0)
 
 
@@ -154,6 +178,7 @@ def crossing_slices(co, faces):
     if not len(faces):
         return np.zeros((0, 2), dtype=np.int64)
     pad = corner_table(faces)
+    yield
     low, high = face_boxes(co, pad)
     found = []
     for ids in tiles((low + high) / 2.0):
@@ -206,20 +231,20 @@ def inspect_steps(co, faces, piece, pairs=...):
     """Generator: `inspect` with a yield between its parts, so a job's timer can end its slice there. Returns the Inspect."""
     faces = [tuple(f) for f in faces]
     piece = np.asarray(piece, dtype=np.int64)
-    broken, nm, flipped, dups = edge_flags(faces)
+    broken, nm, flipped, dups = yield from edge_flag_steps(faces)
     yield
-    holes, holes_by = hole_counts(faces, piece)
+    holes, holes_by = yield from hole_count_steps(faces, piece)
     folded = folded_quads(co, faces)
     broken = np.asarray(broken, dtype=bool) | folded  # a folded quad is a new problem like a flipped one: its part goes a size up
     yield
-    summary = topology_summary(MeshData(co, faces))
+    nm_verts = yield from non_manifold_vertex_steps(faces)  # all `inspect` needs of the topology summary
     yield
     if pairs is ...:
         pairs = crossing_pairs(co, faces)
     crossing = np.zeros(len(faces), bool)
     if pairs is not None and len(pairs):
         crossing[pairs.ravel()] = True
-    out = Inspect(nm, summary.non_manifold_vertices, flipped, dups, holes, None if pairs is None else len(pairs), int(folded.sum()), np.zeros((0, 2), np.int64) if pairs is None else pairs, broken, crossing)
+    out = Inspect(nm, nm_verts, flipped, dups, holes, None if pairs is None else len(pairs), int(folded.sum()), np.zeros((0, 2), np.int64) if pairs is None else pairs, broken, crossing)
     out.bent = folded
     # Crossing, per piece: pairs inside the piece plus the other pieces it crosses (a part passing through a
     # neighbour counts once for each of the two, however many faces meet).
@@ -353,10 +378,11 @@ def _edge_faces(pad: np.ndarray) -> np.ndarray:
 class FaceTree:
     """Blender's BVHTree of polygons, asked about many points at once."""
 
-    def __init__(self, co, faces):
+    def __init__(self, co, faces, lists=None):
         from mathutils.bvhtree import BVHTree
 
-        self._tree = BVHTree.FromPolygons(np.asarray(co, dtype=np.float64).tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
+        lists = [list(f) for f in faces] if lists is None else lists  # `lists`: the faces as lists, made beforehand
+        self._tree = BVHTree.FromPolygons(np.asarray(co, dtype=np.float64).tolist(), lists, all_triangles=False, epsilon=0.0)
 
     def nearest(self, queries) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(closest point (N, 3), polygon, distance) for each query; distance inf where the tree is empty."""
@@ -399,11 +425,16 @@ class _Source:
     """Everything the checks need of one source mesh, worked out once: a job checks the same source again and again."""
 
     def __init__(self, co, faces, tree):
+        drain(self._steps(co, faces, tree))
+
+    def _steps(self, co, faces, tree):
+        """Generator: what `__init__` works out, in slices."""
         self.co, self.faces, self.tree = co, faces, tree
         self.pad = corner_table(faces)
         self.normals, _area, self.middle = _normals(co, self.pad)
         sides = np.linalg.norm(co[self.pad] - co[np.roll(self.pad, -1, axis=1)], axis=2).max(axis=1)
-        self.stacked = _overlapping(co, faces, self.pad, self.normals, self.middle, sides, tree)
+        yield
+        self.stacked = yield from _overlapping_steps(co, faces, self.pad, self.normals, self.middle, sides, tree)
         self._parts = self._tris = self._crossed = None
 
     @property
@@ -421,9 +452,14 @@ class _Source:
     @property
     def crossed(self) -> np.ndarray:
         """Faces that pass through or lie on another face of the source."""
+        return drain(self.crossed_steps())
+
+    def crossed_steps(self):
+        """Generator: `crossed`, a slice per tile of the crossing test."""
         if self._crossed is None:
+            pairs = yield from crossing_slices(self.co, self.faces)
             self._crossed = self.stacked.copy()
-            self._crossed[crossing_pairs(self.co, self.faces).ravel()] = True
+            self._crossed[pairs.ravel()] = True
         return self._crossed
 
 
@@ -438,24 +474,49 @@ def forget() -> None:
 
 def _source_of(source_co, source_faces) -> _Source:
     """The `_Source` of this mesh. Kept while the same mesh (by size and corner sum) comes back."""
+    return drain(source_steps(source_co, source_faces))
+
+
+def source_steps(source_co, source_faces, crossed: bool = False):
+    """Generator: `_source_of` in slices, so the first check of a big source doesn't hold Blender. Returns the `_Source`.
+    With `crossed`, where the source crosses itself is worked out too (`defects` asks for it when the result has a crossing)."""
     global _source
     co = np.asarray(source_co, dtype=np.float64)
     key = (len(co), len(source_faces), float(co.sum()))
     if _source[0] != key:
         faces = [tuple(f) for f in source_faces]
-        _source = (key, _Source(co, faces, face_tree(co, faces)))
+        yield
+        lists = []
+        for start in range(0, len(faces), TILE):
+            lists += [list(f) for f in faces[start : start + TILE]]
+            yield
+        tree = FaceTree(co, faces, lists)
+        yield
+        found = _Source.__new__(_Source)
+        yield from found._steps(co, faces, tree)
+        _source = (key, found)
+    if crossed:
+        yield from _source[1].crossed_steps()
     return _source[1]
 
 
 def _overlapping(co, faces, pad, normal, middle, size, tree=None) -> np.ndarray:
-    """Faces whose middle lies on another face, in its plane, that shares no corner with it."""
+    """`_overlapping_steps` in one go."""
+    return drain(_overlapping_steps(co, faces, pad, normal, middle, size, tree))
+
+
+def _overlapping_steps(co, faces, pad, normal, middle, size, tree=None):
+    """Generator: faces whose middle lies on another face, in its plane, that shares no corner with it."""
     out = np.zeros(len(pad), bool)
     if len(pad) < 2:
         return out
     tree = tree or face_tree(co, faces)
     # Every face within reach of each middle, from one tree: no face is missed, and one pass is cheaper than halves.
     near = tree._tree.find_nearest_range
-    pairs = [(k, hit[2]) for k, (point, reach) in enumerate(zip(middle.tolist(), (0.02 * size).tolist())) for hit in near(point, reach) if hit[2] != k]
+    pairs, reaches, middles = [], (0.02 * size).tolist(), middle.tolist()
+    for start in range(0, len(middles), TILE):
+        pairs += [(k, hit[2]) for k in range(start, min(start + TILE, len(middles))) for hit in near(middles[k], reaches[k]) if hit[2] != k]
+        yield
     if not pairs:
         return out
     a, b = np.asarray(pairs, dtype=np.int64).T

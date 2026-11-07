@@ -36,9 +36,9 @@ import time
 
 import numpy as np
 
-from .engine import RemeshOptions, remesh_mesh
-from .topology import parity_path_quad_closure, quad_only_closure, quads_locally_valid
-from .types import FlatFaces, MeshData
+from .engine import RemeshOptions, remesh_mesh_steps
+from .topology import parity_path_quad_closure_steps, quad_only_closure_steps, quads_locally_valid
+from .types import FlatFaces, MeshData, drain
 
 
 # --------------------------------------------------------------------------- mesh tables
@@ -1095,7 +1095,14 @@ def _quad_colouring(count: int, quads: np.ndarray) -> np.ndarray:
 def _untangle(
     coords: np.ndarray, faces, fixed: np.ndarray, to3d, planar: bool, rounds: int = 12, threshold: float = 0.25
 ) -> np.ndarray:
-    """Vectorised quality optimisation of free quad corners, seam (`fixed`) untouched.
+    """`_untangle_steps` in one go."""
+    return drain(_untangle_steps(coords, faces, fixed, to3d, planar, rounds, threshold))
+
+
+def _untangle_steps(
+    coords: np.ndarray, faces, fixed: np.ndarray, to3d, planar: bool, rounds: int = 12, threshold: float = 0.25
+):
+    """Generator, a slice per round: vectorised quality optimisation of free quad corners, seam (`fixed`) untouched.
 
     Each round takes the free corners of quads with `quad_quality` below
     `threshold`, processes them one colour class at a time (no two on one
@@ -1128,6 +1135,7 @@ def _untangle(
 
     deficit = np.inf
     for _round in range(rounds):
+        yield
         quality = quad_quality(xyz[quads])
         previous, deficit = deficit, float((threshold - np.minimum(quality, threshold)).sum())
         if deficit > 0.98 * previous:  # under 2% progress in the last round: converged
@@ -1369,9 +1377,10 @@ def _pair_and_close(
     frozen midpoint. ParityPath templates must be valid in the plane and in
     3D; `parity=False` splits every face (CornerSplit). Returns (uv of all
     vertices, quads, closure label); raises ValueError if ParityPath fails.
+    A generator: it yields between slices of the pairing and the closure.
     """
 
-    paired, _report = remesh_mesh(
+    paired, _report = yield from remesh_mesh_steps(
         MeshData(vertices=xyz, faces=[tuple(t) for t in tris.tolist()], name="region_patch"),
         RemeshOptions(
             target_faces=max(1, len(tris) // 2), seed_count=seed_count, force_quads=False, field_mode=field_mode
@@ -1388,24 +1397,25 @@ def _pair_and_close(
     faces.extend(tuple(face) for face in paired.faces if len(face) == 3)
     frozen = {_key(2 * k, (2 * k + 2) % loop_count): 2 * k + 1 for k in range(loop_count // 2)}
     planar = MeshData(vertices=np.concatenate((uv, np.zeros((len(uv), 1))), axis=1), faces=faces)
+    yield
     if parity:
         try:
-            closed = parity_path_quad_closure(planar, frozen_midpoints=frozen, validation_vertices=xyz)
+            closed = yield from parity_path_quad_closure_steps(planar, frozen_midpoints=frozen, validation_vertices=xyz)
         except ValueError:
             # Staircase seams: no template is valid in 3D at some seam cell. Take the
             # planar-valid one; the Jacobian pass (_untangle) repairs it in 3D.
-            closed = parity_path_quad_closure(
+            closed = yield from parity_path_quad_closure_steps(
                 planar, frozen_midpoints=frozen, validation_vertices=xyz, validation_required=False
             )
         label = "ParityPath"
     else:
-        closed = quad_only_closure(planar, frozen_midpoints=frozen)
+        closed = yield from quad_only_closure_steps(planar, frozen_midpoints=frozen)
         label = "CornerSplit"
     return closed.vertices[:, :2].copy(), [tuple(f) for f in closed.faces], label
 
 
 def _fill_core(loop_uv, lift, size_fn, strategy, corners, seed_count, max_points, target=0.0, field_mode="SMOOTH"):
-    """Unoptimised all-quad fill of the planar loop: (uv, quads, label); vertex k < B is loop vertex k."""
+    """Generator, in slices: unoptimised all-quad fill of the planar loop: (uv, quads, label); vertex k < B is loop vertex k."""
 
     count = len(loop_uv)
     if count == 4:
@@ -1423,6 +1433,7 @@ def _fill_core(loop_uv, lift, size_fn, strategy, corners, seed_count, max_points
             points = _coons_points(loop_uv, loop_xyz, corners, [max(1, round(c / factor)) for c in counts])
             strategy = "GRID"
         planar = _coarse_planar(loop_uv, lambda q: size_fn(q, factor), strategy, max_points, points)
+        yield
         points, tris = planar.arrays()
         coarse = count // 2
         # Planar vertex i < coarse is seam vertex 2i; later ones are new.
@@ -1430,8 +1441,9 @@ def _fill_core(loop_uv, lift, size_fn, strategy, corners, seed_count, max_points
         uv = np.concatenate((loop_uv, points[coarse:]))
         tris = remap[tris]
         xyz = lift(uv, [tuple(t) for t in tris.tolist()])
+        yield
         try:
-            return _pair_and_close(uv, xyz, tris, count, max(1, seed_count), parity, field_mode)
+            return (yield from _pair_and_close(uv, xyz, tris, count, max(1, seed_count), parity, field_mode))
         except ValueError:
             continue
     raise ValueError("no closure could make the patch all quads")
@@ -1493,7 +1505,12 @@ def build_seam_layer(loop_uv: np.ndarray, angles=None, end_angle: float = 115.0)
     return inner, quads, len(order)
 
 
-def quad_fill(
+def quad_fill(loop_uv: np.ndarray, lift, size_fn, **options):
+    """`quad_fill_steps` in one go."""
+    return drain(quad_fill_steps(loop_uv, lift, size_fn, **options))
+
+
+def quad_fill_steps(
     loop_uv: np.ndarray,
     lift,
     size_fn,
@@ -1509,7 +1526,7 @@ def quad_fill(
     target: float = 0.0,
     field_mode: str = "SMOOTH",
 ):
-    """All-quad fill of a planar disk whose CCW boundary is `loop_uv` (even count).
+    """Generator, a slice per fill tried and per smoothing of it: all-quad fill of a planar disk whose CCW boundary is `loop_uv` (even count).
 
     `lift(uv, faces)` returns 3D positions for every row of uv (seam rows
     included); `size_fn(points, interior_factor)` is the coarse target edge
@@ -1542,17 +1559,20 @@ def quad_fill(
     fixed_count = count
 
     def finish(uv, faces):
+        """Generator: the fill smoothed and untangled, (uv, xyz)."""
         fixed = np.zeros(len(uv), dtype=bool)
         fixed[:fixed_count] = True
         if not cheap_lift:
             uv = _smooth_quads(uv, faces, fixed, smooth_iterations)
-            return uv, _untangle(lift(uv, faces), faces, fixed, lambda p: p, planar=False)
+            yield
+            lifted = lift(uv, faces)
+            return uv, (yield from _untangle_steps(lifted, faces, fixed, lambda p: p, planar=False))
 
         def check(points):
             return lift(points, faces)
 
         uv = _smooth_quads(uv, faces, fixed, smooth_iterations, check)
-        uv = _untangle(uv, faces, fixed, check, planar=True)
+        uv = yield from _untangle_steps(uv, faces, fixed, check, planar=True)
         return uv, lift(uv, faces)
 
     def bad_count(xyz, faces):
@@ -1561,34 +1581,40 @@ def quad_fill(
     best = None
     plain_first = seam_layer == "OFF" or count < 8 or (seam_layer == "AUTO" and corners is not None)
     if plain_first:
-        uv, faces, label = _fill_core(loop_uv, lift, size_fn, strategy, corners, seed_count, max_points, target, field_mode)
-        uv, xyz = finish(uv, faces)
+        uv, faces, label = yield from _fill_core(loop_uv, lift, size_fn, strategy, corners, seed_count, max_points, target, field_mode)
+        yield
+        uv, xyz = yield from finish(uv, faces)
+        yield
         best = (bad_count(xyz, faces), uv, xyz, faces, label)
         if seam_layer == "OFF" or count < 8 or best[0] == 0:
             return best[1:]
     variants = [seam_angles, None] if seam_angles is not None else [None]
     for angles in variants:  # with corner ends, then a plain pillow
+        yield
         inner, layer, inner_count = build_seam_layer(loop_uv, angles)
         if angles is not None and inner_count == count and len(variants) > 1:
             continue  # no ends: identical to the plain pillow
         try:
-            uv_in, faces_in, label = _fill_core(
+            uv_in, faces_in, label = yield from _fill_core(
                 inner, lift, size_fn, strategy, corners if inner_count == count else None, seed_count, max_points, target,
                 field_mode,
             )
         except ValueError:
             continue
+        yield
         uv = np.concatenate((loop_uv, uv_in))
         faces = layer + [tuple(count + v for v in face) for face in faces_in]
-        uv, xyz = finish(uv, faces)
+        uv, xyz = yield from finish(uv, faces)
         layered = (bad_count(xyz, faces), uv, xyz, faces, label + "+Layer")
         if best is None or layered[0] < best[0]:
             best = layered
         if best[0] == 0:
             break
     if best is None:  # no layer could be built: plain fill
-        uv, faces, label = _fill_core(loop_uv, lift, size_fn, strategy, corners, seed_count, max_points, target, field_mode)
-        uv, xyz = finish(uv, faces)
+        yield
+        uv, faces, label = yield from _fill_core(loop_uv, lift, size_fn, strategy, corners, seed_count, max_points, target, field_mode)
+        yield
+        uv, xyz = yield from finish(uv, faces)
         best = (0, uv, xyz, faces, label)
     return best[1:]
 
@@ -1851,7 +1877,12 @@ def _membrane(points: np.ndarray, faces, fixed: np.ndarray, extra_edges=None, bi
     return x
 
 
-def fill_loop(
+def fill_loop(vertices, loop, **options) -> PatchResult:
+    """`fill_loop_steps` in one go."""
+    return drain(fill_loop_steps(vertices, loop, **options))
+
+
+def fill_loop_steps(
     vertices,
     loop,
     *,
@@ -1862,8 +1893,8 @@ def fill_loop(
     max_faces: int = 20_000,
     seam_layer: str = "AUTO",
     field_mode: str = "SMOOTH",
-) -> PatchResult:
-    """Fill a closed hole loop (CCW as the new faces should run) with all quads.
+):
+    """Generator, returning the PatchResult: fill a closed hole loop (CCW as the new faces should run) with all quads.
 
     `ring_edges` are (loop vertex id, outside neighbour id) pairs; when given,
     the fill is faired against them so it follows the surrounding curvature.
@@ -1926,7 +1957,7 @@ def fill_loop(
         return _membrane(positions, faces, fixed, extra)[:n]
 
     try:
-        out_uv, out_xyz, out_faces, label = quad_fill(
+        out_uv, out_xyz, out_faces, label = yield from quad_fill_steps(
             loop_uv, lift, size_fn, strategy=strategy, corners=corners, seed_count=seed_count, max_points=max_faces,
             cheap_lift=False, seam_layer=seam_layer, target=target, field_mode=field_mode,
             seam_angles=180.0 - np.degrees(seam_turning(loop_xyz, np.tile(normal, (count, 1)))),
@@ -1952,7 +1983,14 @@ def fill_loop(
 def fit_to_surface(
     points, faces, pinned, project=None, iterations: int = 5, strength: float = 0.5, guard: bool = True
 ) -> np.ndarray:
-    """Tangential Laplacian relax p' = p + l (I - n n^T)(avg - p), then project, pinned rows fixed.
+    """`fit_to_surface_steps` in one go."""
+    return drain(fit_to_surface_steps(points, faces, pinned, project, iterations, strength, guard))
+
+
+def fit_to_surface_steps(
+    points, faces, pinned, project=None, iterations: int = 5, strength: float = 0.5, guard: bool = True
+):
+    """Generator, a slice per round: tangential Laplacian relax p' = p + l (I - n n^T)(avg - p), then project, pinned rows fixed.
 
     `project(points)` maps (N, 3) points onto the target surface (a BVH in
     Blender); None keeps the relax purely tangential. Moves that leave a quad
@@ -1970,6 +2008,7 @@ def fit_to_surface(
     free = ~pinned & (degree > 0)
     quads = np.asarray([face for face in faces if len(face) == 4], dtype=np.int64).reshape(-1, 4)
     for _ in range(max(0, int(iterations))):
+        yield
         normals = _vertex_normals(points, faces)
         total = np.zeros_like(points)
         for axis in range(3):
@@ -1993,7 +2032,8 @@ def fit_to_surface(
                 moved[undo] = points[undo]
         points = moved
     if guard and len(quads) and free.any():
-        points = _untangle(points, quads, ~free, project if project is not None else (lambda p: p), planar=False)
+        yield
+        points = yield from _untangle_steps(points, quads, ~free, project if project is not None else (lambda p: p), planar=False)
     return points
 
 

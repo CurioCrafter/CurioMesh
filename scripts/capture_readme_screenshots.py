@@ -78,7 +78,14 @@ for _cls in _panels:
         _cls.bl_category = "Regions"  # its own tab, so the whole panel fits in one screenshot
     bpy.utils.register_class(_cls)
 engine = sys.modules["curiomesh.triadq.engine"]
-real_augment = engine._augment_matching
+real_augment = engine._augment_matching_steps
+
+
+
+def _no_rescue(*_args, **_kwargs):
+    """No augmenting paths: the matching stays as the greedy pass left it."""
+    return 0
+    yield
 
 
 def make_source():
@@ -97,7 +104,7 @@ def make_source():
 
 
 def remesh(source, name, rescue):
-    engine._augment_matching = real_augment if rescue else (lambda *args, **kwargs: 0)
+    engine._augment_matching_steps = real_augment if rescue else _no_rescue
     bpy.ops.object.select_all(action="DESELECT")
     source.select_set(True)
     bpy.context.view_layer.objects.active = source

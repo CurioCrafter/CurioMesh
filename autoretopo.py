@@ -35,15 +35,15 @@ from .triadq import bakescore, cases, checks, detail, hardsurf, issues, parts, p
 from .triadq.chords import ChordReducer, PictureJudge
 from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
 from .triadq.fit import fit_vertices, vertex_parts
-from .triadq.flatquad import FlatQuadOptions, _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
-from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces, unfold
-from .triadq.quadreduce import quad_reducer
+from .triadq.flatquad import FlatQuadOptions, _close_pieces, _face_frames, flat_quad_remesh, flatten_region_steps, pair_and_close, pair_and_close_steps
+from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_face_steps, unfold_steps
+from .triadq.quadreduce import QuadReducer
 from .triadq.refill import LOOSE, MIDDLE, STRICT, polish
-from .triadq.shading import blended_normals, corner_normals, corner_table
+from .triadq.shading import blended_normals, corner_normal_steps, corner_table
 from .triadq.fieldmesh import MOST_TARGET, field_quads, is_clean
-from .triadq.smoothgrid import GridOptions, GridReport, crease_areas, grid_areas, smooth_areas
+from .triadq.smoothgrid import GridOptions, GridReport, crease_area_steps, grid_area_steps, smooth_area_steps
 from . import guides, hardware, loops, parallel, symmetry
-from .triadq.types import Cancelled, FlatFaces, MeshData
+from .triadq.types import Cancelled, FlatFaces, MeshData, corners_of, drain
 from .triadq.uvs import simplify_borders
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -149,6 +149,29 @@ BLENDER_OPERATOR_METHODS = ("QUADRIFLOW", "GRID", "FLOW")  # these call Blender 
 STEP = 0.8  # each size made in steps is this share of the size before it
 
 
+def _shifted(polys, offset: int) -> list[tuple[int, ...]]:
+    """Each face as a tuple with `offset` added to its corners."""
+    if isinstance(polys, FlatFaces):
+        ends = polys.indptr.tolist()
+        values = (polys.flat + offset).tolist()
+        return [tuple(values[a:b]) for a, b in zip(ends[:-1], ends[1:])]
+    return [tuple(v + offset for v in p) for p in polys]
+
+
+def _lists_of(polys, rows: int = 20_000):
+    """Generator: each face as a list, as BVHTree.FromPolygons takes them, yielding every `rows` faces."""
+    out = []
+    for start in range(0, len(polys), rows):
+        if isinstance(polys, FlatFaces):
+            ends = polys.indptr[start : start + rows + 1].tolist()
+            values = polys.flat[ends[0] : ends[-1]].tolist()
+            out += [values[a - ends[0] : b - ends[0]] for a, b in zip(ends[:-1], ends[1:])]
+        else:
+            out += [list(p) for p in polys[start : start + rows]]
+        yield
+    return out
+
+
 def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int, tree: BVHTree | None = None, baked_from: BVHTree | None = None):
     """Generator: six exact orthographic pictures, one ray per pixel. Returns [(hit, normal, depth, face)] when exhausted.
 
@@ -157,7 +180,9 @@ def pictures(points: np.ndarray, polys, center: np.ndarray, half: float, pixels:
     """
 
     if tree is None:
-        tree = BVHTree.FromPolygons(points.tolist(), [list(p) for p in polys], all_triangles=False, epsilon=0.0)
+        corners = yield from _lists_of(polys)
+        tree = BVHTree.FromPolygons(points.tolist(), corners, all_triangles=False, epsilon=0.0)
+        yield
     grid = (((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half).tolist()
     out = []
     since_yield = 0
@@ -239,17 +264,23 @@ def triangulate(points, faces, kinds):
 
 def make_pure(mesh: MeshData, method, output, notes=None, **pairing):
     """The faces for one group of pieces by NumPy alone, no Blender data: (points, faces, materials)."""
+    return drain(make_pure_steps(mesh, method, output, notes, **pairing))
+
+
+def make_pure_steps(mesh: MeshData, method, output, notes=None, **pairing):
+    """Generator: `make_pure`, in slices."""
     if method == "FLAT":
         if output == "TRIS":
-            out = flatten_regions(mesh)[0]
+            out = (yield from flatten_region_steps(mesh))[0]
         else:
             out = flat_quad_remesh(mesh, force_quads=output == "QUADS")[0]
     elif output == "TRIS" or method == "TRIS":
         out = mesh
     else:
-        out, solver = pair_and_close(mesh, seed_count=4 if method == "PAIRING" else 2, force_quads=output == "QUADS", **pairing)
+        out, solver = yield from pair_and_close_steps(mesh, seed_count=4 if method == "PAIRING" else 2, force_quads=output == "QUADS", **pairing)
         if solver.forced_pieces and notes is not None:
             notes.append(f"{solver.forced_pieces} part(s) only closed by the last-resort split: up to 3-4x the faces and poor quads there, so check them")
+    yield
     points, out_faces, mats = np.asarray(out.vertices, dtype=np.float64), [tuple(p) for p in out.faces], list(out.face_materials)
     if output == "TRIS" or method == "TRIS":
         points, out_faces, mats = triangulate(points, out_faces, mats)
@@ -324,8 +355,14 @@ def _fill(points, polys, kinds, strategy, goal):
 
 def shaded(picture_set, points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int) -> list[np.ndarray]:
     """Each picture's normals as smooth shading shows them, blended from the vertices at each hit."""
+    return drain(shaded_steps(picture_set, points, polys, center, half, pixels))
 
-    normals = corner_normals(points, polys)
+
+def shaded_steps(picture_set, points: np.ndarray, polys, center: np.ndarray, half: float, pixels: int):
+    """Generator: `shaded`, a slice per stage and per picture."""
+
+    normals = yield from corner_normal_steps(points, polys)
+    yield
     table = corner_table(polys)
     grid = ((np.arange(pixels) + 0.5) / pixels * 2.0 - 1.0) * half
     out = []
@@ -334,6 +371,7 @@ def shaded(picture_set, points: np.ndarray, polys, center: np.ndarray, half: flo
         u, v = (axis + 1) % 3, (axis + 2) % 3
         for sign in (1.0, -1.0):
             hit, _normal, depth, face = next(views)
+            yield
             i, j = np.nonzero(hit)
             at = np.empty((len(i), 3))
             at[:, u] = center[u] + grid[i]
@@ -410,8 +448,25 @@ DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vert
 
 def _decimate(points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     """Reduce to `ratio`. `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders."""
-    context = bpy.context  # read at slice time: an operator's context does not outlive the operator
+    return drain(_decimate_steps(points, polys, kinds, ratio, drop, keep))
 
+
+def _fill_mesh(mesh, points: np.ndarray, faces: FlatFaces) -> None:
+    """What `mesh.from_pydata(points, [], faces)` does, from arrays: the same mesh without a Python list per face."""
+    mesh.vertices.add(len(points))
+    mesh.loops.add(len(faces.flat))
+    mesh.polygons.add(len(faces))
+    mesh.vertices.foreach_set("co", np.ascontiguousarray(points, dtype=np.float32).reshape(-1))
+    mesh.polygons.foreach_set("loop_start", faces.indptr[:-1].astype(np.int32))
+    mesh.polygons.foreach_set("vertices", faces.flat.astype(np.int32))
+    sharp = mesh.attributes.new("sharp_face", "BOOLEAN", "FACE")  # `Mesh.shade_flat`, from an array
+    sharp.data.foreach_set("value", np.ones(len(faces), dtype=bool))
+    if len(faces):
+        mesh.update(calc_edges=True)
+
+
+def _decimate_steps(points, polys, kinds, ratio, drop=None, keep=None):
+    """Generator: `_decimate` in three slices: the arrays Blender takes, Blender's Decimate, the faces read back."""
     free = None if keep is None else np.flatnonzero(~keep)
     if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
         triangles = sum(len(p) - 2 for p in polys)
@@ -422,36 +477,53 @@ def _decimate(points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.nda
         unbound = np.asarray(unbound, dtype=np.int64)
         free = unbound if keep is None else np.intersect1d(unbound, np.flatnonzero(~keep[used]))
         ratio = min(wanted / max(sum(len(p) - 2 for p in polys), 1), 1.0)
-    mesh = bpy.data.meshes.new("CurioMesh_Piece")
-    mesh.from_pydata(points.tolist(), [], polys)
-    mesh.polygons.foreach_set("material_index", np.asarray([int(k) for k in kinds], dtype=np.int32))
-    mesh.update()
-    painted = drop is not None and float(drop.max(initial=0.0)) > 0.0
-    obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
-    context.scene.collection.objects.link(obj)
-    try:
-        modifier = obj.modifiers.new("Reduce", "DECIMATE")
-        modifier.ratio = ratio
-        if free is not None or painted:  # Decimate never collapses a vertex outside the group or of weight 0
-            group = obj.vertex_groups.new(name="CurioMesh_Density")
-            group.add(list(range(len(points))) if free is None else free.tolist(), 1.0, "REPLACE")
-            modifier.vertex_group = group.name
-        if painted:
-            level = np.round(drop / 0.5 * DENSITY_STEPS).astype(np.int64)
-            for step in np.unique(level[level > 0]).tolist():
-                at = np.flatnonzero(level == step)
-                group.add((at if free is None else np.intersect1d(at, free)).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
-        evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
-        reduced = evaluated.to_mesh()
-        co = np.empty(len(reduced.vertices) * 3, dtype=np.float64)
-        reduced.vertices.foreach_get("co", co)
-        faces = [tuple(p.vertices) for p in reduced.polygons]
-        materials = [str(p.material_index) for p in reduced.polygons]
-        evaluated.to_mesh_clear()
-    finally:
-        bpy.data.objects.remove(obj, do_unlink=True)
-        bpy.data.meshes.remove(mesh)
-    return co.reshape(-1, 3), faces, materials
+        yield
+    flat = FlatFaces.of(polys)  # the arrays `Mesh.from_pydata` would build from Python lists, made by NumPy
+    codes = np.asarray([int(k) for k in kinds], dtype=np.int32)
+    yield
+    context = bpy.context  # read at slice time: an operator's context does not outlive the operator
+    with tasks.busy_cursor():  # Blender's own Decimate is one call: the temporary object never outlives this slice
+        mesh = bpy.data.meshes.new("CurioMesh_Piece")
+        _fill_mesh(mesh, points, flat)
+        mesh.polygons.foreach_set("material_index", codes)
+        mesh.update()
+        painted = drop is not None and float(drop.max(initial=0.0)) > 0.0
+        obj = bpy.data.objects.new("CurioMesh_Piece", mesh)
+        context.scene.collection.objects.link(obj)
+        try:
+            modifier = obj.modifiers.new("Reduce", "DECIMATE")
+            modifier.ratio = ratio
+            if free is not None or painted:  # Decimate never collapses a vertex outside the group or of weight 0
+                group = obj.vertex_groups.new(name="CurioMesh_Density")
+                group.add(list(range(len(points))) if free is None else free.tolist(), 1.0, "REPLACE")
+                modifier.vertex_group = group.name
+            if painted:
+                level = np.round(drop / 0.5 * DENSITY_STEPS).astype(np.int64)
+                for step in np.unique(level[level > 0]).tolist():
+                    at = np.flatnonzero(level == step)
+                    group.add((at if free is None else np.intersect1d(at, free)).tolist(), 1.0 - step * 0.5 / DENSITY_STEPS, "REPLACE")
+            evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
+            reduced = evaluated.to_mesh()
+            co = np.empty(len(reduced.vertices) * 3, dtype=np.float64)
+            reduced.vertices.foreach_get("co", co)
+            count = len(reduced.polygons)
+            starts, totals, materials = (np.empty(count, dtype=np.int32) for _ in range(3))
+            reduced.polygons.foreach_get("loop_start", starts)
+            reduced.polygons.foreach_get("loop_total", totals)
+            reduced.polygons.foreach_get("material_index", materials)
+            loops = np.empty(len(reduced.loops), dtype=np.int32)
+            reduced.loops.foreach_get("vertex_index", loops)
+            evaluated.to_mesh_clear()
+        finally:
+            bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.meshes.remove(mesh)
+    yield
+    loops, faces = loops.tolist(), []
+    for at, (start, total) in enumerate(zip(starts.tolist(), totals.tolist())):
+        faces.append(tuple(loops[start : start + total]))
+        if at % 20_000 == 19_999:
+            yield
+    return co.reshape(-1, 3), faces, [str(m) for m in materials.tolist()]
 
 
 def _triangle_count(polys) -> int:
@@ -522,6 +594,12 @@ def _face_tree(points: np.ndarray, faces):
     return BVHTree.FromPolygons(points.tolist(), [list(f) for f in faces], all_triangles=False, epsilon=0.0)
 
 
+def _face_tree_steps(points: np.ndarray, faces):
+    """Generator: `_face_tree`, the lists Blender takes made in slices before the tree itself."""
+    corners = yield from _lists_of(faces)
+    return BVHTree.FromPolygons(points.tolist(), corners, all_triangles=False, epsilon=0.0)
+
+
 def _nearest_faces(tree, queries: np.ndarray) -> np.ndarray:
     return np.fromiter((tree.find_nearest(p)[2] for p in queries.tolist()), dtype=np.int64, count=len(queries))
 
@@ -542,17 +620,19 @@ def _picture_sizes(sizes: np.ndarray, most_rays: int = MOST_RAYS, max_pixels: in
         most *= 0.85
 
 
-def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=None, options: GridOptions | None = None):
-    """The reduced mesh with its smooth round areas rebuilt as rows of quads, using BVH lookups on the source."""
+def smooth_grid_steps(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=None, options: GridOptions | None = None):
+    """Generator: the reduced mesh with its smooth round areas rebuilt as rows of quads, using BVH lookups on the source."""
 
     if labels is None:
-        domes = smooth_areas(co, faces, options=options)
-        labels = (domes, crease_areas(co, faces, domes >= 0, options))
+        domes = yield from smooth_area_steps(co, faces, options=options)
+        labels = (domes, (yield from crease_area_steps(co, faces, domes >= 0, options)))
     coarse = MeshData(coarse_points, coarse_faces, coarse_kinds)
     report = GridReport()
     if int(max(area.max(initial=-1) for area in labels)) < 0:
         return coarse, report
-    whole = _face_tree(co, faces)
+    yield
+    whole = yield from _face_tree_steps(co, faces)
+    yield
 
     def nearest(query):
         if not isinstance(whole, BVHTree):
@@ -569,8 +649,9 @@ def smooth_grids(co, faces, coarse_points, coarse_faces, coarse_kinds, labels=No
 
     extent = float(np.ptp(co, axis=0).max())
     normals = _face_frames(co, faces)[0]
-    coarse, report = grid_areas(coarse, labels[0], nearest, options, extent=extent, normals=normals)
-    coarse, later = grid_areas(coarse, labels[1], nearest, options, project_for=project_for, extent=extent, normals=normals)
+    yield
+    coarse, report = yield from grid_area_steps(coarse, labels[0], nearest, options, extent=extent, normals=normals)
+    coarse, later = yield from grid_area_steps(coarse, labels[1], nearest, options, project_for=project_for, extent=extent, normals=normals)
     report.built += later.built
     report.faces_in += later.faces_in
     report.quads_out += later.quads_out
@@ -684,7 +765,7 @@ class AutoJob:
         self._src_middles = None  # each source face's middle, to find the source round a redone region
         self._known = None  # what the source crosses itself
         self._src_pieces = None  # pieces the source was checked in
-        self.repair_fills = True  # off for the size ladder's rungs: one fill can hold Blender for seconds
+        self.repair_fills = True  # off for the size ladder's rungs: one fill can take seconds of work
         self._piece_trees: dict[int, BVHTree] = {}
         self._view = None
         self.fraction = 0.0  # 0 to 1 of the whole job, for the progress bar
@@ -710,6 +791,7 @@ class AutoJob:
         self.sizes: list[list[tuple]] = []  # per piece, smallest first: (points, polys, materials)
         self.levels: list[list[Level]] = []
         self.field_spent = 0.0
+        self._worked, self._began = 0.0, None  # seconds spent inside `step`, and when the slice running now began
         self.ready: list[list[bool]] = []  # per piece and size: already all quads, so it skips pairing
         self.seen: list[float] = []
         self.twins: dict[int, tuple[int, tuple]] = {}  # a piece that's a copy: the piece it copies, and how to move onto it
@@ -770,12 +852,20 @@ class AutoJob:
         if file is not None and fresh:
             hardware.save_piece(file, self.detail, sizes[:-1], pairs[:-1], seen)
 
+    def clock(self) -> float:
+        """Seconds for this job's time limits: only the time it works counts, so the gaps between slices (and the size
+        ladder's rests) never use them up. A job run straight through (in a helper) has no gaps: plain time."""
+        if self._began is None:
+            return time.perf_counter()
+        return self._worked + time.perf_counter() - self._began
+
     def step(self, seconds: float | None = None) -> None:
         """Do the next slice of work (called from a timer on the main thread)."""
         if not self.busy:
             return
         seconds = self.cfg.slice_s if seconds is None else seconds
-        ends = time.perf_counter() + seconds
+        self._began = time.perf_counter()
+        ends = self._began + seconds
         try:
             while time.perf_counter() < ends:
                 if next(self._search) is WAITING:
@@ -785,13 +875,14 @@ class AutoJob:
         except Exception as exc:  # a timer has nobody above it to report to
             self.warnings = [f"Auto Segments failed: {exc}"]
             self.busy = False
+        finally:
+            self._worked += time.perf_counter() - self._began
+            self._began = None
 
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
         """Generator: this piece reduced to `ratio` by `_decimate`, which has to run on the main thread."""
         started = time.perf_counter()
-        with tasks.busy_cursor():
-            out = _decimate(points, polys, kinds, ratio, drop, keep)
-        yield from ()
+        out = yield from _decimate_steps(points, polys, kinds, ratio, drop, keep)
         self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
         return out
 
@@ -822,12 +913,12 @@ class AutoJob:
     def _piece_vertex(self, ids: np.ndarray, per_vertex):
         if per_vertex is None:
             return None
-        return per_vertex[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))]
+        return per_vertex[np.unique(corners_of(self.faces, ids))]
 
     def _piece_arrays(self, ids: np.ndarray):
         chosen = ids.tolist()
         sizes = np.fromiter((len(self.faces[f]) for f in chosen), dtype=np.int64, count=len(chosen)) if not isinstance(self.faces, FlatFaces) else np.diff(self.faces.indptr)[ids]
-        used, flat = np.unique(np.fromiter(chain.from_iterable(self.faces[f] for f in chosen), dtype=np.int64, count=int(sizes.sum())), return_inverse=True)
+        used, flat = np.unique(corners_of(self.faces, ids), return_inverse=True)
         ends = np.zeros(len(chosen) + 1, dtype=np.int64)
         np.cumsum(sizes, out=ends[1:])
         polys = FlatFaces(ends, flat.reshape(-1))
@@ -955,7 +1046,8 @@ class AutoJob:
         enough = GOOD_ENOUGH * self.detail / 100.0
         if not cut and self.output_kind != "TRIS" and self._method(len(self.sizes)) == "AUTO" and not self.guide_lines and not self.strips and self.drop is None and len(set(kinds)) == 1:  # a rebuilt part would ignore strokes, paint and UV islands
             kind = max(set(kinds), key=kinds.count)
-            tries = chain(parts.rebuilds(points, polys, kind), hardsurf.rebuilds(points, polys, kind, **self.hard))
+            revolve = yield from parts.fit_revolve_steps(points, polys)  # the fit `parts.rebuilds` makes, in slices
+            tries = chain(parts.rebuilds(points, polys, kind, fit=revolve), hardsurf.rebuilds(points, polys, kind, **self.hard))
             while True:
                 out = yield from self._slice(lambda: next(tries, False))
                 if out is False:
@@ -975,7 +1067,8 @@ class AutoJob:
                     break
             yield  # the last try above can end with a long fit: the special shapes start in a slice of their own
             hopeless = HOPELESS * PIECE_LIMIT * self.detail / 100.0
-            for family in special.rebuilds(points, polys, max(set(kinds), key=kinds.count)):  # wires, stacks of fins, cloth
+            fits = yield from special.fit_steps(points, polys)  # the fits `special.rebuilds` makes, in slices
+            for family in special.rebuilds(points, polys, max(set(kinds), key=kinds.count), fits=fits):  # wires, stacks of fins, cloth
                 for out in family:  # most faces first: once one is far off, the smaller ones won't do either
                     yield
                     if out is None:
@@ -1091,7 +1184,7 @@ class AutoJob:
             while reduced is not None and len(reduced[1]) * STEP >= 12.0:
                 yield
                 before = len(reduced[1])
-                reduced = _decimate(*reduced, STEP)
+                reduced = yield from _decimate_steps(*reduced, STEP)
                 if len(reduced[1]) >= before:  # Decimate can't take this piece further: stepping again would never end and use up memory
                     break
                 view = yield from self._timed("pictures", self._pictures(reduced[0], reduced[1], center, half, pixels))
@@ -1225,7 +1318,7 @@ class AutoJob:
 
     def _field_size(self, points, polys, kinds, want, center, half, pixels, reference, pixel, margin):
         """Generator: rows of quads on this part at about `want` quads, looked at. (build, level, area seen, change) or None."""
-        started = time.perf_counter()
+        started, spent_from = time.perf_counter(), self.clock()
         strict = self.output_kind == "QUADS"
 
         def work():
@@ -1238,7 +1331,7 @@ class AutoJob:
                 return None
 
         made = yield from self._slice(work)
-        self.field_spent += time.perf_counter() - started
+        self.field_spent += self.clock() - spent_from
         self.timings["field"] = self.timings.get("field", 0.0) + time.perf_counter() - started
         if made is None or self._stopped:
             return None
@@ -1286,7 +1379,7 @@ class AutoJob:
             all_points.append(points)
             if join:
                 seams.append(np.full(len(points), self._cut(ids)))
-            all_faces += [tuple(v + offset for v in p) for p in polys]
+            all_faces += _shifted(polys, offset)
             all_kinds += kinds
             owner += [index] * len(polys)
             offset += len(points)
@@ -1336,6 +1429,10 @@ class AutoJob:
 
     def _source_samples(self):
         """Each source triangle as a point: (positions, normals, areas, loose parts, the source's tree). Made once."""
+        return drain(self._source_sample_steps())
+
+    def _source_sample_steps(self):
+        """Generator: `_source_samples`, the source's tree made in slices."""
         if self._samples is None:
             flat, starts, sizes = corner_table(self.faces)
             first = np.repeat(starts, sizes - 2)
@@ -1345,11 +1442,13 @@ class AutoJob:
             cross = np.cross(b - a, c - a)
             twice = np.linalg.norm(cross, axis=1)
             real = twice > 0.0
-            self._samples = (((a + b + c) / 3.0)[real], cross[real] / twice[real][:, None], twice[real] / 2.0, parts[real], _face_tree(self.co, self.faces))
+            yield
+            tree = yield from _face_tree_steps(self.co, self.faces)
+            self._samples = (((a + b + c) / 3.0)[real], cross[real] / twice[real][:, None], twice[real] / 2.0, parts[real], tree)
         return self._samples
 
-    def _fit(self, mesh: MeshData) -> MeshData:
-        """Fit the vertices to their share of the source, part by part, and keep it where the part really got closer.
+    def _fit(self, mesh: MeshData):
+        """Generator: fit the vertices to their share of the source, part by part, and keep it where the part really got closer.
 
         Idea from cav3dw3ll3r: each source sample goes to its nearest vertex, so a vertex's share grows with its quads.
         """
@@ -1357,7 +1456,8 @@ class AutoJob:
         if not len(quads):
             return mesh
         points = mesh.vertices
-        position, normal, area, sample_part, source_tree = self._source_samples()
+        position, normal, area, sample_part, source_tree = yield from self._source_sample_steps()
+        yield
         tree = _point_tree(points)
         source_parts = int(sample_part.max()) + 1
         if source_parts == 1:
@@ -1368,8 +1468,10 @@ class AutoJob:
             sample_tree = _point_tree(position)
             vertex_part, source_of = vertex_parts(points, mesh.faces, sample_part, lambda at: _nearest_points(sample_tree, at))
             owner = _nearest_of_kind(tree, position, sample_part, source_of[vertex_part], OTHER_VERTICES)
+        yield
         count = len(source_of)
         moved = fit_vertices(points, quads, position, normal, area, owner)
+        yield
 
         def gaps(where: np.ndarray) -> np.ndarray:
             """Per result part, the mean distance from its source to it plus from it to its source."""
@@ -1379,7 +1481,9 @@ class AutoJob:
             back = np.bincount(vertex_part, to_source, minlength=count) / np.maximum(np.bincount(vertex_part, minlength=count), 1)
             return weighted[source_of] + back
 
-        worse = gaps(moved) >= gaps(points)
+        after = gaps(moved)
+        yield
+        worse = after >= gaps(points)
         moved[worse[vertex_part]] = points[worse[vertex_part]]
         return MeshData(vertices=moved, faces=mesh.faces, face_materials=mesh.face_materials, name=mesh.name)
 
@@ -1489,16 +1593,23 @@ class AutoJob:
         return {"rest": rest, "groups": groups}
 
     def _balanced(self, coarse: MeshData):
-        """Balanced: leftover triangles are kept out of the closing, and only faces that gain shape are split."""
+        """Generator: Balanced: leftover triangles are kept out of the closing, and only faces that gain shape are split."""
         if self._tree is None:
-            self._tree = _face_tree(self.co, self.faces)
+            self._tree = yield from _face_tree_steps(self.co, self.faces)
         find = self._tree.find_nearest if isinstance(self._tree, BVHTree) else self._tree
-        paired = pair_and_close(coarse, seed_count=2, force_quads=False, keep_quads=True, cancelled=lambda: self._stopped)[0]
-        result = snap_new_vertices(split_faces(paired, faces_that_gain(paired, find, FLAT_SNAP_SHARE)), coarse.vertices, find)
-        points, out_faces, keep = unfold(result.vertices, result.faces, find)
+        paired = (yield from pair_and_close_steps(coarse, seed_count=2, force_quads=False, keep_quads=True, cancelled=lambda: self._stopped))[0]
+        yield
+        gain = faces_that_gain(paired, find, FLAT_SNAP_SHARE)
+        yield
+        split = yield from split_face_steps(paired, gain)
+        yield
+        result = snap_new_vertices(split, coarse.vertices, find)
+        yield
+        points, out_faces, keep = yield from unfold_steps(result.vertices, result.faces, find)
         return np.asarray(points, dtype=np.float64), [tuple(f) for f in out_faces], [result.face_materials[k] for k in keep]
 
-    def _pair(self, co, faces, kinds, method) -> None:
+    def _pair(self, co, faces, kinds, method):
+        """Generator: the faces for these pieces by `method`, left in `_paired`, in slices of a few thousand faces."""
         started = time.perf_counter()
         try:
             coarse = MeshData(co, faces, kinds)
@@ -1507,19 +1618,24 @@ class AutoJob:
                 grid, flat = grid_options(self.tweak["rows"]), flat_options(self.tweak["flat"])
                 if grid is not None:
                     if self._labels is None:
-                        domes = smooth_areas(self.co, self.faces, options=grid)
-                        self._labels = (domes, crease_areas(self.co, self.faces, domes >= 0, grid))
-                    coarse = smooth_grids(self.co, self.faces, co, faces, kinds, self._labels, grid)[0]
+                        domes = yield from smooth_area_steps(self.co, self.faces, options=grid)
+                        yield
+                        self._labels = (domes, (yield from crease_area_steps(self.co, self.faces, domes >= 0, grid)))
+                        yield
+                    coarse = (yield from smooth_grid_steps(self.co, self.faces, co, faces, kinds, self._labels, grid))[0]
+                    yield
                 if flat is not None and len(coarse.faces) <= EVEN_FLAT_UP_TO:
-                    coarse = flatten_regions(coarse, flat)[0]
+                    coarse = (yield from flatten_region_steps(coarse, flat))[0]
+                    yield
             if self.style == "BALANCED" and method == "AUTO" and self.output_kind == "QUADS":  # quads split only where that gains shape
-                self._paired = self._balanced(coarse)
+                self._paired = yield from self._balanced(coarse)
                 self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
                 return
-            made = make_pure(coarse, method, self.output_kind, self.notes, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, merge_triangles=self.rough and method == "AUTO", join_triangles=self.collapse and method == "AUTO", chunk_faces=PAIR_CHUNK_FACES if self.cfg.name == "Light" else 0)
+            made = yield from make_pure_steps(coarse, method, self.output_kind, self.notes, cancelled=lambda: self._stopped, guide_edges=self.guide_edges, keep_quads=True, merge_triangles=self.rough and method == "AUTO", join_triangles=self.collapse and method == "AUTO", chunk_faces=PAIR_CHUNK_FACES if self.cfg.name == "Light" else 0)
             # Strokes and a mirror seam must stay where they are.
             if self.output_kind != "TRIS" and method != "TRIS" and not self.guide_lines and not self.strips and self.mirror is None and not self._stopped:
-                made = (self._fit(MeshData(*made)).vertices, made[1], made[2])
+                yield
+                made = ((yield from self._fit(MeshData(*made))).vertices, made[1], made[2])
             self._paired = made
             self.timings["pairing"] = self.timings.get("pairing", 0.0) + time.perf_counter() - started
         except Cancelled:  # Stop was pressed: the step ends at its next stopping point
@@ -1527,13 +1643,15 @@ class AutoJob:
         except Exception as exc:  # shown as the job's warning
             self.warnings = [f"Auto Segments failed: {exc}"]
 
-    def _turn_poles(self, mesh: MeshData, owner: np.ndarray) -> MeshData:
-        """The same corners with edges spun where that leaves fewer poles (Tarini et al. 2010), or `mesh` if none was. Rebuilt parts stay as they are."""
-        reducer = ChordReducer(mesh)
+    def _turn_poles(self, mesh: MeshData, owner: np.ndarray):
+        """Generator: the same corners with edges spun where that leaves fewer poles (Tarini et al. 2010), or `mesh` if none was. Rebuilt parts stay as they are."""
+        reducer = yield from ChordReducer.made_in_steps(mesh)
         rebuilt = [i for i, k in enumerate(self.picked) if self.ready[i][k]]
         reducer.freeze(np.flatnonzero(np.isin(owner, rebuilt)).tolist(), renamed=True)
-        if not reducer.turn_poles():
+        yield
+        if not (yield from reducer.turn_pole_steps()):
             return mesh
+        yield
         return MeshData(mesh.vertices, [tuple(face) for face in reducer.faces], list(reducer.materials))
 
     def _score(self, points, faces) -> None:
@@ -1637,7 +1755,9 @@ class AutoJob:
         # pixels they change; past that, the plain one, which only counts distance.
         chords = self.chords and len(result.faces) <= CHORDS_UP_TO
         judge = PictureJudge(reference, center, half, self.max_pixels, TURNED_DEG) if chords else None
-        reducer = yield from self._slice(lambda: ChordReducer(result, judge) if chords else quad_reducer(result))
+        self._feed()
+        yield
+        reducer = yield from (ChordReducer.made_in_steps(result, judge) if chords else QuadReducer.made_in_steps(result))
         if chords:
             chords_began = time.perf_counter()
             reducer.deadline = chords_began + CHORDS_SECONDS
@@ -1741,7 +1861,9 @@ class AutoJob:
                 self.notes.append(f"{method.title()} did not work on a part ({str(exc)[:60]}): Auto was used there")
                 method = "AUTO"
         self._paired = None
-        yield from tasks.run(lambda: self._pair(co, faces, kinds, method), stopped=lambda: self._stopped)
+        yield
+        if not self._stopped:
+            yield from self._pair(co, faces, kinds, method)
         return None if self._stopped else self._paired
 
     def _method(self, piece: int) -> str:
@@ -1855,7 +1977,7 @@ class AutoJob:
         yield
         began = time.perf_counter()
         yield  # one spot per slice: a spot's fills can take seconds, the whole repair up to REPAIR_SECONDS
-        fixed = yield from repair.fix_crossings_steps(points, faces, mats, piece, after.pairs, self._known, self._near_source, self.output_kind == "TRIS", growth=0.03 if self.repair_fills else 0.0, stopped=lambda: self._stopped or time.perf_counter() > self._repair_until)
+        fixed = yield from repair.fix_crossings_steps(points, faces, mats, piece, after.pairs, self._known, self._near_source, self.output_kind == "TRIS", growth=0.03 if self.repair_fills else 0.0, stopped=lambda: self._stopped or self.clock() > self._repair_until)
         numbers = fixed[4]
         self.timings["fix crossings"] = self.timings.get("fix crossings", 0.0) + time.perf_counter() - began
         if not numbers["pushed"] and not numbers["filled"]:
@@ -1876,19 +1998,21 @@ class AutoJob:
             return same
         self.stage = "Turning folded faces back"
         yield
-        began = time.perf_counter()
+        began, budget_from = time.perf_counter(), self.clock()
+        yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
         found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
         self._defects = (points, faces, found)
         bad = found.inward | found.folded_over
         if not bad.any():
             return same
-        moved, count = yield from repair.untangle_steps(points, faces, piece, bad, self._near_source, stopped=lambda: self._stopped or time.perf_counter() > began + UNTANGLE_SECONDS)  # one group of corners per slice
+        moved, count = yield from repair.untangle_steps(points, faces, piece, bad, self._near_source, stopped=lambda: self._stopped or self.clock() > budget_from + UNTANGLE_SECONDS)  # one group of corners per slice
         self.timings["untangle"] = self.timings.get("untangle", 0.0) + time.perf_counter() - began
         if not count:
             return same
         now = yield from self._inspected(moved, faces, piece)
         if any(getattr(now, k) > getattr(after, k) for k in ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")):
             return same
+        yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
         left = yield from self._slice(lambda: checks.defects(moved, faces, self.co, self.faces, pairs=now.pairs))
         if (left.inward | left.folded_over).sum() >= bad.sum():
             return same
@@ -1901,6 +2025,7 @@ class AutoJob:
 
     def _serious(self, points, faces, after):
         """Generator: per face, turned inward, folded over or crossing (the Issue Finder's serious kinds). Kept for reuse."""
+        yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
         found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
         self._defects = (points, faces, found)
         return found.inward | found.folded_over | found.crossing
@@ -1933,7 +2058,7 @@ class AutoJob:
         after = yield from self._inspected(points, faces, piece)
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
         first = {k: getattr(after, k) for k in keys}
-        self._repair_until = time.perf_counter() + REPAIR_SECONDS  # from here: checking the source first must not use it up
+        self._repair_until = self.clock() + REPAIR_SECONDS  # from here: checking the source first must not use it up
         start_faces = len(faces)
         points, faces, view, after, _turned = yield from self._untangle(points, faces, piece, view, after)
         # Parts one size up first, then the crossings left filled spot by spot. A size up costs a pairing and a look, a
@@ -1949,7 +2074,7 @@ class AutoJob:
                 serious = yield from self._serious(points, faces, after)
             spots += [p for p in checks.worst_parts(piece, serious) if p not in stuck and p not in spots]
             bad = self._affordable([p for p in spots[:MOST_REPAIRED] if len(self.pieces[p]) <= REPAIR_MOST_FACES and not self._cut(self.pieces[p])], start_faces)
-            if not bad or self._stopped or time.perf_counter() > self._repair_until:
+            if not bad or self._stopped or self.clock() > self._repair_until:
                 break
             self.stage = f"Repairing {len(bad)} part{'s' if len(bad) != 1 else ''}, try {attempt + 1}"
             yield
@@ -1984,6 +2109,7 @@ class AutoJob:
         self.face_piece, self.flag = piece, flag
         seen_before = self._defects
         if seen_before is None or seen_before[0] is not points or seen_before[1] is not faces:  # the repairs changed it, or it was never checked
+            yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
             found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
         else:
             found = seen_before[2]
@@ -1993,7 +2119,7 @@ class AutoJob:
             spots, bad_before = self.redo_numbers
             self.notes.append(f"Redo Rough Spots redid {spots} spot{'s' if spots != 1 else ''}: {max(bad_before - int(self.bad.sum()), 0):,} bad face(s) fewer")
         self.timings["check and repair"] = self.timings.get("check and repair", 0.0) + time.perf_counter() - began
-        if left and time.perf_counter() > self._repair_until:
+        if left and self.clock() > self._repair_until:
             self.notes.append(f"Repair stopped at its {REPAIR_SECONDS:.0f} s limit: {len(left)} part(s) with crossings are selected on Apply")
         check = {"first": first, "text": checks.describe(before, after, max(fixed, 0), len(left), int(found.overlap.sum())), "result": {k: getattr(after, k) for k in keys}, "source": {k: getattr(before, k) for k in keys}, "fixed": max(fixed, 0), "unfixed": len(left), "bad": int(self.bad.sum())}
         return points, faces, mats, view, check
@@ -2006,14 +2132,15 @@ class AutoJob:
         if not self.redo_rough or self.output_kind == "TRIS" or self.mirror is not None or self.outside is not None or self.guide_lines or self.strips:
             return same
         began = time.perf_counter()
-        until = began + REDO_SECONDS
+        until = self.clock() + REDO_SECONDS
         keys = ("nm_edges", "nm_verts", "flipped", "dups", "holes", "selfx", "folded")
         redone, bad_before = 0, None
         for round_index in range(REDO_ROUNDS):
-            if self._stopped or time.perf_counter() > until:
+            if self._stopped or self.clock() > until:
                 break
             self.stage = f"Redoing rough spots, round {round_index + 1}"
             yield
+            yield from checks.source_steps(self.co, self.faces, crossed=True)  # the source's half of the check, made once in slices
             found = yield from self._slice(lambda: checks.defects(points, faces, self.co, self.faces, pairs=after.pairs))
             bad = found.any()
             if bad_before is None:
@@ -2067,7 +2194,7 @@ class AutoJob:
         points = np.array(points, dtype=np.float64)
         regions = []
         for spot in spots:
-            if self._stopped or time.perf_counter() > until:
+            if self._stopped or self.clock() > until:
                 break
             region = redo.carve(faces, spot["faces"], rings, REDO_MOST_FACES, taken, users)
             if not len(region):
@@ -2400,8 +2527,8 @@ class AutoJob:
         starts = np.concatenate(([0], np.flatnonzero(shell[order][1:] != shell[order][:-1]) + 1, [len(order)]))
         shells = [order[a:b] for a, b in zip(starts[:-1], starts[1:])]
         low, high = self.co.min(axis=0), self.co.max(axis=0)
-        sizes_f = np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
-        flat = np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes_f.sum()))
+        sizes_f = np.diff(self.faces.indptr) if isinstance(self.faces, FlatFaces) else np.fromiter((len(f) for f in self.faces), dtype=np.int64, count=len(self.faces))
+        flat = self.faces.flat if isinstance(self.faces, FlatFaces) else np.fromiter(chain.from_iterable(self.faces), dtype=np.int64, count=int(sizes_f.sum()))
         centers = np.add.reduceat(self.co[flat], np.concatenate(([0], np.cumsum(sizes_f)[:-1])), axis=0) / sizes_f[:, None]
         cut = []  # a piece with more faces than the machine should hold at once is cut into regions
         label = np.full(len(self.faces), -1, dtype=np.int64)  # region number; loose pieces left whole share -1, so one touching another at a corner isn't locked
@@ -2425,9 +2552,9 @@ class AutoJob:
         if self.chunks or self.split:
             self.locked = hardware.border_vertices(self.faces, label, len(self.co))
         extent = float(np.ptp(self.co, axis=0).max()) or 1.0
-        sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(np.fromiter((v for f in ids.tolist() for v in self.faces[f]), dtype=np.int64))], axis=0).max()) for ids in self.pieces]) / extent
+        sizes = np.asarray([2.0 * 0.55 * float(np.ptp(self.co[np.unique(corners_of(self.faces, ids))], axis=0).max()) for ids in self.pieces]) / extent
         self.picture_sizes = _picture_sizes(sizes, self.cfg.max_rays, self.max_pixels).tolist()
-        weights = np.asarray([sum(len(self.faces[f]) - 2 for f in ids.tolist()) for ids in self.pieces], dtype=np.float64)
+        weights = np.asarray([int(sizes_f[ids].sum()) - 2 * len(ids) for ids in self.pieces], dtype=np.float64)
         return np.concatenate(([0.0], np.cumsum(weights))) / max(float(weights.sum()), 1.0)
 
     def _run(self):
@@ -2470,7 +2597,9 @@ class AutoJob:
         pixel = 2.0 * half / self.max_pixels
         self._mark("measured")
         reference = yield from self._reference(center, half, self.max_pixels, self.co, self.faces)
-        reference_shaded = yield from self._slice(lambda: shaded(reference, self.co, self.faces, center, half, self.max_pixels))
+        self._feed()
+        yield
+        reference_shaded = yield from shaded_steps(reference, self.co, self.faces, center, half, self.max_pixels)
         self._view = (center, half, reference, reference_shaded, pixel)
         total_seen = sum(self.seen)
         asked = self.detail / 100.0
@@ -2573,7 +2702,9 @@ class AutoJob:
                 # Redrawn and relaxed corners sit on the planes they were given, not on the source, and smooth shading
                 # shows that: fit them to the source again and keep it if the shading gets closer within what was asked for.
                 self.stage = "Fitting the redrawn quads to the source"
-                fitted = yield from self._slice(lambda: self._fit(worked))
+                self._feed()
+                yield
+                fitted = yield from self._fit(worked)
                 full, _back = yield from self._slice(lambda: self._with_copies(fitted, owner))
                 fitted_points = np.asarray(full.vertices, dtype=np.float64)
                 fit_loss, fit_shading, fit_soft = yield from self._look(fitted_points, out_faces, center, half, reference, reference_shaded, pixel)
@@ -2583,7 +2714,9 @@ class AutoJob:
             # Rows of quads break wherever a corner has more or fewer than four. Spinning an edge moves no corner, so the shape stays.
             # Balanced splits every quad, which leaves few poles: spinning there gained under a point.
             self.stage = "Spinning edges at poles"
-            turned = yield from self._slice(lambda: self._turn_poles(worked, owner))
+            self._feed()
+            yield
+            turned = yield from self._turn_poles(worked, owner)
             if turned is not worked:
                 full, _back = yield from self._slice(lambda: self._with_copies(turned, owner))
                 turned_points, turned_faces = np.asarray(full.vertices, dtype=np.float64), [tuple(face) for face in full.faces]
@@ -2688,7 +2821,9 @@ class AutoJob:
         """Generator: percent of the view that differs in shape, and in smooth shading past 20 and 10 degrees, when exhausted."""
         view = yield from self._timed("pictures", self._pictures(points, out_faces, center, half, self.max_pixels))
         wrong, shown = self._counts(reference, view, pixel)
-        view_shaded = yield from self._slice(lambda: shaded(view, points, out_faces, center, half, self.max_pixels))
+        self._feed()
+        yield
+        view_shaded = yield from shaded_steps(view, points, out_faces, center, half, self.max_pixels)
         bad_shade, seen_both = shading_counts(reference, view, reference_shaded, view_shaded)
         soft = shading_counts(reference, view, reference_shaded, view_shaded, SOFT_DEG)[0]
         return 100.0 * wrong / max(shown, 1), 100.0 * bad_shade / max(seen_both, 1), 100.0 * soft / max(seen_both, 1)

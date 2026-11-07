@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .types import Face, MeshData
+from .types import Face, MeshData, drain
 
 
 MAX_QUAD_WARP_DEGREES = 60.0
@@ -44,16 +44,26 @@ class TopologySummary:
         return asdict(self)
 
 
-def _edge_occurrences(
-    faces: list[Face],
-) -> dict[tuple[int, int], list[tuple[int, int, int]]]:
+STEP_ROWS = 8_000  # faces or vertices per slice in the `*_steps` generators: about 20-50 ms each
+
+
+def _edge_occurrence_steps(faces: list[Face]):
+    """Generator: `_edge_occurrences`, yielding every STEP_ROWS faces."""
     occurrences: dict[tuple[int, int], list[tuple[int, int, int]]] = defaultdict(list)
     for face_index, face in enumerate(faces):
+        if face_index % STEP_ROWS == STEP_ROWS - 1:
+            yield
         for index in range(len(face)):
             a = face[index]
             b = face[(index + 1) % len(face)]
             occurrences[tuple(sorted((a, b)))].append((face_index, a, b))
     return occurrences
+
+
+def _edge_occurrences(
+    faces: list[Face],
+) -> dict[tuple[int, int], list[tuple[int, int, int]]]:
+    return drain(_edge_occurrence_steps(faces))
 
 
 def _boundary_components(boundary_edges: list[tuple[int, int]]) -> tuple[int, int]:
@@ -86,27 +96,30 @@ def _canonical_face(face: Face) -> Face:
     return min(rotations)
 
 
-def _component_topology_signatures(
-    faces: list[Face],
-    edge_occurrences: dict[tuple[int, int], list[tuple[int, int, int]]],
-) -> tuple[tuple[int, int, int], ...]:
-    """Sorted (euler, boundary cycles, face count) per connected component."""
+def _component_signature_steps(faces, edge_occurrences):
+    """Generator: sorted (euler, boundary cycles, face count) per connected component."""
 
     face_count = len(faces)
     if face_count == 0:
         return ()
     adjacency: list[set[int]] = [set() for _ in range(face_count)]
-    for occurrences in edge_occurrences.values():
+    for count, occurrences in enumerate(edge_occurrences.values()):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
         face_indices = {item[0] for item in occurrences}
         for face_index in face_indices:
             adjacency[face_index].update(face_indices - {face_index})
     remaining = set(range(face_count))
     signatures: list[tuple[int, int, int]] = []
+    walked = 0
     while remaining:
         seed = remaining.pop()
         component_faces = {seed}
         stack = [seed]
         while stack:
+            walked += 1
+            if walked % STEP_ROWS == 0:
+                yield
             linked = adjacency[stack.pop()] & remaining
             remaining.difference_update(linked)
             stack.extend(linked)
@@ -114,6 +127,9 @@ def _component_topology_signatures(
         vertices = {vertex for face_index in component_faces for vertex in faces[face_index]}
         edges: set[tuple[int, int]] = set()
         for face_index in component_faces:
+            walked += 1
+            if walked % STEP_ROWS == 0:
+                yield
             face = faces[face_index]
             edges.update(
                 tuple(sorted((face[index], face[(index + 1) % len(face)])))
@@ -144,18 +160,25 @@ def component_topology_preserved(
     return tuple(source) == tuple(candidate)
 
 
-def _non_manifold_vertex_count(
-    faces: list[Face],
-    edge_occurrences: dict[tuple[int, int], list[tuple[int, int, int]]],
-) -> int:
-    """Count vertices whose incident faces form more than one edge-connected fan."""
+def non_manifold_vertex_steps(faces: list[Face]):
+    """Generator: `topology_summary(...).non_manifold_vertices` alone, in slices of STEP_ROWS. Returns the count."""
 
+    occurrences = yield from _edge_occurrence_steps(faces)
+    return (yield from _non_manifold_vertex_steps(faces, occurrences))
+
+
+def _non_manifold_vertex_steps(faces, edge_occurrences):
+    """Generator: how many vertices have incident faces in more than one edge-connected fan."""
     incident: dict[int, set[int]] = defaultdict(set)
     fan_adjacency: dict[int, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
     for face_index, face in enumerate(faces):
+        if face_index % STEP_ROWS == STEP_ROWS - 1:
+            yield
         for vertex in set(face):
             incident[vertex].add(face_index)
-    for edge, occurrences in edge_occurrences.items():
+    for count, (edge, occurrences) in enumerate(edge_occurrences.items()):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
         face_indices = {item[0] for item in occurrences}
         if len(face_indices) != 2:
             continue
@@ -165,7 +188,9 @@ def _non_manifold_vertex_count(
             fan_adjacency[vertex][second].add(first)
 
     non_manifold = 0
-    for vertex, incident_faces in incident.items():
+    for count, (vertex, incident_faces) in enumerate(incident.items()):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
         if not incident_faces:
             continue
         seen = {next(iter(incident_faces))}
@@ -309,11 +334,19 @@ def quad_is_locally_valid(vertices: np.ndarray, face: Face) -> bool:
 
 
 def topology_summary(mesh: MeshData) -> TopologySummary:
-    edge_occurrences = _edge_occurrences(mesh.faces)
+    return drain(topology_summary_steps(mesh))
+
+
+def topology_summary_steps(mesh: MeshData):
+    """Generator: `topology_summary`, yielding every STEP_ROWS faces, edges or vertices. Returns the summary."""
+    edge_occurrences = yield from _edge_occurrence_steps(mesh.faces)
     edge_counts = Counter({edge: len(items) for edge, items in edge_occurrences.items()})
     used_vertices = {vertex for face in mesh.faces for vertex in face}
+    yield
     adjacency: dict[int, set[int]] = defaultdict(set)
-    for a, b in edge_counts:
+    for count, (a, b) in enumerate(edge_counts):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
         adjacency[a].add(b)
         adjacency[b].add(a)
 
@@ -326,17 +359,26 @@ def topology_summary(mesh: MeshData) -> TopologySummary:
         if len(occurrences) == 2
         and occurrences[0][1:] == occurrences[1][1:]
     )
-    duplicate_faces = len(mesh.faces) - len({_canonical_face(face) for face in mesh.faces})
-    non_manifold_vertices = _non_manifold_vertex_count(mesh.faces, edge_occurrences)
+    yield
+    canonical = set()
+    for count, face in enumerate(mesh.faces):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
+        canonical.add(_canonical_face(face))
+    duplicate_faces = len(mesh.faces) - len(canonical)
+    non_manifold_vertices = yield from _non_manifold_vertex_steps(mesh.faces, edge_occurrences)
     boundary_vertices = {vertex for edge in boundary_edges for vertex in edge}
     extraordinary = 0
     defect_charge = 0
-    for vertex in used_vertices:
+    for count, vertex in enumerate(used_vertices):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
         valence = len(adjacency[vertex])
         ideal = 3 if vertex in boundary_vertices else 4
         if valence != ideal:
             extraordinary += 1
         defect_charge += ideal - valence
+    yield
 
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     area_epsilon = _span_epsilon(vertices)
@@ -348,7 +390,8 @@ def topology_summary(mesh: MeshData) -> TopologySummary:
         if quad_faces
         else 0
     )
-    component_detail = _component_topology_signatures(mesh.faces, edge_occurrences)
+    yield
+    component_detail = yield from _component_signature_steps(mesh.faces, edge_occurrences)
     component_signature = tuple(sorted((item[0], item[1]) for item in component_detail))
     component_euler = tuple(signature[0] for signature in component_signature)
     return TopologySummary(
@@ -486,10 +529,8 @@ def _toggle_edge(edges: set[tuple[int, int]], edge: tuple[int, int]) -> None:
         edges.add(edge)
 
 
-def _parity_path_edges(
-    mesh: MeshData, frozen: frozenset[tuple[int, int]] = frozenset()
-) -> set[tuple[int, int]]:
-    """Solve sparse transition parity on the quadrilateral dual graph.
+def _parity_path_edge_steps(mesh: MeshData, frozen: frozenset[tuple[int, int]] = frozenset()):
+    """Generator: solve sparse transition parity on the quadrilateral dual graph.
 
     Every triangle first marks its three edges. That gives each residual
     triangle the robust six-corner template used by global corner closure,
@@ -500,7 +541,7 @@ def _parity_path_edges(
     `frozen` edges are always split and never used as exterior exits.
     """
 
-    occurrences = _edge_occurrences(mesh.faces)
+    occurrences = yield from _edge_occurrence_steps(mesh.faces)
     selected: set[tuple[int, int]] = {
         tuple(sorted((face[corner], face[(corner + 1) % len(face)])))
         for face in mesh.faces
@@ -509,7 +550,9 @@ def _parity_path_edges(
     } | set(frozen)
     adjacency: list[list[tuple[int, tuple[int, int]]]] = [[] for _face in mesh.faces]
     boundary_by_face: dict[int, list[tuple[int, int]]] = defaultdict(list)
-    for edge, uses in occurrences.items():
+    for count, (edge, uses) in enumerate(occurrences.items()):
+        if count % STEP_ROWS == STEP_ROWS - 1:
+            yield
         if len(uses) > 2:
             raise ValueError(f"Edge {edge} has {len(uses)} incident faces.")
         if len(uses) == 1:
@@ -537,7 +580,12 @@ def _parity_path_edges(
         )
         % 2
     }
+    yield
+    searched = 0
     while terminals:
+        searched += 1
+        if searched % 64 == 0:
+            yield
         start = min(terminals)
         distances = {start: 0}
         parents: dict[int, tuple[int, tuple[int, int]]] = {}
@@ -596,6 +644,8 @@ def _parity_path_edges(
             terminals.remove(paired_terminal)
 
     for face_index, face in enumerate(mesh.faces):
+        if face_index % STEP_ROWS == STEP_ROWS - 1:
+            yield
         split_count = sum(
             tuple(sorted((face[corner], face[(corner + 1) % len(face)]))) in selected
             for corner in range(len(face))
@@ -605,14 +655,8 @@ def _parity_path_edges(
     return selected
 
 
-def _parity_template_validity(
-    mesh: MeshData,
-    vertices: np.ndarray,
-    base_coordinates: np.ndarray,
-    selected_edges: set[tuple[int, int]],
-    midpoint_indices: dict[tuple[int, int], int],
-) -> list[list[bool]]:
-    """Validate every ParityPath template candidate of every face in one batch.
+def _parity_template_steps(mesh, vertices, base_coordinates, selected_edges, midpoint_indices):
+    """Generator: validate every ParityPath template candidate of every face in one batch.
 
     Per face, candidates are listed in the order `parity_path_quad_closure`
     tries them: the untouched quad, the three two-quad diagonal cuts, then the
@@ -625,7 +669,10 @@ def _parity_template_validity(
     quads: list[tuple[int, int, int, int]] = []
     patch_sizes: list[int] = []
     per_face: list[int] = []
+    yield
     for face_index, face in enumerate(mesh.faces):
+        if face_index % STEP_ROWS == STEP_ROWS - 1:
+            yield
         augmented: list[int] = []
         for corner, vertex in enumerate(face):
             augmented.append(vertex)
@@ -661,6 +708,7 @@ def _parity_template_validity(
 
     if not quads:
         return [[] for _face in mesh.faces]
+    yield
     coordinates = np.vstack((base_coordinates, np.asarray(centers, dtype=np.float64)))
     points = coordinates[np.asarray(quads, dtype=np.int64)]
     span = np.ptp(points, axis=1)
@@ -704,13 +752,26 @@ def parity_path_quad_closure(
     `allow_invalid` that goes for `mesh.vertices` too: a face with no valid
     template takes its first one, and the caller repairs the shape.
     """
+    return drain(parity_path_quad_closure_steps(mesh, name=name, frozen_midpoints=frozen_midpoints, validation_vertices=validation_vertices, validation_required=validation_required, allow_invalid=allow_invalid))
+
+
+def parity_path_quad_closure_steps(
+    mesh: MeshData,
+    *,
+    name: str | None = None,
+    frozen_midpoints: dict[tuple[int, int], int] | None = None,
+    validation_vertices: np.ndarray | None = None,
+    validation_required: bool = True,
+    allow_invalid: bool = False,
+):
+    """Generator: `parity_path_quad_closure`, in slices of STEP_ROWS faces."""
 
     if not mesh.faces:
         raise ValueError("ParityPath closure requires at least one face.")
     if any(len(face) not in {3, 4} for face in mesh.faces):
         raise ValueError("ParityPath closure accepts triangle/quad meshes only.")
 
-    source_summary = topology_summary(mesh)
+    source_summary = yield from topology_summary_steps(mesh)
     source_errors = {
         "degenerate_faces": source_summary.degenerate_faces,
         "invalid_quads": source_summary.invalid_quads,
@@ -726,7 +787,7 @@ def parity_path_quad_closure(
         raise ValueError(f"ParityPath source topology is not certifiable: {details}.")
 
     frozen_midpoints = frozen_midpoints or {}
-    selected_edges = _parity_path_edges(mesh, frozenset(frozen_midpoints))
+    selected_edges = yield from _parity_path_edge_steps(mesh, frozenset(frozen_midpoints))
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     output_vertices = vertices.tolist()
     midpoint_indices: dict[tuple[int, int], int] = {}
@@ -744,7 +805,7 @@ def parity_path_quad_closure(
         [] if output_uvs is not None and mesh.face_uvs is not None else None
     )
 
-    template_results = _parity_template_validity(
+    template_results = yield from _parity_template_steps(
         mesh, vertices, np.asarray(output_vertices, dtype=np.float64), selected_edges, midpoint_indices
     )
     if validation_vertices is not None:
@@ -754,7 +815,7 @@ def parity_path_quad_closure(
         for edge, index in midpoint_indices.items():
             if index >= len(check):
                 check_base[index] = (check[edge[0]] + check[edge[1]]) * 0.5
-        other = _parity_template_validity(mesh, check, check_base, selected_edges, midpoint_indices)
+        other = yield from _parity_template_steps(mesh, check, check_base, selected_edges, midpoint_indices)
         both = [
             [first and second for first, second in zip(row, other_row)]
             for row, other_row in zip(template_results, other)
@@ -767,6 +828,8 @@ def parity_path_quad_closure(
         template_results = [row if any(row) else [True] * len(row) for row in template_results]
 
     for face_index, face in enumerate(mesh.faces):
+        if face_index % STEP_ROWS == STEP_ROWS - 1:
+            yield
         # Results arrive in the same order the templates are tried below.
         patch_is_valid = iter(template_results[face_index]).__next__
         material = (
@@ -894,7 +957,7 @@ def parity_path_quad_closure(
         face_uvs=output_face_uvs,
         name=name or f"{mesh.name}_parity_path_closure",
     )
-    summary = topology_summary(result)
+    summary = yield from topology_summary_steps(result)
     bent_only = allow_invalid and summary.quads == summary.faces and not (summary.degenerate_faces or summary.non_manifold_edges)
     if not summary.all_quads and not bent_only:
         raise ValueError(
@@ -916,15 +979,15 @@ def parity_path_quad_closure(
     return result
 
 
-def _unclosable_quads(mesh: MeshData) -> list[int]:
-    """Quads ParityPath would refuse: every template for them comes out warped or folded."""
+def _unclosable_quad_steps(mesh: MeshData):
+    """Generator: the quads ParityPath would refuse: every template for them comes out warped or folded."""
 
-    selected = _parity_path_edges(mesh, frozenset())
+    selected = yield from _parity_path_edge_steps(mesh, frozenset())
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     midpoints = {edge: len(vertices) + k for k, edge in enumerate(sorted(selected))}
     middles = [(vertices[a] + vertices[b]) * 0.5 for a, b in sorted(selected)]
     output = np.vstack([vertices, *middles]) if middles else vertices
-    rows = _parity_template_validity(mesh, vertices, output, selected, midpoints)
+    rows = yield from _parity_template_steps(mesh, vertices, output, selected, midpoints)
     return [k for k, row in enumerate(rows) if not any(row) and len(mesh.faces[k]) == 4]
 
 
@@ -951,13 +1014,19 @@ def _unpair_quads(mesh: MeshData, quads: list[int]) -> MeshData:
 
 def parity_path_closure_unpairing(mesh: MeshData, *, tries: int = 8) -> MeshData:
     """ParityPath closure, giving back the few quads it can't keep so they can't cost the rest of the piece its quads."""
+    return drain(parity_path_closure_unpairing_steps(mesh, tries=tries))
+
+
+def parity_path_closure_unpairing_steps(mesh: MeshData, *, tries: int = 8):
+    """Generator: `parity_path_closure_unpairing`, in slices."""
 
     for _ in range(tries):
-        quads = _unclosable_quads(mesh)
+        quads = yield from _unclosable_quad_steps(mesh)
         if not quads:
             break
         mesh = _unpair_quads(mesh, quads)
-    return parity_path_quad_closure(mesh)
+        yield
+    return (yield from parity_path_quad_closure_steps(mesh))
 
 
 def quad_only_closure(
@@ -974,6 +1043,17 @@ def quad_only_closure(
     `frozen_midpoints` reuses existing vertices as the midpoints of those edges.
     `checked=False` skips validating the result, for a last resort that must be all quads whatever they look like.
     """
+    return drain(quad_only_closure_steps(mesh, name=name, frozen_midpoints=frozen_midpoints, checked=checked))
+
+
+def quad_only_closure_steps(
+    mesh: MeshData,
+    *,
+    name: str | None = None,
+    frozen_midpoints: dict[tuple[int, int], int] | None = None,
+    checked: bool = True,
+):
+    """Generator: `quad_only_closure`, in slices of STEP_ROWS faces."""
 
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     output_vertices = vertices.tolist()
@@ -985,6 +1065,8 @@ def quad_only_closure(
     output_face_uvs: list[Face] | None = [] if output_uvs is not None and mesh.face_uvs is not None else None
 
     for face_index, face in enumerate(mesh.faces):
+        if face_index % STEP_ROWS == STEP_ROWS - 1:
+            yield
         if len(face) < 3:
             raise ValueError(f"Face {face_index} has fewer than three corners.")
         if len(set(face)) != len(face):
@@ -1042,7 +1124,7 @@ def quad_only_closure(
     )
     if not checked:
         return result
-    summary = topology_summary(result)
+    summary = yield from topology_summary_steps(result)
     if not summary.all_quads:
         raise ValueError(
             "Quad closure failed validation: "

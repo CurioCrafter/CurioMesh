@@ -31,6 +31,7 @@ ROWS_MOST = 100_000  # Even Rows rungs only up to here: one took over three minu
 SLOW = 120.0  # seconds: a search slower than this gets only the sizes next to its own, and no Even Rows (a 79,000 triangle machine took about 6 minutes a rung)
 SLICE, GAP, WAIT = 0.03, 0.05, 0.25  # seconds of work per tick, between ticks, and between looks while a job of yours runs
 REST = 1.0  # seconds Blender is left alone after each finished size, before the next one starts
+IDLE = 2.0  # after each tick Blender is left alone this many times as long as the tick took, so the sizes take a third of it at most
 THROTTLE = 0.1  # while you drag a slider the preview changes at most this often
 SETTLE = 0.4  # seconds after the last move: then the segments of the result are found (and a blend is looked at)
 QUIET = 1.0  # the ladder's own work waits this long after a slider moved, so dragging never competes with it
@@ -110,7 +111,7 @@ def start(context) -> bool:
     if inputs[0] or job.outside is not None or len(job.faces) > MOST_FACES:  # Reduce To aims at a face count, not a Detail
         return False
     here = (job.style, round(job.detail, 3))
-    slow = (job.report or {}).get("seconds", 0.0) > SLOW
+    slow = (job._worked or (job.report or {}).get("seconds", 0.0)) > SLOW  # the time it worked: the gaps between its slices don't count
     plan = L.plan(here[1], here[0], rows=len(job.faces) <= ROWS_MOST and not slow and parallel.allowed())
     if slow:  # Limitation: a fixed cut; helpers for the ladder would make all sizes affordable, at the cost of more Blenders running
         plan = [(s, d) for s, d in plan if here[1] / 2.6 <= d <= here[1] * 2.6]
@@ -163,7 +164,7 @@ def work(seconds: float) -> None:
             lad["job"].repair_fills = False  # crossings are still pushed and collapsed away, but not filled: a fill can take seconds
             shared = lad.get("source_check")
             if shared is not None and len(lad["job"].faces) == len(shared[0].faces):  # the job checks the piece count before using it
-                lad["job"]._src_check, lad["job"]._known, lad["job"]._src_pieces = shared[1:]  # checking the source again would hold Blender for seconds
+                lad["job"]._src_check, lad["job"]._known, lad["job"]._src_pieces = shared[1:]  # checking the source again would take seconds of work
             continue
         job.step(min(SLICE, max(ends - time.perf_counter(), 0.005)))
         if job.busy:
@@ -192,8 +193,8 @@ def _tick():
     spent = time.perf_counter() - started
     if not (lad["job"] is not None or lad["plan"]):
         return None
-    # Idle at least as long as this tick took: after a long step Blender is left free for as long again
-    return max(REST if len(lad["rungs"]) + len(lad["failed"]) > finished else GAP, spent)
+    # Idle at least twice as long as this tick took: the sizes keep Blender busy a third of the time at most
+    return max(REST if len(lad["rungs"]) + len(lad["failed"]) > finished else GAP, IDLE * spent)
 
 
 # --------------------------------------------------------------------------- picking rungs
@@ -457,10 +458,10 @@ def status() -> str:
     if not left:
         return ""
     if not bpy.app.timers.is_registered(_tick):
-        return "Other sizes are not worked out yet. Blender can pause for up to about 7 seconds at a time while they are made"
+        return "Other sizes are not worked out yet. Making them takes about a third of Blender's time, in short steps"
     doing = lad["doing"]
     words = f" ({STYLE_WORDS.get(doing[0], doing[0])}, {doing[1]:g}%)" if doing else ""
-    return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender can pause for up to about 7 seconds at a time"
+    return f"Working out more sizes for these sliders: {len(lad['rungs'])} ready, {left} to go{words}. Blender stays usable: short steps, idle twice as long in between"
 
 
 def draw(layout, gs) -> None:

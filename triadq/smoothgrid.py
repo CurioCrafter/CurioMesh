@@ -36,7 +36,7 @@ from .patch import (
     quad_quality,
     tutte_embedding,
 )
-from .types import MeshData
+from .types import MeshData, drain
 
 
 @dataclass(slots=True)
@@ -85,10 +85,16 @@ class GridReport:
 
 def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptions | None = None) -> np.ndarray:
     """Area id per source face, -1 where the surface isn't a smooth doubly curved area."""
+    return drain(smooth_area_steps(vertices, faces, materials, options))
+
+
+def smooth_area_steps(vertices: np.ndarray, faces, materials=None, options: GridOptions | None = None):
+    """Generator: `smooth_areas`, a slice per stage."""
 
     options = options or GridOptions()
     count = len(vertices)
     normals, areas = _face_frames(vertices, faces)
+    yield
     face_of, a, b = _half_edges(faces)
     low, high = np.minimum(a, b), np.maximum(a, b)
     key = low * (count + 1) + high
@@ -97,6 +103,7 @@ def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptio
     two = uses == 2
     fa, fb = face_of[order][start[two]], face_of[order][start[two] + 1]
     va, vb = low[order][start[two]], high[order][start[two]]
+    yield
     centre = np.stack([np.bincount(face_of, vertices[a, axis], len(faces)) for axis in range(3)], axis=1)
     centre /= np.bincount(face_of, minlength=len(faces))[:, None]
     bend = np.arctan2(np.linalg.norm(np.cross(normals[fa], normals[fb]), axis=1), np.einsum("ij,ij->i", normals[fa], normals[fb]))
@@ -107,10 +114,12 @@ def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptio
     if materials is not None:
         kinds = np.unique(np.asarray(materials), return_inverse=True)[1]
         sharp |= kinds[fa] != kinds[fb]
+    yield
 
     triangles = np.asarray([(face[0], face[k], face[k + 1]) for face in faces for k in range(1, len(face) - 1)], dtype=np.int64).reshape(-1, 3)
     defect = 2.0 * math.pi - np.radians(_corner_angle_sums(vertices, triangles))
     soft = ~sharp
+    yield
 
     # Normals around a face: one direction on a plate, a great circle on a cylinder, a patch of the sphere on a dome.
     # A neighbour counts by its size relative to the face, squared, so a small dome face at the end of a long cylinder face barely counts.
@@ -118,7 +127,9 @@ def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptio
     for here, there in ((fa[soft], fb[soft]), (fb[soft], fa[soft])):
         weight = np.minimum(areas[here], areas[there]) ** 2 / np.maximum(areas[here], 1e-30)
         np.add.at(tensor, here, weight[:, None, None] * np.einsum("ij,ik->ijk", normals[there], normals[there]))
+        yield
     spread = np.linalg.eigvalsh(tensor)
+    yield
     mask = spread[:, 0] > options.min_spread * np.maximum(spread.sum(axis=1), 1e-30)
     support = np.zeros(len(faces))
     np.add.at(support, fa[soft], mask[fb[soft]])
@@ -128,6 +139,7 @@ def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptio
     keep = soft & mask[fa] & mask[fb]
     labels = _labels(len(faces), fa[keep], fb[keep])
     labels[~mask] = -1
+    yield
     out = np.full(len(faces), -1, dtype=np.int64)
     ids, inverse, members = np.unique(labels, return_inverse=True, return_counts=True)
     total_curvature = np.zeros(len(ids))
@@ -138,10 +150,12 @@ def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptio
     inner = keep
     np.add.at(pull, inverse[fa[inner]], (signed * lengths)[inner])
     np.add.at(span, inverse[fa[inner]], (bend * lengths)[inner])
+    yield
     next_id = 0
     for row, label in enumerate(ids.tolist()):
         if label < 0 or members[row] < options.min_source_faces:
             continue
+        yield
         if total_curvature[row] < math.radians(options.min_total_deg):
             continue
         if abs(pull[row]) < options.min_agreement * max(span[row], 1e-30):
@@ -153,23 +167,33 @@ def smooth_areas(vertices: np.ndarray, faces, materials=None, options: GridOptio
 
 def crease_areas(vertices: np.ndarray, faces, skip: np.ndarray, options: GridOptions | None = None) -> np.ndarray:
     """Area id per source face: parts of the surface with creases all around, not rough, not in `skip`."""
+    return drain(crease_area_steps(vertices, faces, skip, options))
+
+
+def crease_area_steps(vertices: np.ndarray, faces, skip: np.ndarray, options: GridOptions | None = None):
+    """Generator: `crease_areas`, a slice per stage."""
 
     options = options or GridOptions()
     normals, _areas = _face_frames(vertices, faces)
+    yield
     fa, fb = face_adjacency(faces)
+    yield
     bend = np.degrees(np.arctan2(np.linalg.norm(np.cross(normals[fa], normals[fb]), axis=1), np.einsum("ij,ij->i", normals[fa], normals[fb])))
     soft = (bend <= options.sharp_deg) & ~skip[fa] & ~skip[fb]
     labels = _labels(len(faces), fa[soft], fb[soft])
     labels[skip] = -1
+    yield
     ids, inverse, members = np.unique(labels, return_inverse=True, return_counts=True)
     order = np.argsort(inverse[fa[soft]], kind="stable")
     held = inverse[fa[soft]][order]
     bends = bend[soft][order]
     out = np.full(len(faces), -1, dtype=np.int64)
     next_id = 0
+    yield
     for row, label in enumerate(ids.tolist()):
         if label < 0 or members[row] < options.min_source_faces:
             continue
+        yield
         inner = bends[np.searchsorted(held, row) : np.searchsorted(held, row, side="right")]
         if len(inner) and float(np.median(inner)) > options.max_bend:
             continue
@@ -513,7 +537,12 @@ def cap_fill(loop_xyz: np.ndarray, tris: np.ndarray, points: np.ndarray, border:
 
 
 def grid_areas(coarse: MeshData, labels: np.ndarray, nearest, options: GridOptions | None = None, project_for=None, extent: float | None = None, normals: np.ndarray | None = None) -> tuple[MeshData, GridReport]:
-    """Rebuild the reduced mesh's smooth areas as organized rows. Everything else passes through untouched.
+    """`grid_area_steps` in one go."""
+    return drain(grid_area_steps(coarse, labels, nearest, options, project_for, extent, normals))
+
+
+def grid_area_steps(coarse: MeshData, labels: np.ndarray, nearest, options: GridOptions | None = None, project_for=None, extent: float | None = None, normals: np.ndarray | None = None):
+    """Generator, a slice per area: rebuild the reduced mesh's smooth areas as organized rows. Everything else passes through untouched.
 
     `labels` comes from `smooth_areas` or `crease_areas`; `nearest(points)` gives the closest source face and point per
     point. `project_for(area)`, if given, moves points onto that area alone; `extent` is the whole object's size;
@@ -534,8 +563,10 @@ def grid_areas(coarse: MeshData, labels: np.ndarray, nearest, options: GridOptio
     face_of, a, _b = _half_edges(faces)
     centres = np.stack([np.bincount(face_of, points[a, axis], len(faces)) for axis in range(3)], axis=1)
     centres /= np.bincount(face_of, minlength=len(faces))[:, None]
+    yield
     area_of = np.where(triangle, labels[nearest(centres)[0]], -1)
     adjacency = face_adjacency(faces)
+    yield
 
     def reject(reason: str) -> None:
         report.rejected[reason] = report.rejected.get(reason, 0) + 1
@@ -551,6 +582,7 @@ def grid_areas(coarse: MeshData, labels: np.ndarray, nearest, options: GridOptio
     sorted_areas = area_of[order]
     plans = []
     for area in np.unique(area_of[area_of >= 0]).tolist():
+        yield
         group = order[np.searchsorted(sorted_areas, area) : np.searchsorted(sorted_areas, area, side="right")]
         size = float(np.linalg.norm(np.ptp(centres[group], axis=0)))
         if size < options.min_size * extent or len(group) < options.min_faces:
@@ -576,6 +608,7 @@ def grid_areas(coarse: MeshData, labels: np.ndarray, nearest, options: GridOptio
             plans.append((size, area, parts[0]))
     plans.sort(key=lambda row: -row[0])
     for _size, area, part in plans:
+        yield
         final[part] = area
     area_list = final.tolist()
     members = {area: np.flatnonzero(final == area).tolist() for _size, area, _part in plans}

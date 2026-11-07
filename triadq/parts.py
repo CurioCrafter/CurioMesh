@@ -15,6 +15,8 @@ import math
 
 import numpy as np
 
+from .types import FlatFaces, drain
+
 
 KINDS = ("TUBE", "FLAT", "ROUGH")
 KIND_WORDS = {"TUBE": "Tube", "FLAT": "Flat", "ROUGH": "Rough"}
@@ -121,13 +123,23 @@ def _axes(points: np.ndarray) -> list[np.ndarray]:
     return out
 
 
+CLUSTER_ROWS = 4_000  # points clustered per slice in `_cluster_steps`
+
+
 def _cluster(values: np.ndarray, tol: float) -> np.ndarray:
     """Leader clustering of 2D points; returns a cluster id per point."""
+    return drain(_cluster_steps(values, tol))
+
+
+def _cluster_steps(values: np.ndarray, tol: float):
+    """Generator: `_cluster`, yielding every CLUSTER_ROWS points."""
 
     cells: dict[tuple[int, int], list[int]] = {}
     leaders: list[np.ndarray] = []
     ids = np.zeros(len(values), dtype=np.int64)
     for i, p in enumerate(values):
+        if i % CLUSTER_ROWS == CLUSTER_ROWS - 1:
+            yield
         cx, cy = int(p[0] // tol), int(p[1] // tol)
         hit = -1
         for dx in (-1, 0, 1):
@@ -174,6 +186,11 @@ def _rdp(profile: np.ndarray, tol: float) -> list[int]:
 
 def fit_revolve(points: np.ndarray, polys) -> dict | None:
     """Find an axis around which the piece is turned, and its profile. None if the piece isn't such a part."""
+    return drain(fit_revolve_steps(points, polys))
+
+
+def fit_revolve_steps(points: np.ndarray, polys):
+    """Generator: `fit_revolve`, in slices of a few thousand points or faces."""
 
     points = np.asarray(points, dtype=np.float64)
     diag = float(np.linalg.norm(np.ptp(points, axis=0)))
@@ -190,7 +207,7 @@ def fit_revolve(points: np.ndarray, polys) -> dict | None:
         center = (local.min(axis=0) + local.max(axis=0)) / 2.0
         local = local - center
         rz = np.stack([np.hypot(local[:, 0], local[:, 1]), local[:, 2]], axis=1)
-        ids = _cluster(rz, tol)
+        ids = yield from _cluster_steps(rz, tol)
         size = np.bincount(ids)
         on_axis = rz[:, 0] <= tol
         share = float(((size[ids] >= MIN_SPIN) | on_axis).mean())
@@ -204,7 +221,9 @@ def fit_revolve(points: np.ndarray, polys) -> dict | None:
     # rings that really turn (or sit on the axis) are the profile; anything else (a lug, a bolt) is left out
     valid = (np.bincount(ids) >= MIN_SPIN) | (mean[:, 0] <= tol)
     near = [set() for _ in range(count)]
-    for p in polys:
+    for f, p in enumerate(polys):
+        if f % CLUSTER_ROWS == CLUSTER_ROWS - 1:
+            yield
         for i in range(len(p)):
             a, b = int(ids[p[i]]), int(ids[p[i - 1]])
             if a != b and valid[a] and valid[b]:
@@ -397,10 +416,11 @@ def facing(points: np.ndarray, polys, source_points: np.ndarray, source_polys) -
     def frames(p, f):
         p = np.asarray(p, dtype=np.float64)
         c, n = np.zeros((len(f), 3)), np.zeros((len(f), 3))
-        sizes = np.fromiter(map(len, f), dtype=np.int64, count=len(f))
+        flat = f if isinstance(f, FlatFaces) else None
+        sizes = np.diff(flat.indptr) if flat is not None else np.fromiter(map(len, f), dtype=np.int64, count=len(f))
         for size in np.unique(sizes).tolist():
             at = np.flatnonzero(sizes == size)
-            rows = np.asarray([f[k] for k in at.tolist()], dtype=np.int64)
+            rows = flat.flat[flat.indptr[at][:, None] + np.arange(size)] if flat is not None else np.asarray([f[k] for k in at.tolist()], dtype=np.int64)
             c[at] = p[rows].mean(axis=1)
             n[at] = np.cross(p[rows[:, 2]] - p[rows[:, 0]], p[rows[:, -1]] - p[rows[:, 1]])  # a quad's diagonals; on a triangle its own normal too
         return c, n / np.maximum(np.linalg.norm(n, axis=1), 1e-30)[:, None]
@@ -456,9 +476,12 @@ def sweeps(fit: dict, kind: str = "0", floor: float = 0.0):
             yield build_revolve(fit, spin, tolerance, kind)
 
 
-def rebuilds(points: np.ndarray, polys, kind: str = "0"):
-    """Generator of rebuilt versions of a piece, fewest faces first, as (points, quads, kinds); nothing if it isn't a known part."""
+def rebuilds(points: np.ndarray, polys, kind: str = "0", fit=...):
+    """Generator of rebuilt versions of a piece, fewest faces first, as (points, quads, kinds); nothing if it isn't a known part.
 
-    fit = fit_revolve(points, polys)
+    `fit` is what `fit_revolve_steps` returned for this piece; without it, it is made here."""
+
+    if fit is ...:
+        fit = fit_revolve(points, polys)
     if fit is not None:
         yield from sweeps(fit, kind)

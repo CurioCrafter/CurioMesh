@@ -27,6 +27,14 @@ from triadq import (  # noqa: E402
     topology_summary,
 )
 import triadq.engine as triad_engine  # noqa: E402
+from triadq.types import drain  # noqa: E402
+
+
+
+def _done(value):
+    """A `*_steps` generator that has nothing left to do: it returns `value` at once."""
+    return value
+    yield
 
 
 class QuadClosureTests(unittest.TestCase):
@@ -307,7 +315,7 @@ class QuadClosureTests(unittest.TestCase):
 
         with patch.object(
             triad_engine,
-            "parity_path_quad_closure",
+            "parity_path_quad_closure_steps",
             side_effect=ValueError("forced parity rejection"),
         ):
             output, report = remesh_mesh(
@@ -470,7 +478,7 @@ class QuadClosureTests(unittest.TestCase):
             )
             return triad_engine._Candidate(mesh, report)
 
-        with patch.object(triad_engine, "_run_candidate", side_effect=fake_candidate):
+        with patch.object(triad_engine, "_run_candidate_steps", side_effect=lambda *args: _done(fake_candidate(*args))):
             output, report = remesh_mesh(source, RemeshOptions(seed_count=6))
 
         gc.collect()
@@ -512,7 +520,7 @@ class QuadClosureTests(unittest.TestCase):
             )
             return triad_engine._Candidate(mesh, report)
 
-        with patch.object(triad_engine, "_run_candidate", side_effect=fake_candidate):
+        with patch.object(triad_engine, "_run_candidate_steps", side_effect=lambda *args: _done(fake_candidate(*args))):
             output, report = remesh_mesh(source, RemeshOptions(seed_count=3))
 
         self.assertTrue(report.success)
@@ -548,7 +556,7 @@ class QuadClosureTests(unittest.TestCase):
             3: [(1.0, 2, ())],
         }
         mate = {1: 2, 2: 1}
-        rescued = triad_engine._augment_matching(mate, allowed, [0, 1, 2, 3])
+        rescued = drain(triad_engine._augment_matching_steps(mate, allowed, [0, 1, 2, 3]))
         self.assertEqual(rescued, 1)
         self.assertEqual(mate, {0: 1, 1: 0, 2: 3, 3: 2})
 
@@ -566,7 +574,7 @@ class QuadClosureTests(unittest.TestCase):
         # long way round; a search without blossom contraction misses it.
         edges = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 0), (9, 8), (8, 7), (7, 6), (6, 5), (5, 9), (1, 8)]
         mate = {1: 2, 2: 1, 3: 4, 4: 3, 8: 7, 7: 8, 6: 5, 5: 6}
-        rescued = triad_engine._augment_matching(mate, self._allowed_from_edges(edges), list(range(10)))
+        rescued = drain(triad_engine._augment_matching_steps(mate, self._allowed_from_edges(edges), list(range(10))))
         self.assertEqual(rescued, 1)
         self.assertEqual(len(mate), 10)
         for a, b in mate.items():
@@ -597,7 +605,7 @@ class QuadClosureTests(unittest.TestCase):
                     mate[b] = a
             start = len(mate) // 2
             order = [int(v) for v in rng.permutation(count)]
-            rescued = triad_engine._augment_matching(mate, self._allowed_from_edges(sorted(edges)), order)
+            rescued = drain(triad_engine._augment_matching_steps(mate, self._allowed_from_edges(sorted(edges)), order))
             self.assertEqual(len(mate) // 2, brute_force(list(range(count)), edges))
             self.assertEqual(rescued, len(mate) // 2 - start)
             for a, b in mate.items():

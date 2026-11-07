@@ -58,6 +58,16 @@ class FlatFaces(Sequence):
         return list(self) == list(other)
 
 
+def corners_of(faces, ids) -> np.ndarray:
+    """The corners of these faces one after another, as one array (by the arrays alone when `faces` is a FlatFaces)."""
+    ids = np.asarray(ids, dtype=np.int64)
+    if isinstance(faces, FlatFaces):
+        sizes = np.diff(faces.indptr)[ids]
+        ends = np.cumsum(sizes)
+        return faces.flat[np.repeat(faces.indptr[ids] - (ends - sizes), sizes) + np.arange(int(ends[-1]) if len(ends) else 0)]
+    return np.fromiter((v for f in ids.tolist() for v in faces[f]), dtype=np.int64)
+
+
 @dataclass(slots=True)
 class MeshData:
     vertices: np.ndarray
@@ -142,3 +152,28 @@ def check_cancelled() -> None:
     check = getattr(_cancel, "check", None)
     if check is not None and check():
         raise Cancelled()
+
+
+def drain(steps):
+    """Run a `*_steps` generator (one that yields between slices of its work) to its end in one go; its result."""
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+def cancel_steps(steps, check):
+    """Generator: `steps` with `check_cancelled()` raising once `check()` is true while each slice runs (off between slices)."""
+    try:
+        while True:
+            cancel_with(check)
+            try:
+                next(steps)
+            except StopIteration as done:
+                return done.value
+            finally:
+                cancel_with(None)
+            yield
+    finally:
+        steps.close()

@@ -15,6 +15,7 @@ import numpy as np
 
 from .parts import orient_like  # noqa: F401 (the same vote for these rebuilds)
 from .patch import quad_quality
+from .types import FlatFaces, drain
 
 SLENDER = 0.2  # a tube's mean radius is at most this share of its length
 TUBES = ((0.5, 0.5), (0.25, 0.25), (0.12, 0.25), (0.12, 0.1), (0.06, 0.1), (0.03, 0.05))  # (section, path) tolerances as shares of the radius, fewest faces first
@@ -37,9 +38,31 @@ COPY_EXACT = 0.05  # of the tolerance: a placement this close is the copy, so no
 COPY_MORE = 8  # placements still tried after one fits, for one that fits closer
 
 
+SOLVE_ROUNDS = 64  # conjugate gradient rounds per slice in `_solve_steps`
+SECTIONS_PER_SLICE = 4  # cross-sections cut per slice
+RASTER_TRIANGLES = 2_000  # triangles laid on a sheet's raster per slice
+
+
+def _sides(polys) -> np.ndarray:
+    """Each face's sides as (corner, the corner before it), face after face, by the arrays alone."""
+    flat = FlatFaces.of(polys)
+    if not len(flat.flat):
+        return np.zeros((0, 2), dtype=np.int64)
+    before = np.arange(len(flat.flat)) - 1
+    before[flat.indptr[:-1]] = flat.indptr[1:] - 1  # a face's first corner follows its last
+    return np.column_stack([flat.flat, flat.flat[before]])
+
+
 def _edges(polys) -> np.ndarray:
-    pairs = np.asarray([(p[i], p[i - 1]) for p in polys for i in range(len(p))], dtype=np.int64)
-    return np.unique(np.sort(pairs, axis=1), axis=0)
+    return _edge_uses(polys)[0]
+
+
+def _edge_uses(polys) -> tuple[np.ndarray, np.ndarray]:
+    """(the edges as sorted vertex pairs in order, how many faces use each), by one sort of one number per side."""
+    pairs = np.sort(_sides(polys), axis=1)
+    span = int(pairs.max(initial=0)) + 1
+    keys, uses = np.unique(pairs[:, 0] * span + pairs[:, 1], return_counts=True)
+    return np.column_stack([keys // span, keys % span]).reshape(-1, 2), uses
 
 
 def _solve(points: np.ndarray, edges: np.ndarray, known: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -47,6 +70,11 @@ def _solve(points: np.ndarray, edges: np.ndarray, known: np.ndarray, values: np.
 
     All weights are positive, so nothing folds over when this flattens a sheet (Tutte), and a tube's values make clean rings.
     """
+    return drain(_solve_steps(points, edges, known, values))
+
+
+def _solve_steps(points: np.ndarray, edges: np.ndarray, known: np.ndarray, values: np.ndarray):
+    """Generator: `_solve`, yielding every SOLVE_ROUNDS rounds."""
 
     n = len(points)
     weight = 1.0 / np.maximum(np.linalg.norm(points[edges[:, 0]] - points[edges[:, 1]], axis=1), 1e-30)
@@ -65,9 +93,11 @@ def _solve(points: np.ndarray, edges: np.ndarray, known: np.ndarray, values: np.
     z = r / total
     d = z.copy()
     rz = float(r @ z)
-    for _ in range(min(3 * n, 2000)):
+    for done in range(min(3 * n, 2000)):
         if rz <= 1e-24:
             break
+        if done % SOLVE_ROUNDS == SOLVE_ROUNDS - 1:
+            yield
         q = laplace(d) * free
         step = rz / max(float(d @ q), 1e-300)
         x += step * d
@@ -123,7 +153,22 @@ def _frames(centres: np.ndarray, closed: bool) -> tuple[np.ndarray, np.ndarray, 
 
 
 def _triangles(polys) -> np.ndarray:
-    return np.asarray([(p[0], p[i], p[i + 1]) for p in polys for i in range(1, len(p) - 1)], dtype=np.int64)
+    """Each face as a fan of triangles from its first corner, face after face, by the arrays alone."""
+    flat = FlatFaces.of(polys)
+    fans = np.maximum(np.diff(flat.indptr) - 2, 0)
+    first = np.repeat(flat.indptr[:-1], fans)
+    step = np.arange(int(fans.sum())) - np.repeat(np.cumsum(fans) - fans, fans) + 1
+    return np.column_stack([flat.flat[first], flat.flat[first + step], flat.flat[first + step + 1]]).reshape(-1, 3)
+
+
+def _sections(points, tris, stations, largest: bool = False):
+    """Generator: `_section` at each (centre, tangent, u, v), a slice per SECTIONS_PER_SLICE of them."""
+    out = []
+    for c, t, u, v in stations:
+        out.append(_section(points, tris, c, t, u, v, largest))
+        if len(out) % SECTIONS_PER_SLICE == 0:
+            yield
+    return out
 
 
 def _section(points: np.ndarray, tris: np.ndarray, centre: np.ndarray, tangent: np.ndarray, u: np.ndarray, v: np.ndarray, largest: bool = False) -> np.ndarray | None:
@@ -188,14 +233,20 @@ def _steady(values: np.ndarray, closed: bool) -> np.ndarray:
 
 def fit_tube(points: np.ndarray, polys) -> dict | None:
     """The path and cross-sections of a slender piece. None if it isn't a tube."""
+    return drain(fit_tube_steps(points, polys))
+
+
+def fit_tube_steps(points: np.ndarray, polys):
+    """Generator: `fit_tube`, a slice per few cross-sections."""
 
     points = np.asarray(points, dtype=np.float64)
     if len(points) < 12:
         return None
     centred = points - points.mean(axis=0)
     spread = np.sqrt(np.maximum(np.linalg.eigvalsh(centred.T @ centred / len(points)), 0.0))
-    edges = _edges(polys)
-    rim = _rim_vertices(polys)
+    edges, uses = _edge_uses(polys)
+    rim = np.unique(edges[uses == 1])  # `_rim_vertices`, from the same sort
+    yield
     closed = len(points) - len(edges) + len(polys) == 0 and not len(rim)
     if closed:
         frame = np.linalg.eigh(centred.T @ centred)[1]
@@ -210,8 +261,10 @@ def fit_tube(points: np.ndarray, polys) -> dict | None:
         known[[one, two]] = True
         values = np.zeros(len(points))
         values[two] = 1.0
-        field = _solve(points, edges, known, values)
+        field = yield from _solve_steps(points, edges, known, values)
+    yield
     samples, values = _surface_samples(points, polys, field)
+    yield
     order = np.argsort(values)
     slices = np.array_split(order, 32)
     centres = np.asarray([samples[k].mean(axis=0) for k in slices])
@@ -224,7 +277,7 @@ def fit_tube(points: np.ndarray, polys) -> dict | None:
     tris = _triangles(polys)
     for _ in range(2):  # the real outlines say where the middle is; then cut again square to the better path
         tangents, us, vs = _frames(centres, closed)
-        outlines = [_section(points, tris, c, t, u, v) for c, t, u, v in zip(centres, tangents, us, vs)]
+        outlines = yield from _sections(points, tris, zip(centres, tangents, us, vs))
         good = np.asarray([o is not None for o in outlines])
         if good.mean() < MOST_MISSED:
             return None
@@ -248,6 +301,11 @@ def fit_tube(points: np.ndarray, polys) -> dict | None:
 
 def fit_prisms(points: np.ndarray, polys) -> list[dict]:
     """The piece as the same outline along a straight line (a stack of fins, a gear, a plate), for each line that may do."""
+    return drain(fit_prism_steps(points, polys))
+
+
+def fit_prism_steps(points: np.ndarray, polys):
+    """Generator: `fit_prisms`, a slice per few cross-sections."""
 
     points = np.asarray(points, dtype=np.float64)
     if len(polys) < 24:
@@ -261,11 +319,16 @@ def fit_prisms(points: np.ndarray, polys) -> list[dict]:
     # along the right line nearly all the surface faces straight out sideways or straight along it
     axes = np.linalg.eigh(centred.T @ centred)[1].T
     shares = [float(area[(np.abs(normal @ a) < 0.1) | (np.abs(normal @ a) > 0.98)].sum()) / max(float(area.sum()), 1e-30) for a in axes]
-    fits = [_fit_prism(points, polys, tris, axes[k], axes[(k + 1) % 3]) for k in range(3) if shares[k] >= PRISM_SHARE]
+    fits = []
+    for k in range(3):
+        if shares[k] >= PRISM_SHARE:
+            yield
+            fits.append((yield from _fit_prism(points, polys, tris, axes[k], axes[(k + 1) % 3])))
     return [fit for fit in fits if fit is not None]
 
 
-def _fit_prism(points: np.ndarray, polys, tris: np.ndarray, axis: np.ndarray, u: np.ndarray) -> dict | None:
+def _fit_prism(points: np.ndarray, polys, tris: np.ndarray, axis: np.ndarray, u: np.ndarray):
+    """Generator: the prism along this axis, or None."""
     v = np.cross(axis, u)
     height = points @ axis
     low, high = float(height.min()), float(height.max())
@@ -275,7 +338,7 @@ def _fit_prism(points: np.ndarray, polys, tris: np.ndarray, axis: np.ndarray, u:
     inset = PRISM_INSET * (high - low)
     levels = np.linspace(low + inset, high - inset, PRISM_STATIONS)
     centres = middle + levels[:, None] * axis
-    outlines = [_section(points, tris, c, axis, u, v, True) for c in centres]
+    outlines = yield from _sections(points, tris, ((c, axis, u, v) for c in centres), True)
     good = np.asarray([o is not None for o in outlines])
     if good.mean() < MOST_MISSED:
         return None
@@ -297,8 +360,7 @@ def _fit_prism(points: np.ndarray, polys, tris: np.ndarray, axis: np.ndarray, u:
 
 
 def _rim_vertices(polys) -> np.ndarray:
-    pairs = np.sort(np.asarray([(p[i], p[i - 1]) for p in polys for i in range(len(p))], dtype=np.int64), axis=1)
-    edges, count = np.unique(pairs, axis=0, return_counts=True)
+    edges, count = _edge_uses(polys)
     return np.unique(edges[count == 1])
 
 
@@ -446,8 +508,8 @@ def _corners(points: np.ndarray, loop: list[int]) -> list[int]:
     return sorted(picks) if len(picks) == 4 else [0, n // 4, n // 2, 3 * n // 4]
 
 
-def _flatten(points: np.ndarray, polys, loop: list[int], corners: list[int]) -> np.ndarray:
-    """(u, v) in the unit square, the rim along its sides by length, the inside spread smoothly."""
+def _flatten(points: np.ndarray, polys, loop: list[int], corners: list[int]):
+    """Generator: (u, v) in the unit square, the rim along its sides by length, the inside spread smoothly."""
 
     n = len(points)
     uv = np.zeros((n, 2))
@@ -462,7 +524,10 @@ def _flatten(points: np.ndarray, polys, loop: list[int], corners: list[int]) -> 
     known = np.zeros(n, dtype=bool)
     known[rim] = True
     edges = _edges(polys)
-    return np.stack([_solve(points, edges, known, uv[:, axis]) for axis in range(2)], axis=1)
+    yield
+    first = yield from _solve_steps(points, edges, known, uv[:, 0])
+    second = yield from _solve_steps(points, edges, known, uv[:, 1])
+    return np.stack([first, second], axis=1)
 
 
 def _weights(corners: np.ndarray, at: np.ndarray) -> np.ndarray:
@@ -479,14 +544,21 @@ def _weights(corners: np.ndarray, at: np.ndarray) -> np.ndarray:
 
 def fit_sheet(points: np.ndarray, polys) -> dict | None:
     """A disc with one rim, spread over a square so rows can follow it. None if it isn't one."""
+    return drain(fit_sheet_steps(points, polys))
+
+
+def fit_sheet_steps(points: np.ndarray, polys):
+    """Generator: `fit_sheet`, in slices."""
 
     points = np.asarray(points, dtype=np.float64)
     if len(polys) < 48 or len(points) - len(_edges(polys)) + len(polys) != 1:
         return None
+    yield
     loop = _rim_loop(polys)
     if loop is None:
         return None
-    uv = _flatten(points, polys, loop, _corners(points, loop))
+    yield
+    uv = yield from _flatten(points, polys, loop, _corners(points, loop))
     tris = _triangles(polys)
     # which triangle lies over each cell of a fine raster of the square, its centre decided by the best weights
     corner = uv[tris] * (RASTER - 1)
@@ -495,6 +567,8 @@ def fit_sheet(points: np.ndarray, polys) -> dict | None:
     under = np.zeros((RASTER, RASTER), dtype=np.int64)
     best = np.full((RASTER, RASTER), -np.inf)
     for t in range(len(tris)):
+        if t % RASTER_TRIANGLES == RASTER_TRIANGLES - 1:
+            yield
         xs, ys = np.meshgrid(np.arange(low[t, 0], high[t, 0] + 1), np.arange(low[t, 1], high[t, 1] + 1), indexing="ij")
         at = np.column_stack([xs.ravel(), ys.ravel()]).astype(np.float64)
         score = _weights(np.repeat(corner[t][None], len(at), axis=0), at).min(axis=1)
@@ -694,14 +768,26 @@ def _unfolded(out):
     return None if len(quads) and (quad_quality(out[0][quads]) <= 0.0).any() else out
 
 
-def rebuilds(points: np.ndarray, polys, kind: str = "0"):
-    """Generator of kinds of rebuild that may suit a piece. Each is a generator of (points, quads, kinds) or None, most faces first."""
+def fit_steps(points: np.ndarray, polys):
+    """Generator: (tube, prisms, sheet) as `rebuilds` would fit them, in slices, to hand to `rebuilds` as `fits`."""
+    tube = yield from fit_tube_steps(points, polys)
+    yield
+    prisms = yield from fit_prism_steps(points, polys)
+    yield
+    sheet = yield from fit_sheet_steps(points, polys)
+    return tube, prisms, sheet
 
-    fit = fit_tube(points, polys)
+
+def rebuilds(points: np.ndarray, polys, kind: str = "0", fits=None):
+    """Generator of kinds of rebuild that may suit a piece. Each is a generator of (points, quads, kinds) or None, most faces first.
+
+    `fits` is what `fit_steps` returned for this piece; without it each fit is made as its turn comes."""
+
+    fit = fits[0] if fits is not None else fit_tube(points, polys)
     if fit is not None:
         yield (_unfolded(build_tube(fit, section, path, kind)) for section, path in reversed(TUBES))
-    for fit in fit_prisms(points, polys):
+    for fit in fits[1] if fits is not None else fit_prisms(points, polys):
         yield (_unfolded(build_tube(fit, section, path, kind)) for section, path in reversed(PRISMS))
-    fit = fit_sheet(points, polys)
+    fit = fits[2] if fits is not None else fit_sheet(points, polys)
     if fit is not None:
         yield (_unfolded(build_sheet(fit, max(16, int(share * len(polys))), kind)) for share in reversed(SHEETS))

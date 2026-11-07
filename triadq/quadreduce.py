@@ -19,7 +19,7 @@ import math
 
 import numpy as np
 
-from .types import MeshData
+from .types import MeshData, drain
 
 MIN_QUALITY = 0.15  # no new quad worse than this, on `patch.quad_quality`'s scale (> 0 means convex and warped < 60 degrees)
 MOST_TURNED = math.cos(math.radians(25.0))  # no face may turn further than this in one removal
@@ -96,6 +96,21 @@ class QuadReducer:
     """Removes quads cheapest first. `remove(count)` is a generator; `save`/`restore` allow stepping back after a look."""
 
     def __init__(self, mesh: MeshData):
+        drain(self._setup(mesh))
+
+    @classmethod
+    def made_in_steps(cls, mesh: MeshData, *args):
+        """Generator: a reducer of this class for `mesh` (and the class's own `args`), set up in slices. Returns it."""
+        reducer = cls.__new__(cls)
+        reducer._fields(mesh, *args)
+        yield from reducer._setup(mesh)
+        return reducer
+
+    def _fields(self, mesh: MeshData) -> None:
+        """What a subclass sets before the queue is built (its `_push` may read it)."""
+
+    def _setup(self, mesh: MeshData):
+        """Generator: the corners, borders, quadrics and the queue of collapses, yielding every SETUP_FACES faces."""
         self.materials = list(mesh.face_materials)
         self.name = mesh.name
         self.points = [tuple(p) for p in np.asarray(mesh.vertices, dtype=np.float64).tolist()]
@@ -107,6 +122,8 @@ class QuadReducer:
         material_of: list[set[str]] = [set() for _ in self.points]
         self.locked = [False] * len(self.points)
         for index, face in enumerate(self.faces):
+            if index % SETUP_FACES == SETUP_FACES - 1:
+                yield
             for k, v in enumerate(face):
                 self.users[v].add(index)
                 material_of[v].add(self.materials[index])
@@ -123,13 +140,17 @@ class QuadReducer:
         for v in range(len(self.points)):
             if self.border[v] or len(material_of[v]) > 1:
                 self.locked[v] = True
+        yield
         self.quadrics = _plane_quadrics(self.points, self.faces)
+        yield
         used = np.asarray(mesh.vertices, dtype=np.float64)
         self.dissolve_limit = DISSOLVE_SHARE * float(np.linalg.norm(np.ptp(used, axis=0))) if len(used) else 0.0
         self.stamps = [0] * len(self.points)
         self.heap: list[tuple] = []
         self.refused: list[tuple] = []
         for index in range(len(self.faces)):
+            if index % SETUP_FACES == SETUP_FACES - 1:
+                yield
             if len(self.faces[index]) == 4:
                 self._push(index, 0)
                 self._push(index, 1)
@@ -357,12 +378,6 @@ class QuadReducer:
         )
 
 
-def quad_reducer(mesh: MeshData):
-    """A reducer for this mesh."""
-
-    return QuadReducer(mesh)
-
-
 def _compensated_sum(values) -> float:
     """Python 3.12's float `sum` (Neumaier), spelled out so 3.11 gives the same last digit."""
 
@@ -427,8 +442,17 @@ def _cut_hexagon(hexagon: list[int], points, free_chord, facings=()) -> tuple[li
     return best, [middle]
 
 
+SETUP_FACES = 3_000  # faces a reducer sets up per slice in `made_in_steps`
+SEARCHES_PER_SLICE = 16  # triangles searched from per slice in the loose-triangle passes
+
+
 def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, int]:
-    """Join leftover triangles two at a time along a path of quads. Returns (mesh, triangles joined).
+    """`join_loose_triangle_steps` in one go."""
+    return drain(join_loose_triangle_steps(mesh, farthest))
+
+
+def join_loose_triangle_steps(mesh: MeshData, farthest: int = 8):
+    """Generator: join leftover triangles two at a time along a path of quads. Returns (mesh, triangles joined).
 
     Closure splits all three edges of a leftover triangle, and each split runs on through the mesh, which costs about
     seven quads per triangle. A triangle only needs one extra corner, though: a triangle and its neighbouring quad have
@@ -562,10 +586,13 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
                             following.append(other)
             level = following
 
+    yield
     reach = 0
     while reach < farthest:
         reach = max(1, reach * 2)
-        for start in sorted(loose):
+        for count, start in enumerate(sorted(loose)):
+            if count % SEARCHES_PER_SLICE == SEARCHES_PER_SLICE - 1:
+                yield
             if start in loose:
                 search(start, reach)
         if not loose:
@@ -575,11 +602,16 @@ def join_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, i
     return MeshData(vertices=np.asarray(points, dtype=np.float64), faces=[faces[k] for k in kept], face_materials=[materials[k] for k in kept], name=mesh.name), joined
 
 
-__all__ = ["QuadReducer", "join_loose_triangles", "quad_reducer"]
+__all__ = ["QuadReducer", "join_loose_triangles"]
 
 
 def collapse_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshData, int]:
-    """Get rid of leftover triangles by merging edges along a path of quads. Returns (mesh, triangles gone).
+    """`collapse_loose_triangle_steps` in one go."""
+    return drain(collapse_loose_triangle_steps(mesh, farthest))
+
+
+def collapse_loose_triangle_steps(mesh: MeshData, farthest: int = 8):
+    """Generator: get rid of leftover triangles by merging edges along a path of quads. Returns (mesh, triangles gone).
 
     Merging an edge a triangle shares with a quad removes the triangle and leaves the quad a triangle: one face fewer,
     and the triangle has moved a step. When it reaches another triangle, both are gone. So where `join_loose_triangles`
@@ -713,10 +745,13 @@ def collapse_loose_triangles(mesh: MeshData, farthest: int = 8) -> tuple[MeshDat
                         return
             level = following
 
+    yield
     reach = 0
     while reach < farthest:
         reach = max(1, reach * 2)
-        for start in sorted(loose):
+        for count, start in enumerate(sorted(loose)):
+            if count % SEARCHES_PER_SLICE == SEARCHES_PER_SLICE - 1:
+                yield
             if start in loose:
                 search(start, reach)
         if not loose:

@@ -181,21 +181,26 @@ class _Work:
         pieces, _ = patch._disk_pieces(self.points, faces, np.asarray([local[f] for f in ids]), patch._Incidence(faces), patch.face_adjacency(faces), set(), 1)
         return [[area[k] for k in piece.tolist()] for piece in pieces]
 
-    def attempt_fill(self, ids: set[int], share: float, spot: set[int]) -> bool:
-        """Fill these faces again at this edge length, seam welded, if that leaves fewer new crossings."""
+    def attempt_fill(self, ids: set[int], share: float, spot: set[int]):
+        """Generator, a slice per step of each disk: fill these faces again at this edge length, seam welded, if that
+        leaves fewer new crossings. Returns whether any disk was."""
         done = False
         for region in self._disks(ids):
             self.fills += 1
-            done = (len(region) <= MOST_FILLED and self._fill_disk(region, share, spot)) or done
+            if len(region) <= MOST_FILLED:
+                yield
+                done = (yield from self._fill_disk(region, share, spot)) or done
         return done
 
-    def _fill_disk(self, region: list[int], share: float, spot: set[int]) -> bool:
+    def _fill_disk(self, region: list[int], share: float, spot: set[int]):
+        """Generator: one disk filled again, kept if it helps. Returns whether it was."""
         loops, _ = patch.boundary_loops(self.faces, region)
         if len(loops) != 1:
             return False
         kind, part = self.mats[region[0]], int(self.piece[region[0]])
         edges = [np.linalg.norm(np.diff(self.points[list(self.faces[f]) + [self.faces[f][0]]], axis=0), axis=1).mean() for f in region]
-        result = patch.fill_loop(self.points, loops[0], target_length=share * float(np.mean(edges)), strategy="FLOW", max_faces=MOST_FILLED * 8)
+        result = yield from patch.fill_loop_steps(self.points, loops[0], target_length=share * float(np.mean(edges)), strategy="FLOW", max_faces=MOST_FILLED * 8)
+        yield
         if not result.ok:
             return False
         made = result.faces
@@ -210,9 +215,11 @@ class _Work:
             stacked = np.vstack((self.points[seam], points))
             pinned = np.zeros(len(stacked), bool)
             pinned[: len(seam)] = True
-            stacked = patch.fit_to_surface(stacked, local, pinned, lambda q: self.near(part, q)[0], 3, 0.5)
+            stacked = yield from patch.fit_to_surface_steps(stacked, local, pinned, lambda q: self.near(part, q)[0], 3, 0.5)
+            yield
             if self._swap(region, stacked[len(seam) :], made, kind, part, spot):
                 return True
+            yield
         return self._swap(region, points, made, kind, part, spot)  # plain, without the source: a knot too tight to follow
 
     def _swap(self, region: list[int], points, made, kind: str, part: int, spot: set[int]) -> bool:
@@ -319,7 +326,7 @@ class _Work:
                     self.fresh = set()
                     yield  # one try per slice: a timer runs the repair in short steps
                     try:
-                        done = self.attempt_fill(sheet, share, spot)
+                        done = yield from self.attempt_fill(sheet, share, spot)
                     except (ValueError, np.linalg.LinAlgError):  # a fill can't always close a tangled seam: the spot stays as it was
                         done = False
                     if done:

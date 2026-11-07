@@ -14,13 +14,15 @@ import numpy as np
 
 from .field import estimate_field_gl
 from .topology import (
-    parity_path_quad_closure,
-    quad_only_closure,
+    parity_path_quad_closure_steps,
+    quad_only_closure_steps,
     quads_locally_valid,
     split_non_manifold_vertex_fans,
-    topology_summary,
+    topology_summary_steps,
 )
-from .types import Face, MeshData, check_cancelled
+from .types import Face, MeshData, check_cancelled, drain
+
+STEP_FACES = 6_000  # triangles (or candidate pairs) handled per slice in the `*_steps` generators
 
 
 @dataclass(slots=True)
@@ -137,13 +139,20 @@ class _PairWeights:
 
 
 def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[MeshData, RemeshReport]:
+    return drain(remesh_mesh_steps(mesh, options))
+
+
+def remesh_mesh_steps(mesh: MeshData, options: RemeshOptions | None = None):
+    """Generator: `remesh_mesh`, yielding between slices of a few thousand triangles. Returns (mesh, report)."""
     start = time.perf_counter()
     options = options or RemeshOptions()
     normalized_mesh = mesh
     vertex_fan_splits = 0
     if options.force_quads:
         normalized_mesh, vertex_fan_splits = split_non_manifold_vertex_fans(mesh)
+    yield
     tri_mesh = _triangulate(normalized_mesh)
+    yield
     if not tri_mesh.faces:
         return mesh, RemeshReport(
             False,
@@ -153,6 +162,7 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
         )
 
     mode = _classify_mesh(tri_mesh, options)
+    yield
     best_mesh: MeshData | None = None
     best_report: RemeshReport | None = None
     candidate_reports: list[dict[str, Any]] = []
@@ -160,7 +170,8 @@ def remesh_mesh(mesh: MeshData, options: RemeshOptions | None = None) -> tuple[M
 
     for seed in range(seed_count):
         check_cancelled()
-        candidate = _run_candidate(tri_mesh, options, mode, seed)
+        candidate = yield from _run_candidate_steps(tri_mesh, options, mode, seed)
+        yield
         candidate.report.vertex_fan_splits = vertex_fan_splits
         candidate.report.candidates = []
         candidate_reports.append(candidate.report.to_dict())
@@ -257,9 +268,12 @@ def _classify_mesh(mesh: _TriMesh, options: RemeshOptions) -> str:
     return "BalancedFlow"
 
 
-def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int) -> _Candidate:
-    prep = _pairing_prep(mesh, _options_for_mode(options, mode), mode)
-    output_mesh, feature_breaks, rescued_pairs = _pair_triangles(mesh, prep, seed)
+def _run_candidate_steps(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int):
+    """Generator: one seed's pairing, closure and score. Returns the _Candidate."""
+    prep = yield from _pairing_prep_steps(mesh, _options_for_mode(options, mode), mode)
+    yield
+    output_mesh, feature_breaks, rescued_pairs = yield from _pair_triangle_steps(mesh, prep, seed)
+    yield
     closure_applied = bool(options.force_quads)
     closure_method = ""
     closure_error = ""
@@ -269,14 +283,15 @@ def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int)
         parity_error = ""
         global_error = ""
         try:
-            parity_mesh = parity_path_quad_closure(
+            parity_mesh = yield from parity_path_quad_closure_steps(
                 output_mesh,
                 name=f"{mesh.name}_paritypath",
             )
         except ValueError as exc:
             parity_error = str(exc)
+        yield
         try:
-            global_mesh = quad_only_closure(
+            global_mesh = yield from quad_only_closure_steps(
                 output_mesh,
                 name=f"{mesh.name}_pairclosure_global",
             )
@@ -305,7 +320,8 @@ def _run_candidate(mesh: _TriMesh, options: RemeshOptions, mode: str, seed: int)
                 f"ParityPath: {parity_error or 'no candidate'}; "
                 f"global fallback: {global_error or 'no candidate'}"
             )
-    report = _score_output(output_mesh, mesh, options, mode, seed, prep.feature_edge_count, feature_breaks)
+    yield
+    report = yield from _score_output_steps(output_mesh, mesh, options, mode, seed, prep.feature_edge_count, feature_breaks)
     report.input_faces = len(mesh.faces)
     report.success = bool(output_mesh.faces)
     report.feature_edges = prep.feature_edge_count
@@ -385,11 +401,17 @@ class _PairingPrep:
     table: tuple | None = None  # (allowed, quads_by_pair), built when the Python matching first needs them
 
     def tables(self) -> tuple[dict, dict]:
+        return drain(self.table_steps())
+
+    def table_steps(self):
+        """Generator: `tables`, yielding every STEP_FACES candidates."""
         if self.table is None:
             allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]] = defaultdict(list)
             quads_by_pair: dict[tuple[int, int], tuple[int, ...]] = {}
             face_a, face_b, quads, scores = self.candidates
-            for a, b, quad, score in zip(face_a.tolist(), face_b.tolist(), quads.tolist(), scores.tolist()):
+            for count, (a, b, quad, score) in enumerate(zip(face_a.tolist(), face_b.tolist(), quads.tolist(), scores.tolist())):
+                if count % STEP_FACES == STEP_FACES - 1:
+                    yield
                 if self.minimum is not None and not score > self.minimum:
                     continue
                 quad = tuple(quad)
@@ -566,6 +588,16 @@ def _estimate_field(
     feature_mask: np.ndarray,
     smooth_iters: int,
 ) -> np.ndarray:
+    """`_estimate_field_steps` in one go."""
+    return drain(_estimate_field_steps(mesh, adj, feature_mask, smooth_iters))
+
+
+def _estimate_field_steps(
+    mesh: _TriMesh,
+    adj: _Adjacency,
+    feature_mask: np.ndarray,
+    smooth_iters: int,
+):
     """Smooth a 4-RoSy cross field and return one representative direction per face.
 
     Each face gets a tangent frame (e1 along its first side, e2 = n x e1). A
@@ -609,8 +641,10 @@ def _estimate_field(
     # Limitation: fixed-count Jacobi diffusion; switch to a sparse linear solve if
     # very large scans need the field converged across hundreds of rings.
     steps = 24 * max(0, int(smooth_iters))
-    for _ in range(steps):
+    for done in range(steps):
         check_cancelled()
+        if done % 8 == 7:
+            yield
         into_a = cross[face_b] * transport
         into_b = cross[face_a] * np.conj(transport)
         real = np.bincount(face_a, weights=into_a.real, minlength=face_count) + np.bincount(
@@ -626,20 +660,26 @@ def _estimate_field(
     return np.cos(theta)[:, None] * e1 + np.sin(theta)[:, None] * e2
 
 
-def _pairing_prep(mesh: _TriMesh, options: RemeshOptions, mode: str) -> _PairingPrep:
+def _pairing_prep_steps(mesh: _TriMesh, options: RemeshOptions, mode: str):
+    """Generator: the seed-independent pairing inputs, made once per mesh and (mode, options). Returns the _PairingPrep."""
     key = ("pairing", mode, astuple(options))
     cached = mesh.cache.get(key)
     if cached is not None:
         return cached
     adj = _adjacency(mesh)
+    yield
     weights = _pair_weights(mode)
     feature_mask = _feature_mask(mesh, adj, options)
+    yield
     if str(options.field_mode).upper() == "CURVATURE":
         cross_field = estimate_field_gl(mesh, adj, feature_mask, options.smooth_field_iters)
     else:
-        cross_field = _estimate_field(mesh, adj, feature_mask, options.smooth_field_iters)
+        cross_field = yield from _estimate_field_steps(mesh, adj, feature_mask, options.smooth_field_iters)
+    yield
     candidates = _pair_candidates(mesh, adj, feature_mask, cross_field, weights)
+    yield
     prep = _PairingPrep(int(np.count_nonzero(feature_mask)), candidates, None if options.max_pairing else weights.minimum_score)
+    yield from prep.table_steps()
     mesh.cache[key] = prep
     return prep
 
@@ -741,13 +781,16 @@ def _min_scaled_jacobians(points: np.ndarray) -> np.ndarray:
     return np.where(degenerate, -1.0, minimum)
 
 
-def _pair_triangles(mesh: _TriMesh, prep: _PairingPrep, seed: int) -> tuple[MeshData, int, int]:
+def _pair_triangle_steps(mesh: _TriMesh, prep: _PairingPrep, seed: int):
+    """Generator: greedy pairs, then a maximum matching, as quads. Returns (mesh, feature breaks, pairs rescued)."""
     allowed = prep.allowed
     feature_breaks = 0
     order = list(range(len(mesh.faces)))
     random.Random(seed).shuffle(order)
     mate: dict[int, int] = {}
-    for face_index in order:
+    for count, face_index in enumerate(order):
+        if count % STEP_FACES == STEP_FACES - 1:
+            yield
         if face_index in mate:
             continue
         for _score, other, _quad in allowed.get(face_index, ()):
@@ -755,13 +798,15 @@ def _pair_triangles(mesh: _TriMesh, prep: _PairingPrep, seed: int) -> tuple[Mesh
                 mate[face_index] = other
                 mate[other] = face_index
                 break
-    rescued_pairs = _augment_matching(mate, allowed, order)
+    rescued_pairs = yield from _augment_matching_steps(mate, allowed, order)
 
     used: set[int] = set()
     output_faces: list[Face] = []
     output_materials: list[str] = []
     output_face_uvs: list[Face] | None = [] if mesh.uvs is not None and mesh.face_uvs is not None else None
-    for face_index in order:
+    for count, face_index in enumerate(order):
+        if count % STEP_FACES == STEP_FACES - 1:
+            yield
         if face_index in used or face_index not in mate:
             continue
         other = mate[face_index]
@@ -800,12 +845,12 @@ def _pair_triangles(mesh: _TriMesh, prep: _PairingPrep, seed: int) -> tuple[Mesh
     return out, feature_breaks, rescued_pairs
 
 
-def _augment_matching(
+def _augment_matching_steps(
     mate: dict[int, int],
     allowed: dict[int, list[tuple[float, int, tuple[int, ...]]]],
     order: list[int],
-) -> int:
-    """Grow `mate` in place to a maximum-cardinality matching (Edmonds' blossoms).
+):
+    """Generator, yielding every 256 roots: grow `mate` in place to a maximum-cardinality matching (Edmonds' blossoms).
 
     Pairing triangles into quads by a matching on the dual graph is the idea of Blossom-Quad (Remacle et al. 2012);
     the search is Edmonds' algorithm (Edmonds 1965, "Paths, Trees, and Flowers") in its usual textbook form
@@ -825,6 +870,7 @@ def _augment_matching(
     for count, root in enumerate(order):
         if not count % 256:
             check_cancelled()
+            yield
         if root in mate or root in frozen or not adjacency.get(root):
             continue
         end, parent, tree = _blossom_search(root, mate, adjacency, frozen)
@@ -928,7 +974,7 @@ def _majority_material(a: str, b: str) -> str:
     return a if a == b else a
 
 
-def _score_output(
+def _score_output_steps(
     output: MeshData,
     source: _TriMesh,
     options: RemeshOptions,
@@ -936,12 +982,13 @@ def _score_output(
     seed: int,
     feature_edge_count: int,
     feature_breaks: int,
-) -> RemeshReport:
+):
+    """Generator: the RemeshReport of one candidate."""
     face_count = len(output.faces)
     quads = sum(1 for face in output.faces if len(face) == 4)
     tris = sum(1 for face in output.faces if len(face) == 3)
     quad_ratio = quads / max(1, face_count)
-    summary = topology_summary(output)
+    summary = yield from topology_summary_steps(output)
     boundary = summary.boundary_edges
     non_manifold = summary.non_manifold_edges
     extraordinary = summary.extraordinary_vertices

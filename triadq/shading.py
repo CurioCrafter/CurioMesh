@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .types import drain
+
 
 
 SMOOTH_DEG = 60.0  # faces meeting at more than this shade as a hard edge, on the output and in the check
@@ -15,6 +17,11 @@ SMOOTH_DEG = 60.0  # faces meeting at more than this shade as a hard edge, on th
 def corner_normals(points: np.ndarray, polys, degrees: float = SMOOTH_DEG) -> np.ndarray:
     """Unit normal per polygon corner, in the order of `polys`. Faces at the corner's vertex count if they're within
     `degrees` of the corner's own face, weighted by their angle at it, as Blender does."""
+    return drain(corner_normal_steps(points, polys, degrees))
+
+
+def corner_normal_steps(points: np.ndarray, polys, degrees: float = SMOOTH_DEG):
+    """Generator: `corner_normals`, a slice per stage and per corner count."""
 
     flat, starts, sizes = corner_table(polys)
     ends = np.cumsum(sizes)
@@ -32,11 +39,13 @@ def corner_normals(points: np.ndarray, polys, degrees: float = SMOOTH_DEG) -> np
     weighted = area[owner] * np.arccos(np.clip(cosine, -1.0, 1.0))[:, None]
     facing = area[owner]
     limit = np.cos(np.radians(degrees))
+    yield
     order = np.argsort(flat, kind="stable")
     counts = np.unique(flat, return_counts=True)[1]
     groups = np.split(order, np.cumsum(counts)[:-1])
     result = np.zeros_like(facing)
     for size in np.unique(counts).tolist():  # all vertices with this many corners at once
+        yield
         rows = np.stack([g for g in groups if len(g) == size])
         near = (facing[rows] @ np.swapaxes(facing[rows], 1, 2)) >= limit
         result[rows] = near.astype(np.float64) @ weighted[rows]

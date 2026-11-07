@@ -23,11 +23,11 @@ import math
 
 import numpy as np
 
-from .engine import RemeshOptions, RemeshReport, remesh_mesh
-from .quadreduce import collapse_loose_triangles, join_loose_triangles
+from .engine import STEP_FACES, RemeshOptions, RemeshReport, remesh_mesh, remesh_mesh_steps
+from .quadreduce import collapse_loose_triangle_steps, join_loose_triangle_steps
 from .patch import _half_edges, _inside_polygon, _key, _labels, _orient, _Planar, _polygon_distance, _tri_edges, face_adjacency
-from .topology import parity_path_closure_unpairing, quad_only_closure, topology_summary
-from .types import FlatFaces, MeshData, cancel_with, check_cancelled
+from .topology import parity_path_closure_unpairing_steps, quad_only_closure_steps, topology_summary_steps
+from .types import FlatFaces, MeshData, cancel_steps, check_cancelled, drain
 
 
 
@@ -485,6 +485,11 @@ def _rebuild_region(vertices, origin, normal, loops, dense, options, tol):
 
 def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> tuple[MeshData, FlatQuadReport]:
     """Replace flat regions by coarse conforming triangles; other faces pass through untouched."""
+    return drain(flatten_region_steps(mesh, options))
+
+
+def flatten_region_steps(mesh: MeshData, options: FlatQuadOptions | None = None):
+    """Generator: `flatten_regions`, a slice per few regions."""
 
     options = options or FlatQuadOptions()
     vertices = mesh.vertices
@@ -500,9 +505,11 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
     normals, areas = _face_frames(vertices, faces)
     materials = list(mesh.face_materials)
     labels = _grow_regions(vertices, faces, normals, areas, materials, tol, cos_limit)
+    yield
     fa, fb = face_adjacency(faces)
     if len(fa):
         labels = _merge_regions(vertices, faces, normals, labels, materials, fa, fb, tol, cos_limit)
+    yield
     _unique, labels = np.unique(labels, return_inverse=True)
     region_count = int(labels.max()) + 1
     members: list[list[int]] = [[] for _ in range(region_count)]
@@ -522,6 +529,7 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
         report.rejected_faces[reason] = report.rejected_faces.get(reason, 0) + len(members[region])
 
     edge_faces = _edge_faces(faces)
+    yield
     built: dict[int, tuple] = {}
     cache: dict[int, tuple] = {}  # most outlines survive a round unchanged
     for _round in range(32):  # a failed region becomes detail, which re-locks its neighbours' chains
@@ -531,7 +539,9 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
             kept, dense = kept | outline, dense | outline
         failed = False
         built.clear()
+        yield
         for region in np.flatnonzero(usable).tolist():
+            yield
             group = members[region]
             halves = set()
             for face in group:
@@ -596,6 +606,7 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
     else:
         built.clear()
 
+    yield
     is_flat = np.asarray([usable[label] and int(label) in built for label in labels.tolist()], dtype=bool)
     out_points = [vertices]
     out_faces = [faces[index] for index in np.flatnonzero(~is_flat).tolist()]
@@ -630,7 +641,12 @@ def flatten_regions(mesh: MeshData, options: FlatQuadOptions | None = None) -> t
 
 
 def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
-    """Make a dirty mesh certifiable for quad closure without moving anything.
+    """`make_closable_steps` in one go."""
+    return drain(make_closable_steps(mesh))
+
+
+def make_closable_steps(mesh: MeshData):
+    """Generator: make a dirty mesh certifiable for quad closure without moving anything.
 
     Faces with a repeated vertex, zero area, or the same vertices as an earlier
     face are dropped. Each vertex is then split into one copy per fan of faces
@@ -645,7 +661,9 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
     materials: list[str] = []
     span = float(np.linalg.norm(np.ptp(vertices, axis=0))) if len(vertices) else 1.0
     _normals, areas = _face_frames(vertices, mesh.faces)
-    for face, material, area in zip(mesh.faces, mesh.face_materials, areas.tolist()):
+    for count, (face, material, area) in enumerate(zip(mesh.faces, mesh.face_materials, areas.tolist())):
+        if count % STEP_FACES == STEP_FACES - 1:
+            yield
         key = tuple(sorted(face))
         if len(set(face)) < len(face) or key in seen or area <= 1e-14 * span * span:
             continue
@@ -661,10 +679,13 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
     for index, face in enumerate(faces):
         for vertex in face:
             users_of.setdefault(vertex, []).append(index)
+    yield
     new_points: list[np.ndarray] = []
     corner_copy: dict[tuple[int, int], int] = {}
     next_vertex = len(vertices)
-    for vertex, users in users_of.items():
+    for count, (vertex, users) in enumerate(users_of.items()):
+        if count % STEP_FACES == STEP_FACES - 1:
+            yield
         if len(users) < 2:
             continue
         parent = {face: face for face in users}
@@ -692,6 +713,7 @@ def make_closable(mesh: MeshData) -> tuple[MeshData, int]:
             next_vertex += 1
         for face in users:
             corner_copy[(vertex, face)] = copy_of[root(face)]
+    yield
     out_faces = [tuple(corner_copy.get((v, index), v) for v in face) for index, face in enumerate(faces)]
     stacked = np.vstack([vertices] + [p[None] for p in new_points]) if new_points else vertices
     return MeshData(vertices=stacked, faces=out_faces, face_materials=materials, name=mesh.name), len(new_points)
@@ -713,11 +735,16 @@ def pair_and_close(
     With `chunk_faces`, pairing runs per region of that size, for less memory on a huge mesh: a few more triangles are left at the seams.
     """
 
-    cancel_with(cancelled)
-    try:
-        return _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces, merge_triangles)
-    finally:
-        cancel_with(None)
+    return drain(pair_and_close_steps(coarse, seed_count=seed_count, force_quads=force_quads, field_mode=field_mode, feature_angle_deg=feature_angle_deg, cancelled=cancelled, guide_edges=guide_edges, keep_quads=keep_quads, join_triangles=join_triangles, chunk_faces=chunk_faces, merge_triangles=merge_triangles))
+
+
+def pair_and_close_steps(
+    coarse: MeshData, *, seed_count: int = 2, force_quads: bool = True, field_mode: str = "SMOOTH",
+    feature_angle_deg: float = 60.0, cancelled=None, guide_edges: tuple = (), keep_quads: bool = False, join_triangles: bool = False, chunk_faces: int = 0, merge_triangles: bool = False,
+):
+    """Generator: `pair_and_close`, yielding between slices of a few thousand faces. Returns (mesh, report)."""
+    steps = _pair_and_close_steps(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces, merge_triangles)
+    return (yield from cancel_steps(steps, cancelled))
 
 
 def _chunks(centers: np.ndarray, limit: int) -> list[np.ndarray]:
@@ -736,8 +763,8 @@ def _chunks(centers: np.ndarray, limit: int) -> list[np.ndarray]:
     return out
 
 
-def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[MeshData, RemeshReport]:
-    """Pair triangles one compact region at a time, so the working memory is that of one region, not of the whole mesh.
+def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int):
+    """Generator, a slice per region: pair triangles one compact region at a time, so the working memory is that of one region, not of the whole mesh.
 
     Each region is paired on its own and only its faces are kept, as arrays numbered like `mesh`. No pair crosses a seam,
     and nothing moves or splits here: closure then runs once on the whole result, so both sides of a seam agree by
@@ -771,6 +798,7 @@ def _pair_chunks(mesh: MeshData, options: RemeshOptions, limit: int) -> tuple[Me
     for region in regions:
         parts.append(one(region))
         check_cancelled()
+        yield
     counts = np.concatenate([part[0] for part in parts]).astype(np.int64)
     indptr = np.zeros(len(counts) + 1, dtype=np.int64)
     np.cumsum(counts, out=indptr[1:])
@@ -804,9 +832,10 @@ def _joined(first: FlatFaces, second: FlatFaces) -> FlatFaces:
     return FlatFaces(np.concatenate((first.indptr, second.indptr[1:] + first.indptr[-1])), np.concatenate((first.flat, second.flat)))
 
 
-def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces=0, merge_triangles=False):
-    repaired, _added = make_closable(coarse)
+def _pair_and_close_steps(coarse, seed_count, force_quads, field_mode, feature_angle_deg, guide_edges, keep_quads, join_triangles, chunk_faces=0, merge_triangles=False):
+    repaired, _added = yield from make_closable_steps(coarse)
     check_cancelled()
+    yield
     kept = None
     if keep_quads:
         flat = FlatFaces.of(repaired.faces)
@@ -820,19 +849,23 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
         target_faces=max(1, len(repaired.faces) // 2), seed_count=seed_count, force_quads=False, field_mode=field_mode,
         feature_angle_deg=feature_angle_deg, max_pairing=True, guide_edges=guide_edges,
     )
+    yield
     if chunk_faces and not guide_edges and len(repaired.faces) > chunk_faces:
-        paired, solver = _pair_chunks(repaired, pair, chunk_faces)
+        paired, solver = yield from _pair_chunks(repaired, pair, chunk_faces)
     else:
-        paired, solver = remesh_mesh(repaired, pair)
+        paired, solver = yield from remesh_mesh_steps(repaired, pair)
+    yield
     if kept is not None:
         paired = _flat_mesh(repaired.vertices, _joined(FlatFaces.of(paired.faces), kept[0]), list(paired.face_materials) + kept[1], paired.name)
     if not force_quads or not paired.faces:
         return paired, solver
     if merge_triangles:
-        paired = collapse_loose_triangles(paired)[0]
+        paired = (yield from collapse_loose_triangle_steps(paired))[0]
+        yield
     if join_triangles:
-        paired = join_loose_triangles(paired)[0]
-    closed, sparse, split, open_pieces, forced = _close_pieces(paired)
+        paired = (yield from join_loose_triangle_steps(paired))[0]
+        yield
+    closed, sparse, split, open_pieces, forced = yield from _close_piece_steps(paired)
     solver.forced_pieces = forced
     solver.closure_applied = True
     solver.closure_method = "PARITY_PATH" if not split and not open_pieces else "PER_PIECE"
@@ -846,27 +879,33 @@ def _pair_and_close(coarse, seed_count, force_quads, field_mode, feature_angle_d
     return closed, solver
 
 
-def _close_piece(piece: MeshData) -> tuple[MeshData, int]:
-    """(all-quad piece, 0 if closed by ParityPath, 1 by corner closure, 2 if it has only quads left as they were, 3 if forced).
+def _close_piece(piece: MeshData):
+    """Generator: (all-quad piece, 0 if closed by ParityPath, 1 by corner closure, 2 if it has only quads left as they were, 3 if forced).
 
     One bad edge must not leave a whole piece in triangles. A piece that won't close is opened along its non-manifold
     edges and tried again, and in the end split at every corner without the check on how the new quads look.
     """
 
-    opened, added = make_closable(piece)
+    opened, added = yield from make_closable_steps(piece)
     for attempt in ((piece, opened) if added else (piece,)):
-        for kind, closure in enumerate((parity_path_closure_unpairing, quad_only_closure)):
+        for kind, closure in enumerate((parity_path_closure_unpairing_steps, quad_only_closure_steps)):
+            yield
             try:
-                return closure(attempt), kind
+                return (yield from closure(attempt)), kind
             except ValueError:
                 continue
     if all(len(face) == 4 for face in piece.faces):
         return piece, 2
-    return quad_only_closure(opened, checked=False), 3
+    return (yield from quad_only_closure_steps(opened, checked=False)), 3
 
 
-def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
+def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int, int]:
     """(closed mesh, pieces closed by ParityPath, by corner closure, left as all-quad, forced with no check of the quads)."""
+    return drain(_close_piece_steps(paired))
+
+
+def _close_piece_steps(paired: MeshData):
+    """Generator: `_close_pieces`, a slice per piece or per few thousand faces of one."""
 
     fa, fb = face_adjacency(paired.faces)
     labels = _labels(len(paired.faces), fa, fb)
@@ -879,6 +918,7 @@ def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
     counts = [0, 0, 0, 0]
     for group in np.split(order, starts[1:]):
         check_cancelled()
+        yield
         members = group.tolist()
         used = sorted({v for f in members for v in paired.faces[f]})
         local = {v: k for k, v in enumerate(used)}
@@ -889,10 +929,10 @@ def _close_pieces(paired: MeshData) -> tuple[MeshData, int, int, int]:
         )
         result = piece
         kind = 2
-        if all(len(face) == 4 for face in piece.faces) and topology_summary(piece).all_quads:
+        if all(len(face) == 4 for face in piece.faces) and (yield from topology_summary_steps(piece)).all_quads:
             kind = 0
         else:
-            result, kind = _close_piece(piece)
+            result, kind = yield from _close_piece(piece)
         counts[kind] += 1
         points.append(result.vertices)
         faces.extend(tuple(v + offset for v in face) for face in result.faces)
