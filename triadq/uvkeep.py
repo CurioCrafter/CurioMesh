@@ -526,10 +526,9 @@ class FitStage:
                            split_budget=budget)
         # per-side transfer: the active layer's lookup first (folds fixed after the split's seam UVs are laid over it),
         # the other layers through the same lookup. A face whose fan triangles want opposite windings (orient 0: folded
-        # in 3D, or across a crease with one half leaning into a wall) and whose UVs wind one way shows the texture
-        # mirrored on one half; it is cut into its fan triangles, which can each wind their own way, and read again.
+        # in 3D, or across a crease with one half leaning into a wall) shows the texture mirrored on part of it under any
+        # one winding; it is cut into its fan triangles, which can each wind their own way, and read again.
         name, uv = sa.layers[sa.active]
-        ready = None
         for again in (False, True):
             tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, seams["class"], False, self.use_fast)
             if tr._job is not None:
@@ -544,22 +543,16 @@ class FitStage:
             look = tr.result
             if again:
                 break
-            ready = {}
-            yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, ready)
-            if self._stopped:
-                return
-            halve = fold_halves(ip, look["orient"], ready["uv"])
+            halve = (np.asarray(look["orient"]) == 0) & (np.diff(ip) > 3)
             if not halve.any():
                 break
-            ready = None
             ip, fl, origin = fan_split(ip, fl, origin, halve)
             added = len(ip) - 1 - len(halve)
             numbers.update(extra_faces=numbers["extra_faces"] + added, faces_halved=int(halve.sum()))
         out = {}
         for i, (nm, luv) in enumerate(sa.layers):
-            got = ready if i == sa.active and ready is not None else {}
-            if not got:
-                yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+            got = {}
+            yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
             if self._stopped:
                 return
             out[i] = np.asarray(got["uv"], np.float64).reshape(-1, 2)
@@ -580,24 +573,6 @@ class FitStage:
         self.candidate, self.numbers = c, numbers
         if not self.only_transfer:
             remember(c)
-
-
-def fold_halves(indptr, orient, uv) -> np.ndarray:
-    """Per result face: True where the lookup found its fan triangles wanting opposite windings (orient 0) but its UVs
-    wind every fan triangle the same way, so the texture shows mirrored on part of it."""
-
-    ip = np.asarray(indptr, np.int64)
-    q = np.asarray(uv, np.float64).reshape(-1, 2)
-    sizes = np.diff(ip)
-    tri_face = np.repeat(np.arange(len(sizes)), np.maximum(sizes - 2, 0))
-    i = np.arange(len(tri_face)) - np.repeat(np.cumsum(np.maximum(sizes - 2, 0)) - np.maximum(sizes - 2, 0), np.maximum(sizes - 2, 0)) + 1
-    s = ip[tri_face]
-    a, b = q[s + i] - q[s], q[s + i + 1] - q[s]
-    area = a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1]
-    pos = np.bincount(tri_face, area > 0, len(sizes))
-    neg = np.bincount(tri_face, area < 0, len(sizes))
-    fan = np.maximum(sizes - 2, 0)
-    return (np.asarray(orient) == 0) & (fan > 1) & ((pos == fan) | (neg == fan))
 
 
 def fan_split(indptr, flat, origin, mask) -> tuple:
