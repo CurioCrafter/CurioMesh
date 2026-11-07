@@ -73,9 +73,9 @@ def save() -> None:
     values = np.zeros(len(mesh.polygons), dtype=np.int32)
     values[src["keep"]] = labels
     attribute = mesh.attributes.get(ATTRIBUTE)
-    if attribute is None or attribute.domain != "FACE" or attribute.data_type != "INT":
-        if attribute is not None:
-            mesh.attributes.remove(attribute)
+    if attribute is not None and (attribute.domain != "FACE" or attribute.data_type != "INT"):
+        return  # an attribute of that name that isn't ours: never overwrite or remove it
+    if attribute is None:
         attribute = mesh.attributes.new(ATTRIBUTE, "INT", "FACE")
     attribute.data.foreach_set("value", values)
     source[SAVED] = json.dumps({
