@@ -2272,8 +2272,12 @@ class AutoJob:
 
         total = float(areas.sum()) or 1.0
         folder = tempfile.mkdtemp(prefix="curiomesh_rows_")
-        atexit.register(shutil.rmtree, folder, True)  # Blender quit in the middle
-        atexit.register(self._kill_worker)
+
+        def clean_up():  # also run if Blender quits in the middle
+            self._kill_worker()
+            shutil.rmtree(folder, ignore_errors=True)
+
+        atexit.register(clean_up)
         try:
             sizes = np.asarray([len(ids) for ids in self.pieces], dtype=np.float64)
             wants = (target * 0.5 * (areas / total + sizes / sizes.sum())).astype(np.int64)  # a small part with many faces is usually detail
@@ -2365,8 +2369,8 @@ class AutoJob:
                 offset += len(moved)
                 yield
         finally:
-            self._kill_worker()
-            shutil.rmtree(folder, ignore_errors=True)
+            atexit.unregister(clean_up)  # a finished job is not kept alive by an exit hook
+            clean_up()
         if leftovers:
             pts, fcs, knd, cursor = [], [], [], 0
             for points, polys, kinds in leftovers:
