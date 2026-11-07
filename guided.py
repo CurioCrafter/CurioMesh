@@ -3030,10 +3030,7 @@ def _lod_finished(context, source, report) -> None:
     gs = context.scene.curiomesh_guided
     lod = state["lod"]
     level = len(lod["made"])
-    name = profiles.lod_name(source.name, level)
-    old = bpy.data.objects.get(name)
-    if old is not None and "curiomesh_lod" in old:  # made by this button before: the name must stay free for the engine's import
-        bpy.data.objects.remove(old)
+    name = profiles.lod_name(source.name, level)  # old LODs were removed by the operator, so the name is free unless the user took it
     out, baked = _write_result(context, source, state["res"], gs, name)
     out["curiomesh_lod"] = level
     out["curiomesh_view_change"] = report["loss"]
@@ -3049,9 +3046,10 @@ def _lod_finished(context, source, report) -> None:
     if any(notes):
         state["lod_report"] += " | " + next(n for n in notes if n) + (" (the smaller sizes share this limit)" if sum(map(bool, notes)) > 1 else "")
     bpy.ops.object.select_all(action="DESELECT")
-    first = bpy.data.objects[made[0][0]]
-    first.select_set(True)
-    context.view_layer.objects.active = first
+    first = bpy.data.objects.get(made[0][0])  # the user may have renamed or deleted it while the set was made
+    if first is not None:
+        first.select_set(True)
+        context.view_layer.objects.active = first
 
 
 class _AskFirst:
@@ -3095,8 +3093,8 @@ def _ask_lines(context, bakes: int = 1, applying: bool = False) -> list[str]:
 class CURIOMESH_OT_guided_make_lods(_AskFirst, bpy.types.Operator):
     bl_idname = "curiomesh.guided_make_lods"
     bl_label = "Make LOD Set"
-    bl_description = "Make three new objects named for game engines (_LOD0, _LOD1, _LOD2), each a Reduce To of your mesh at the percents here. Blender stays usable, and only the first needs the full search. Uses your UV and bake settings"
-    bl_options = {"INTERNAL"}
+    bl_description = "Make three new objects named for game engines (_LOD0, _LOD1, _LOD2), each a Reduce To of your mesh at the percents here. LODs this button made before for this mesh are replaced (Ctrl+Z brings them back). Blender stays usable, and only the first needs the full search. Uses your UV and bake settings"
+    bl_options = {"UNDO", "INTERNAL"}
 
     @classmethod
     def poll(cls, context):
@@ -3114,6 +3112,14 @@ class CURIOMESH_OT_guided_make_lods(_AskFirst, bpy.types.Operator):
         state["source"] = source.name
         stop_work()
         remove_preview()
+        old = [obj for level in range(profiles.LOD_LEVELS) if (obj := bpy.data.objects.get(profiles.lod_name(source.name, level))) is not None and "curiomesh_lod" in obj]
+        for obj in old:  # made by this button before: the names must stay free for the engine's import
+            mesh = obj.data
+            bpy.data.objects.remove(obj)
+            if mesh is not None and mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+        if old:
+            self.report({"INFO"}, f"Replacing {len(old)} old LOD object(s); Ctrl+Z brings them back")
         state.update(region=None, lod_report="", lod=None)
         gs["bool_on"] = False
         gs.scope = "AUTO"
