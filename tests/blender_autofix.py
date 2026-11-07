@@ -349,7 +349,7 @@ def run_model(key):
     rec = len(H.steps.entries)
     before = res_co()
     if real_button:
-        r = bpy.ops.curiomesh.tool_every("EXEC_DEFAULT", tool=tool_op)
+        r = bpy.ops.curiomesh.tool_every("EXEC_DEFAULT", True, tool=tool_op)  # True: push the undo step a click pushes (a script call does not)
         ok(r == {"FINISHED"} or r == {"CANCELLED"}, f"{name}: the per-tool button ran: {r}")
         kept_one = r == {"FINISHED"}
     else:
