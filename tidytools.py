@@ -18,7 +18,8 @@ from dataclasses import dataclass
 import bpy
 import numpy as np
 
-from . import history, icons, overlay, tidylive
+from . import autofix_live, history, icons, overlay, tidylive
+from .triadq import autofix
 from .triadq import relax as RX
 from .triadq import loopspoles as LP
 from .triadq import hardtidy as HT
@@ -102,6 +103,8 @@ def why_not(context) -> str:
         return "Make a result first with Start. Tools work on the result before you apply it."
     if g.progress_info("AUTO") is not None:
         return "Wait for the search to finish or press Stop."
+    if autofix_live.busy():
+        return "Auto Fix is working. Wait for it, or press Stop to keep what it fixed so far."
     ts = history.settings(context.scene)
     scope = ts.tool_scope if ts is not None else "WHOLE"
     if scope == "SELECTION":
@@ -129,6 +132,67 @@ class _Tool(tidylive.LiveTool):
         if why:
             cls.poll_message_set(why)
         return not why
+
+
+def trial_of(idname: str):
+    """The Trial class of a tool's operator, or None."""
+    cls = getattr(bpy.types, "CURIOMESH_OT_" + idname.partition(".")[2], None)
+    return getattr(cls, "trial", None)
+
+
+def finds_spots(idname: str) -> bool:
+    """True when this tool fixes spots by itself (it has `spots`, and is not manual only)."""
+    trial = trial_of(idname)
+    return trial is not None and getattr(trial, "auto", False) and trial.spots is not TT.Trial.spots
+
+
+def _every_class(idname: str):
+    """The tool's Trial wrapped in `EverySpot`, with the tool's idname among its settings so Again can open it."""
+    inner = autofix.every(trial_of(idname))
+
+    class Every(inner):
+        def __init__(self, trial=None):
+            super().__init__(trial)
+            self.defaults = dict(self.defaults, tool=idname)
+
+    Every.__name__ = inner.__name__
+    return Every
+
+
+class CURIOMESH_OT_tool_every(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_every"
+    bl_label = "Fix Every Spot Like This"
+    bl_description = "Finds every spot this tool is made for in Work On and shows every fix first. Enter keeps the ones that got better"
+    bl_options = {"REGISTER", "UNDO"}
+
+    tool: bpy.props.StringProperty(name="Tool", description="Which tool to run on every spot it finds", default="", options={"SKIP_SAVE"})
+    keep_going: bpy.props.BoolProperty(name="Keep Going", description="Runs again on the kept result, and keeps each run that makes something better, until a run makes nothing better. Esc stops", default=False)
+
+    @classmethod
+    def description(cls, context, properties):
+        trial = trial_of(properties.tool) if properties.tool else None
+        many = trial.kinds[0][2] if trial is not None and trial.kinds else "spots"
+        return f"Fix every spot like this: finds every {many} in Work On and shows every fix first. Enter keeps the ones that got better"
+
+    @classmethod
+    def poll(cls, context):
+        why = why_not(context)
+        if why:
+            cls.poll_message_set(why)
+        return not why
+
+    def _bind(self) -> bool:
+        if not finds_spots(self.tool):
+            self.report({"WARNING"}, "This tool has no spots to find. Open it by itself instead.")
+            return False
+        self.trial = _every_class(self.tool)
+        return True
+
+    def invoke(self, context, event):
+        return super().invoke(context, event) if self._bind() else {"CANCELLED"}
+
+    def execute(self, context):
+        return super().execute(context) if self._bind() else {"CANCELLED"}
 
 
 class PartSwap(tidylive.LiveTool):
@@ -985,7 +1049,12 @@ class _GroupPopover:
     def draw(self, context):
         col = self.layout.column(align=True)
         for tool in shown_tools(context, self.GROUP):
-            col.operator(tool.idname, text=tool.label, **icons.kw(tool.icon, tool.stock))
+            if not finds_spots(tool.idname):  # manual only: the row is just the tool
+                col.operator(tool.idname, text=tool.label, **icons.kw(tool.icon, tool.stock))
+                continue
+            row = col.row(align=True)
+            row.operator(tool.idname, text=tool.label, **icons.kw(tool.icon, tool.stock))
+            row.operator("curiomesh.tool_every", text="", **icons.kw("tt_fix_every", "SHADERFX")).tool = tool.idname
 
 
 def _popover(key, label, tip):
@@ -994,7 +1063,7 @@ def _popover(key, label, tip):
 
 POPOVERS = tuple(_popover(key, label, tip) for key, label, _icon, _stock, tip in GROUPS)
 PANELS = (CURIOMESH_PT_guided_tools, CURIOMESH_PT_guided_history)  # registered by panel.py, in the main tab's order
-CLASSES = (CURIOMESH_OT_tool_source_relax, CURIOMESH_OT_tool_keep_lines_relax, CURIOMESH_OT_tool_square_up, CURIOMESH_OT_tool_relax_toward_detail, CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_even_band, CURIOMESH_OT_tool_cancel_pole_pair, CURIOMESH_OT_tool_open_poles, CURIOMESH_OT_tool_preview_tidy, CURIOMESH_OT_tool_seal_middle, CURIOMESH_OT_tool_true_up_edges, CURIOMESH_OT_tool_press_panels_flat, CURIOMESH_OT_tool_hard_edges, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
+CLASSES = (CURIOMESH_OT_tool_source_relax, CURIOMESH_OT_tool_keep_lines_relax, CURIOMESH_OT_tool_square_up, CURIOMESH_OT_tool_relax_toward_detail, CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_even_band, CURIOMESH_OT_tool_cancel_pole_pair, CURIOMESH_OT_tool_open_poles, CURIOMESH_OT_tool_preview_tidy, CURIOMESH_OT_tool_seal_middle, CURIOMESH_OT_tool_true_up_edges, CURIOMESH_OT_tool_press_panels_flat, CURIOMESH_OT_tool_hard_edges, CURIOMESH_OT_tool_every, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
 
 
 def register() -> None:

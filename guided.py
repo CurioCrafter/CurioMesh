@@ -29,7 +29,7 @@ from mathutils.kdtree import KDTree
 
 from . import guides, live, overlay, region, segments, symmetry, textures
 from . import loops as edgeloops
-from . import autoretopo, blockout, faceloops, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
+from . import autofix_live, autoretopo, blockout, faceloops, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
 from .triadq.budget import density_drop
 from .triadq.engine import RemeshOptions, remesh_mesh
@@ -317,12 +317,13 @@ def _detail_set(self, value: int) -> None:
 
 
 def _cleanup_get(self) -> int:
-    return 2 if self.auto_tidy else 1 if self.auto_redo_rough else 0
+    return 2 if self.auto_tidy else 1 if self.auto_redo_rough or self.auto_fix else 0
 
 
 def _cleanup_set(self, value: int) -> None:
     """Quick, Normal, Thorough over the three tidy switches (still in Pro > Engine one by one)."""
     self.auto_redo_rough = value >= 1
+    self.auto_fix = value >= 1
     self.auto_tidy = value == 2
     self.auto_chords = value == 2 or self.auto_profile in CHORDS_PROFILES
 
@@ -446,6 +447,7 @@ class CURIOMESH_PG_guided(bpy.types.PropertyGroup):
     auto_baked: bpy.props.BoolProperty(name="Judge After Baking (Experimental)", description="Experimental, Low Poly on scans you will bake: judges the look after baking, so far fewer faces remain. Can leave thin slivers; check the result", default=False)
     auto_chords: bpy.props.BoolProperty(name="Redraw Messy Quads", description="Redraws messy patches as plain grids of quads. Much tidier loops; adds a minute or two, and can stall on models of many loose pieces", default=False)
     auto_tidy: bpy.props.BoolProperty(name="Tidy Quads", description="Evens out the quads after the search, closer to hand-made. Slow, and the shape changes a little more", default=False)
+    auto_fix: bpy.props.BoolProperty(name="Auto Fix", description="After the search, each tidy tool finds the spots it is made for and fixes them, keeping only fixes that make the quads better within Most Detail Loss. Every fix is a step you can undo", default=True)
     auto_redo_rough: bpy.props.BoolProperty(name="Redo Rough Spots", description="Rebuilds the small spots where faces point inward, fold or cross. Adds up to a minute; recommended", default=False)
     keep_uvs: bpy.props.BoolProperty(name="Keep UV Seams", description="Keeps quads inside each piece of your UV map so textures stay in place. Can double the faces; for game assets, baking is usually better", default=False)
     lod0_percent: bpy.props.FloatProperty(name="LOD0", description="Faces of the most detailed LOD, as a share of your mesh's faces", default=profiles.LOD_PERCENTS[0], min=0.1, max=100.0, precision=1, subtype="PERCENTAGE")
@@ -2044,6 +2046,7 @@ def _collect_work(context) -> None:
             segments.ensure()
             segments.segment_goals.start_find(context)
             ladder.start(context)
+            autofix_live.start(context)  # Auto Fix, when it is on: a timer fixes spots one pass at a time
             words = f"{len(state['res']['faces']):,} faces" if state["res"] is not None else ""
             if not history.settled("search", words):  # a Tweak slider or a Detail Marker asked for this search: it is that step
                 history.record(context, "New result", words, push=True)

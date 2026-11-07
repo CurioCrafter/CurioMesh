@@ -142,6 +142,7 @@ REPAIR_SECONDS = 30.0  # time for clearing crossings per run; what's left is sel
 REPAIR_GROWTH = 1.03  # a repair may not add more than this share of faces to the whole result
 REDO_SECONDS = 60.0  # Redo Rough Spots: time per run; the spots not reached stay as they are
 REDO_ROUNDS = 2  # rounds that always run; after them a round runs only while the round before cut the bad faces (each one ring wider)
+AUTOFIX_SECONDS = 180.0  # Auto Fix after Start: time for all its passes; when it runs out it says so and offers Keep going
 REDO_SPOTS = 200  # spots looked at per round, worst first
 REDO_RINGS = 2  # faces round a spot taken into its region, in rings of neighbours
 REDO_MOST_FACES = 600  # a region never gets bigger than this
@@ -149,8 +150,8 @@ REDO_SHARES = (0.5, 1.0, 0.25)  # per region: how far its inner corners are put 
 if os.environ.get("CURIOMESH_NO_TIME_LIMITS", "").strip().lower() in {"1", "true", "on", "yes"}:
     # The limits above end work by the clock, so a slower or busier computer stops at another point and the result differs a little.
     # Set this to run to the end instead: the same model and settings then give the same result every time.
-    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = REDO_SECONDS = float("inf")
-TIME_NAMES = ("FIELD_SECONDS", "CHORDS_SECONDS", "UNTANGLE_SECONDS", "REPAIR_SECONDS", "REDO_SECONDS")
+    FIELD_SECONDS = CHORDS_SECONDS = UNTANGLE_SECONDS = REPAIR_SECONDS = REDO_SECONDS = AUTOFIX_SECONDS = float("inf")
+TIME_NAMES = ("FIELD_SECONDS", "CHORDS_SECONDS", "UNTANGLE_SECONDS", "REPAIR_SECONDS", "REDO_SECONDS", "AUTOFIX_SECONDS")
 TIME_BASE = {name: globals()[name] for name in TIME_NAMES}
 TIME_SCALES = {"NORMAL": 1.0, "LONGER": 4.0, "NONE": float("inf")}  # the panel's Time Limits
 _time_kind = "NORMAL"
