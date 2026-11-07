@@ -31,7 +31,7 @@ SLICE_SECONDS = 0.002
 ROW_TOL_DEG = 1e-6
 WAIT = "wait"  # a stage yields this while a faster job runs: step() returns at once instead of spinning
 SELF_CHECK_FACES = 4  # charts smaller than this are not checked for lying over themselves (a pole of valence 5 needs 5 faces)
-CHECK_BATCH = 48  # charts checked in one call, each in its own tile
+CHECK_BATCH = 24  # charts checked in one call, each in its own tile
 RASTER_PX = 128  # tile size of the check that runs without the faster callable
 SELF_CHECK_PX = 256.0  # a checked chart is drawn this big (its longest side is SELF_CHECK_FILL of it)
 SELF_CHECK_FILL = 0.9
@@ -468,8 +468,12 @@ class NewUVs:
         are drawn at a small size, each in its own integer tile, so one check answers for the whole group."""
 
         side = int(np.ceil(np.sqrt(len(groups))))
-        pieces, vbase, points, ptr, flat_, uvs = [], 0, [], [0], [], []
+        vbase, points, ptr, flat_, uvs = 0, [], [0], [], []
+        until = time.perf_counter() + self.budget
         for i, faces in enumerate(groups):
+            if time.perf_counter() > until:
+                yield
+                until = time.perf_counter() + self.budget
             corners, local, lptr, pts = self._sub(faces)
             uv = corner_uv[corners]
             span = float((uv.max(axis=0) - uv.min(axis=0)).max())
