@@ -33,7 +33,38 @@ def kinds(old_charts, source, src, gs):
         target = guided.auto_target(gs, len(src["faces"]))
     except Exception:  # not running inside the add-on (tests)
         pass
-    return uvkeep.kinds_for_remesh(source, src, gs, target or None)
+    return as_islands(uvkeep.kinds_for_remesh(source, src, gs, target or None), _islands_of(source, src))
+
+
+def _islands_of(source, src):
+    """UV island of every source face in the active layer, numbered as guided's own UV transfer numbers them, or None."""
+    try:
+        from . import guided
+
+        uv = uv_layers.read_uv(source.data)
+        return None if uv is None else np.asarray(guided._uv_islands(src, uv)).reshape(-1)
+    except Exception:  # not inside the add-on (tests), or no layer
+        return None
+
+
+def as_islands(got, island):
+    """The kinds with each code's third entry an island id: guided._transfer_uvs reads res["chart"] (filled from it) as
+    the island of the active layer. Each code gets the island most of its faces lie on, one not given to another code
+    when there is one, so codes stay apart (tools never join faces of two kinds)."""
+    if got is None or island is None or len(island) != len(got[0]):
+        return got
+    codes, mats, _kind = got
+    pairs, count = np.unique(np.stack([np.asarray(codes, np.int64), island.astype(np.int64)], axis=1), axis=0, return_counts=True)
+    out = np.full(len(mats), -1, np.int64)
+    taken = set()
+    for c, i in pairs[np.argsort(-count, kind="stable")].tolist():
+        if out[c] < 0 and i not in taken:
+            out[c] = i
+            taken.add(i)
+    for c in np.flatnonzero(out < 0).tolist():  # every island of this code went to another one: share the biggest
+        hit = pairs[pairs[:, 0] == c]
+        out[c] = hit[0, 1] if len(hit) else 0
+    return codes, mats, out
 
 
 def _write_back(res: dict, c: uvkeep.Candidate) -> None:

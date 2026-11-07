@@ -188,11 +188,7 @@ ok(len(res_co()) == len(after) and np.allclose(res_co(), after), "Ctrl+Shift+Z b
 
 # --- 3. the result's Apply writes exactly the previewed fit
 bpy.context.view_layer.objects.active = bpy.data.objects["Monkey"]
-if guided.state["res"].get("chart") is not None:
-    # guided._transfer_uvs reads res["chart"] as old island ids, but in Light it holds uvkeep's kind codes (A1/H1 bug,
-    # reported): it crashes on an empty island. after_apply overwrites those UVs anyway, so the test drops it here.
-    print("INFO res['chart'] dropped before Apply (known A1/H1 issue)", flush=True)
-    guided.state["res"].pop("chart")
+print(f"INFO res['chart'] kept through Apply: {guided.state['res'].get('chart') is not None}", flush=True)
 f2 = importlib.import_module(pkg.__name__ + ".triadq.types").FlatFaces.of(guided.state["res"]["faces"])
 k2 = KEEP.result_key(res_co(), f2.indptr, f2.flat)
 print(f"INFO before Apply: key filed={k2 in KEEP.CANDIDATES}, filed keys={len(KEEP.CANDIDATES)}, mode={KEEP.mode_of(gs)}", flush=True)

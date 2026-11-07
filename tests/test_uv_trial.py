@@ -163,6 +163,16 @@ class UVOnly(unittest.TestCase):
         self.assertLess(cand.numbers["overlap_pct"], 0.01 + base.cache["numbers"]["overlap_pct"])
 
 
+class KindsAsIslands(unittest.TestCase):
+    def test_every_code_names_a_real_island_and_codes_stay_apart(self):
+        hooks = common.addon_module("uv_hooks")
+        codes = np.array([0, 0, 0, 1, 1, 2])
+        island = np.array([5, 5, 7, 7, 7, 9])  # code 0 lies on islands 5 and 7, code 1 on 7, code 2 on 9
+        _c, _m, out = hooks.as_islands((codes, np.zeros(3, np.int64), np.arange(3)), island)
+        self.assertEqual(out.tolist(), [5, 7, 9])
+        self.assertTrue(set(out.tolist()) <= set(island.tolist()))
+
+
 class Names(unittest.TestCase):
     AVOID = ("New UV Map", "Keep Seams", "Keep My Seams", "Pack Islands", "Pack Again", "Repack", "Hide Cuts", "Mark Seam", "Protect UV",
              "Fewer Islands", "Low Stretch", "Bake Into Existing", "Even Out UVs", "Utilization", "Straighten", "Rectify")
