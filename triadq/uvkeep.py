@@ -457,6 +457,23 @@ class FitStage:
         except StopIteration:
             self.done = True
 
+    def _lookup(self, uv, P, ip, fl):
+        """Generator: the per-side lookup of the active layer `uv` on result (P, ip, fl), sliced; returns the lookup dict,
+        or None when stopped."""
+
+        sa, s = self.sa, self.settings
+        tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, self.plan.seams["class"], False, self.use_fast)
+        if tr._job is not None:
+            self._now = tr
+        while not tr.done:
+            tr.step()
+            yield
+            if self._stopped:
+                tr.stop()
+                return None
+        self._now = None
+        return tr.result
+
     def _drive(self, stage):
         self._now = stage
         while not stage.done:
@@ -509,53 +526,52 @@ class FitStage:
             r = snap.result
             P, vchain, vparam = np.asarray(r["points"], np.float64), r["vchain"], r["vparam"]
             numbers.update(moved=int(r["moved"]), held=int(np.sum(r["held"])))
-        if soft and s.split:
-            if s.allowance is None:
-                budget = -1.0
-            else:
-                off = nf - plan.hard_spent - self.extra_so_far
-                budget = max(0.0, s.allowance * off - plan.hard_spent - self.extra_so_far)
-            cut = uvsnap.Split(P, ip, fl, seams, xyz, vchain, vparam, (), budget, use_fast=self.use_fast)
-            yield from self._drive(cut)
-            if self._stopped:
-                return
-            r = cut.result
-            P, ip, fl, origin = np.asarray(r["points"], np.float64), np.asarray(r["indptr"], np.int64), np.asarray(r["flat"], np.int64), np.asarray(r["origin"], np.int64)
-            numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
-                           faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
-                           split_budget=budget)
+        budget = -1.0
+        if soft and s.split and s.allowance is not None:
+            off = nf - plan.hard_spent - self.extra_so_far
+            budget = max(0.0, s.allowance * off - plan.hard_spent - self.extra_so_far)
         # per-side transfer: the active layer's lookup first (folds fixed after the split's seam UVs are laid over it),
         # the other layers through the same lookup. A face whose fan triangles want opposite windings (orient 0: folded
         # in 3D, or across a crease with one half leaning into a wall) shows the texture mirrored on part of it under any
         # one winding; it is cut into its fan triangles, which can each wind their own way, and read again. So is a face
-        # the fold fix leaves folded, and a face with a zero-area fan triangle (closed by `close_flat`).
+        # the fold fix leaves folded, and a face with a zero-area fan triangle (closed by `close_flat`). The cut faces come
+        # out of the extra-face allowance: when they do not fit beside the split, the split runs again with less.
         name, uv = sa.layers[sa.active]
-        ready = None
-        for again in (False, True):
-            tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, seams["class"], False, self.use_fast)
-            if tr._job is not None:
-                self._now = tr
-            while not tr.done:
-                tr.step()
-                yield
+        P0, ip0, fl0 = P, ip, fl
+        reserve = 0
+        while True:
+            P, ip, fl, origin = P0, ip0, fl0, np.arange(nf, dtype=np.int64)
+            if soft and s.split:
+                give = budget if budget < 0 else max(0.0, budget - reserve)
+                cut = uvsnap.Split(P, ip, fl, seams, xyz, vchain, vparam, (), give, use_fast=self.use_fast)
+                yield from self._drive(cut)
                 if self._stopped:
-                    tr.stop()
                     return
-            self._now = None
-            look = tr.result
-            if again:
-                break
+                r = cut.result
+                P, ip, fl, origin = np.asarray(r["points"], np.float64), np.asarray(r["indptr"], np.int64), np.asarray(r["flat"], np.int64), np.asarray(r["origin"], np.int64)
+                numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
+                               faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
+                               split_budget=give)
+            look = yield from self._lookup(uv, P, ip, fl)
+            if look is None:
+                return
             ready = {}
             yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, ready)
             if self._stopped:
                 return
             halve = halve_mask(P, ip, fl, look["orient"]) | still_folded(ip, ready["uv"], ready["expected"])
-            if not halve.any():
-                break
+            cost = int((np.diff(ip)[halve] - 3).sum())
+            if soft and s.split and budget >= 0 and numbers["extra_faces"] + cost > budget and reserve < cost:
+                reserve = cost  # room for the cut faces: split again with less
+                continue
+            break
+        if halve.any():
             ready = None
             ip, fl, origin = fan_split(ip, fl, origin, halve)
-            added = len(ip) - 1 - len(halve)
-            numbers.update(extra_faces=numbers["extra_faces"] + added, faces_halved=int(halve.sum()))
+            numbers.update(extra_faces=numbers["extra_faces"] + cost, faces_halved=int(halve.sum()), halve_reserve=reserve)
+            look = yield from self._lookup(uv, P, ip, fl)
+            if look is None:
+                return
         out = {}
         for i, (nm, luv) in enumerate(sa.layers):
             got = ready if i == sa.active and ready is not None else {}
