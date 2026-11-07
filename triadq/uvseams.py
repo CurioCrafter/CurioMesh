@@ -1015,20 +1015,30 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
             continue
         shortest = min(_dist(a, b), _dist(b, cc), _dist(cc, a))
         reach = math.sqrt(src.on_faces([g0], q)[0]) + WIND_BALL_EDGE * shortest
-        ball, seen, at, allowed = [g0], {g0}, 0, 0
-        while at < len(ball):
-            f = ball[at]
-            at += 1
+        ball, seen, out, allowed = [g0], {g0}, set(), 0
+        frontier = [g0]
+        while frontier:  # the ball grows a ring at a time: one batched distance pass per ring (the set is what counts)
+            cands = []
+            for f in frontier:
+                for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
+                    v = int(src.wflat[h])
+                    for g in src.vf[src.vf_ptr[v]:src.vf_ptr[v + 1]].tolist():
+                        if g not in seen and g not in out:
+                            out.add(g)
+                            cands.append(g)
+            frontier = []
+            if cands:
+                for g, hit in zip(cands, src.on_each([[g] for g in cands], [q] * len(cands))):
+                    if math.sqrt(hit[0]) <= reach:
+                        out.discard(g)
+                        seen.add(g)
+                        frontier.append(g)
+                        ball.append(g)
+        for f in ball:
             if _has_area(src, f):
                 wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, f))
                 w = _facing(nt, src.normal[f]) * wind * ref_wind
                 allowed |= 3 if wind == 0.0 else (1 if w > 0.0 else (2 if w < 0.0 else 0))
-            for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
-                v = int(src.wflat[h])
-                for g in src.vf[src.vf_ptr[v]:src.vf_ptr[v + 1]].tolist():
-                    if g not in seen and math.sqrt(src.on_faces([g], q)[0]) <= reach:
-                        seen.add(g)
-                        ball.append(g)
         if allowed:
             common &= allowed
             said = True
