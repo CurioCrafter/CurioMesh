@@ -13,10 +13,17 @@ import sys
 
 import addon_utils
 
-at = sys.argv.index("--") + 1
-package, module, function = sys.argv[at : at + 3]
 ENTRIES = {("parallel", "worker_main"), ("rows_worker", "main")}
-if (module, function) not in ENTRIES:
-    raise SystemExit(f"not a CurioMesh helper entry: {module}.{function}")
-addon_utils.enable(package, default_set=False)
-getattr(importlib.import_module(f"{package}.{module}"), function)(sys.argv[:at] + sys.argv[at + 3 :])
+
+
+def run(argv) -> None:
+    at = argv.index("--") + 1
+    package, module, function = argv[at : at + 3]
+    if (module, function) not in ENTRIES:
+        raise SystemExit(f"not a CurioMesh helper entry: {module}.{function}")
+    addon_utils.enable(package, default_set=False)
+    getattr(importlib.import_module(f"{package}.{module}"), function)(argv[:at] + argv[at + 3 :])
+
+
+if "--" in sys.argv:  # only a helper Blender started with --python passes "--"; a plain import runs nothing
+    run(sys.argv)

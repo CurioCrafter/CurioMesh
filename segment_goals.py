@@ -1014,7 +1014,7 @@ def _centres():
 
 
 class _SegmentOp:
-    bl_options = {"INTERNAL"}
+    bl_options = {"INTERNAL", "UNDO"}
 
     def _done(self, problem: str):
         if problem:
@@ -1365,7 +1365,7 @@ class CURIOMESH_OT_seg_goal(bpy.types.Operator):
     bl_idname = "curiomesh.seg_goal"
     bl_label = "Redo"
     bl_description = "Remakes the selected parts for this Use; only they change and their borders stay. Every result stays in the part's tries"
-    bl_options = {"INTERNAL"}
+    bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
     def poll(cls, context):
@@ -1374,16 +1374,20 @@ class CURIOMESH_OT_seg_goal(bpy.types.Operator):
     def execute(self, context):
         gs = context.scene.curiomesh_guided
         todo = []
+        changed = False
         detail = round(gs.seg_goal_detail, 3)
         for p in sorted(view.seg["sel"]):
             record = view.seg["parts"][p]
-            record.update(goal=gs.seg_goal, goal_detail=gs.seg_goal_detail, choice=gs.seg_method)
+            wanted = {"goal": gs.seg_goal, "goal_detail": gs.seg_goal_detail, "choice": gs.seg_method}
+            changed |= any(record.get(k) != v for k, v in wanted.items())
+            record.update(wanted)
             tried = next((i for i, t in enumerate(record["tries"]) if t["method"] == gs.seg_goal and t.get("detail") == detail and t.get("choice") == _choice_of(gs.seg_goal, gs.seg_method)), None)
             if tried is None:
                 todo.append(p)
             elif record["cur"] != tried:
                 view.use_try(context, p, tried)
-        save()
+        if changed:  # only a real change is written on your object
+            save()
         # A whole loose piece at the search's own size can keep what the search measured and only change method.
         keeps_size = abs(gs.seg_goal_detail - 0.5) < 1e-3 and gs.seg_goal == "REDUCE" and all(view.seg["parts"][p].get("whole") for p in todo)
         if todo and keeps_size and gs.seg_method != "AUTO":
@@ -1421,7 +1425,7 @@ class CURIOMESH_OT_seg_multires(bpy.types.Operator):
     bl_idname = "curiomesh.seg_multires"
     bl_label = "Multires Detail"
     bl_description = "On Apply, the selected parts follow your mesh in the Multires levels. Off, they keep their own shape at every level"
-    bl_options = {"INTERNAL"}
+    bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
     def poll(cls, context):
