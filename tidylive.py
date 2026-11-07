@@ -122,7 +122,7 @@ def _ui_scale() -> float:
 
 
 def _preview():
-    obj = bpy.data.objects.get(_g().PREVIEW_NAME)
+    obj = _g().preview_object()
     return obj if obj is not None and obj.type == "MESH" else None
 
 
@@ -611,8 +611,8 @@ class Session:
             out["ghost"] = _lines(flat, batch_for_shader, world((co + lift)[edges.ravel()]), TEAL)
             old = T.edges_of(scope_faces_)[:GHOST_MOST]
             out["wire"] = _lines(flat, batch_for_shader, world(base.co[old.ravel()]), (0.9, 0.9, 0.95, 0.3))
-            if cand.kept is not None and len(cand.kept) and np.asarray(cand.kept).dtype.kind in "iu":
-                out["kept"] = _lines(flat, batch_for_shader, world((co + 1.5 * lift)[np.asarray(cand.kept).ravel()]), PINK)
+            if cand.lines is not None and len(cand.lines) and np.asarray(cand.lines).dtype.kind in "iu":
+                out["kept"] = _lines(flat, batch_for_shader, world((co + 1.5 * lift)[np.asarray(cand.lines).ravel()]), PINK)
             if cand.tint is not None and len(cand.tint) == len(co):
                 tris = _triangles(faces)
                 if len(tris):
@@ -626,10 +626,8 @@ class Session:
                     out["wash"] = batch_for_shader(smooth, "TRIS", {"pos": world(co + 0.5 * lift), "color": tint}, indices=tris.astype(np.int32))
             if cand.arrows is not None and len(cand.arrows):
                 out["arrows"] = _lines(flat, batch_for_shader, world(cand.arrows.reshape(-1, 3)), WHITE)
-            if cand.lines is not None and len(cand.lines):
-                out["kept"] = _lines(flat, batch_for_shader, world(np.asarray(cand.lines).reshape(-1, 3)[: 2 * GHOST_MOST]), PINK)
-        if cand is not None and cand.kept is not None and len(cand.kept) and np.asarray(cand.kept).dtype.kind == "f":
-            out["kept"] = _lines(flat, batch_for_shader, world(np.asarray(cand.kept, dtype=np.float64).reshape(-1, 3)), PINK)
+        if cand is not None and cand.lines is not None and len(cand.lines) and np.asarray(cand.lines).dtype.kind == "f":
+            out["kept"] = _lines(flat, batch_for_shader, world(np.asarray(cand.lines, dtype=np.float64).reshape(-1, 3)[: 2 * GHOST_MOST]), PINK)
         self.batch_key, self.batches = key, out
         return out
 

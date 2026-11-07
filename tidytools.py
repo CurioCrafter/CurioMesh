@@ -502,8 +502,7 @@ def _marker_hit(m, x: float, y: float):
     origin = view3d_utils.region_2d_to_origin_3d(region, region.data, (x, y))
     direction = view3d_utils.region_2d_to_vector_3d(region, region.data, (x, y))
     best = None
-    for name in (m["src"], guided.PREVIEW_NAME):
-        obj = bpy.data.objects.get(name)
+    for obj in (bpy.data.objects.get(m["src"]), guided.preview_object()):
         if obj is None or obj.type != "MESH":
             continue
         hit = guided.surface_hit(obj, origin, direction)

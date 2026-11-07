@@ -378,7 +378,7 @@ def edit(context, kind: str, amount: float = 1.0):
 def _ray(context, event):
     """(origin, direction) of the mouse ray in the result's own space, or None off the 3D view."""
     guided = _g()
-    preview = bpy.data.objects.get(guided.PREVIEW_NAME)
+    preview = guided.preview_object()
     view = guided._SurfaceTool._view_region(None, context, event)
     if preview is None or view is None:
         return None
@@ -449,7 +449,7 @@ def _screen(context, preview, points):
 
 def _pole_near(context, event):
     """The pole of the result within POLE_PIXELS of the mouse, or None."""
-    res, preview = _g().state["res"], bpy.data.objects.get(_g().PREVIEW_NAME)
+    res, preview = _g().state["res"], _g().preview_object()
     ray = _ray(context, event)
     if res is None or preview is None or ray is None:
         return None
@@ -490,7 +490,7 @@ class CURIOMESH_OT_strip_pick(bpy.types.Operator):
         return {"FINISHED"}
 
     def _show(self, points) -> None:
-        mesh = bpy.data.objects[_g().PREVIEW_NAME].data
+        mesh = _g().preview_object().data
         mesh.vertices.foreach_set("co", np.asarray(points, dtype=np.float32).ravel())
         mesh.update()
         fl["live"] = points
@@ -498,7 +498,7 @@ class CURIOMESH_OT_strip_pick(bpy.types.Operator):
 
     def _start_drag(self, context, event) -> bool:
         res = _g().state["res"]
-        preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+        preview = _g().preview_object()
         if res is None or preview is None or len(preview.data.vertices) != len(res["co"]):
             return False
         pole = _pole_near(context, event)
@@ -669,7 +669,7 @@ class CURIOMESH_OT_strip_ring(bpy.types.Operator):
         at = None if ray is None else hit(res, *ray)
         if at is None:
             return
-        preview = bpy.data.objects[_g().PREVIEW_NAME]
+        preview = _g().preview_object()
         inv = preview.matrix_world.inverted().to_3x3()
         right = np.asarray(inv @ (context.space_data.region_3d.view_rotation @ Vector((1, 0, 0))))
         right /= max(float(np.linalg.norm(right)), 1e-30)
@@ -744,7 +744,7 @@ def _view_mappers(context, preview):
 
 def _across(context):
     """The view's sideways direction in the result's space (None off a 3D view): Redraw in Rows lays rows along it."""
-    preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+    preview = _g().preview_object()
     rv3d = getattr(context.space_data, "region_3d", None)
     if preview is None or rv3d is None:
         return None
@@ -754,7 +754,7 @@ def _across(context):
 
 def _edit_selection(context):
     """Faces of the result selected in Edit Mode on the preview, or None (back in Object Mode either way)."""
-    preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+    preview = _g().preview_object()
     res = _g().state["res"]
     if preview is None or res is None or context.mode != "EDIT_MESH" or context.edit_object is not preview:
         return None
@@ -781,7 +781,7 @@ class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _has_result(context) or (context.mode == "EDIT_MESH" and context.edit_object is bpy.data.objects.get(_g().PREVIEW_NAME))
+        return _has_result(context) or (context.mode == "EDIT_MESH" and context.edit_object is _g().preview_object())
 
     def _run(self, context, ids):
         fl["lasso"] = None
@@ -827,7 +827,7 @@ class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
             fl["lasso"].append(here)
             overlay.tag_redraw()
         elif event.type == "LEFTMOUSE" and event.value == "RELEASE" and fl["lasso"]:
-            res, preview = _g().state["res"], bpy.data.objects[_g().PREVIEW_NAME]
+            res, preview = _g().state["res"], _g().preview_object()
             path = np.asarray(fl["lasso"], dtype=np.float64)
             if float(np.ptp(path, axis=0).max()) < 8.0:  # a click: the whole part under it
                 ray = _ray(context, event)
@@ -866,7 +866,7 @@ class CURIOMESH_OT_strip_slide(_Edit, bpy.types.Operator):
 
     def invoke(self, context, event):
         found = selected()
-        preview = bpy.data.objects.get(_g().PREVIEW_NAME)
+        preview = _g().preview_object()
         if found is None or preview is None or len(preview.data.vertices) != len(found[0]["co"]):
             return self.execute(context)
         self.res, _e, self.strip = found
@@ -1043,7 +1043,7 @@ def _draw_ring(preview) -> None:
 def _draw() -> None:
     try:
         guided = _g()
-        res, preview = guided.state["res"], bpy.data.objects.get(guided.PREVIEW_NAME)
+        res, preview = guided.state["res"], guided.preview_object()
         if res is None or preview is None:
             return
         if fl["ring_show"] is not None:
