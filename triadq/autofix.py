@@ -210,7 +210,7 @@ def _faces(trial, base: T.Base, settings: dict, spots: list, rough: bool):
         why = "" if _better(a, b, trial.least) else "no better"
         if not why:
             before = yield from T.bad_faces_steps(cur, cur.co)
-            after = yield from T.bad_faces_steps(cur, co, faces if cand.faces is not None else None, parent)
+            after = yield from T.bad_faces_steps(cur, co, faces if cand.faces is not None else None, parent, getattr(trial, "splits_faces", False))
             bad_before = int(before[now.faces].sum())
             if getattr(trial, "splits_faces", False):
                 bad_after = T.bad_by_parent(after[then.faces], parent[then.faces])

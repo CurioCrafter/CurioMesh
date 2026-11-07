@@ -377,13 +377,18 @@ def face_normals(co, faces) -> np.ndarray:
 BAD_CHUNK = 1000  # faces checked between two yields of `bad_faces_steps` (about 3 ms)
 
 
-def bad_faces(base: Base, co, faces=None, parent=None) -> np.ndarray:
+DEGENERATE = 1e-6  # a piece of a split with less than this share of its parent's area has no direction: it is not "turned over"
+
+
+def bad_faces(base: Base, co, faces=None, parent=None, splits=False) -> np.ndarray:
     """Per face of (co, faces): turned over against the face of `base` it came from (the same face, or `parent`), or a
-    quad folded or concave. `faces=None`: base's faces. The one bad-face test of the Tidy Tools and Auto Fix."""
-    return finish(bad_faces_steps(base, co, faces, parent))
+    quad folded or concave. `faces=None`: base's faces. The one bad-face test of the Tidy Tools and Auto Fix.
+    `splits` (`Trial.splits_faces`): a split can leave a zero-area piece (the cut runs along an edge) whose sign is
+    noise; it is not counted as turned over. A real turned or folded face still is."""
+    return finish(bad_faces_steps(base, co, faces, parent, splits))
 
 
-def bad_faces_steps(base: Base, co, faces=None, parent=None):
+def bad_faces_steps(base: Base, co, faces=None, parent=None, splits=False):
     """`bad_faces` as a generator: yields (nothing) every `BAD_CHUNK` faces, so no slice runs long. Same answer."""
     from .checks import folded_quads
 
@@ -403,7 +408,11 @@ def bad_faces_steps(base: Base, co, faces=None, parent=None):
         part = faces[s : s + BAD_CHUNK]
         out[s : s + len(part)] = folded_quads(co, part)
         if ref is not None and len(ref) == len(faces):
-            out[s : s + len(part)] |= (face_normals(co, part) * ref[s : s + len(part)]).sum(axis=1) < 0.0
+            n, r = face_normals(co, part), ref[s : s + len(part)]
+            turned = (n * r).sum(axis=1) < 0.0
+            if splits:
+                turned &= np.linalg.norm(n, axis=1) > DEGENERATE * np.linalg.norm(r, axis=1)
+            out[s : s + len(part)] |= turned
         if s + BAD_CHUNK < len(faces):
             yield
     return out
@@ -478,7 +487,7 @@ def measure(base: Base, cand: Candidate, stages=("poles", "move", "look"), look=
     if "bad" in stages:
         if "bad" not in base.cache:
             base.cache["bad"] = int((yield from bad_faces_steps(base, base.co)).sum())
-        bad = yield from bad_faces_steps(base, co_after, faces if cand.faces is not None else None, cand.parent)
+        bad = yield from bad_faces_steps(base, co_after, faces if cand.faces is not None else None, cand.parent, splits)
         cand.numbers["bad"] = (base.cache["bad"], bad_by_parent(bad, cand.parent) if cut else int(bad.sum()))
         yield
     if "look" in stages and look is not None:

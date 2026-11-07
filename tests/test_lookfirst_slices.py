@@ -148,6 +148,18 @@ class SplitFlagTest(unittest.TestCase):
         self.assertEqual([why for _sp, why in p.left], ["bad faces"])  # the spot is put back, and says why
         self.assertEqual(p.cand.faces, None)
 
+    def test_a_zero_area_piece_of_a_split_is_not_turned_but_a_real_turn_is(self):
+        co = np.array([(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0), (1, 1e-14, 0)], dtype=np.float64)
+        base = trial.make_base(co[:4], [(0, 1, 2, 3)])
+        flat = [(0, 1, 2), (2, 3, 0)]
+        sliver = [(0, 2, 3), (1, 0, 4)]
+        parent = np.array([0, 0])
+        self.assertTrue(trial.bad_faces(base, co, sliver, parent).any())
+        self.assertFalse(trial.bad_faces(base, co, sliver, parent, splits=True).any())
+        turned = [(0, 2, 3), (0, 3, 2)]
+        self.assertTrue(trial.bad_faces(base, co, turned, parent, splits=True).any())
+        self.assertFalse(trial.bad_faces(base, co, flat, parent, splits=True).any())
+
     def test_bad_by_parent_counts_a_split_once(self):
         bad = np.array([True, True, False, True])
         self.assertEqual(trial.bad_by_parent(bad, np.array([0, 0, 1, 2])), 2)
