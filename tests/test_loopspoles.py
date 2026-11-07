@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
+from triadq import autofix, trial
 from triadq import loopspoles as L
-from triadq import trial
 from triadq.patterns import Topology
 
 
@@ -159,6 +159,101 @@ class RingsTest(unittest.TestCase):
         self.assertEqual(int(ring[at[2, 2]]), 1)
         patch, ring = L.rings_of(faces, len(co), [at[3, 3]], 2)
         self.assertEqual(len(patch), 16)
+
+
+def _run(work):
+    return trial.finish(work)
+
+
+def _held(base, spot):
+    """`base` with every corner of `spot` held: a spot nothing can make better."""
+    stay = np.zeros(len(base.co), dtype=bool)
+    stay[np.unique([v for f in spot.faces.tolist() for v in base.faces[f]])] = True
+    return trial.make_base(base.co, base.faces, stay=stay, project=base.project, mirror=base.mirror)
+
+
+def _spun_at(n: int, spins):
+    co, faces, at = _grid(n, n)
+    faces = list(faces)
+    for i, j in spins:
+        f, g = faces.index((at[i, j], at[i + 1, j], at[i + 1, j + 1], at[i, j + 1])), faces.index((at[i + 1, j], at[i + 2, j], at[i + 2, j + 1], at[i + 1, j + 1]))
+        faces[f] = (at[i, j], at[i + 1, j], at[i + 2, j], at[i + 2, j + 1])
+        faces[g] = (at[i, j], at[i + 2, j + 1], at[i + 1, j + 1], at[i, j + 1])
+    return co, faces, at
+
+
+class SpotsTest(unittest.TestCase):
+    """Auto Fix (AUTO_FIX.md 6.2): each tool finds its planted problem, makes its own number better, and puts back
+    a planted spot that cannot improve."""
+
+    def test_even_the_band_finds_the_bunched_bands(self):
+        xs = [0.0, 0.3, 0.6, 2.0, 3.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 12.2, 12.4, 14.0, 15.6, 17.0, 18.0]
+        co, faces, _at = _grid(18, 6, xs=xs)  # two bunched bands, a pole-free run between them
+        base = trial.make_base(co, faces, project=_flat)
+        tool = L.EvenTheBand()
+        spots = _run(tool.spots(base))
+        self.assertTrue(spots and all(sp.kind == "bunched" and sp.bad > L.BUNCHED for sp in spots))
+        p = _run(autofix.propose(tool, base, {}, spots))
+        self.assertEqual(p.reason, "")
+        for sp in spots:
+            self.assertLess(tool.own_number(base, p.cand.co, faces, sp), sp.bad)
+        p = _run(autofix.propose(tool, _held(base, spots[0]), {}, spots[:1]))
+        self.assertEqual([why for _sp, why in p.left], [p.left[0][1]] if p.left else ["missing"])
+        self.assertIn(p.left[0][1], ("no better", "held"))
+        self.assertEqual(p.reason, "no better")
+
+    def test_open_up_poles_finds_the_pinched_pole(self):
+        co, faces, at = _spun_at(12, [(5, 5)])
+        co = co.copy()
+        co[at[6, 6]] += (0.35, -0.3, 0.0)
+        base = trial.make_base(co, faces, project=_flat)
+        tool = L.OpenUpPoles()
+        spots = _run(tool.spots(base))
+        self.assertEqual([sp.kind for sp in spots], ["pinched"])
+        p = _run(autofix.propose(tool, base, {}, spots))
+        self.assertEqual(len(p.fixed), 1)  # its own number got better (Loop Quality may still say no)
+        self.assertLess(tool.own_number(base, p.cand.co, faces, spots[0]), tool.own_number(base, co, faces, spots[0]))
+        p = _run(autofix.propose(tool, _held(base, spots[0]), {}, spots))
+        self.assertTrue(p.left and not p.fixed)
+        self.assertEqual(_run(tool.spots(trial.make_base(*_grid(4, 4)[:2], project=_flat))), [])
+
+    def test_cancel_pole_pair_pairs_and_cancels(self):
+        co, faces, _at = _spun_at(12, [(5, 5)])
+        base = trial.make_base(co, faces, project=_flat)
+        tool = L.CancelPolePair()
+        spots = _run(tool.spots(base))
+        self.assertEqual(len(spots), 2)  # two 3-5 pairs round the spun edge
+        self.assertTrue(all(sp.pick["pole"] != sp.pick["partner"] for sp in spots))
+        p = _run(autofix.propose(tool, base, {}, spots))
+        self.assertEqual(p.reason, "")
+        self.assertEqual(p.after.poles, 0)
+        self.assertEqual(len(p.cand.faces), len(faces))
+        self.assertEqual([why for _sp, why in p.left], ["held"])  # the second pair went with the first walk
+        self.assertEqual(_run(tool.spots(trial.make_base(co, faces, project=_flat, mirror=(0, 6.0)))), [])
+
+    def test_tries_and_reach_are_settings(self):
+        co, faces, at = _spun_grid()
+        base = trial.make_base(co, faces, project=_flat)
+        tool = L.CancelPolePair()
+        self.assertIn("tries", tool.defaults)
+        self.assertIn("reach", tool.defaults)
+        three = at[3, 2]
+        partner = int(tool.targets(base, dict(tool.defaults, pole=three), "partner")[0][0])
+        self.assertFalse(_run(tool.run(base, dict(tool.defaults, pole=three, partner=partner, tries=100000))).refusal)
+
+    def test_empty_mesh_nothing_free_and_mirrored(self):
+        empty = trial.make_base(np.zeros((0, 3)), [], project=_flat)
+        co, faces, _at = _spun_at(8, [(3, 3)])
+        boxed = trial.make_base(co, faces, scope=np.zeros(len(faces), dtype=bool), project=_flat)
+        for cls in (L.EvenTheBand, L.OpenUpPoles, L.CancelPolePair):
+            for base in (empty, boxed):
+                self.assertEqual(_run(cls().spots(base)), [], cls.__name__)
+        xs = [0.0, 1.0, 2.0, 2.2, 2.4, 4.0, 5.6, 6.0, 6.4, 8.0, 9.6, 10.0, 10.2, 10.4, 12.0, 13.0, 14.0]
+        co, faces, _at = _grid(16, 4, xs=xs)  # bunched the same way on both sides of x = 7
+        base = trial.make_base(co, faces, project=_flat, mirror=(0, 7.0))
+        spots = _run(L.EvenTheBand().spots(base))
+        self.assertTrue(spots)
+        self.assertTrue(all(sp.at[0] >= 7.0 - 1e-9 for sp in spots))  # found on the half the mirror copies from
 
 
 if __name__ == "__main__":

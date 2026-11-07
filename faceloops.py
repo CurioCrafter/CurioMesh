@@ -4,7 +4,9 @@
 """Face Loops: pick one strip of quads of the result on screen and adjust it (the Blender side of `triadq.strips`).
 
 Pick a Strip shows the strip under the mouse and selects it on click. Slide (drag the mouse), Straighten, Even Width,
-Add Strip and Remove Strip change it on the result: each edit is one Ctrl+Z step and one History entry. The result
+Add Strip and Remove Strip change it on the result: each edit is one Ctrl+Z step and one History entry. Straighten,
+Even Width, Remove Strip and Redraw in Rows run the Tidy Tools of `triadq.stripfix` (the same maths Auto Fix uses), and
+Fix Every Strip is the "Fix every spot like this" run of Straighten and Even Width in Look First. The result
 lives in Python, so each edit is kept by the add-on's shared undo history (`history.before` / `history.record`), the
 same steps Tidy Up and Look First use; the selected strip is part of each step.
 """
@@ -16,18 +18,17 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from . import autoretopo, history, icons, overlay, region, segments
+from . import autoretopo, history, icons, overlay, region, segments, tidylive
 from . import organize as ORG
-from .triadq import loopscore, patch, rowfill, segment
+from .triadq import autofix, loopscore, patch
+from .triadq import stripfix as SF
+from .triadq import trial as TT
 from .triadq import organize as O
 from .triadq import rings as RG
 from .triadq import strips as S
 from .triadq.patterns import Topology
 
-WIGGLY = 4.0  # degrees per quad: Fix This straightens a strip that turns more
-UNEVEN = 0.15  # Fix This evens out a strip whose width varies more than this
-SHORT = 3  # quads: Fix This takes away an open strip this short (a dead end between two poles)
-VIEW_COST = 1.0  # points of view change Fix Every Strip may spend
+WIGGLY, UNEVEN, SHORT = SF.WIGGLY, SF.UNEVEN, SF.SHORT  # Fix This: straighten, even out, or take away a dead end
 SHARP_DEG = 60.0  # an edge folding more than this holds its vertices: Tidy Up's 35 held 40% of a coarse bust's face
 LASSO_FACING = 0.25  # a lasso takes faces turned at least this much toward the view (cosine): not the sides it only grazes
 RING_VIEW = 3.0  # points of view change Ring Round This may spend
@@ -183,71 +184,20 @@ def _view(points, faces):
     return 100.0 * wrong / max(shown, 1)
 
 
-def fix_all(context, rounds: int = 0, bend: float = 40.0, most: float = 0.75) -> str:
-    """Straighten every wiggly strip of the result, worst first, a few times over, then even out the uneven ones half
-    way, as one step (rounds go on while the strips get straighter; `rounds` > 0 stops after that many). Vertices where the surface bends stay, no vertex moves more than 3/4 of an edge, and it is kept only
-    when Loop Quality goes up."""
-    guided = _g()
-    res = guided.state["res"]
-    if res is None:
-        return "No result yet"
-    st = strips(res)
+def _base(res, project=None, scope=None) -> TT.Base:
+    """A Tidy Tool's Base for the result on screen, with Face Loops' own holds (borders, edges folding over SHARP_DEG,
+    non-quads) and the mirror plane of a mirrored result."""
     co = np.asarray(res["co"], dtype=np.float64)
-    _plan(res, {"a": [], "b": []})
-    stay, go = fl["stay"] | S.bent(co, res["faces"], bend), fl["go"]
-    plans = []
-    for label in np.unique(st.labels).tolist():
-        if st.sizes[label] >= 2:
-            strip = st.walk(int(np.flatnonzero(st.labels == label)[0]))
-            plans.append((strip, S.rung_lines(strip, go, len(co), stay)))
-    done, last = 0, float("inf")
-    while not rounds or done < rounds:  # 0: rounds go on while the strips still get straighter
-        moved = False
-        for strip, lines in sorted(plans, key=lambda p: -S.stats(co, p[0])["turn"]):
-            if lines and S.stats(co, strip)["turn"] > WIGGLY:
-                co = S.move(co, lines, S.targets(co, lines, "straighten", 1.0, strip["closed"]), stay)
-                moved = True
-        done += 1
-        turn = sum(S.stats(co, strip)["turn"] for strip, lines in plans if lines)
-        if not moved or turn >= last - 1e-9:
-            break
-        last = turn
-    for strip, lines in plans:
-        if lines and S.stats(co, strip)["width"] > UNEVEN:
-            co = S.move(co, lines, S.targets(co, lines, "even", 0.5, strip["closed"]), stay)
-    co = S.capped(res["co"], co, res["faces"], most)
-    mirror, side = _mirror(res, {"a": [0], "b": [0]})
-    co = S.finish(res["co"], co, res["faces"], _project(), mirror, side)
-    co = _no_new_folds(res["co"], co, res["faces"])
-    before = loopscore.loop_quality(res["co"], res["faces"])["quality"]
-    seen = _view(res["co"], res["faces"])
-    full = co
-    for part in (1.0, 0.5, 0.25):  # as much of the fix as keeps the look within VIEW_COST points
-        co = res["co"] + part * (full - res["co"])
-        after = loopscore.loop_quality(co, res["faces"])["quality"]
-        if _view(co, res["faces"]) <= seen + VIEW_COST:
-            break
-    else:
-        return "Straightening the strips here would change the look too much (the rows run over detail)"
-    if after <= before:
-        return f"Straightening every strip would not make the rows better here (Loop Quality {before:.0f} -> {after:.0f})"
-    keep = fl["sel"][1] if fl["sel"] is not None and fl["sel"][0] is res else None
-    commit(context, dict(res, co=co), keep, name="Fix Every Strip", numbers=f"Loop Quality {before:.0f} -> {after:.0f}")
-    fl["note"] = f"Fix Every Strip: Loop Quality {before:.0f} -> {after:.0f}"
-    return ""
+    _plan(res, {"a": [], "b": []})  # the pins
+    job = (_g().state["auto_base"] or {}).get("job")
+    mirror = getattr(job, "mirror", None)
+    scope = np.ones(len(res["faces"]), dtype=bool) if scope is None else scope
+    return TT.Base(co, res["faces"], scope, fl["stay"].copy(), project, TT.mean_edge(co, res["faces"]), None if mirror is None else (mirror[0], mirror[1]))
 
 
-def _no_new_folds(old, new, faces) -> np.ndarray:
-    """`new` with the corners of every face it folds or bends flat that `old` didn't put back, until none is left."""
-    old, new = np.asarray(old, dtype=np.float64), np.asarray(new, dtype=np.float64).copy()
-    was = rowfill.folded(old, faces)
-    for _ in range(6):
-        worse = np.flatnonzero(rowfill.folded(new, faces) & ~was)
-        if not len(worse):
-            break
-        back = np.unique([v for i in worse.tolist() for v in faces[i]])
-        new[back] = old[back]
-    return new
+def _trial(res, trial, settings: dict, project=None, scope=None):
+    """Run a `triadq.stripfix` tool on the result to the end: its Candidate (a refusal says why it can't)."""
+    return TT.finish(trial.run(_base(res, project, scope), dict(trial.defaults, **settings)))
 
 
 def lasso_faces(res, poly, to_screen, toward) -> np.ndarray:
@@ -287,66 +237,64 @@ def _strokes_in(context, res, ids):
 
 def redraw_rows(context, ids, across=None) -> str:
     """Remake the faces `ids` of the result on screen as rows of quads at their own size, tied to the faces round them
-    (`triadq.rowfill`), as one Undo step. `across`: the view's sideways direction in the result's space, which the rows
-    follow. Returns an error in words, or ""."""
-    from . import flowstroke as F
-
+    (`triadq.stripfix.RedrawInRows`), as one Undo step. `across`: the view's sideways direction in the result's space,
+    which the rows follow. Returns an error in words, or ""."""
     res = _g().state["res"]
     if res is None:
         return "No result yet"
     ids = np.asarray(ids, dtype=np.int64)
-    if len(ids) < 8:
+    if len(ids) < SF.SMALLEST:
         return "Mark a bigger area: rows need at least a few quads each way"
-    try:
-        co, faces, mat, new, area, bad = F.rows(res["co"], res["faces"], res["mat"], ids, _strokes_in(context, res, ids), _project(), across)
-    except ValueError as exc:
-        return f"Can't redraw this area in rows: {exc}"
-    if segment.open_edges(faces) > segment.open_edges(res["faces"]):
-        return "The rows did not close on the faces round them, so the result stays as it was"
-    old = np.asarray([np.asarray(res["co"])[list(res["faces"][i])].mean(axis=0) for i in area])
-    kept = np.setdiff1d(np.arange(len(res["faces"])), area)
-    born = np.asarray([co[list(f)].mean(axis=0) for f, n in zip(faces, new) if n]).reshape(-1, 3)
-    parent = np.empty(len(faces), dtype=np.int64)
-    parent[~new] = kept
-    parent[new] = area[np.argmin(np.linalg.norm(born[:, None] - old[None], axis=2), axis=1)] if len(born) else 0
-    out = _faces_changed(res, co, faces, parent)
-    out["mat"], out["new"] = np.asarray(mat), new
+    cand = _trial(res, SF.RedrawInRows(), {"faces": ids, "strokes": _strokes_in(context, res, ids), "across": across}, _project())
+    if cand.refusal:
+        return cand.refusal
+    parent = np.asarray(cand.parent, dtype=np.int64)
+    old = res["faces"]
+    new = np.array([tuple(f) != tuple(old[q]) for f, q in zip(cand.faces, parent.tolist())], dtype=bool)
+    out = _faces_changed(res, cand.co, cand.faces, parent)
+    out["new"] = new
     before = loopscore.loop_quality(res["co"], res["faces"])["quality"]
     after = loopscore.loop_quality(out["co"], out["faces"])["quality"]
     commit(context, out, None, parent, name="Redraw in Rows")
     poles = Topology(out["co"], out["faces"]).poles
-    inside = np.unique([v for f, n in zip(faces, new) if n for v in f])
-    fl["note"] = f"Redraw in Rows: {len(area)} faces -> {int(new.sum())}, poles there {100.0 * poles[inside].mean():.0f}%. Loop Quality {before:.0f} -> {after:.0f}" + (f". {bad} folded faces to check" if bad else "")
+    inside = np.unique([v for f, n in zip(cand.faces, new) if n for v in f])
+    fl["note"] = f"Redraw in Rows: {cand.note}, poles there {100.0 * poles[inside].mean():.0f}%. Loop Quality {before:.0f} -> {after:.0f}"
     return ""
 
 
 def edit(context, kind: str, amount: float = 1.0):
     """Do one edit on the selected strip. Returns an error in words, or ""."""
-    if kind == "fix_all":
-        return fix_all(context)
     found = selected()
     if found is None:
         return "Pick a strip first"
     res, element, strip = found
     project = _project()
-    if kind in ("slide", "straighten", "even"):
-        new = moved_points(res, strip, kind, amount, project)
-        commit(context, dict(res, co=new), element, name=NAMES[kind])
+    if kind == "slide":
+        commit(context, dict(res, co=moved_points(res, strip, kind, amount, project)), element, name=NAMES[kind])
         return ""
     if kind == "fix":
         numbers = S.stats(res["co"], strip)
         if not strip["closed"] and numbers["faces"] <= SHORT and not edit(context, "remove"):
             return ""  # a short dead end: gone, its neighbours joined
-        out = res
-        if numbers["turn"] > WIGGLY:
-            out = dict(out, co=moved_points(out, strip, "straighten", 1.0, project))
-        elif numbers["width"] > UNEVEN:
-            out = dict(out, co=moved_points(out, strip, "even", 1.0, project))
-        if out is res:
+        kind, amount = ("straighten" if numbers["turn"] > WIGGLY else "even" if numbers["width"] > UNEVEN else ""), 1.0
+        if not kind:
             return "This strip already looks clean"
-        commit(context, out, element, name=NAMES[kind])
+        name = NAMES["fix"]
+    else:
+        name = NAMES[kind]
+    if kind in ("straighten", "even"):
+        cand = _trial(res, SF.Straighten() if kind == "straighten" else SF.EvenWidth(), {"strip": element, "amount": amount}, project)
+        if cand.refusal:
+            return cand.refusal
+        commit(context, dict(res, co=cand.co), element, name=name)
         return ""
-    strip = strips(res).walk(element, past_poles=True)  # a strip is split or joined whole, or a face at its end breaks
+    if kind == "remove":
+        cand = _trial(res, SF.RemoveDeadEnd(), {"strip": element})
+        if cand.refusal:
+            return cand.refusal
+        commit(context, _faces_changed(res, cand.co, cand.faces, cand.parent), None, cand.parent, name=name)
+        return ""
+    strip = strips(res).walk(element, past_poles=True)  # a strip is split whole, or a face at its end breaks
     mirror, _side = _mirror(res, strip)
     group = [strip]
     if mirror is not None:
@@ -355,20 +303,15 @@ def edit(context, kind: str, amount: float = 1.0):
             group.append(strips(res).walk(other, past_poles=True))
     _plan(res, strip)  # the pins
     try:
-        if kind == "add":
-            co, faces, parent, (face, edge) = S.cut(res["co"], res["faces"], group, project)
-        else:
-            co, faces, parent = S.collapse(res["co"], res["faces"], group, fl["stay"])
+        co, faces, parent, (face, edge) = S.cut(res["co"], res["faces"], group, project)
     except ValueError as exc:
-        return f"Can't {'add a strip here' if kind == 'add' else 'remove this strip'}: {exc}"
+        return f"Can't add a strip here: {exc}"
     out = _faces_changed(res, co, faces, parent)
-    element = None
-    if kind == "add":
-        element = strips(out).element(face, edge)
-        new_strip = walk(out, element)
-        lines, stay = _plan(out, new_strip, reach=2)  # the new strip and two quads each side spaced evenly
-        out["co"] = S.finish(out["co"], S.move(out["co"], lines, [(0.0, 0.0)] * len(lines), stay, spread=True), out["faces"], project, *_mirror(out, new_strip))
-    commit(context, out, element, parent, name=NAMES[kind])
+    element = strips(out).element(face, edge)
+    new_strip = walk(out, element)
+    lines, stay = _plan(out, new_strip, reach=2)  # the new strip and two quads each side spaced evenly
+    out["co"] = S.finish(out["co"], S.move(out["co"], lines, [(0.0, 0.0)] * len(lines), stay, spread=True), out["faces"], project, *_mirror(out, new_strip))
+    commit(context, out, element, parent, name=name)
     return ""
 
 
@@ -943,15 +886,23 @@ class CURIOMESH_OT_strip_fix(_Edit, bpy.types.Operator):
     KIND = "fix"
 
 
-class CURIOMESH_OT_strip_fix_all(_Edit, bpy.types.Operator):
+class CURIOMESH_OT_strip_fix_all(tidylive.LiveTool, bpy.types.Operator):
     bl_idname = "curiomesh.strip_fix_all"
     bl_label = "Fix Every Strip"
-    bl_description = "Straightens every wiggly strip of the result and evens out the uneven ones, all at once. Kept only when the rows come out better; one step, one Undo"
-    KIND = "fix_all"
+    bl_description = "Finds every wiggly strip and every strip of uneven width in Work On and shows the fix of each first. Enter keeps the ones that got better"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = autofix.every(SF.FixStrips)
+
+    amount: bpy.props.FloatProperty(name="Amount", description="How far each strip goes toward straight and even. 1 goes all the way", default=1.0, min=0.0, max=1.0, subtype="FACTOR")
+    keep_going: bpy.props.BoolProperty(name="Keep Going", description="Runs again on the kept result while a run still makes a strip better. Each run is one step in History", default=False)
 
     @classmethod
     def poll(cls, context):
-        return _has_result(context)
+        return _g().state["res"] is not None and _g().state["auto_base"] is not None  # no 3D view needed for F9 and scripts
+
+    def _settings(self) -> dict:
+        # the wrapper's settings (with Keep going) belong to an instance, not to the class LiveTool reads them from
+        return {k: getattr(self, k) for k in self.trial().defaults if hasattr(self, k)}
 
 
 class CURIOMESH_OT_strip_add(_Edit, bpy.types.Operator):
