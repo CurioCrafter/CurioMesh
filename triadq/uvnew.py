@@ -30,10 +30,10 @@ CLEAN_DOWN_TO_PX = 256  # SPEC 8.2: the gap keeps neighbours apart down to this 
 SLICE_SECONDS = 0.002
 ROW_TOL_DEG = 1e-6
 WAIT = "wait"  # a stage yields this while a faster job runs: step() returns at once instead of spinning
-SELF_CHECK_FACES = 100  # charts smaller than this are not checked for lying over themselves
+SELF_CHECK_FACES = 4  # charts smaller than this are not checked for lying over themselves (a pole of valence 5 needs 5 faces)
+CHECK_BATCH = 48  # charts checked in one call, each in its own tile
 SELF_CHECK_PX = 256.0  # a checked chart is drawn this big (its longest side is SELF_CHECK_FILL of it)
 SELF_CHECK_FILL = 0.9
-SELF_OVERLAP_PCT = 0.1  # percent of that square used twice that a chart may have
 NUMPY_CHECK_FACES = 30000  # without the faster check the guard is skipped above this size
 ROWS_INDEX = {"off": 0, "soft": 1, "on": 2, "auto": 3}
 
@@ -54,7 +54,7 @@ class Settings:
     """The New UVs popover values (SPEC 10.1), in the units the card shows."""
 
     def __init__(self, **kw):
-        self.stretch_allowed = 50.0  # percent; measured start (SPEC 6.4 says 10 from P0; P1 tunes), see bench/uvplan/a2_report
+        self.stretch_allowed = 10.0  # percent; P0's start value (SPEC 6.4), P1 tunes. Sweeps 10-100 on 13 models: charts within 25 %
         self.rows = "auto"  # auto / on / soft / off
         self.out_of_sight = True
         self.hidden_pct = 50.0  # px per metre of hidden parts, percent of seen ones
@@ -234,6 +234,7 @@ class NewUVs:
         self.tree = None
         self.messages: list = []
         self._stop = False
+        self.waiting = False
         self._active = None  # the sliced core stage being polled
         self._keep = _keep or {}
         self._work = self._run()
@@ -250,9 +251,11 @@ class NewUVs:
         if self.done:
             return 1.0
         until = time.perf_counter() + self.budget
+        self.waiting = False
         try:
             while time.perf_counter() < until:
                 if next(self._work) == WAIT:
+                    self.waiting = True  # a job runs: the caller should not spin on step()
                     break
         except StopIteration:
             self.done = True
@@ -266,6 +269,8 @@ class NewUVs:
 
         while not self.done:
             self.step()
+            if self.waiting:
+                time.sleep(0.0005)
         if self.error is not None:
             raise self.error
         return self.result
@@ -462,16 +467,27 @@ class NewUVs:
         self._tick("done", 1.0)
         yield
 
-    def _lies_over_itself(self, faces, corner_uv):
-        """Generator: True when the chart made of `faces` overlaps itself (or has a flipped face) at a small size."""
+    def _lies_over_itself(self, groups, corner_uv):
+        """Generator: True when any chart of `groups` (face index arrays) overlaps itself or has a flipped face. The charts
+        are drawn at a small size, each in its own integer tile, so one check answers for the whole group."""
 
-        corners, local, lptr, pts = self._sub(faces)
-        uv = corner_uv[corners]
-        span = float((uv.max(axis=0) - uv.min(axis=0)).max())
-        if not span > 0:
+        side = int(np.ceil(np.sqrt(len(groups))))
+        pieces, vbase, points, ptr, flat_, uvs = [], 0, [], [0], [], []
+        for i, faces in enumerate(groups):
+            corners, local, lptr, pts = self._sub(faces)
+            uv = corner_uv[corners]
+            span = float((uv.max(axis=0) - uv.min(axis=0)).max())
+            if not span > 0:
+                continue
+            uv = (uv - uv.min(axis=0)) * (SELF_CHECK_FILL / span) + np.array([i % side, i // side])
+            points.append(pts)
+            flat_.append(local + vbase)
+            ptr.extend((lptr[1:] + ptr[-1]).tolist())
+            uvs.append(uv)
+            vbase += len(pts)
+        if not points:
             return False
-        uv = (uv - uv.min(axis=0)) * (SELF_CHECK_FILL / span)
-        m = uvscore.mesh(pts, lptr, local, uv)
+        m = uvscore.mesh(np.vstack(points), np.array(ptr), np.concatenate(flat_), np.vstack(uvs))
         fast = uvscore.FAST.get("check")
         z, zi, zb = np.zeros(0), np.zeros(0, np.int64), np.zeros(0, bool)
         job = None
@@ -485,7 +501,7 @@ class NewUVs:
         else:
             yield
             numbers = uvscore.check(m, texture_px=SELF_CHECK_PX, use_fast=False).numbers
-        return bool(numbers[uvscore._I["overlap_pct"]] > SELF_OVERLAP_PCT or numbers[uvscore._I["flipped_faces"]] > 0)
+        return bool(numbers[uvscore._I["overlap_pct"]] > 0.0 or numbers[uvscore._I["flipped_faces"]] > 0)
 
     def _split_overlapping(self, tree, chart, corner_uv, rows, x):
         """A chart the solver kept free of flips can still lie over itself (a cap with a pole of valence 5 or more).
@@ -509,9 +525,13 @@ class NewUVs:
 
         pending = []
         by = faces_of_each()
-        for c, faces in by.items():
-            if len(faces) >= SELF_CHECK_FACES and (yield from self._lies_over_itself(faces, corner_uv)):
-                pending.append(c)
+        todo = [c for c, faces in by.items() if len(faces) >= SELF_CHECK_FACES and rows.get(c) != 2]  # On charts are exact grids
+        for i in range(0, len(todo), CHECK_BATCH):
+            batch = todo[i : i + CHECK_BATCH]
+            if (yield from self._lies_over_itself([by[c] for c in batch], corner_uv)):
+                for c in batch:
+                    if len(batch) == 1 or (yield from self._lies_over_itself([by[c]], corner_uv)):
+                        pending.append(c)
         back = len(pending)
         patch = np.asarray(tree.patches() if callable(getattr(tree, "patches", None)) else tree.patch, dtype=np.int64)
         while pending and x > 0:
@@ -534,7 +554,7 @@ class NewUVs:
                 for i in inside:
                     chart[lby[int(i)]] = next_id
                     rows[next_id] = int(lrows[int(i)])
-                    if len(lby[int(i)]) >= SELF_CHECK_FACES and (yield from self._lies_over_itself(lby[int(i)], corner_uv)):
+                    if len(lby[int(i)]) >= SELF_CHECK_FACES and lrows[int(i)] != 2 and (yield from self._lies_over_itself([lby[int(i)]], corner_uv)):
                         still.append(next_id)
                     next_id += 1
             pending = still
