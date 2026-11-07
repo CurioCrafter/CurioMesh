@@ -8,6 +8,7 @@ import bpy
 from .atlasq import analyze_object
 from .bridge import RemeshConfig, RemeshResult, run_curiomesh
 from .metrics import mesh_diagnostics
+from .triadq import tasks
 
 
 QUALITY_ITEMS = [
@@ -160,7 +161,7 @@ def apply_result_to_settings(settings: bpy.types.PropertyGroup, result: RemeshRe
 class CURIOMESH_OT_remesh(bpy.types.Operator):
     bl_idname = "curiomesh.remesh"
     bl_label = "Remesh to Quads"
-    bl_description = "Turn the active mesh into clean quads at the target face count. Undo restores the original"
+    bl_description = "Turn the active mesh into clean quads at the target face count. Runs in one go, like Blender's Remesh: Blender is busy until it is done (about 10-20 seconds on a 20,000-60,000-face mesh). Undo restores the original"
     bl_options = {"REGISTER", "UNDO"}
 
     target_faces: bpy.props.IntProperty(name="Target Faces", description="Roughly how many faces the new mesh should have (a quad counts as one face)", default=8000, min=4, soft_max=250000)
@@ -207,7 +208,8 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
             self.report({"ERROR"}, "Select a mesh object first.")
             return {"CANCELLED"}
 
-        result = run_curiomesh(obj, config_from_owner(self))
+        with tasks.busy_cursor():  # one call, like Blender's own Remesh: Blender is busy until it is done
+            result = run_curiomesh(obj, config_from_owner(self))
         settings = context.scene.curiomesh_settings
         apply_result_to_settings(settings, result)
 

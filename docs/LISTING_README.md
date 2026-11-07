@@ -31,8 +31,8 @@ CurioMesh contains Python code only and no compiled or third-party code.
   back.
 - **Advanced tab** (off by default): Regions (redo a boxed area on a fixed seam, Fill Loop), Blockout volumes and
   Redo Inside Shapes, the Smart Solver (Atlas-Q), remembered fixes you can look for, apply, and export or import as
-  JSON files, Materials & UVs and texture sets, the older Classic Remesh, Classic Guided and QuadriFlow methods, the
-  quality heatmap and viewport HUD, Work Live, Import Job Result, Judge After Baking (experimental) and Diagnostics
+  JSON files, Materials & UVs and texture sets, the older Classic Remesh, Batch, Classic Guided and QuadriFlow methods,
+  the quality heatmap and viewport HUD, Work Live, Import Job Result, Judge After Baking (experimental) and Diagnostics
   (Measure Active Mesh, Check This Computer).
 
 ## Notes
@@ -46,12 +46,18 @@ CurioMesh contains Python code only and no compiled or third-party code.
     takes long on a full-detail piece, so this keeps your Blender usable and lets **Stop** end it at once. With
     background processes off, Even Rows is not available and the panel says so.
   - The **QuadriFlow** method (and Classic Remesh with QuadriFlow) runs Blender's own QuadriFlow inside your Blender,
-    like Remesh > QuadriFlow does, on one reduced part at a time; Blender is busy while each part runs.
-- Blender stays usable while a job runs: the work is done in short steps from a timer, most of them well under a
-  tenth of a second. The longest steps we measured were about half a second on a 60,000-face mesh with every Style,
-  Method and Use we tried (Fewest Faces, Even Rows, Flat Quads, Subdivision, Blockout), and up to about 1.5 seconds
-  on an 86,000-face mesh or with the Field Rows method. Blender's own Decimate on a whole part is one call that can't
-  be cut up; the wait cursor shows while it runs. **Stop** takes effect right after the step that is running.
+    like Remesh > QuadriFlow does, on one reduced part at a time; Blender is busy while each part runs. The
+    **Animation** Use is made this way too: expect several seconds per part (about 8 s on a 60,000-face mesh).
+- Blender stays usable while Auto, Work Out Other Sizes, the part tools (Redo, Bigger/Smaller Quads, Redo this
+  spot), Tidy Up and the Flow Editor run: the work is done in short steps from a timer, most of them well under a
+  tenth of a second. The longest Auto steps we measured were about half a second on a 60,000-face mesh with the
+  Styles, Methods and Uses we tried (Fewest Faces, Even Rows, Flat Quads, Subdivision, Blockout), and up to about 1.5
+  seconds on an 86,000-face mesh or with the Field Rows method. Blender's own Decimate on a whole part is one call
+  that can't be cut up; the wait cursor shows while it runs.
+- Some tools run in one go, like Blender's own Remesh, with the wait cursor, and Blender is busy until they finish:
+  the Advanced tab's Classic Remesh and Batch (about 10-20 seconds per 20,000-60,000-face mesh; Batch reads Esc
+  between meshes), Classic Guided's Whole Mesh and Points Only updates, Lock Faces, Unlock All and Redraw Strip,
+  Redo Inside Shapes, Fix Selection, Bake Detail (Blender's own bake) and the Multires Detail step of Apply. **Stop** takes effect right after the step that is running.
   **Apply** is available once the job has finished, or after **Stop**. The other sizes for the Quad Size and Rows
   sliders are worked out only when you press **Work Out Other Sizes** under the sliders; neither Auto nor moving a
   slider starts it. While it runs the panel says so. It works in the same short steps and leaves Blender idle at

@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .patch import _labels, quad_quality
-from .types import drain
 
 SHARP_DEG = 60.0
 CREASE_DEG = 20.0  # faces this far apart may be a feature line
@@ -1290,18 +1289,13 @@ def refit(fine_points: np.ndarray, fine_tris: np.ndarray, points: np.ndarray, fa
 
 
 
-def field_quads(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None) -> tuple[np.ndarray, list[tuple[int, ...]]]:
-    """Quads in rows on one loose piece, about `target` of them. May leave a few triangles or folds: see `is_clean`.
+def field_quad_steps(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None):
+    """Generator: quads in rows on one loose piece, about `target` of them. May leave a few triangles or folds: see `is_clean`.
 
     Best on large, smooth or simply shaped pieces. Busy machined parts lose far more shape than the usual reduction and
     pairing, so a caller should judge the result and keep the better one.
     Raises ValueError with a message for a person on a piece too small for a grid or too large to finish in reasonable time.
-    """
-    return drain(field_quad_steps(vertices, faces, target, turn, seed, cancelled, lines))
-
-
-def field_quad_steps(vertices, faces, target: float, turn: float | None = None, seed: int = 0, cancelled=None, lines=None):
-    """Generator: `field_quads`, a slice per sweep of the field solve and per step after it. Raises as `field_quads` does."""
+    A slice per sweep of the field solve and per step after it. Raises as said above."""
 
     if target < SMALLEST_TARGET:
         raise ValueError("This part is too small for rows of quads.")

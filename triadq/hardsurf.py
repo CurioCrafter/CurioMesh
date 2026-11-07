@@ -16,7 +16,7 @@ three quads, each quad into four, the Catmull-Clark split), so it is all quads t
 A chamfer or bevel strip is a long four-cornered panel, so it comes out as one clean row.
 
 Even Cylinders, for a turned part whose rings touch in many places (a detailed casting) or that has no clean rings at
-all (a scan). `parts.fit_revolve` walks its rings breadth first and can wander across such a part; here the profile is
+all (a scan). `parts.fit_revolve_steps` walks its rings breadth first and can wander across such a part; here the profile is
 the longest path through the minimum spanning tree of the rings, the usual way to read a curve back from samples
 (the EMST curve idea, Figueiredo and Miranda Gomes 1995), and a scan is binned on a coarser grid. The part is then
 swept by `parts.build_revolve`: a constant segment count around that is a multiple of four, straight rows along it and
@@ -30,8 +30,9 @@ import math
 import numpy as np
 
 from . import parts
-from .flatquad import _Unfit, _bridge_holes, _ear_clip, _face_frames, _grow_regions
+from .flatquad import _Unfit, _bridge_holes, _ear_clip, _face_frames, _grow_region_steps
 from .patch import _key, _orient, _Planar
+from .types import drain
 
 PANEL_DEG = 4.0  # faces whose normals differ by less than this can share a panel
 PANEL_TOL = 0.001  # how far from its panel's plane a vertex may be, as a share of the part's diagonal
@@ -426,6 +427,11 @@ def _rings(coords: np.ndarray, frame, outer: list[int], inner: list[int], h: flo
 
 def panel_layout(points: np.ndarray, polys) -> dict | None:
     """Panels, their border chains and loops, worked out once per part. None if the part is not made of flat panels."""
+    return drain(panel_layout_steps(points, polys))
+
+
+def panel_layout_steps(points: np.ndarray, polys):
+    """Generator: `panel_layout`, the panels grown a few thousand faces per slice."""
 
     points = np.asarray(points, dtype=np.float64)
     polys = [tuple(int(v) for v in p) for p in polys]
@@ -435,7 +441,8 @@ def panel_layout(points: np.ndarray, polys) -> dict | None:
     if diag <= 0.0:
         return None
     normals, areas = _face_frames(points, polys)
-    labels = _grow_regions(points, polys, normals, areas, np.zeros(len(polys), dtype=np.int64), PANEL_TOL * diag, math.cos(math.radians(PANEL_DEG)))
+    labels = yield from _grow_region_steps(points, polys, normals, areas, np.zeros(len(polys), dtype=np.int64), PANEL_TOL * diag, math.cos(math.radians(PANEL_DEG)))
+    yield
     regions = int(labels.max()) + 1
     if regions > MOST_REGIONS or regions > REGION_SHARE * len(polys) + 6:
         return None
@@ -443,6 +450,7 @@ def panel_layout(points: np.ndarray, polys) -> dict | None:
     if not chains:
         return None
     simple = [[path[k] for k in _dp3(points[path], CHAIN_TOL * diag)] for path, _a, _b in chains]  # once: both panels use it
+    yield
     loops, frames = {}, {}
     for r in range(regions):
         found = _loops_of(r, chains)
@@ -811,8 +819,9 @@ def _supported(fit: dict, cloud: np.ndarray, cell: float) -> float:
     return float((gap <= 3.0 * cell).mean())
 
 
-def fit_turned(points: np.ndarray, polys) -> dict | None:
-    """A turned part's axis and profile, read as a curve through its rings (see the module text). None if it isn't one."""
+def fit_turned_steps(points: np.ndarray, polys):
+    """Generator: a turned part's axis and profile, read as a curve through its rings (see the module text). None if it isn't one.
+    A slice per axis tried and per few thousand points clustered."""
 
     points = np.asarray(points, dtype=np.float64)
     diag = float(np.linalg.norm(np.ptp(points, axis=0)))
@@ -825,12 +834,14 @@ def fit_turned(points: np.ndarray, polys) -> dict | None:
     pairs = np.asarray(sorted(edges), dtype=np.int64).reshape(-1, 2)
     rim = parts._boundary_vertices(polys)
     centres = np.asarray([p[:3] for p in polys], dtype=np.int64)  # three corners give a face's middle near enough
+    yield
     best = None
     for cell_share in TURN_CELLS:
         if cell_share != TURN_CELLS[0] and len(polys) < SCAN_FACES:
             break
         cell = cell_share * diag
         for axis in parts._axes(points):
+            yield
             frame, center, local = _frame(axis, points)
             angle = np.arctan2(local[:, 1], local[:, 0])
             rz = np.stack([np.hypot(local[:, 0], local[:, 1]), local[:, 2]], axis=1)
@@ -838,7 +849,7 @@ def fit_turned(points: np.ndarray, polys) -> dict | None:
             off_axis = rz[:, 0] > 2 * cell
             if off_axis.sum() < 8 or spread.min() < TURN_SPREAD * off_axis.sum() / 16.0:
                 continue  # not turned all the way round this axis
-            ids = parts._cluster(rz, cell)
+            ids = yield from parts._cluster_steps(rz, cell)
             count = int(ids.max()) + 1
             mean = np.stack([np.bincount(ids, rz[:, k], count) for k in range(2)], axis=1) / np.bincount(ids, None, count)[:, None]
             a, b = ids[pairs[:, 0]], ids[pairs[:, 1]]
@@ -884,12 +895,13 @@ def fit_turned(points: np.ndarray, polys) -> dict | None:
 
 
 def cylinder_rebuilds(points: np.ndarray, polys, kind: str = "0"):
-    """Generator: the part swept from a fitted profile, fewest faces first, when `parts.rebuilds` would miss or misread it."""
+    """Generator: the part swept from a fitted profile, fewest faces first, when `parts.rebuilds` would miss or misread it.
+    A None between them is a slice of the fits: nothing to judge yet."""
 
-    fit = fit_turned(points, polys)
+    fit = yield from fit_turned_steps(points, polys)
     if fit is None:
         return
-    old = parts.fit_revolve(points, polys)
+    old = yield from parts.fit_revolve_steps(points, polys)
     if old is not None:
         old = dict(old, cell=parts.CLUSTER)
         if cover(old, points) >= fit["cover"] - 0.02:
@@ -897,14 +909,15 @@ def cylinder_rebuilds(points: np.ndarray, polys, kind: str = "0"):
     yield from parts.sweeps(fit, kind, 0.5 * fit["cell"])
 
 
-def round_floor(points: np.ndarray, polys, model_diag: float) -> int:
-    """Fewest triangles a reduced size of this part may keep when it is a visibly round part of the model (its radius at
-    least ROUND_VISIBLE of the model's size): about what its 16-step sweep would take, so a pipe or barrel never ends up
-    as a 6- or 12-sided prism however little of the view that changes. 0 when it isn't such a part."""
+def round_floor_steps(points: np.ndarray, polys, model_diag: float):
+    """Generator, in slices: the fewest triangles a reduced size of this part may keep when it is a visibly round part of
+    the model (its radius at least ROUND_VISIBLE of the model's size): about what its 16-step sweep would take, so a
+    pipe or barrel never ends up as a 6- or 12-sided prism however little of the view that changes. 0 when it isn't
+    such a part."""
 
-    fit = fit_turned(points, polys)
+    fit = yield from fit_turned_steps(points, polys)
     if fit is None:
-        old = parts.fit_revolve(points, polys)
+        old = yield from parts.fit_revolve_steps(points, polys)
         if old is None or cover(dict(old, cell=parts.CLUSTER), points) < TURN_COVER:
             return 0
         fit = dict(old, cell=parts.CLUSTER)
@@ -916,14 +929,16 @@ def round_floor(points: np.ndarray, polys, model_diag: float) -> int:
 
 
 def panel_rebuilds(points: np.ndarray, polys, kind: str = "0"):
-    """Generator: Clean Panels layouts of the part, fewest faces first; nothing if it isn't made of flat panels."""
+    """Generator: Clean Panels layouts of the part, fewest faces first; nothing if it isn't made of flat panels. A None
+    between them is a slice of the layout: nothing to judge yet."""
 
-    layout = panel_layout(points, polys)
+    layout = yield from panel_layout_steps(points, polys)
     if layout is None:
         return
     sizes = set()
     most = max(6.0, PANEL_MOST * sum(len(p) - 2 for p in polys))
     for step in PANEL_STEPS:
+        yield
         out = panel_rebuild(points, polys, step, kind, layout)
         if out is not None and len(out[1]) > most:
             return  # more quads than reducing the part would leave: the camera would never pick it
@@ -933,11 +948,12 @@ def panel_rebuilds(points: np.ndarray, polys, kind: str = "0"):
 
 
 def rebuilds(points: np.ndarray, polys, kind: str = "0", panels: bool = True, cylinders: bool = True):
-    """Generator of hard-surface rebuilds of a part for the camera to judge, as (points, quads, kinds, family)."""
+    """Generator of hard-surface rebuilds of a part for the camera to judge, as (points, quads, kinds, family). A None is
+    a slice of the fits with nothing to judge: the caller steps on."""
 
     if cylinders:
         for out in cylinder_rebuilds(points, polys, kind):
             yield None if out is None else (*out, "cylinders")
     if panels:
         for out in panel_rebuilds(points, polys, kind):
-            yield (*out, "panels")
+            yield None if out is None else (*out, "panels")

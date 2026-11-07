@@ -15,6 +15,7 @@ Loop Flow draws the edge loops of the result in a colour each, and its poles as 
 from __future__ import annotations
 
 import colorsys
+import time
 
 import bpy
 import numpy as np
@@ -26,7 +27,8 @@ from .triadq import checks, issues, loopscore, patterns
 from .triadq import organize as O
 
 STRENGTHS = (0.25, 0.5, 0.75, 1.0)  # worked out once; the slider shows the nearest one at or below it. 0.25: poles cleaned, 0.5: quads settled, 0.75 and 1: loops straightened half and fully
-GAP = 0.1  # seconds between looks at what is ready
+SLICE, GAP = 0.03, 0.05  # seconds of work per timer tick, and between ticks
+IDLE = 2.0  # after each tick Blender is left alone at least this many times as long as the tick took
 LONG_LOOP = 4  # edges: shorter loops are not drawn in Loop Flow
 FACE_ARRAYS = ("mat", "piece", "parts", "new", "locked", "chart")  # per-face numbers of a result that organizing carries along
 SETTLE_PULL = "smooth"  # neighbours' middle; "settle" (rectangles and straight loops) measured the same view change with a few more slivers on five test models
@@ -71,14 +73,6 @@ def _nearest(tree, points: np.ndarray) -> np.ndarray:
     return tree.nearest(points)[0]
 
 
-def _drain(work):
-    while True:
-        try:
-            next(work)
-        except StopIteration as done:
-            return done.value
-
-
 def start(context) -> bool:
     """Start working out the strengths of the result on screen. False when it has none (no search, Blockout, Reduce To)."""
     guided = _g()
@@ -89,13 +83,13 @@ def start(context) -> bool:
     cancel()
     out = base["out"]
     tree = BVHTree.FromPolygons(job.co.tolist(), [list(f) for f in job.faces], all_triangles=False, epsilon=0.0)
-    box = {"stop": False, "levels": {}, "stage": "Getting ready", "error": None}
+    box = {"stop": False, "levels": {}, "stage": "Getting ready", "error": None, "job": None}
     seg_piece = segments.seg.get("piece")
     org.update(base=base, origin=out, report=dict(base["report"]), box=box, seg_piece=seg_piece)
     org["meshes"][0.0] = _mesh_for(out)
     strokes = list(getattr(job, "guide_lines", None) or []) + [line for _tag, rows in (getattr(job, "bend_groups", None) or []) for line in rows]
     gap = float(getattr(job, "gap", 0.0) or 0.0)
-    _work(box, out, job.co, job.faces, job.mirror, tree, seg_piece, (strokes, gap))
+    box["job"] = _work(box, out, job.co, job.faces, job.mirror, tree, seg_piece, (strokes, gap))
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=GAP)
     return True
@@ -127,8 +121,9 @@ def _held_by_strokes(points: np.ndarray, strokes) -> np.ndarray:
     return out
 
 
-def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0)) -> None:
-    """Every strength, measured. Hands each over in `box["levels"]` as it is ready."""
+def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0)):
+    """Generator, stepped by the timer in short slices: every strength, measured. Hands each over in `box["levels"]`
+    as it is ready."""
     try:
         co, faces = np.asarray(out["co"], dtype=np.float64), [tuple(f) for f in out["faces"]]
         kind, table = _kinds(out, len(faces), seg_piece)
@@ -143,7 +138,7 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0
         low, high = src_co.min(axis=0), src_co.max(axis=0)
         centre, reach = (low + high) / 2.0, (float(np.ptp(src_co, axis=0).max()) or 1.0) * 0.55
         pixels = autoretopo.MAX_PIXELS
-        reference = _drain(autoretopo.pictures(src_co, src_faces, centre, reach, pixels))
+        reference = yield from autoretopo.pictures(src_co, src_faces, centre, reach, pixels)
         judge = None  # poles are redrawn by distance
 
         def whole_of(points, these, kinds):
@@ -159,10 +154,13 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0
             return made, kept
 
         def measured(points, these, whole, kept):
-            wrong, shown = autoretopo.picture_counts(reference, _drain(autoretopo.pictures(points, these, centre, reach, pixels)), 2.0 * reach / pixels)
+            """Generator: the meter numbers of one strength."""
+            picture = yield from autoretopo.pictures(points, these, centre, reach, pixels)
+            wrong, shown = autoretopo.picture_counts(reference, picture, 2.0 * reach / pixels)
             full_co, full_faces = whole["co"], whole["faces"]
             score = patterns.score(patterns.measure(full_co, full_faces))["score"]
-            found = checks.defects(points, these, src_co, src_faces)
+            yield
+            found = yield from checks.defect_steps(points, these, src_co, src_faces)
             masks = {k: getattr(found, k) for k in checks.Defects.KINDS}
             if mirror is not None:  # the half was checked: its mirror has the same faces
                 masks = {k: np.concatenate((m[kept], m[kept])) for k, m in masks.items()}
@@ -174,27 +172,29 @@ def _work(box, out, src_co, src_faces, mirror, tree, seg_piece, strokes=((), 0.0
 
         box["stage"] = "Measuring the result as it is"
         first, kept = whole_of(half, half_faces, half_kinds)
-        box["levels"][0.0] = dict(measured(half, half_faces, first, kept), out=None)
+        box["levels"][0.0] = dict((yield from measured(half, half_faces, first, kept)), out=None)
         if box["stop"]:
             return
         box["stage"] = "Redrawing patches around poles"
         stay = O.pinned(half, half_faces, plane=plane) | _held_by_strokes(half, strokes)
-        clean, clean_faces, clean_kinds, stay = O.clean_poles(half, half_faces, half_kinds, stay, judge, redraw=REDRAW)
+        clean, clean_faces, clean_kinds, stay = yield from O.clean_pole_steps(half, half_faces, half_kinds, stay, judge, redraw=REDRAW)
         if box["stop"]:
             return
         box["stage"] = "Settling the quads"
         stay |= O.pinned(clean, clean_faces, plane=plane)
         project = lambda p: _nearest(tree, p)  # noqa: E731
-        shots = O.settle(clean, clean_faces, project, stay, plane, snapshots=(0,), method=SETTLE_PULL)  # the weakest only cleans the poles
+        shots = yield from O.settle_steps(clean, clean_faces, project, stay, plane, snapshots=(0,), method=SETTLE_PULL)  # the weakest only cleans the poles
+        if box["stop"]:
+            return
         box["stage"] = "Straightening the loops"
         settled = shots[-1][1]
-        straight = O.settle(settled, clean_faces, project, stay, plane, snapshots=(O.STRAIGHT_STEPS // 2,), method="straighten", steps=O.STRAIGHT_STEPS)
+        straight = yield from O.settle_steps(settled, clean_faces, project, stay, plane, snapshots=(O.STRAIGHT_STEPS // 2,), method="straighten", steps=O.STRAIGHT_STEPS)
         for strength, (_step, points) in zip(STRENGTHS, shots + straight):
             if box["stop"]:
                 return
             box["stage"] = f"Measuring strength {strength:g}"
             whole, kept = whole_of(points, clean_faces, clean_kinds)
-            row = measured(points, clean_faces, whole, kept)
+            row = yield from measured(points, clean_faces, whole, kept)
             box["levels"][strength] = dict(row, out=whole)
         box["stage"] = ""
     except Exception as exc:  # shown under the slider
@@ -214,6 +214,15 @@ def _tick():
     if not active() or org["box"] is None:
         return None
     box = org["box"]
+    started = time.perf_counter()
+    if box["job"] is not None:
+        try:
+            while time.perf_counter() - started < SLICE and not box["stop"]:
+                next(box["job"])
+        except StopIteration:
+            box["job"] = None
+        overlay.tag_redraw()  # the stage under the slider
+    spent = time.perf_counter() - started
     for strength, row in list(box["levels"].items()):
         if strength not in org["levels"]:
             org["levels"][strength] = row
@@ -224,8 +233,8 @@ def _tick():
     gs = getattr(context.scene, "curiomesh_guided", None)
     if gs is not None:
         show(context, gs)
-    done = box["error"] is not None or len(org["levels"]) > len(STRENGTHS)
-    return None if done else GAP
+    done = box["error"] is not None or len(org["levels"]) > len(STRENGTHS) or box["job"] is None
+    return None if done else max(GAP, IDLE * spent)
 
 
 def cap(gs):

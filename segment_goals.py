@@ -30,7 +30,7 @@ from . import segments as view
 from .triadq import parts as P
 from .triadq import patch, tasks
 from .triadq import segment as S
-from .triadq.flatquad import flat_quad_remesh
+from .triadq.flatquad import flat_quad_remesh_steps
 from .triadq.types import MeshData
 
 ATTRIBUTE = "curiomesh_segment"
@@ -503,6 +503,15 @@ def in_step(call):
     return box
 
 
+def in_steps(steps):
+    """Generator: `yield from steps`, so a sliced call keeps its slices. Returns {"out": result} or {"error": text},
+    like `in_step`."""
+    try:
+        return {"out": (yield from steps)}
+    except Exception as exc:  # handed back to the caller as text
+        return {"error": str(exc)[:100]}
+
+
 class GoalJob(view.PartJob):
     """Remake the chosen segments for their Use, one at a time, then look at the whole object again."""
 
@@ -514,6 +523,13 @@ class GoalJob(view.PartJob):
     def _in_step(self, call):
         """Generator: `call()` as a slice of its own. Returns its result, or None after noting what went wrong."""
         box = yield from in_step(call)
+        if "out" not in box and box.get("error") != "cancelled":
+            self.warnings = [box.get("error", "no result")]
+        return box.get("out")
+
+    def _in_steps(self, steps):
+        """Generator: `_in_step` for a sliced call: its slices stay slices."""
+        box = yield from in_steps(steps)
         if "out" not in box and box.get("error") != "cancelled":
             self.warnings = [box.get("error", "no result")]
         return box.get("out")
@@ -580,12 +596,12 @@ class GoalJob(view.PartJob):
         marks = (lambda pts, tris: _on_lines(pts, tris, drawn)) if drawn else None
         settle = (lambda co, faces, pinned: _lay_edges(co, faces, pinned, drawn, project)) if drawn else None
         most = int(np.bincount(np.asarray(out["mat"])[ids]).argmax()) if len(ids) else 0
-        made = yield from self._in_step(lambda: S.field_with_rings(points, polys, rings, seams, target, project, marks, settle))
+        made = yield from self._in_steps(S.field_with_rings_steps(points, polys, rings, seams, target, project, marks, settle))
         if made is None and rings:  # a loop that can't be a true one still gets edges along it
             drawn = self._expand_lines(items, edge, project)
             marks = lambda pts, tris: _on_lines(pts, tris, drawn)  # noqa: E731
             settle = lambda co, faces, pinned: _lay_edges(co, faces, pinned, drawn, project)  # noqa: E731
-            made = yield from self._in_step(lambda: S.field_on_seams(points, polys, seams, target, project, marks, settle))
+            made = yield from self._in_steps(S.field_on_seams_steps(points, polys, seams, target, project, marks, settle))
         if made is None:
             return None
         return made[0], made[1], [most] * len(made[1])
@@ -638,17 +654,18 @@ class GoalJob(view.PartJob):
                 ratio = (STROKE_SHARE if goal == "STROKES" else CLOSED_SHARE if goal in {"REDUCE", "LOWPOLY"} else 2.0) * area / max(edge * edge, 1e-30) / max(triangles, 1)
                 if ratio < 0.98:
                     yield
-                    points, polys, kinds = autoretopo._decimate(points, polys, kinds, max(ratio, 1e-4))
+                    points, polys, kinds = yield from autoretopo._decimate_steps(points, polys, kinds, max(ratio, 1e-4))
             choice = record.get("choice", "AUTO") if goal in {"REDUCE", "LOWPOLY"} else "AUTO"
             quads = goal in {"REDUCE", "LOWPOLY", "STROKES"} and choice != "TRIS"
             seeds = 4 if choice == "PAIRING" else 2
             if choice == "FLAT":
                 def flat_then_join():
-                    made = flat_quad_remesh(MeshData(points, polys, kinds), force_quads=True)[0]
+                    made = (yield from flat_quad_remesh_steps(MeshData(points, polys, kinds), force_quads=True))[0]
+                    yield
                     co2, faces2, origin, _ids = S.conform(np.asarray(made.vertices, dtype=np.float64), [tuple(f) for f in made.faces], seams)
                     return co2, faces2, [list(made.face_materials)[i] for i in origin]
 
-                made = yield from self._in_step(flat_then_join)
+                made = yield from self._in_steps(flat_then_join())
                 if made is not None:
                     return made
                 self.warnings = []
@@ -657,7 +674,7 @@ class GoalJob(view.PartJob):
                 cut = yield from self._in_step(lambda: self._cut_strokes(points, polys, kinds, items, nearest))
                 if cut is not None:
                     points, polys, kinds, keep = cut
-            made = yield from self._in_step(lambda: S.pair_on_seams(points, polys, kinds, seams, quads=quads, guide_edges=keep, project=project, seeds=seeds))
+            made = yield from self._in_steps(S.pair_on_seams_steps(points, polys, kinds, seams, quads=quads, guide_edges=keep, project=project, seeds=seeds))
             if made is not None:
                 return made
             # Your mesh's border and the result's differ too much for a join here. The seam-keeping fill always fits.
@@ -665,7 +682,7 @@ class GoalJob(view.PartJob):
             self.warnings = []
             goal = "SUBD"
             self.note = f"{GOAL_NAMES.get(record['goal'], record['goal'])} could not join its neighbours ({note}): made quads on the seam instead"
-        made = yield from self._in_step(lambda: S.fill_part(co, faces, ids, goal, edge, project, topology, cancelled, focus=focus, creases=self._creases(record, goal)))
+        made = yield from self._in_steps(S.fill_part_steps(co, faces, ids, goal, edge, project, topology, cancelled, focus=focus, creases=self._creases(record, goal)))
         if made is None:
             return None
         points, new_faces, warnings = made

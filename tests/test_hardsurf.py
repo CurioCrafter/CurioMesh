@@ -11,6 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq import hardsurf, parts  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 def prism(outline, height=1.0, rows=3):
@@ -141,7 +142,7 @@ class EvenCylinders(unittest.TestCase):
             for i in range(sides):
                 a, b = r * sides + i, r * sides + (i + 1) % sides
                 faces += [(a, b, b + sides), (a, b + sides, a + sides)]
-        fit = hardsurf.fit_turned(co, faces)
+        fit = drain(hardsurf.fit_turned_steps(co, faces))
         self.assertIsNotNone(fit)
         built = parts.build_revolve(fit, 16, 0.01)
         self.assertIsNotNone(built)

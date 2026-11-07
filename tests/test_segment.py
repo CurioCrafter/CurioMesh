@@ -10,6 +10,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq import patch, segment  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 def dumbbell(sides=24, rings=40):
@@ -145,7 +146,7 @@ class JoinTests(unittest.TestCase):
         co[:, 2] = 0.8 * np.sin(co[:, 0]) * np.cos(co[:, 1])  # bent enough to refuse some templates
         tris = [t for f in faces for t in ((f[0], f[1], f[2]), (f[0], f[2], f[3]))]
         seam = self._seam(co, faces, range(len(faces)))
-        points, made, _mats = segment.pair_on_seams(co, tris, ["0"] * len(tris), seam)
+        points, made, _mats = drain(segment.pair_on_seams_steps(co, tris, ["0"] * len(tris), seam))
         self.assertEqual(sum(len(f) != 4 for f in made), 0)
         self.assertEqual(segment.open_edges(made), len(seam[0]))
         self.assertEqual({tuple(p) for p in points[patch.boundary_loops(made, range(len(made)))[0][0]].tolist()}, {tuple(p) for p in seam[0].tolist()})
@@ -154,7 +155,7 @@ class JoinTests(unittest.TestCase):
         co, faces = grid(10, 10)
         tris = [t for f in faces for t in ((f[0], f[1], f[2]), (f[0], f[2], f[3]))]
         row = [(5 * 11 + i, 5 * 11 + i + 1) for i in range(2, 8)]
-        points, made, _mats = segment.pair_on_seams(co, tris, ["0"] * len(tris), self._seam(co, faces, range(len(faces))), guide_edges=row)
+        points, made, _mats = drain(segment.pair_on_seams_steps(co, tris, ["0"] * len(tris), self._seam(co, faces, range(len(faces))), guide_edges=row))
         fa, _fb, u, v = segment.face_links(made)
         have = {(tuple(points[a]), tuple(points[b])) for a, b in zip(u.tolist(), v.tolist())}
         kept = sum((tuple(co[a]), tuple(co[b])) in have or (tuple(co[b]), tuple(co[a])) in have for a, b in row)
@@ -182,7 +183,7 @@ class JoinTests(unittest.TestCase):
         co, faces = grid(10, 10)
         ids = np.flatnonzero([(i % 10) < 5 for i in range(len(faces))])
         rest = [faces[i] for i in range(len(faces)) if i not in set(ids.tolist())]
-        points, made, _warn = segment.fill_part(co, faces, ids, "SUBD", 1.5)
+        points, made, _warn = drain(segment.fill_part_steps(co, faces, ids, "SUBD", 1.5))
         joined = np.vstack((co, points))
         final = rest + [tuple(v + len(co) for v in f) for f in made]
         welded, welded_faces = segment.weld_border(joined, final)
@@ -194,7 +195,7 @@ class JoinTests(unittest.TestCase):
         co, faces = grid(10, 10)
         tris = [t for f in faces for t in ((f[0], f[1], f[2]), (f[0], f[2], f[3]))]
         seam = self._seam(co, faces, range(len(faces)))
-        points, made, _mats = segment.pair_on_seams(co, tris, ["0"] * len(tris), seam)
+        points, made, _mats = drain(segment.pair_on_seams_steps(co, tris, ["0"] * len(tris), seam))
         loops, pinched = patch.boundary_loops(made, range(len(made)))
         self.assertFalse(pinched)
         self.assertEqual(len(loops[0]), len(seam[0]))

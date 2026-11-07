@@ -66,11 +66,12 @@ def area_masks(centroids: np.ndarray, areas: list[Area], groups: list[list[int]]
 
 
 class AreaRunner:
-    """Runs one plan of jobs, to its end, each time `start` is called. Synchronous: `start` returns when the plan is done.
+    """Runs one plan of jobs, to its end, each time `start` is called. Synchronous: `start` returns when the plan is done
+    (the caller shows the wait cursor).
 
     `fit(result)` settles a finished piece on the surface; `merge(results)` builds what `output` shows;
     `finish(output)` runs once the whole plan is done.
-    `output_id` changes each time a new `output` is ready, so a timer can pick it up.
+    `output_id` changes each time a new `output` is ready, so the panel knows a new one is there.
     """
 
     def __init__(self, vertices, faces, frozen=None, *, fit=None, merge=None, finish=None, max_faces: int = 40_000):

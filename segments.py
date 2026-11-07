@@ -404,7 +404,7 @@ class PartJob:
         count = len(faces)
         output = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": np.asarray(mat, dtype=np.int32), "parts": piece, "piece": piece}
         self.stage = "Looking for problem spots"
-        found = yield from _step(lambda: checks.defects(np.asarray(co), faces, job.co, job.faces))
+        found = yield from checks.defect_steps(np.asarray(co), faces, job.co, job.faces)
         output["issue_spots"], output["issues"] = issues.analyse(np.asarray(co), faces, {k: getattr(found, k) for k in checks.Defects.KINDS}, piece, {"source_faces": len(job.faces)})
         self.output = output  # issues are in before the panel can see the new output
         self.output_id += 1

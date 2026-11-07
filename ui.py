@@ -257,6 +257,8 @@ class CURIOMESH_PT_panel(bpy.types.Panel):
         big.scale_y = 1.4
         text = "Remesh" if compact else f"Remesh to ~{settings.target_faces:,} faces"
         _fill_remesh_operator(big.operator("curiomesh.remesh", text=text, icon="MOD_REMESH"), settings)
+        if not compact:
+            layout.label(text="Runs in one go: Blender is busy until it is done", icon="TIME")
 
         # Quality presets.
         if not compact:
@@ -521,6 +523,7 @@ class CURIOMESH_PT_batch(_SubPanel, bpy.types.Panel):
         row.enabled = count > 0
         row.scale_y = 1.4
         row.operator("curiomesh.batch_remesh", text=f"Remesh {count} Selected", icon="OUTLINER_COLLECTION")
+        layout.label(text="Each mesh runs in one go: Esc stops between meshes", icon="TIME")
         if count == 0 and not settings.batch_results:
             layout.label(text="Select several meshes, then press the button.")
         if settings.batch_status:

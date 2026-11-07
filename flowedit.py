@@ -138,9 +138,9 @@ def _local(co, faces, ids):
     return co[used], [tuple(int(remap[v]) for v in f) for f in sub]
 
 
-def _issues(co, faces, mask, src_co, src_tris) -> int:
-    """Issue Finder spots among the masked faces (where the strokes redid the result, seams included)."""
-    found = checks.defects(co, faces, src_co, [tuple(t) for t in src_tris.tolist()])
+def _issues(co, faces, mask, src_co, src_tris):
+    """Generator: Issue Finder spots among the masked faces (where the strokes redid the result, seams included)."""
+    found = yield from checks.defect_steps(co, faces, src_co, [tuple(t) for t in src_tris.tolist()])
     hit = np.any([getattr(found, k) for k in checks.Defects.KINDS], axis=0)
     _spots, record = issues.analyse(np.asarray(co), faces, {"here": hit & mask}, None, {"source_faces": len(src_tris)})
     return int(sum(record["totals"].values()))
@@ -149,7 +149,7 @@ def _issues(co, faces, mask, src_co, src_tris) -> int:
 def _job(box, origin, plan, project, src_co, src_tris):
     """Generator, stepped by the timer in short slices: each patch redone (or taken from the cache), then put in and
     measured, a slice at a time."""
-    from .segment_goals import in_step
+    from .segment_goals import in_step, in_steps
 
     co, faces = origin["co"], origin["faces"]
     builds, timings, failed = [], [], []
@@ -165,15 +165,16 @@ def _job(box, origin, plan, project, src_co, src_tris):
             made = fe["cache"][key] = done["out"]
             timings.append(time.perf_counter() - t)
         builds.append((ids, made))
-    done = yield from in_step(lambda: _finish(origin, builds, failed, sum(timings) if timings else None, src_co, src_tris))
+    done = yield from in_steps(_finish(origin, builds, failed, sum(timings) if timings else None, src_co, src_tris))
     if "out" not in done:
         box["error"] = f"Flow Editor failed: {done.get('error')}"
         return
     box.update(done["out"])
 
 
-def _finish(origin, builds, failed, seconds, src_co, src_tris) -> dict:
-    """The result with the patches put in, and what changed where they went."""
+def _finish(origin, builds, failed, seconds, src_co, src_tris):
+    """Generator: the result with the patches put in, and what changed where they went (the problem-spot checks
+    sliced)."""
     co, faces, mat = origin["co"], origin["faces"], np.asarray(origin["mat"])
     if builds:
         new_co, new_faces, new_mat, new = F.splice(co, faces, mat, builds)
@@ -191,7 +192,7 @@ def _finish(origin, builds, failed, seconds, src_co, src_tris) -> dict:
     after = loopscore.loop_quality(*_local(new_co, new_faces, np.flatnonzero(new)))
     was = np.zeros(len(faces), dtype=bool)
     was[old_ids] = True
-    spots = (_issues(co, faces, was, src_co, src_tris), _issues(new_co, new_faces, new, src_co, src_tris))
+    spots = ((yield from _issues(co, faces, was, src_co, src_tris)), (yield from _issues(new_co, new_faces, new, src_co, src_tris)))
     text = f"Redone where you drew: faces {len(old_ids):,} -> {int(new.sum()):,}" + (f" in {seconds:.1f} s" if seconds else "")
     text += f". {loopscore.meter(before, after)}. Issues there {spots[0]} -> {spots[1]}"
     if failed:

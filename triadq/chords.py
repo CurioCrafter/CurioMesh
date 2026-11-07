@@ -20,7 +20,7 @@ import time
 import numpy as np
 
 from .quadreduce import MIN_QUALITY, MOST_TURNED, QuadReducer, _cross, _dot, _normal, _quality, _sub
-from .types import MeshData, drain
+from .types import MeshData
 
 TURN_CORNERS = 500  # corners looked at per slice in `turn_pole_steps`
 
@@ -597,12 +597,9 @@ class ChordReducer(QuadReducer):
             out |= ring
         return out | set(also)
 
-    def redraw_all(self, radii=(1, 2, 3), rounds: int = 3, seeds=None) -> int:
-        """Redraw patches around poles, worst first, until that stops paying. Returns the energy taken away."""
-        return drain(self.redraw_all_steps(radii, rounds, seeds))
-
     def redraw_all_steps(self, radii=(1, 2, 3), rounds: int = 3, seeds=None):
-        """Generator: `redraw_all`, yielding after every pole tried."""
+        """Generator: redraw patches around poles, worst first, until that stops paying. Returns the energy taken away.
+        Yields after every pole tried."""
 
         total = 0
         for _round in range(rounds):
@@ -706,12 +703,9 @@ class ChordReducer(QuadReducer):
             self._push(index, 0, self.heap)
             self._push(index, 1, self.heap)
 
-    def turn_poles(self, depth: int = 1, seeds=None) -> int:
-        """Spin edges around poles (Tarini et al. 2010's edge rotation): cheap, and it picks up what redrawing leaves. Returns the energy taken away."""
-        return drain(self.turn_pole_steps(depth, seeds))
-
     def turn_pole_steps(self, depth: int = 1, seeds=None):
-        """Generator: `turn_poles`, yielding every TURN_CORNERS corners."""
+        """Generator: spin edges around poles (Tarini et al. 2010's edge rotation): cheap, and it picks up what redrawing leaves. Returns the energy taken away.
+        Yields every TURN_CORNERS corners."""
 
         total = 0
         for count, v in enumerate(range(len(self.users)) if seeds is None else seeds):

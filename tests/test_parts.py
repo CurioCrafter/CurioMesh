@@ -12,7 +12,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq import parts  # noqa: E402
-from triadq.parts import build_revolve, fit_revolve  # noqa: E402
+from triadq.parts import build_revolve, fit_revolve_steps  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 def grid(nx, ny, scale=(1.0, 1.0)):
@@ -113,7 +114,7 @@ def closed(polys):
 class RevolveTests(unittest.TestCase):
     def test_tube_becomes_a_few_clean_rings_of_quads(self):
         pts, tris = capped_cylinder()
-        fit = fit_revolve(pts, tris)
+        fit = drain(fit_revolve_steps(pts, tris))
         self.assertIsNotNone(fit)
         co, polys, _ = build_revolve(fit, 16, 0.01)
         self.assertTrue(all(len(p) == 4 for p in polys))

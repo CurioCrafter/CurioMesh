@@ -109,7 +109,7 @@ def measure(out_path: str, model_path: str, parts_path: str | None) -> None:
                 if share * triangles < 12.0:
                     continue
                 started = time.perf_counter()
-                mesh = auto._decimate(points, polys, kinds, share)
+                mesh = types.drain(auto._decimate_steps(points, polys, kinds, share))
                 row["tries"].append(_try(auto, flatquad, types, view, "decimate", share, mesh, time.perf_counter() - started, True))
             if rebuilds is not None:
                 started = time.perf_counter()

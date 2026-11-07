@@ -5,9 +5,9 @@
 
 Two steps, both on the result as it is (any style, any size):
 
-- `clean_poles`: the patch redrawing and edge spinning of `chords.ChordReducer` (Tarini et al. 2010's edge rotation),
+- `clean_pole_steps`: the patch redrawing and edge spinning of `chords.ChordReducer` (Tarini et al. 2010's edge rotation),
   judged by the camera when a judge is given. Every new face keeps the key (material, part) of the patch it replaced.
-- `settle`: the quads are pulled into shape like a damped cloth held on the surface. Every quad pulls its corners toward
+- `settle_steps`: the quads are pulled into shape like a damped cloth held on the surface. Every quad pulls its corners toward
   the nearest rectangle of its own size (shape matching, Mueller et al. 2005), every regular vertex pulls toward the
   straight line through its two opposite neighbours (so loops run straight), and a pull toward the nearest point of
   your mesh holds the result on it. The pulls are averaged per vertex and applied a few dozen times with momentum and
@@ -220,10 +220,11 @@ def _fair_pull(co: np.ndarray, rows: np.ndarray) -> np.ndarray:
     return across + ((middle - v) * d).sum(axis=1, keepdims=True) * d
 
 
-def settle(co, faces, project=None, stay=None, plane=None, strength: float = 1.0, snapshots=(), method: str = "settle", steps: int | None = None):
-    """Pull the quads into shape on the surface. `project(points)` gives the nearest points of your mesh. `stay`: vertices
-    that don't move (default `pinned`). `plane`: (axis, offset) of a mirror, whose vertices slide in it. Returns a list of
-    (step, points) at each step in `snapshots`, on the surface, plus the last one."""
+def settle_steps(co, faces, project=None, stay=None, plane=None, strength: float = 1.0, snapshots=(), method: str = "settle", steps: int | None = None):
+    """Generator: pull the quads into shape on the surface, yielding after every step. `project(points)` gives the
+    nearest points of your mesh. `stay`: vertices that don't move (default `pinned`). `plane`: (axis, offset) of a
+    mirror, whose vertices slide in it. Returns a list of (step, points) at each step in `snapshots`, on the surface,
+    plus the last one."""
     co = np.asarray(co, dtype=np.float64)
     if stay is None:
         stay = pinned(co, faces, plane=plane)
@@ -308,15 +309,17 @@ def settle(co, faces, project=None, stay=None, plane=None, strength: float = 1.0
         last, x = x, kept_shape(new, x)  # a quad flipping, folding or caving in: its corners stay where they were this step
         if step in wanted:
             out.append((step, landed(x)))
+        yield
     out.append((steps, landed(x)))
     return out
 
 
-def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: bool = True):
-    """Fewer poles: messy patches around poles redrawn as plain grids (`ChordReducer.redraw_all`), then edges spun to
-    walk the poles left together (`turn_poles`). `keys` per face: faces with different keys (another material or part)
+def clean_pole_steps(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: bool = True):
+    """Generator: fewer poles: messy patches around poles redrawn as plain grids (`ChordReducer.redraw_all_steps`), then edges spun to
+    walk the poles left together (`turn_pole_steps`). `keys` per face: faces with different keys (another material or part)
     are never mixed, and every new face takes the key of the patch it replaced. `stay`: vertices that don't move.
-    Returns (co, faces, keys, stay) of the cleaned mesh, with unused vertices dropped."""
+    Returns (co, faces, keys, stay) of the cleaned mesh, with unused vertices dropped.
+    Yields between the poles tried."""
     co = np.asarray(co, dtype=np.float64)
     reducer = ChordReducer(MeshData(co, [tuple(f) for f in faces], list(keys)), judge)
     stay = np.zeros(len(co), dtype=bool) if stay is None else np.asarray(stay, dtype=bool)
@@ -324,9 +327,9 @@ def clean_poles(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: 
         reducer.locked[v] = True  # not `freeze`: that stops the whole connected part
     if redraw:  # without the judge: its check of a new grid skips the fold test, and the redrawn grids came out bent
         reducer.judge = None
-        reducer.redraw_all(rounds=2)
+        yield from reducer.redraw_all_steps(rounds=2)
         reducer.judge = judge
-    reducer.turn_poles(depth=depth)
+    yield from reducer.turn_pole_steps(depth=depth)
     alive = [i for i, f in enumerate(reducer.faces) if f is not None]
     used = np.unique(np.fromiter((v for i in alive for v in reducer.faces[i]), dtype=np.int64))
     remap = np.full(len(reducer.points), -1, dtype=np.int64)
@@ -375,4 +378,4 @@ def pick(levels: dict, wanted: float, cap: float | None = None):
     return max(fine, default=0.0)
 
 
-__all__ = ["clean_poles", "half_of", "meter", "pick", "pinned", "poles", "settle"]
+__all__ = ["clean_pole_steps", "half_of", "meter", "pick", "pinned", "poles", "settle_steps"]

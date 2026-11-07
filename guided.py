@@ -1575,7 +1575,8 @@ def _start_areas(source, gs, pts, src, L0) -> bool:
     work["areas"] = pts
     state.update(L0=L0, ms=0.0, spot=None)
     state["message"] = "Working..."
-    work["runner"].start(jobs)
+    with tasks.busy_cursor():  # the whole plan runs in this call
+        work["runner"].start(jobs)
     return True
 
 
@@ -1944,7 +1945,8 @@ def _start_boolean(context, gs, source, src, coarser: float = 1.0) -> bool:
         work["coarser"] = coarser
         jobs = [areas.Job(mask, edge, gs.strategy, (0,))]
     state["message"] = work["note"] or "Redoing the part inside the shapes..."
-    work["runner"].start(jobs)
+    with tasks.busy_cursor():  # the whole plan runs in this call
+        work["runner"].start(jobs)
     return True
 
 
@@ -2040,7 +2042,13 @@ def finish_work(context) -> bool:
 
 
 def run_update(context, force: bool = False) -> bool:
-    """Recompute the preview now. Returns True when a preview was produced."""
+    """Recompute the preview now, under the wait cursor (Whole Mesh and Points Only run in one go). Returns True when a
+    preview was produced."""
+    with tasks.busy_cursor():
+        return _run_update(context, force)
+
+
+def _run_update(context, force: bool) -> bool:
     gs = context.scene.curiomesh_guided
     source = _source_mesh(context)
     if source is None:
@@ -2767,7 +2775,7 @@ class CURIOMESH_OT_guided_suggest(bpy.types.Operator):
 class CURIOMESH_OT_guided_update(bpy.types.Operator):
     bl_idname = "curiomesh.guided_update"
     bl_label = "Update"
-    bl_description = "Rebuild the preview now, even when it is too big for automatic updates"
+    bl_description = "Rebuild the preview now, even when it is too big for automatic updates. Whole Mesh and Points Only run in one go: Blender is busy until they are done"
     bl_options = {"INTERNAL"}
 
     @classmethod
@@ -3372,7 +3380,7 @@ class CURIOMESH_OT_ladder_stop(bpy.types.Operator):
 class CURIOMESH_OT_ladder_more(bpy.types.Operator):
     bl_idname = "curiomesh.ladder_more"
     bl_label = "Work Out Other Sizes"
-    bl_description = "Work out the other sizes for the Quad Size and Rows sliders in short steps. This can take several minutes; it uses about a third of Blender's time, and single steps last under a second on a 60,000-face mesh. Stop Working Out Sizes ends it at any time"
+    bl_description = "Work out the other sizes for the Quad Size and Rows sliders in short steps. This can take several minutes; it uses about a third of Blender's time, and single steps last about half a second on a 60,000-face mesh, up to about 1.5 seconds with Field Rows or on bigger meshes. Stop Working Out Sizes ends it at any time"
     bl_options = {"INTERNAL"}
 
     def execute(self, context):

@@ -18,8 +18,8 @@ import heapq
 
 import numpy as np
 
-from .engine import RemeshOptions, remesh_mesh
-from .flatquad import pair_and_close
+from .engine import RemeshOptions, remesh_mesh_steps
+from .flatquad import pair_and_close_steps
 from .patch import (
     _arc_parameters,
     _half_edges,
@@ -32,14 +32,15 @@ from .patch import (
     coons_grid,
     fill_loop,
     fit_to_surface,
+    fit_to_surface_steps,
     mask_components,
     prepare_regions,
     quad_quality,
     remesh_region,
     tutte_embedding,
 )
-from .topology import parity_path_quad_closure
-from .types import MeshData
+from .topology import parity_path_quad_closure_steps
+from .types import MeshData, drain
 
 from . import fieldmesh, patterns, smoothgrid
 
@@ -900,13 +901,13 @@ def conform(points, faces, seams):
     return final_points, final, origin, [np.searchsorted(used, ids) for ids in seam_ids]
 
 
-def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edges=(), project=None, seeds: int = 2):
-    """A reduced part joined to its seams: all quads when ParityPath can close it, every second seam vertex taking the others as frozen midpoints.
+def pair_on_seams_steps(points, faces, kinds, seams, *, quads: bool = True, guide_edges=(), project=None, seeds: int = 2):
+    """Generator: a reduced part joined to its seams: all quads when ParityPath can close it, every second seam vertex taking the others as frozen midpoints.
 
     Bent seams can leave a face no valid template; it takes the first anyway and the shape is repaired with the seam held.
     `guide_edges` (pairs of vertices) are edges the quads must keep. `project` lays repaired vertices back on your surface.
     Returns (points, faces, materials). Falls back to quads and a few triangles on the full seam only if closure can't finish, and gives triangles with `quads` off.
-    """
+    Yields between slices of the pairing and the closure."""
 
     points = np.asarray(points, dtype=np.float64)
     wanted = points[np.asarray(guide_edges, dtype=np.int64).reshape(-1, 2)]
@@ -917,7 +918,7 @@ def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edge
         return RemeshOptions(target_faces=max(1, len(faces) // 2), seed_count=seeds, force_quads=False, max_pairing=True, guide_edges=tuple(keep))
 
     if not seams and quads:
-        made = pair_and_close(MeshData(points, faces, kinds), seed_count=seeds, guide_edges=tuple(guide_edges))[0]
+        made = (yield from pair_and_close_steps(MeshData(points, faces, kinds), seed_count=seeds, guide_edges=tuple(guide_edges)))[0]
         return np.asarray(made.vertices, dtype=np.float64), [tuple(f) for f in made.faces], list(made.face_materials)
     if quads and sum(len(s) for s in seams) % 2 == 0 and all(len(s) >= 6 for s in seams):  # two odd borders are fine: all quads only needs an even total
         try:
@@ -931,22 +932,22 @@ def pair_on_seams(points, faces, kinds, seams, *, quads: bool = True, guide_edge
                     extra.append(middle)
                     at += 1
             whole = np.vstack((p, extra))
-            paired = remesh_mesh(MeshData(whole, f, [kinds[i] for i in origin]), pairing(whole))[0]
+            paired = (yield from remesh_mesh_steps(MeshData(whole, f, [kinds[i] for i in origin]), pairing(whole)))[0]
             try:
-                closed = parity_path_quad_closure(paired, frozen_midpoints=frozen)
+                closed = yield from parity_path_quad_closure_steps(paired, frozen_midpoints=frozen)
                 final = np.asarray(closed.vertices, dtype=np.float64)
             except ValueError:
-                closed = parity_path_quad_closure(paired, frozen_midpoints=frozen, allow_invalid=True)
+                closed = yield from parity_path_quad_closure_steps(paired, frozen_midpoints=frozen, allow_invalid=True)
                 pinned = np.zeros(len(closed.vertices), dtype=bool)
                 pinned[[v for loop in ids for v in loop.tolist()] + list(frozen.values())] = True
-                final = fit_to_surface(np.asarray(closed.vertices, dtype=np.float64), closed.faces, pinned, project, 1, 0.5)
+                final = yield from fit_to_surface_steps(np.asarray(closed.vertices, dtype=np.float64), closed.faces, pinned, project, 1, 0.5)
             return final, [tuple(x) for x in closed.faces], list(closed.face_materials)
         except ValueError:  # closure could not finish: quads and some triangles, on the full seam
             pass
     p, f, origin, _ids = conform(points, faces, seams)
     mats = [kinds[i] for i in origin]
     if quads:
-        paired = remesh_mesh(MeshData(p, f, mats), pairing(p))[0]
+        paired = (yield from remesh_mesh_steps(MeshData(p, f, mats), pairing(p)))[0]
         return np.asarray(paired.vertices, dtype=np.float64), [tuple(x) for x in paired.faces], list(paired.face_materials)
     return p, f, mats
 
@@ -1176,11 +1177,11 @@ def _sheet(co, faces, comp, edge, project, focus=None, creases=None):
     return settled, quads, loop
 
 
-def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3, focus=None, creases=None):
-    """Rebuild a part of the result on its own seams. Returns (points, faces, warnings); seam vertices stay exactly where they were.
+def fill_part_steps(co, faces, ids, goal: str, edge: float, project=None, topology=None, cancelled=None, passes: int = 3, focus=None, creases=None):
+    """Generator: rebuild a part of the result on its own seams. Returns (points, faces, warnings); seam vertices stay exactly where they were.
 
     Animation tries a row-and-grid sheet and a flow fill on each disk and keeps the better topology score. Subdivision is the flow fill.
-    """
+    A slice per piece and per stage of each."""
 
     co = np.asarray(co, dtype=np.float64)
     mask = np.zeros(len(faces), dtype=bool)
@@ -1190,6 +1191,7 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
     all_points, out_faces = [co], []
     offset = len(co)
     for comp in comps:
+        yield
         if cancelled is not None and cancelled():
             raise ValueError("cancelled")
         options = []
@@ -1201,6 +1203,7 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
                 remap = np.concatenate((loop, len(co) + np.arange(len(new))))
                 made = [tuple(int(remap[v]) for v in q) for q in quads]
                 options.append((topology_score(*_local_mesh(np.vstack((co, new)), made)) or 0.0, new, made))
+            yield
         good = options and options[0][0] >= SHEET_GOOD
         result = None if good else remesh_region(co, faces, comp, target_length=edge, strategy="FLOW", falloff=2.5 * edge, max_faces=40_000, cancelled=cancelled)
         if good:
@@ -1212,7 +1215,8 @@ def fill_part(co, faces, ids, goal: str, edge: float, project=None, topology=Non
                 local = {v: k for k, v in enumerate(seam)}
                 both = np.vstack((co[seam], pts))
                 plain = [tuple(local[v] if v < result.base else len(seam) + v - result.base for v in face) for face in result.faces]
-                pts = fit_to_surface(both, plain, np.arange(len(both)) < len(seam), project, passes, 0.5)[len(seam) :]
+                yield
+                pts = (yield from fit_to_surface_steps(both, plain, np.arange(len(both)) < len(seam), project, passes, 0.5))[len(seam) :]
             options.append((topology_score(*_local_mesh(np.vstack((co, pts)), result.faces)) or 0.0, pts, result.faces))
         elif not options:
             warnings.append(f"A piece of {len(comp)} faces stayed as it was: {result.message}")
@@ -1319,8 +1323,14 @@ def _fill_holes(co, faces, holes):
 
 def field_on_seams(points, polys, seams, target: float, project=None, lines=None, settle=None):
     """Rows from the field mesher, joined to the seams: its last row comes off and one row of quads ties what's left to the seam's own vertices. Returns (points, faces). Raises ValueError where it can't."""
+    return drain(field_on_seams_steps(points, polys, seams, target, project, lines, settle))
 
-    co, faces = fieldmesh.field_quads(np.asarray(points, dtype=np.float64), polys, max(target, fieldmesh.SMALLEST_TARGET), turn=FIELD_TURN, lines=lines)
+
+def field_on_seams_steps(points, polys, seams, target: float, project=None, lines=None, settle=None):
+    """Generator: `field_on_seams`, a slice per sweep of the field mesher and per step after it."""
+
+    co, faces = yield from fieldmesh.field_quad_steps(np.asarray(points, dtype=np.float64), polys, max(target, fieldmesh.SMALLEST_TARGET), turn=FIELD_TURN, lines=lines)
+    yield
     co = np.asarray(co, dtype=np.float64)
     faces = _drop_crowded(faces)
     if seams:
@@ -1351,16 +1361,18 @@ def field_on_seams(points, polys, seams, target: float, project=None, lines=None
         loops, _pinched = boundary_loops(faces, range(len(faces)))
         co, faces = _fill_holes(co, faces, loops)
         pinned_ids = np.zeros(0, dtype=np.int64)
+    yield
     if any(len(f) != 4 for f in faces):
         mesh = MeshData(co, faces, ["0"] * len(faces))
         try:
-            closed = parity_path_quad_closure(mesh, allow_invalid=True)
+            closed = yield from parity_path_quad_closure_steps(mesh, allow_invalid=True)
             co, faces = np.asarray(closed.vertices, dtype=np.float64), [tuple(f) for f in closed.faces]
         except ValueError:  # the certificate wants every quad flat and convex first: a handful of triangles stay
             faces = fieldmesh.pair_by_paths(co, faces, 4000)
     pinned = np.zeros(len(co), dtype=bool)
     pinned[pinned_ids] = True
-    co = fit_to_surface(co, faces, pinned, project, 2, 0.5)
+    co = yield from fit_to_surface_steps(co, faces, pinned, project, 2, 0.5)
+    yield
     if settle is not None:  # drawn lines: edges of the result are laid along them
         co = settle(co, faces, pinned)
     if seams and open_edges(faces) != sum(len(s) for s in seams):
@@ -1496,15 +1508,22 @@ def field_with_rings(points, polys, rings, seams, target: float, project=None, l
     Each line gets rows of the same count on both sides, laid first. The field mesher fills what's left and is tied to the
     outermost rows, so its poles stay outside. Returns (points, faces). Raises ValueError where a line can't be done.
     """
+    return drain(field_with_rings_steps(points, polys, rings, seams, target, project, lines, settle, rows))
+
+
+def field_with_rings_steps(points, polys, rings, seams, target: float, project=None, lines=None, settle=None, rows: int = RING_ROWS):
+    """Generator: `field_with_rings`, the field mesher of each side sliced as in `field_on_seams_steps`."""
 
     if not rings:
-        return field_on_seams(points, polys, seams, target, project, lines, settle)
+        return (yield from field_on_seams_steps(points, polys, seams, target, project, lines, settle))
     points = np.asarray(points, dtype=np.float64)
     tris = fieldmesh.triangulate(polys)[0]
     area = float(fieldmesh._normals_areas(points, tris)[1].sum())
     cell = float(np.sqrt(area / max(target, 1.0)))
     pts, tris, _sizes, _carried = fieldmesh.split_long_edges(points, tris, np.full(len(points), cell), RING_SPLIT)
+    yield
     band, side, distance, each, step = _ring_band(pts, tris, rings[0], cell, rows)
+    yield
     normals = fieldmesh._normals_areas(pts, tris)[2]
     normals_at = lambda asked: normals[fieldmesh.nearest_points(pts, asked, step, normals, np.zeros_like(asked))]  # noqa: E731
     quads, flipped = _band_quads(band, normals_at)
@@ -1527,7 +1546,7 @@ def field_with_rings(points, polys, rings, seams, target: float, project=None, l
         side_seams = [s for s in seams if side_of(np.asarray(s, dtype=np.float64)[0]) == k] + [row if forward else row[::-1]]
         share = float(fine_area[inside].sum()) / total
         try:
-            made = field_with_rings(here, [tuple(t) for t in here_tris.tolist()], side_rings, side_seams, share * left, project, lines, settle, rows)
+            made = yield from field_with_rings_steps(here, [tuple(t) for t in here_tris.tolist()], side_rings, side_seams, share * left, project, lines, settle, rows)
         except ValueError:
             if side_rings or len(side_seams) != 1:
                 raise

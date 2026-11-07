@@ -13,6 +13,7 @@ from test_flowstroke import grid  # noqa: E402
 from test_organize import ball, onto_ball  # noqa: E402
 from triadq import loopscore as L  # noqa: E402
 from triadq import organize as O  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 class LoopScoreTest(unittest.TestCase):
@@ -47,7 +48,7 @@ class LoopScoreTest(unittest.TestCase):
     def test_straighten_raises_loop_quality_and_stays_on_the_surface(self):
         co, faces = ball(10, jitter=0.3)
         before = L.loop_quality(co, faces)["quality"]
-        last = O.settle(co, faces, onto_ball, method="straighten")[-1][1]
+        last = drain(O.settle_steps(co, faces, onto_ball, method="straighten"))[-1][1]
         self.assertGreater(L.loop_quality(last, faces)["quality"], before + 20)
         self.assertLess(float(np.abs(np.linalg.norm(last, axis=1) - 1.0).max()), 1e-9)
 

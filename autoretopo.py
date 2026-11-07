@@ -43,7 +43,7 @@ from .triadq.shading import blended_normals, corner_normal_steps, corner_table
 from .triadq.fieldmesh import MOST_TARGET, field_quad_steps, is_clean
 from .triadq.smoothgrid import GridOptions, GridReport, crease_area_steps, grid_area_steps, smooth_area_steps
 from . import guides, hardware, loops, parallel, symmetry
-from .triadq.types import Cancelled, FlatFaces, MeshData, cancel_steps, corners_of, drain
+from .triadq.types import Cancelled, FlatFaces, MeshData, cancel_steps, corners_of
 from .triadq.uvs import simplify_borders
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -436,11 +436,6 @@ SPLIT_FACES = 2 * HUGE_FROM  # with helpers, a piece of more faces is cut into r
 DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vertex group takes a few calls, not one per vertex
 
 
-def _decimate(points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
-    """Reduce to `ratio`. `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders."""
-    return drain(_decimate_steps(points, polys, kinds, ratio, drop, keep))
-
-
 def _fill_mesh(mesh, points: np.ndarray, faces: FlatFaces) -> None:
     """What `mesh.from_pydata(points, [], faces)` does, from arrays: the same mesh without a Python list per face."""
     mesh.vertices.add(len(points))
@@ -456,7 +451,9 @@ def _fill_mesh(mesh, points: np.ndarray, faces: FlatFaces) -> None:
 
 
 def _decimate_steps(points, polys, kinds, ratio, drop=None, keep=None):
-    """Generator: `_decimate` in three slices: the arrays Blender takes, Blender's Decimate, the faces read back."""
+    """Generator: reduce to `ratio` in three slices: the arrays Blender takes, Blender's Decimate, the faces read back.
+    `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders. Returns
+    (points, faces, kinds)."""
     free = None if keep is None else np.flatnonzero(~keep)
     if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
         triangles = sum(len(p) - 2 for p in polys)
@@ -879,7 +876,7 @@ class AutoJob:
             self._began = None
 
     def _reduced(self, points, polys, kinds, ratio, drop=None, keep=None, one_off: bool = False):
-        """Generator: this piece reduced to `ratio` by `_decimate`, which has to run on the main thread."""
+        """Generator: this piece reduced to `ratio` by `_decimate_steps`, whose Decimate has to run on the main thread."""
         started = time.perf_counter()
         out = yield from _decimate_steps(points, polys, kinds, ratio, drop, keep)
         self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
@@ -1203,7 +1200,7 @@ class AutoJob:
                     turned_sizes.append(out[0])
                     turned_levels.append(out[1])
         if self.hard.get("cylinders") and not cut and sizes:  # Even Cylinders: a visibly round part never becomes a coarse prism
-            least = yield from self._slice(lambda: hardsurf.round_floor(points, polys, float(np.linalg.norm(np.ptp(self.co, axis=0)))))
+            least = yield from hardsurf.round_floor_steps(points, polys, float(np.linalg.norm(np.ptp(self.co, axis=0))))
             if least and any(level.faces >= least for level in levels):
                 kept = [k for k, level in enumerate(levels) if level.faces >= least]
                 sizes, levels = [sizes[k] for k in kept], [levels[k] for k in kept]

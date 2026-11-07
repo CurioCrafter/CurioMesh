@@ -28,7 +28,7 @@ PROFILES = {
     "LOW_POLY": ("Low Poly", "Fewest faces for a game prop or background: flat areas collapse into big polygons, then triangles. Small parts may vanish", 10.0, "FLAT", "TRIS"),
     "GAME": ("Game Asset", "All quads, few faces, good for a game model. The default", 6.0, "AUTO", "QUADS"),
     "HARD": ("Hard Surface", "Machines, props and architecture: all quads, few faces, flat panels laid out as clean grids and round parts as even cylinders where the camera agrees, and every hard edge marked Sharp and Creased when you Apply. Keeps a little more detail than Game Asset, for crisp silhouettes", 5.0, "AUTO", "QUADS"),
-    "ANIMATION": ("Animation", "All quads, even sizes and more faces, so the mesh bends cleanly. Check eyes, mouth and joints by hand", 1.5, "QUADRIFLOW", "QUADS"),
+    "ANIMATION": ("Animation", "All quads, even sizes and more faces, so the mesh bends cleanly. Check eyes, mouth and joints by hand. Uses Blender's QuadriFlow, which keeps Blender busy for several seconds per part (about 8 s on a 60,000-face mesh)", 1.5, "QUADRIFLOW", "QUADS"),
     "SUBDIV": ("Subdivision", "All quads with flat panels kept as single large quads, so smoothing keeps the shape", 1.5, "FLAT", "QUADS"),
     "SCAN": ("Scan Cleanup", "Keeps more of the detail of a dirty scan (scans have few true flats, so no flat merging)", 2.0, "AUTO", "QUADS"),
     "SCULPT": ("Sculpt Base", "Even, smooth quads to sculpt on: smoothness over detail", 6.0, "PAIRING", "QUADS"),

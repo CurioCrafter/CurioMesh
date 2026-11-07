@@ -1444,17 +1444,22 @@ def _transfer_uvs_with_modifier(source: bpy.types.Object, target: bpy.types.Obje
 
     _set_active_only(target)
     modifier = target.modifiers.new("CurioMesh UV transfer", "DATA_TRANSFER")
-    modifier.object = source
-    modifier.use_loop_data = True
-    modifier.data_types_loops = {"UV"}
-    modifier.loop_mapping = "NEAREST_FACE_INTERPOLATED"
-    modifier.layers_uv_select_src = "ACTIVE"
-    modifier.layers_uv_select_dst = "ACTIVE"
-    modifier.mix_mode = "REPLACE"
     try:
+        modifier.object = source
+        modifier.use_loop_data = True
+        modifier.data_types_loops = {"UV"}
+        # "Nearest Face Interpolated" in the UI; its id is POLYINTERP_NEAREST.
+        modifier.loop_mapping = "POLYINTERP_NEAREST"
+        modifier.layers_uv_select_src = "ACTIVE"
+        modifier.layers_uv_select_dst = "ACTIVE"
+        modifier.mix_mode = "REPLACE"
         bpy.ops.object.modifier_apply(modifier=modifier.name)
-    except RuntimeError:
-        target.modifiers.remove(modifier)
+    except (RuntimeError, TypeError, ValueError):
+        # A failed transfer falls back to the BVH projection; never leave the modifier behind.
+        try:
+            target.modifiers.remove(modifier)
+        except (RuntimeError, ReferenceError):
+            pass
         return False
     return uv_mapping_is_valid(target)
 

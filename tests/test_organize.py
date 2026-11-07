@@ -10,6 +10,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq import organize as O  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 def ball(n: int, jitter: float = 0.0):
@@ -57,7 +58,7 @@ class OrganizeTest(unittest.TestCase):
     def test_settle_evens_quads_and_stays_on_the_surface(self):
         co, faces = ball(8, jitter=0.25)
         for method in ("settle", "smooth"):
-            last = O.settle(co, faces, onto_ball, method=method)[-1][1]
+            last = drain(O.settle_steps(co, faces, onto_ball, method=method))[-1][1]
             self.assertLess(skew(last, faces), 0.7 * skew(co, faces), method)
             self.assertLess(float(np.abs(np.linalg.norm(last, axis=1) - 1.0).max()), 1e-9)
 
@@ -65,7 +66,7 @@ class OrganizeTest(unittest.TestCase):
         co, faces = ball(6, jitter=0.2)
         stay = np.zeros(len(co), dtype=bool)
         stay[:5] = True
-        shots = O.settle(co, faces, onto_ball, stay=stay, snapshots=(10, 20))
+        shots = drain(O.settle_steps(co, faces, onto_ball, stay=stay, snapshots=(10, 20)))
         self.assertEqual([s for s, _p in shots], [10, 20, O.SETTLE_STEPS])
         self.assertTrue(np.array_equal(shots[-1][1][:5], co[:5]))
 
@@ -75,7 +76,7 @@ class OrganizeTest(unittest.TestCase):
         on = O.on_mirror(half, 0, 0.0)
         self.assertTrue(on.any())
         self.assertFalse(O.pinned(half, kept, plane=(0, 0.0))[on].all())
-        last = O.settle(half, kept, None, plane=(0, 0.0))[-1][1]
+        last = drain(O.settle_steps(half, kept, None, plane=(0, 0.0)))[-1][1]
         self.assertTrue(np.all(last[on, 0] == 0.0))
 
     def test_clean_poles_keeps_keys_and_pins(self):
@@ -83,7 +84,7 @@ class OrganizeTest(unittest.TestCase):
         keys = ["top" if co[list(f)].mean(axis=0)[2] > 0 else "low" for f in faces]
         stay = np.zeros(len(co), dtype=bool)
         stay[0] = True
-        new_co, new_faces, new_keys, held = O.clean_poles(co, faces, keys, stay)
+        new_co, new_faces, new_keys, held = drain(O.clean_pole_steps(co, faces, keys, stay))
         self.assertEqual(len(new_faces), len(new_keys))
         self.assertLessEqual(O.poles(new_co, new_faces), O.poles(co, faces))
         self.assertEqual(int(held.sum()), 1)

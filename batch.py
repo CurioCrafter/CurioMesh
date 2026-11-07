@@ -16,6 +16,7 @@ import bpy
 from . import overlay
 from .bridge import run_curiomesh
 from .operators import apply_result_to_settings, config_from_owner
+from .triadq import tasks
 
 
 class CURIOMESH_PG_batch_item(bpy.types.PropertyGroup):
@@ -96,7 +97,8 @@ class BatchRunner:
             if obj is None:
                 error = "object no longer exists"
             else:
-                result = run_curiomesh(obj, self.config)
+                with tasks.busy_cursor():  # one whole remesh per object: Esc is read between objects
+                    result = run_curiomesh(obj, self.config)
                 if result.success:
                     apply_result_to_settings(self.settings, result)
         except Exception as exc:  # one bad mesh must not stop the batch
@@ -137,7 +139,7 @@ class BatchRunner:
 class CURIOMESH_OT_batch_remesh(bpy.types.Operator):
     bl_idname = "curiomesh.batch_remesh"
     bl_label = "Batch Remesh Selected"
-    bl_description = "Remesh every selected mesh with the current settings and save one JSON report"
+    bl_description = "Remesh every selected mesh with the current settings and save one JSON report. Each mesh is remeshed in one go, so Blender is busy while it runs; Esc stops between meshes"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod

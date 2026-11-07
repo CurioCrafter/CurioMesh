@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from triadq.chords import ChordReducer, PictureJudge, _closed_walk, _grid_cells  # noqa: E402
 from triadq.topology import topology_summary  # noqa: E402
-from triadq.types import MeshData  # noqa: E402
+from triadq.types import MeshData, drain  # noqa: E402
 
 
 def box(cells: int) -> MeshData:
@@ -78,7 +78,7 @@ class RedrawTests(unittest.TestCase):
         mesh = turned_edge(box(6))
         reducer = ChordReducer(mesh)
         before = energy(reducer)
-        self.assertGreater(reducer.redraw_all(), 0)
+        self.assertGreater(drain(reducer.redraw_all_steps()), 0)
         self.assertLess(energy(reducer), before)
         summary = topology_summary(reducer.result())
         self.assertEqual((summary.boundary_edges, summary.non_manifold_edges, summary.euler_characteristic), (0, 0, 2))
@@ -89,7 +89,7 @@ class RedrawTests(unittest.TestCase):
         reducer = ChordReducer(turned_edge(box(6)))
         saved = reducer.save()
         known = len(reducer.users)
-        reducer.redraw_all()
+        drain(reducer.redraw_all_steps())
         self.assertGreater(len(reducer.users), known)
         reducer.restore(saved)
         reducer.freeze([0, known + 1], renamed=True)
@@ -102,7 +102,7 @@ class RedrawTests(unittest.TestCase):
         faces = list(one.faces) + [tuple(v + count for v in f) for f in two.faces]
         reducer = ChordReducer(MeshData(np.vstack((one.vertices, np.asarray(two.vertices) + 5.0)), faces, ["0"] * len(faces)))
         saved, messy = reducer.save(), energy(reducer)
-        reducer.redraw_all()
+        drain(reducer.redraw_all_steps())
         tidy = energy(reducer)
         self.assertLess(tidy, messy)
         reducer.roll_back_parts(saved, [0])

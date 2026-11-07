@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _nobvh  # noqa: E402,F401  (no BVH outside Blender)
 
 from triadq import checks, parts, special  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "turned_tube.json").read_text())
 SOURCE = (np.asarray(FIXTURE["source_co"]), [tuple(f) for f in FIXTURE["source_faces"]])
@@ -46,7 +47,7 @@ class GateTests(unittest.TestCase):
         self.assertGreater(volume(*SOURCE), 0.0)
 
     def test_every_rebuild_of_a_triangle_part_faces_out(self):
-        built = list(parts.rebuilds("0", parts.fit_revolve(*SOURCE)))
+        built = list(parts.rebuilds("0", drain(parts.fit_revolve_steps(*SOURCE))))
         self.assertGreaterEqual(len(built), 3)  # a round part starts at 16 steps (parts.min_spin): 16, 24, 32
         for co, polys, _kinds in built:
             turned = parts.orient_like(co, polys, *SOURCE)

@@ -9,8 +9,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.fieldmesh import field_quads, is_clean, long_creases  # noqa: E402
+from triadq.fieldmesh import field_quad_steps, is_clean, long_creases  # noqa: E402
 from triadq.patterns import measure  # noqa: E402
+from triadq.types import drain  # noqa: E402
+
+
+def field_quads(*args, **kwargs):
+    return drain(field_quad_steps(*args, **kwargs))
 
 
 def capsule(rows: int = 40, around: int = 60):

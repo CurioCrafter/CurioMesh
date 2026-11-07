@@ -94,8 +94,12 @@ def _thin_triangles(vertices: np.ndarray, faces, ratio: float) -> np.ndarray:
     return out
 
 
-def _grow_regions(vertices, faces, normals, areas, materials, tol, cos_limit) -> np.ndarray:
-    """Region id per face (every face starts or joins one), largest faces seeding first."""
+GROW_FACES = 4_000  # faces put in a region per slice in `_grow_region_steps`
+
+
+def _grow_region_steps(vertices, faces, normals, areas, materials, tol, cos_limit):
+    """Generator: region id per face (every face starts or joins one), largest faces seeding first. Yields every
+    GROW_FACES faces placed."""
 
     fa, fb = face_adjacency(faces)
     neighbours: list[list[int]] = [[] for _ in faces]
@@ -104,9 +108,13 @@ def _grow_regions(vertices, faces, normals, areas, materials, tol, cos_limit) ->
         neighbours[b].append(a)
     labels = np.full(len(faces), -1, dtype=np.int64)
     next_label = 0
+    placed = 0
     for seed in np.argsort(-areas, kind="stable").tolist():
         if labels[seed] >= 0:
             continue
+        if placed >= GROW_FACES:
+            placed = 0
+            yield
         labels[seed] = next_label
         members = [seed]
         ids = set(faces[seed])
@@ -123,6 +131,7 @@ def _grow_regions(vertices, faces, normals, areas, materials, tol, cos_limit) ->
             if np.abs((vertices[list(faces[face])] - origin) @ normal).max() > tol:
                 continue
             labels[face] = next_label
+            placed += 1
             members.append(face)
             ids.update(faces[face])
             frontier.extend(neighbours[face])
@@ -504,7 +513,7 @@ def flatten_region_steps(mesh: MeshData, options: FlatQuadOptions | None = None)
     cos_limit = math.cos(math.radians(options.angle_deg))
     normals, areas = _face_frames(vertices, faces)
     materials = list(mesh.face_materials)
-    labels = _grow_regions(vertices, faces, normals, areas, materials, tol, cos_limit)
+    labels = yield from _grow_region_steps(vertices, faces, normals, areas, materials, tol, cos_limit)
     yield
     fa, fb = face_adjacency(faces)
     if len(fa):

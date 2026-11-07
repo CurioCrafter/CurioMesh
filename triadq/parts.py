@@ -15,7 +15,7 @@ import math
 
 import numpy as np
 
-from .types import FlatFaces, drain
+from .types import FlatFaces
 
 
 KINDS = ("TUBE", "FLAT", "ROUGH")
@@ -126,13 +126,9 @@ def _axes(points: np.ndarray) -> list[np.ndarray]:
 CLUSTER_ROWS = 4_000  # points clustered per slice in `_cluster_steps`
 
 
-def _cluster(values: np.ndarray, tol: float) -> np.ndarray:
-    """Leader clustering of 2D points; returns a cluster id per point."""
-    return drain(_cluster_steps(values, tol))
-
-
 def _cluster_steps(values: np.ndarray, tol: float):
-    """Generator: `_cluster`, yielding every CLUSTER_ROWS points."""
+    """Generator: leader clustering of 2D points; returns a cluster id per point.
+    Yields every CLUSTER_ROWS points."""
 
     cells: dict[tuple[int, int], list[int]] = {}
     leaders: list[np.ndarray] = []
@@ -184,13 +180,9 @@ def _rdp(profile: np.ndarray, tol: float) -> list[int]:
     return sorted(set(keep))
 
 
-def fit_revolve(points: np.ndarray, polys) -> dict | None:
-    """Find an axis around which the piece is turned, and its profile. None if the piece isn't such a part."""
-    return drain(fit_revolve_steps(points, polys))
-
-
 def fit_revolve_steps(points: np.ndarray, polys):
-    """Generator: `fit_revolve`, in slices of a few thousand points or faces."""
+    """Generator: find an axis around which the piece is turned, and its profile. None if the piece isn't such a part.
+    In slices of a few thousand points or faces."""
 
     points = np.asarray(points, dtype=np.float64)
     diag = float(np.linalg.norm(np.ptp(points, axis=0)))
