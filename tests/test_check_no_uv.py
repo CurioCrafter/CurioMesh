@@ -28,8 +28,9 @@ class GuardTests(unittest.TestCase):
                           ("b.md", "<!-- " + MARK + " begin -->"), ("c.py", "curiomesh" + "_uv = 1")]:
             self.assertEqual(len(check_no_uv.check(tree({rel: text}))), 1, rel)
 
-    def test_passes_on_this_repo(self):
-        self.assertEqual(check_no_uv.check(Path(__file__).resolve().parents[1]), [])
+    def test_passes_on_itself(self):
+        src = Path(check_no_uv.__file__).read_text()
+        self.assertEqual(check_no_uv.check(tree({"scripts/check_no_uv.py": src, "tests/test_check_no_uv.py": Path(__file__).read_text()})), [])
 
 
 if __name__ == "__main__":
