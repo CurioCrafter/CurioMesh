@@ -38,6 +38,7 @@ from .triadq.types import FlatFaces, MeshData
 from .triadq.uvs import chart_codes
 
 PREVIEW_NAME = "CurioMesh_GuidedPreview"
+SPARE_MESHES = (PREVIEW_NAME + "_Size", PREVIEW_NAME + "_Organize")  # preview meshes kept for a quick swap, with no users
 REGION_READY = False  # Selected Faces Only: off until it re-stitches its seam (226 of 398 outline vertices joined on a bust). Redo Inside Shapes covers it
 POINT_TAG = "curiomesh_point"
 DEBOUNCE_SECONDS = 0.35
@@ -1518,7 +1519,7 @@ def _build_preview(context, source, res, uvs=True, mesh=None) -> None:
     else:
         old = obj.data
         obj.data = mesh
-        if old.users == 0:
+        if old.users == 0 and old.get(overlay.PREVIEW_TAG) not in SPARE_MESHES:  # spares go when their size ladder or Tidy Up forgets them
             bpy.data.meshes.remove(old)
     gs = context.scene.curiomesh_guided
     segments.place(obj, source, gs)
@@ -2155,7 +2156,7 @@ def _stop() -> None:
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
     stop_work()
-    ladder.cancel()  # its preview meshes have fake users: left, they would be saved in the file
+    ladder.cancel()  # and its spare preview meshes
     remove_preview()
     state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}), lod=None)
     segments.reset()
@@ -3965,6 +3966,7 @@ _draw_handles: list = []
 def _on_load_post(*_args):
     segments.seglive.add_handlers()  # Blender drops the add-on's other handlers when a file loads
     stop_work()
+    remove_preview()  # a preview saved with the file: nothing can apply it after a load
     ladder.cancel()
     segments.reset()
     flowedit.cancel()

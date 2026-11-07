@@ -13,6 +13,7 @@ import numpy as np
 
 PREVIEW_NAME = "CurioMesh_Preview"
 REGION_PREVIEW_NAME = "CurioMesh_RegionPreview"
+PREVIEW_TAG = "curiomesh_preview"  # on objects and spare meshes the add-on made itself: found and removed by this mark, never by name
 HEATMAP_MAX_FACES = 300_000
 HEATMAP_MAX_POLE_POINTS = 60_000
 

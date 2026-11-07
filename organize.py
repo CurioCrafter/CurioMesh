@@ -317,9 +317,7 @@ def _mesh_for(out):
     source = _g().state_source()
     if source is None:
         return None
-    mesh = _make_mesh(_g().PREVIEW_NAME + "_Organize", out, source)
-    mesh.use_fake_user = True  # kept while another strength is on screen
-    return mesh
+    return _make_mesh(_g().SPARE_MESHES[1], out, source)  # no fake user: a spare has no users, so a save never keeps it
 
 
 def _tick():

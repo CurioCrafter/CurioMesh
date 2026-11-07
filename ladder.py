@@ -65,15 +65,19 @@ def cancel() -> None:
     organize.cancel()
     if lad["job"] is not None:
         lad["job"].stop()
-    for mesh in lad["meshes"].values():
-        try:
-            mesh.use_fake_user = False
-            if mesh.users == 0:
-                bpy.data.meshes.remove(mesh)
-        except ReferenceError:  # gone with a file load
-            pass
+    for kind in _g().SPARE_MESHES:  # organize.cancel above already let go of its own
+        drop_spares(kind)
     lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None)
     drag.update(pending=False, settled=True)
+
+
+def drop_spares(kind: str) -> None:
+    """Remove the spare preview meshes of `kind` (made by `_make_mesh`) that nothing shows, also ones an older version
+    saved in a file with a fake user. Meshes without the add-on's mark are never touched."""
+    for mesh in [m for m in bpy.data.meshes if m.get(overlay.PREVIEW_TAG) == kind]:
+        mesh.use_fake_user = False
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
 
 
 def unregister() -> None:
@@ -269,6 +273,7 @@ def _make_mesh(name, out, source):
     sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
     flat = np.fromiter(chain.from_iterable(faces), dtype=np.int32, count=int(sizes.sum()))
     mesh = bpy.data.meshes.new(name)
+    mesh[overlay.PREVIEW_TAG] = name  # found and removed by this mark, never by its name
     mesh.vertices.add(len(out["co"]))
     mesh.vertices.foreach_set("co", np.asarray(out["co"], dtype=np.float32).ravel())
     mesh.loops.add(len(flat))
@@ -295,14 +300,15 @@ def _mesh_for(picked, out):
     source = guided.state_source()
     if source is None:
         return None
-    mesh = _make_mesh(guided.PREVIEW_NAME + "_Size", out, source)
-    mesh.use_fake_user = True  # kept while another size is on screen
-    lad["meshes"][picked] = mesh
+    mesh = _make_mesh(guided.SPARE_MESHES[0], out, source)
+    lad["meshes"][picked] = mesh  # no fake user: a spare size has no users, so a save never keeps it (undo still does)
     while len(lad["meshes"]) > MOST_MESHES:
         old = lad["meshes"].pop(next(iter(lad["meshes"])))
-        old.use_fake_user = False
-        if old.users == 0:
-            bpy.data.meshes.remove(old)
+        try:
+            if old.users == 0:
+                bpy.data.meshes.remove(old)
+        except ReferenceError:  # purged by the user
+            pass
     return mesh
 
 
