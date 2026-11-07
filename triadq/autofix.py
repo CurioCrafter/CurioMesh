@@ -457,17 +457,19 @@ def _key(base: T.Base) -> str:
     return h.hexdigest()
 
 
-def run(make_base, plan, settings=None, look=None, budget=None, stopped=None, start: int = 0):
+def run(make_base, plan, settings=None, look=None, budget=None, stopped=None, start: int = 0, rnd: int = 1, carried: bool = False):
     """Generator of `Event`s: Auto Fix's rounds (AUTO_FIX.md 3). `make_base()` gives a Base of the result as it is now;
     it is called before each pass, so a driver that commits on "kept" before pumping on is what the next pass sees.
     `settings`: {Trial class name: settings}. `stopped()`: "" to go on, or words for why it stops between passes (the
     time limit). `start`: the pass to begin the first round at (Keep going after a stop). Rounds repeat while one keeps
-    a pass; no round count. A round that ends on a mesh an earlier round ended on also ends it (the tools went round
-    in a circle)."""
+    a pass and the round made the result better as a whole (`_round_gained`); no round count. A round that ends on a
+    mesh an earlier round ended on also ends it (the tools went round in a circle). `rnd` and `carried` resume a round a stop cut short: its number, and whether its passes before the
+    stop kept something (then another round follows, as it would have)."""
     settings = settings or {}
-    seen, found, rnd, first = set(), False, 1, True
+    seen, found, first = set(), carried, True
     while True:
-        kept = False
+        kept, gain, carried = carried, carried, False
+        first_before = None
         for i, (cls, kinds) in enumerate(plan):
             if first and i < start:
                 continue
@@ -485,9 +487,12 @@ def run(make_base, plan, settings=None, look=None, budget=None, stopped=None, st
             s = dict(settings.get(cls.__name__, {}))
             p = yield from _relay(propose(trial, base, s, spots, look, budget), rnd, i, trial, len(spots))
             yield Event("left" if p.reason else "kept", rnd, i, trial, p, len(spots), 1.0, p.words)
-            kept |= not p.reason
+            first_before = first_before or p.before
+            if not p.reason:
+                kept = True
+                gain = gain or _round_gained(first_before, p.after)
         first = False
-        if kept:
+        if kept and gain:  # passes that only trade their own numbers back and forth do not start another round
             key = _key(make_base())
             if key not in seen:
                 seen.add(key)
@@ -495,6 +500,19 @@ def run(make_base, plan, settings=None, look=None, budget=None, stopped=None, st
                 continue
         yield Event("done", rnd, len(plan), words=FINISHED if found else NOTHING)
         return
+
+
+def _round_gained(b: Scores, a: Scores) -> bool:
+    """Whether the round so far made the result better as a whole: a pole or a bad face fewer, or Tidiness or Loop
+    Quality up by `MIN_GAIN` (`organize.gained`'s measure). Rounds go on while this holds. Nothing measured: True."""
+
+    def up(x, y, m):
+        return x is not None and y is not None and y - x >= m
+
+    pairs = ((b.poles, a.poles), (b.bad, a.bad), (b.tidy, a.tidy), (b.loops, a.loops))
+    if all(x is None or y is None for x, y in pairs):
+        return True
+    return up(a.poles, b.poles, 1) or up(a.bad, b.bad, 1) or up(b.tidy, a.tidy, MIN_GAIN) or up(b.loops, a.loops, MIN_GAIN)
 
 
 def _relay(work, rnd, i, trial, count):

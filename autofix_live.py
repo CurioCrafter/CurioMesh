@@ -164,7 +164,9 @@ class AutoFixJob:
             before = yield from self._pump(self.look(np.asarray(res["co"], dtype=np.float64), res["faces"]))
             budget = (before + self.gs_cap) if self.gs_cap is not None else max(1.1 * self.detail, before)
             self.report["ceiling"] = budget
-        events = autofix.run(self.make_base, self.plan, {}, self.look, budget, self.stopped, self.start_at)
+        rnd = self.report.get("resume_round", 1)
+        carried = any(e["kept"] and e["round"] == rnd for e in self.report["passes"]) if self.start_at else False
+        events = autofix.run(self.make_base, self.plan, {}, self.look, budget, self.stopped, self.start_at, rnd, carried)
         for ev in events:
             if self._handle(context, ev):
                 return
@@ -214,7 +216,7 @@ class AutoFixJob:
             overlay.tag_redraw()
             return False
         if ev.kind == "stopped":
-            rep["stop"], rep["resume"] = ev.words, ev.step
+            rep["stop"], rep["resume"], rep["resume_round"] = ev.words, ev.step, ev.round
             self.finish("limit")
             return True
         rep["words"] = ev.words

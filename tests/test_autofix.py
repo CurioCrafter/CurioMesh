@@ -357,6 +357,21 @@ class RunTest(unittest.TestCase):
         self.assertEqual(events[-1].kind, "done")
         self.assertTrue(any(e.kind == "kept" and e.step == 1 for e in events))
 
+    def test_go_on_after_a_round_that_kept(self):
+        """A stop cut a round that had kept a pass: the passes after it find nothing, yet a next round still runs."""
+        state, make = self._driver(_bent())
+        events = list(autofix.run(make, [(Even, None)], start=1, rnd=3, carried=True))
+        self.assertEqual([(e.kind, e.round) for e in events if e.kind != "working"][0][1], 4)
+        events = list(autofix.run(make, [(Even, None)], start=1, rnd=3))
+        self.assertEqual([e.kind for e in events], ["done"])
+
+    def test_a_round_that_only_trades_numbers_ends(self):
+        S = autofix.Scores
+        self.assertFalse(autofix._round_gained(S(40.0, 20.0, 100, 0), S(40.2, 20.1, 100, 0)))
+        self.assertTrue(autofix._round_gained(S(40.0, 20.0, 100, 0), S(40.0, 20.0, 99, 0)))
+        self.assertTrue(autofix._round_gained(S(40.0, 20.0, 100, 0), S(40.6, 20.0, 100, 0)))
+        self.assertTrue(autofix._round_gained(S(), S()))  # nothing measured: rounds go on as before
+
     def test_every_spot_wrapper(self):
         base = _bent()
         cls = autofix.every(Even)

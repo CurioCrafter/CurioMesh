@@ -259,9 +259,11 @@ def run_model(key):
     tick_to_end()
     rep = AL.fx["report"]
     limits = 0
-    while rep["how"] == "limit" and AL.keep_going(bpy.context):  # Time Limits Normal hit on a big model: the stop line, then Keep going
+    while rep["how"] == "limit":  # Time Limits Normal hit on a big model: the stop line, then Keep going
         limits += 1
         ok("Time Limits: Normal" in rep["stop"] and "still improving" in rep["stop"], f"the time limit says so: {rep['stop']}")
+        if not AL.keep_going(bpy.context):  # Keep going clears the stop line, so it is read first
+            break
         tick_to_end()
         rep = AL.fx["report"]
     seconds = time.perf_counter() - began
