@@ -273,10 +273,16 @@ class SmartProjectBoxes(unittest.TestCase):
               "block-rounded bound, seconds of the first fill, seconds of the Keep going pass):", report)
         for name, v in report.items():
             print(f"  {name:40} {v[0]:5} islands  first {100 * v[1] / v[3]:5.1f} %  Keep going {100 * v[2] / v[3]:5.1f} % of the bound  ({100 * v[2] / v[5]:5.1f} % of the block-rounded bound)  {v[6]:5.2f} s + {v[7]:5.2f} s")
-        # The gate: 95 % of the bound (SPEC 14, K7). Where the block-rounded bound is itself lower than 95 % of the bound (many tiny
-        # islands of odd size: every one wastes a texel at its block edge, no packer can avoid it) the packer must reach 98 % of that.
+        # The gate: 95 % of the bound (SPEC 14, K7). The block-rounded bound is a true upper bound, so where it is itself below 95 % of
+        # the raw bound (many tiny islands of odd size) the raw bound cannot be reached by any packer and the packer must reach 98 % of
+        # the block-rounded one. Proof: mip-clean means the blocks two boxes touch, each grown by one block, never meet. A box of
+        # w x h texels touches at least ceil(w / 2) x ceil(h / 2) blocks whatever its origin, so with its growth it owns at least
+        # (ceil(w / 2) + 2) x (ceil(h / 2) + 2) blocks, i.e. (ew + 4) x (eh + 4) texels, and these owned sets are disjoint. They fit in the
+        # page plus the growth ring that may hang over its edge (one block each side: (1024 + 4)^2 texels), so
+        # used <= aligned * (1028 / 1024)^2. Checked below on every set.
         for name, (n, first, more, bound, _, aligned, *_) in report.items():
             self.assertGreaterEqual(more, first)
+            self.assertLessEqual(more, aligned * (1028 / 1024) ** 2 + 1e-9, f"{name}: above the block-rounded bound, so the proof or the packer is wrong")
             self.assertTrue(more >= 0.95 * bound or more >= 0.98 * aligned, f"{name}: {more} (bound {bound}, block-rounded {aligned})")
         self.assertGreaterEqual(sum(v[2] >= 0.95 * v[3] for v in report.values()), 17)
 

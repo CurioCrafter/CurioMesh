@@ -45,6 +45,24 @@ pub const WALK_UV_SLACK: f64 = 2.0;
 pub const SLIDE_EDGE: f64 = 0.02;
 /// Share of a result face's area its centre sample stands for (the corners share the rest equally).
 pub const CENTRE_WEIGHT: f64 = 0.5;
+/// A result face reads through a reference face turned at most this far from it (cosine of 60 deg). A coarse face
+/// across a crease often has its centre nearest a wall turned away from it; that wall's winding, taken as the face's
+/// expected winding, makes the fold fix fold the face. Such a face takes the nearest source face turned at most 60 deg
+/// from it (within the walk's reach) as its reference instead when that face is nearer its centre, and is read from there.
+pub const REF_ALIGN_COS: f64 = 0.5;
+/// The winding vote's reach around a fan triangle's centre: the nearest source face's distance plus this share of the
+/// triangle's shortest edge.
+pub const WIND_BALL_EDGE: f64 = 0.25;
+/// A fan triangle whose twice-area is at most this share of its summed squared edge lengths has no area: its normal is
+/// rounding, so it has no say in its face's winding.
+pub const DEGENERATE_SHARE: f64 = 1e-6;
+/// Two normals whose cosine is at most this are edge-on: which side of 90 deg they fall on is rounding (a cap face beside
+/// a cylinder's wall reads cosines of 4e-9 to 5e-6 from single-precision positions), so that source face has no say in the
+/// winding vote.
+pub const EDGE_ON_COS: f64 = 1e-4;
+/// Cosine noise per unit of a face's rounding scale (largest coordinate over shortest edge): 8 single-precision ulps.
+/// A 1 mm face half a metre from the origin reads cosines up to 2e-4 off from its float corners.
+pub const F32_TURN: f64 = 8.0 / 16777216.0;
 /// Fold fix stop rule (SPEC 3): no UV moves more than this share of a texel in one sweep.
 pub const STOP_TEXEL_SHARE: f64 = 0.02;
 /// Fold fix stall rule: the largest move must drop by `STALL_DROP` within `STALL_WINDOW` sweeps (reported).
@@ -663,6 +681,10 @@ struct Source<'a> {
     uv: Option<&'a [f64]>,
     uv_centre: Vec<[f64; 2]>,
     radius: Vec<f64>,
+    /// Welded vertex per corner, and the faces at each welded vertex (in face order).
+    wflat: Vec<i64>,
+    vf_ptr: Vec<usize>,
+    vf: Vec<usize>,
 }
 
 impl Source<'_> {
@@ -750,7 +772,23 @@ fn source<'a>(points: &'a [f64], faces: &'a Faces<'a>, set: &SeamSet, uv: Option
             radius.push(r);
         }
     }
-    Source { points, faces, tri, tri_ptr, centre, normal, across, crossing, uv, uv_centre, radius }
+    let mut vf_ptr = vec![0usize; set.n_welded + 1];
+    for &v in &wflat {
+        vf_ptr[v as usize + 1] += 1;
+    }
+    for v in 0..set.n_welded {
+        vf_ptr[v + 1] += vf_ptr[v];
+    }
+    let mut vf = vec![0usize; wflat.len()];
+    let mut fill = vf_ptr.clone();
+    for f in 0..nf {
+        for h in faces.indptr[f] as usize..faces.indptr[f + 1] as usize {
+            let v = wflat[h] as usize;
+            vf[fill[v]] = f;
+            fill[v] += 1;
+        }
+    }
+    Source { points, faces, tri, tri_ptr, centre, normal, across, crossing, uv, uv_centre, radius, wflat, vf_ptr, vf }
 }
 
 /// The inverse of a triangle's 3D-to-UV map as [k00, k01, k10, k11]: UV offsets to 3D lengths in the triangle's
@@ -789,6 +827,180 @@ struct FaceRead {
     ref_face: i64,
     orient: f64,
     region: i64,
+}
+
+/// The faces a result face reads from: from the reference face `rf` (hit at triangle `rt`, weights `rw`) across free
+/// and Shift edges only, within `reach` of the face centre `c`, and (with a UV layer) passing the walk's UV check.
+/// Breadth-first order, each with whether a Shift chain was crossed on the way.
+fn walk(src: &Source, rf: usize, rt: usize, rw: [f64; 3], c: V3, reach: f64) -> Vec<(usize, bool)> {
+    // The walk's UV check (see WALK_UV_SLACK): reference UV, reference point, UV offsets back to 3D lengths.
+    let uv_reach = src.uv.and_then(|layer| {
+        let tri = src.tri[rt];
+        let (p0, p1, p2) = (src.corner_point(tri[0]), src.corner_point(tri[1]), src.corner_point(tri[2]));
+        let q = |h: usize| [layer[2 * h], layer[2 * h + 1]];
+        let (q0, q1, q2) = (q(tri[0]), q(tri[1]), q(tri[2]));
+        let u_ref = [rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1]];
+        uv_to_3d(p0, p1, p2, q0, q1, q2).map(|k| (u_ref, mix(rw, p0, p1, p2), k))
+    });
+    let uv_near = |g: usize, shifted: bool| {
+        let Some((u_ref, p_ref, k)) = uv_reach else { return true };
+        let u = src.uv_centre[g];
+        let (mut du, mut dv) = (u[0] - u_ref[0], u[1] - u_ref[1]);
+        if shifted {
+            du += whole(-du);
+            dv += whole(-dv);
+        }
+        let (lx, ly) = (k[0] * du + k[1] * dv, k[2] * du + k[3] * dv);
+        (lx * lx + ly * ly).sqrt() <= WALK_UV_SLACK * (dist(src.centre[g], p_ref) + src.radius[g])
+    };
+    let mut order: Vec<(usize, bool)> = vec![(rf, false)];
+    let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
+    seen.insert(rf, ());
+    let mut queue = VecDeque::from([0usize]);
+    while let Some(at) = queue.pop_front() {
+        let (f, shifted) = order[at];
+        for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
+            let g = src.across[h];
+            if g < 0 || src.crossing[h] == 2 || seen.contains_key(&(g as usize)) || dist(src.centre[g as usize], c) > reach {
+                continue;
+            }
+            let sh = shifted || src.crossing[h] == 1;
+            if !uv_near(g as usize, sh) {
+                continue;
+            }
+            seen.insert(g as usize, ());
+            order.push((g as usize, sh));
+            queue.push_back(order.len() - 1);
+        }
+    }
+    order
+}
+
+/// -1, 0 or 1 by the sign of x (NaN stays NaN; `f64::signum` gives 1 for 0).
+fn sgn(x: f64) -> f64 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else if x.is_nan() {
+        x
+    } else {
+        0.0
+    }
+}
+
+/// How far single-precision rounding of a face's corners can turn its normal: its largest coordinate over its shortest
+/// edge (times F32_TURN gives the cosine noise).
+fn rounding_scale(points: &[f64], face: &[i64]) -> f64 {
+    let (mut big, mut short) = (0.0f64, f64::INFINITY);
+    for i in 0..face.len() {
+        let p = p3(points, face[i]);
+        big = big.max(p[0].abs()).max(p[1].abs()).max(p[2].abs());
+        short = short.min(dist(p, p3(points, face[(i + 1) % face.len()])));
+    }
+    if short > 0.0 { big / short } else { f64::INFINITY }
+}
+
+/// -1, 0 or 1: whether normals a and b face the same way, 0 when they are edge-on to rounding: a cosine at most
+/// EDGE_ON_COS, or at most what single-precision corners can turn the two faces (F32_TURN times their rounding scales).
+fn facing(a: V3, b: V3, scale: f64) -> f64 {
+    let d = dot(a, b);
+    if d.abs() <= EDGE_ON_COS.max(F32_TURN * scale) * dot(a, a).sqrt() * dot(b, b).sqrt() {
+        0.0
+    } else {
+        sgn(d)
+    }
+}
+
+/// True when source face g has area (twice-area above DEGENERATE_SHARE of its summed squared edges): a zero-area
+/// sliver's normal is rounding, so it has no say in which way a result face winds.
+fn has_area(src: &Source, g: usize) -> bool {
+    let face = src.faces.face(g);
+    let mut e2 = 0.0;
+    for i in 0..face.len() {
+        let d = sub(p3(src.points, face[(i + 1) % face.len()]), p3(src.points, face[i]));
+        e2 += dot(d, d);
+    }
+    dot(src.normal[g], src.normal[g]).sqrt() > DEGENERATE_SHARE * e2
+}
+
+/// Twice the signed UV area of source face f in `layer` (shoelace over its corners).
+fn uv_area(layer: &[f64], faces: &Faces, f: usize) -> f64 {
+    let (s, e) = (faces.indptr[f] as usize, faces.indptr[f + 1] as usize);
+    let mut area = 0.0;
+    for i in s..e {
+        let j = if i + 1 == e { s } else { i + 1 };
+        area += layer[2 * i] * layer[2 * j + 1] - layer[2 * j] * layer[2 * i + 1];
+    }
+    area
+}
+
+/// A result face's orientation sign against its reference face `rf`, from the source under each of its fan
+/// triangles. Each triangle (0, i, i+1) gathers the source faces within reach of its centre (the nearest one's distance
+/// plus WIND_BALL_EDGE of its shortest edge, joined through shared vertices) and the windings they would show a texture with:
+/// a face's UV winding times whether it faces the triangle, relative to the reference's UV winding (a face with no UV
+/// area allows both, one edge-on to it or with no 3D area neither). The face takes the winding every triangle allows; when both are
+/// allowed throughout, `fallback` (its own sign against the reference). A face whose triangles allow no common winding
+/// (folded in 3D, or across a crease with one half leaning into a wall) gets 0: no single winding shows the texture on
+/// all of it (`uvkeep` cuts such a face into its fan triangles). So does a face with no area (DEGENERATE_SHARE): it
+/// shows no texture, and the fold fix leaves its reads alone instead of opening it up in UV.
+fn fan_orient(src: &Source, tree: &FaceTree, res_points: &[f64], face: &[i64], rf: usize, fallback: f64) -> f64 {
+    let ref_wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, rf)));
+    if ref_wind == 0.0 {
+        return fallback;
+    }
+    let mut common = 3u8; // bit 0: +1 allowed, bit 1: -1 allowed
+    let mut said = false;
+    for i in 1..face.len().saturating_sub(1) {
+        let t = [face[0], face[i], face[i + 1]];
+        let (a, b, cc) = (p3(res_points, t[0]), p3(res_points, t[1]), p3(res_points, t[2]));
+        let q = [(a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0];
+        let nt = newell(res_points, &t);
+        let edges2 = dot(sub(b, a), sub(b, a)) + dot(sub(cc, b), sub(cc, b)) + dot(sub(a, cc), sub(a, cc));
+        if dot(nt, nt).sqrt() <= DEGENERATE_SHARE * edges2 {
+            continue; // a zero-area triangle: its normal, and so the winding it shows, is rounding
+        }
+        let Some(g0) = tree.nearest(q).map(|h| h.1 as usize) else { continue };
+        let shortest = dist(a, b).min(dist(b, cc)).min(dist(cc, a));
+        let scale_t = rounding_scale(res_points, &t);
+        let reach = src.on_face(g0, q).0.sqrt() + WIND_BALL_EDGE * shortest;
+        let mut ball = vec![g0];
+        let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
+        seen.insert(g0, ());
+        let mut at = 0;
+        let mut allowed = 0u8;
+        while at < ball.len() {
+            let f = ball[at];
+            at += 1;
+            if has_area(src, f) {
+                let wind = src.uv.map_or(1.0, |layer| sgn(uv_area(layer, src.faces, f)));
+                let w = facing(nt, src.normal[f], scale_t + rounding_scale(src.points, src.faces.face(f))) * wind * ref_wind;
+                allowed |= if wind == 0.0 { 3 } else if w > 0.0 { 1 } else if w < 0.0 { 2 } else { 0 };
+            }
+            for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
+                let v = src.wflat[h] as usize;
+                for &g in &src.vf[src.vf_ptr[v]..src.vf_ptr[v + 1]] {
+                    if !seen.contains_key(&g) && src.on_face(g, q).0.sqrt() <= reach {
+                        seen.insert(g, ());
+                        ball.push(g);
+                    }
+                }
+            }
+        }
+        if allowed != 0 {
+            common &= allowed;
+            said = true;
+        }
+    }
+    if !said {
+        return 0.0;
+    }
+    match common {
+        1 => 1.0,
+        2 => -1.0,
+        0 => 0.0,
+        _ => fallback,
+    }
 }
 
 fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], face: &[i64]) -> FaceRead {
@@ -835,49 +1047,55 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
         }
     }
     let ref_sample = if set.region[hits[n].0] == win.0 { n } else { (0..n).find(|&s| set.region[hits[s].0] == win.0).unwrap_or(n) };
-    let (rf, rd, rt, rw) = hits[ref_sample];
-    // Walk from the reference face across free and Shift edges only, within reach of the face.
-    let reach = WALK_REACH * diameter + rd;
-    // The walk's UV check (see WALK_UV_SLACK): reference UV, reference point, UV offsets back to 3D lengths.
-    let uv_reach = src.uv.and_then(|layer| {
-        let tri = src.tri[rt];
-        let (p0, p1, p2) = (src.corner_point(tri[0]), src.corner_point(tri[1]), src.corner_point(tri[2]));
-        let q = |h: usize| [layer[2 * h], layer[2 * h + 1]];
-        let (q0, q1, q2) = (q(tri[0]), q(tri[1]), q(tri[2]));
-        let u_ref = [rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1]];
-        uv_to_3d(p0, p1, p2, q0, q1, q2).map(|k| (u_ref, mix(rw, p0, p1, p2), k))
-    });
-    let uv_near = |g: usize, shifted: bool| {
-        let Some((u_ref, p_ref, k)) = uv_reach else { return true };
-        let u = src.uv_centre[g];
-        let (mut du, mut dv) = (u[0] - u_ref[0], u[1] - u_ref[1]);
-        if shifted {
-            du += whole(-du);
-            dv += whole(-dv);
-        }
-        let (lx, ly) = (k[0] * du + k[1] * dv, k[2] * du + k[3] * dv);
-        (lx * lx + ly * ly).sqrt() <= WALK_UV_SLACK * (dist(src.centre[g], p_ref) + src.radius[g])
+    let (mut rf, mut rd, mut rt, mut rw) = hits[ref_sample];
+    let mut region = win.0;
+    // A reference turned away from the face (REF_ALIGN_COS): the nearest source face within the walk's reach that is
+    // not, found across every edge (seams too: the vote may have picked the wall's side on a tie of the corners on the
+    // crease), becomes the reference and gives the face its side region when it is nearer the centre.
+    let nr = newell(res_points, face);
+    let aligned = |g: usize| {
+        let (a, b) = (dot(nr, nr).sqrt(), dot(src.normal[g], src.normal[g]).sqrt());
+        a > 0.0 && b > 0.0 && dot(nr, src.normal[g]) >= REF_ALIGN_COS * a * b
     };
-    let mut order: Vec<(usize, bool)> = vec![(rf, false)];
-    let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
-    seen.insert(rf, ());
-    let mut queue = VecDeque::from([0usize]);
-    while let Some(at) = queue.pop_front() {
-        let (f, shifted) = order[at];
-        for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
-            let g = src.across[h];
-            if g < 0 || src.crossing[h] == 2 || seen.contains_key(&(g as usize)) || dist(src.centre[g as usize], c) > reach {
+    if !aligned(rf) {
+        let reach = WALK_REACH * diameter + rd;
+        let mut near: Vec<usize> = Vec::new();
+        let mut seen: HashMap<usize, (), FxBuild> = HashMap::default();
+        for f in std::iter::once(rf).chain(hits.iter().map(|h| h.0)) {
+            if seen.insert(f, ()).is_none() {
+                near.push(f);
+            }
+        }
+        let mut at = 0;
+        while at < near.len() {
+            let f = near[at];
+            at += 1;
+            for h in src.faces.indptr[f] as usize..src.faces.indptr[f + 1] as usize {
+                let g = src.across[h];
+                if g >= 0 && !seen.contains_key(&(g as usize)) && dist(src.centre[g as usize], c) <= reach {
+                    seen.insert(g as usize, ());
+                    near.push(g as usize);
+                }
+            }
+        }
+        let mut best: Option<(f64, usize, usize, [f64; 3])> = None;
+        for &g in &near {
+            if !aligned(g) {
                 continue;
             }
-            let sh = shifted || src.crossing[h] == 1;
-            if !uv_near(g as usize, sh) {
-                continue;
+            let (d2, t, w) = src.on_face(g, c);
+            if best.is_none_or(|b| d2 < b.0) {
+                best = Some((d2, g, t, w));
             }
-            seen.insert(g as usize, ());
-            order.push((g as usize, sh));
-            queue.push_back(order.len() - 1);
+        }
+        // Only a face nearer the centre than the reference: a reference that is the nearest face is the surface the
+        // face lies on, however it is turned (a thin part's far side seen from a coarse face).
+        if let Some((d2, g, t, w)) = best.filter(|b| b.0 < src.on_face(rf, c).0) {
+            (rf, rd, rt, rw) = (g, d2.sqrt(), t, w);
+            region = set.region[g];
         }
     }
+    let order = walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd);
     let mut out = FaceRead {
         ids: Vec::with_capacity(3 * n),
         w: Vec::with_capacity(3 * n),
@@ -886,8 +1104,8 @@ fn read_face(src: &Source, set: &SeamSet, tree: &FaceTree, res_points: &[f64], f
         ref_ids: src.tri[rt].map(|h| h as i64),
         ref_w: rw,
         ref_face: rf as i64,
-        orient: if dot(newell(res_points, face), src.normal[rf]) < 0.0 { -1.0 } else { 1.0 },
-        region: win.0,
+        orient: fan_orient(src, tree, res_points, face, rf, if dot(nr, src.normal[rf]) < 0.0 { -1.0 } else { 1.0 }),
+        region,
     };
     for (i, &q) in corners.iter().enumerate() {
         let mut best = (f64::INFINITY, 0usize, [0.0; 3], false);

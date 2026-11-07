@@ -39,6 +39,11 @@ WALK_REACH = 2.0
 WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
 CENTRE_WEIGHT = 0.5
+DEGENERATE_SHARE = 1e-6  # a fan triangle with 2 x area <= this x its summed squared edges has no area (no say in the vote)
+EDGE_ON_COS = 1e-4  # normals this close to 90 deg are edge-on to rounding: no say in the winding vote
+F32_TURN = 8.0 / 16777216.0  # cosine noise per unit rounding scale (largest coordinate / shortest edge): 8 float32 ulps
+WIND_BALL_EDGE = 0.25  # the winding vote's reach: nearest distance plus this share of a fan triangle's shortest edge
+REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
 STOP_TEXEL_SHARE = 0.02
 STALL_WINDOW = 50
 STALL_DROP = 0.01
@@ -822,6 +827,11 @@ class _Source:
                 self.radius.append(r)
         weld = seams["weld"]
         wflat = weld[flat]
+        # faces at each welded vertex, in face order (the winding vote's ball grows through them)
+        self.wflat = wflat
+        order = np.argsort(wflat, kind="stable")
+        self.vf = _face_of_corner(indptr)[order]
+        self.vf_ptr = np.concatenate([[0], np.cumsum(np.bincount(wflat, minlength=int(seams["n_welded"])))])
         nxt = _next_corners(indptr)
         cface = _face_of_corner(indptr)
         ea, eb, estart, occ = _edges(wflat, nxt)
@@ -904,6 +914,154 @@ class _Source:
         return float(d2[k]), int(t[k]), tuple(float(x) for x in w[k]), which
 
 
+def _walk(src: _Source, rf, rt, rw, c, reach):
+    """The source faces a result face reads from: from the reference face `rf` (hit at triangle `rt`, weights `rw`)
+    across free and Shift edges only, within `reach` of the face centre `c`, passing the walk's UV check (with a layer).
+    Breadth-first, each with whether a Shift chain was crossed on the way."""
+
+    # The walk's UV check: a face whose UV offset from the reference UV, taken back to 3D through the reference
+    # triangle's map, is much longer than its 3D distance lies on the far side of a seam reached the long way round (a
+    # thin tube or plate inside one island); it is not walked.
+    uv_reach = None
+    if src.uv is not None:
+        tri = src.tri[rt]
+        p0, p1, p2 = (tuple(src.cp[tri[k]]) for k in range(3))
+        q0, q1, q2 = (tuple(src.uv[tri[k]]) for k in range(3))
+        u_ref = (rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1])
+        p_ref = _mix(rw, p0, p1, p2)
+        inverse = _uv_to_3d(p0, p1, p2, q0, q1, q2)
+        if inverse is not None:
+            uv_reach = (u_ref, p_ref, inverse)
+    order = [(rf, False)]
+    seen = {rf}
+    queue = deque([0])
+    indptr = src.indptr
+    while queue:
+        f, shifted = order[queue.popleft()]
+        for h in range(int(indptr[f]), int(indptr[f + 1])):
+            g = int(src.across[h])
+            if g < 0 or src.crossing[h] == 2 or g in seen or _dist(src.centre[g], c) > reach:
+                continue
+            sh = shifted or src.crossing[h] == 1
+            if uv_reach is not None and not _uv_near(src, g, sh, uv_reach):
+                continue
+            seen.add(g)
+            order.append((g, sh))
+            queue.append(len(order) - 1)
+    return order
+
+
+def _sign(x: float) -> float:
+    return 1.0 if x > 0.0 else (-1.0 if x < 0.0 else (x if x != x else 0.0))
+
+
+def _uv_area(uv, indptr, f) -> float:
+    """Twice the signed UV area of source face f (shoelace over its corners; `uv` is 2 per source corner)."""
+
+    s, e = int(indptr[f]), int(indptr[f + 1])
+    area = 0.0
+    for i in range(s, e):
+        j = s if i + 1 == e else i + 1
+        area += float(uv[i][0]) * float(uv[j][1]) - float(uv[j][0]) * float(uv[i][1])
+    return area
+
+
+def _rounding_scale(pts) -> float:
+    """How far single-precision rounding of a face's corners (`pts`) can turn its normal: largest coordinate over
+    shortest edge."""
+
+    big, short = 0.0, math.inf
+    for i, p in enumerate(pts):
+        big = max(big, abs(p[0]), abs(p[1]), abs(p[2]))
+        short = min(short, _dist(p, pts[(i + 1) % len(pts)]))
+    return big / short if short > 0.0 else math.inf
+
+
+def _facing(a, b, scale) -> float:
+    """-1, 0 or 1: whether normals a and b face the same way, 0 when edge-on to rounding (cosine at most EDGE_ON_COS or
+    F32_TURN times the two faces' rounding scales)."""
+
+    d = _dot(a, b)
+    return 0.0 if abs(d) <= max(EDGE_ON_COS, F32_TURN * scale) * math.sqrt(_dot(a, a)) * math.sqrt(_dot(b, b)) else _sign(d)
+
+
+def _has_area(src, g) -> bool:
+    """True when source face g has area (twice-area above DEGENERATE_SHARE of its summed squared edges)."""
+
+    s, e = int(src.indptr[g]), int(src.indptr[g + 1])
+    pts = [tuple(src.P[v]) for v in src.flat[s:e]]
+    e2 = 0.0
+    for i in range(len(pts)):
+        d = _sub(pts[(i + 1) % len(pts)], pts[i])
+        e2 += _dot(d, d)
+    n = src.normal[g]
+    return math.sqrt(_dot(n, n)) > DEGENERATE_SHARE * e2
+
+
+def _fan_orient(src, Pr, face, rf, fallback) -> float:
+    """A result face's orientation sign against its reference face `rf`, from the source under each of its fan
+    triangles. Each triangle (0, i, i+1) gathers the source faces within reach of its centre (the nearest one's distance
+    plus WIND_BALL_EDGE of its shortest edge, joined through shared vertices) and the windings they would show a texture with: a
+    face's UV winding times whether it faces the triangle, relative to the reference's UV winding (no UV area: both
+    allowed; edge-on or no 3D area: neither). The face takes the winding every triangle allows; both throughout: `fallback`. No common
+    winding (folded in 3D, or across a crease with one half leaning into a wall): 0 (uvkeep cuts it into its fan
+    triangles); no area at all (DEGENERATE_SHARE): 0 too, so the fold fix leaves its reads alone."""
+
+    ref_wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, rf))
+    if ref_wind == 0.0:
+        return fallback
+    tris = [[face[0], face[i], face[i + 1]] for i in range(1, len(face) - 1)]
+    qs = []
+    for t in tris:
+        a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
+        qs.append(((a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0))
+    near = src.grid.nearest_many(qs) if qs else []
+    common = 3  # bit 0: +1 allowed, bit 1: -1 allowed
+    said = False
+    for t, q, g0 in zip(tris, qs, near):
+        a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
+        nt = _newell(Pr, t)
+        ab, bc, ca = _sub(b, a), _sub(cc, b), _sub(a, cc)
+        if math.sqrt(_dot(nt, nt)) <= DEGENERATE_SHARE * (_dot(ab, ab) + _dot(bc, bc) + _dot(ca, ca)):
+            continue  # a zero-area triangle: its normal, and so the winding it shows, is rounding
+        if g0 < 0:
+            continue
+        shortest = min(_dist(a, b), _dist(b, cc), _dist(cc, a))
+        scale_t = _rounding_scale([a, b, cc])
+        reach = math.sqrt(src.on_faces([g0], q)[0]) + WIND_BALL_EDGE * shortest
+        ball, seen, out, allowed = [g0], {g0}, set(), 0
+        frontier = [g0]
+        while frontier:  # the ball grows a ring at a time: one batched distance pass per ring (the set is what counts)
+            cands = []
+            for f in frontier:
+                for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
+                    v = int(src.wflat[h])
+                    for g in src.vf[src.vf_ptr[v]:src.vf_ptr[v + 1]].tolist():
+                        if g not in seen and g not in out:
+                            out.add(g)
+                            cands.append(g)
+            frontier = []
+            if cands:
+                for g, hit in zip(cands, src.on_each([[g] for g in cands], [q] * len(cands))):
+                    if math.sqrt(hit[0]) <= reach:
+                        out.discard(g)
+                        seen.add(g)
+                        frontier.append(g)
+                        ball.append(g)
+        for f in ball:
+            if _has_area(src, f):
+                wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, f))
+                corners = [tuple(src.P[v]) for v in src.flat[int(src.indptr[f]):int(src.indptr[f + 1])]]
+                w = _facing(nt, src.normal[f], scale_t + _rounding_scale(corners)) * wind * ref_wind
+                allowed |= 3 if wind == 0.0 else (1 if w > 0.0 else (2 if w < 0.0 else 0))
+        if allowed:
+            common &= allowed
+            said = True
+    if not said:
+        return 0.0
+    return {1: 1.0, 2: -1.0, 0: 0.0}.get(common, fallback)
+
+
 def _read_face(src: _Source, region, Pr, face):
     n = len(face)
     corners = [tuple(Pr[v]) for v in face]
@@ -937,40 +1095,47 @@ def _read_face(src: _Source, region, Pr, face):
             win = v
     ref = n if region[hits[n][0]] == win[0] else next((s for s in range(n) if region[hits[s][0]] == win[0]), n)
     rf, rd, rt, rw = hits[ref]
-    reach = WALK_REACH * diameter + rd
-    # The walk's UV check: a face whose UV offset from the reference UV, taken back to 3D through the reference
-    # triangle's map, is much longer than its 3D distance lies on the far side of a seam reached the long way round (a
-    # thin tube or plate inside one island); it is not walked.
-    uv_reach = None
-    if src.uv is not None:
-        tri = src.tri[rt]
-        p0, p1, p2 = (tuple(src.cp[tri[k]]) for k in range(3))
-        q0, q1, q2 = (tuple(src.uv[tri[k]]) for k in range(3))
-        u_ref = (rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1])
-        p_ref = _mix(rw, p0, p1, p2)
-        inverse = _uv_to_3d(p0, p1, p2, q0, q1, q2)
-        if inverse is not None:
-            uv_reach = (u_ref, p_ref, inverse)
-    order = [(rf, False)]
-    seen = {rf}
-    queue = deque([0])
-    indptr = src.indptr
-    while queue:
-        f, shifted = order[queue.popleft()]
-        for h in range(int(indptr[f]), int(indptr[f + 1])):
-            g = int(src.across[h])
-            if g < 0 or src.crossing[h] == 2 or g in seen or _dist(src.centre[g], c) > reach:
-                continue
-            sh = shifted or src.crossing[h] == 1
-            if uv_reach is not None and not _uv_near(src, g, sh, uv_reach):
-                continue
-            seen.add(g)
-            order.append((g, sh))
-            queue.append(len(order) - 1)
-    reached = [f for f, _ in order]
+    reg = win[0]
+    # A reference turned away from the face (REF_ALIGN_COS): a coarse face across a crease often has its centre nearest
+    # a wall turned away from it, whose winding would make the fold fix fold it. The nearest source face within the
+    # walk's reach turned at most 60 deg from it, found across every edge (seams too: the vote may have picked the
+    # wall's side on a tie of the corners on the crease), becomes the reference and gives the face its side region when
+    # it is nearer the centre.
     nr = _newell(Pr, face)
+    na = math.sqrt(_dot(nr, nr))
+
+    def aligned(g):
+        ng = src.normal[g]
+        nb = math.sqrt(_dot(ng, ng))
+        return na > 0.0 and nb > 0.0 and _dot(nr, ng) >= REF_ALIGN_COS * na * nb
+    if not aligned(rf):
+        reach = WALK_REACH * diameter + rd
+        near, seen = [], set()
+        for f in [rf] + [h[0] for h in hits]:
+            if f not in seen:
+                seen.add(f)
+                near.append(f)
+        at = 0
+        while at < len(near):
+            f = near[at]
+            at += 1
+            for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
+                g = int(src.across[h])
+                if g >= 0 and g not in seen and _dist(src.centre[g], c) <= reach:
+                    seen.add(g)
+                    near.append(g)
+        cands = [g for g in near if aligned(g)]
+        # Only a face nearer the centre than the reference: a reference that is the nearest face is the surface the
+        # face lies on, however it is turned (a thin part's far side seen from a coarse face).
+        if cands:
+            d2, t2, w2, which = src.on_faces(cands, c)
+            if d2 < src.on_faces([rf], c)[0]:
+                rf, rd, rt, rw = cands[which], math.sqrt(d2), t2, w2
+                reg = int(region[rf])
+    order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
+    reached = [f for f, _ in order]
     out = dict(ids=[], w=[], shift=[], slid=[], ref_ids=[int(x) for x in src.tri[rt]], ref_w=list(rw), ref_face=rf,
-               orient=-1.0 if _dot(nr, src.normal[rf]) < 0.0 else 1.0, region=win[0])
+               orient=_fan_orient(src, Pr, face, rf, -1.0 if _dot(nr, src.normal[rf]) < 0.0 else 1.0), region=reg)
     for i, (q, (d2, t, w, which)) in enumerate(zip(corners, src.on_each([reached] * n, corners))):
         tri = src.tri[t]
         slid = math.sqrt(d2) > hits[i][1] + SLIDE_EDGE * edge

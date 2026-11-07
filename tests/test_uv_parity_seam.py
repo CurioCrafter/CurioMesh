@@ -67,6 +67,36 @@ def fold_case():
     return points, indptr, flat, uv, before
 
 
+def crease():
+    """A floor (z = 0, x in 0..4) and a wall (x = 4, z in 0..2) at 90 deg in one island: floor UV (x, y) / 8, wall UV
+    (4 + z, y) / 8 (the wall unrolled beside the floor, same winding as seen from outside the corner)."""
+
+    pts, flat, uv = [], [], []
+    for j in range(3):
+        for i in range(5):
+            pts.append((float(i), float(j), 0.0))
+    for j in range(3):
+        for k in range(1, 3):
+            pts.append((4.0, float(j), float(k)))
+    def fid(i, j):
+        return j * 5 + i
+
+    def wid(k, j):
+        return fid(4, j) if k == 0 else 15 + j * 2 + (k - 1)
+    for j in range(2):
+        for i in range(4):
+            ids = (fid(i, j), fid(i + 1, j), fid(i + 1, j + 1), fid(i, j + 1))
+            flat.extend(ids)
+            uv.extend(c for v in ids for c in (pts[v][0] / 8, pts[v][1] / 8))
+        for k in range(2):
+            ids = (wid(k, j), wid(k + 1, j), wid(k + 1, j + 1), wid(k, j + 1))  # x = 4 wall, normal +x after the turn
+            ids = (ids[0], ids[3], ids[2], ids[1])
+            flat.extend(ids)
+            uv.extend(c for v in ids for c in ((4 + pts[v][2]) / 8, pts[v][1] / 8))
+    flat = np.array(flat)
+    return np.array(pts), np.arange(0, len(flat) + 1, 4), flat, np.array(uv)
+
+
 def drift_px(uv, want):
     return float(np.max(np.abs(np.asarray(uv) - np.asarray(want)))) * 1024.0
 
@@ -122,6 +152,19 @@ class Twin(unittest.TestCase):
         res, rip, rfl, _ = tube(4, 2, 0.5)
         out = uvseams.transfer(points, indptr, flat, uv, res, rip, rfl, repeat=[False], fix_folds=False, use_fast=False)
         self.assertEqual(sum(uvseams.folded(rip, out["uv"], out["expected"], f) for f in range(len(rip) - 1)), 0)
+
+    def test_coarse_faces_at_a_crease_read_the_surface_they_lie_on(self):
+        # result quads on the floor whose corners sit on the crease line (the wall ties with the floor there), one quad
+        # bent over the crease (its fan triangles want opposite windings: no common winding) and a zero-area triangle
+        points, indptr, flat, uv = crease()
+        res = np.array([[3.0, 0.2, 0.0], [4.0, 0.2, 0.0], [4.0, 0.8, 0.0], [3.0, 0.8, 0.0],
+                        [3.4, 1.2, 0.0], [4.0, 1.2, 0.6], [4.0, 1.8, 0.6], [3.4, 1.8, 0.0],
+                        [1.0, 1.0, 0.0], [1.5, 1.0, 0.0], [2.0, 1.0, 0.0]])
+        rip, rfl = np.array([0, 4, 8, 11]), np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        out = uvseams.transfer(points, indptr, flat, uv, res, rip, rfl, fix_folds=False, use_fast=False)
+        self.assertEqual(out["orient"][0], 1.0)  # on the floor, read as the floor
+        self.assertLess(drift_px(out["uv"][:8], res[[0, 1, 2, 3], :2].ravel() / 8), 1e-6)
+        self.assertEqual(out["orient"][2], 0.0)  # no area: no winding
 
     def test_reread_unfolds_a_face_through_its_reference_triangle(self):
         src = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float)
@@ -215,6 +258,20 @@ class Parity(unittest.TestCase):
             kern = self.run_job(turbo.uvseam_transfer(*src, *res, repeat=repeat))
             self.same_dict(twin, kern, keys)
             self.assertEqual((twin["folded_before"], twin["folded_after"]), (kern["folded_before"], kern["folded_after"]))
+
+    def test_crease_reads_match(self):
+        points, indptr, flat, uv = crease()
+        keys = ("uv", "expected", "ids", "w", "shift", "slid", "ref_ids", "ref_w", "ref_face", "orient", "region")
+        g = np.linspace(0.0, 1.0, 7)
+        res = np.array([(3.0 + 1.4 * a, 2.0 * b, max(0.0, 1.4 * a - 0.6) * 1.5) for b in g for a in g])  # bent across x = 4
+        res[24, 2] += 0.4  # one corner lifted: a quad folded in 3D
+        ids = np.arange(49).reshape(7, 7)
+        rfl = np.stack([ids[:-1, :-1], ids[:-1, 1:], ids[1:, 1:], ids[1:, :-1]], -1).ravel()
+        rip = np.arange(0, len(rfl) + 1, 4)
+        twin = uvseams.transfer(points, indptr, flat, uv, res, rip, rfl, use_fast=False)
+        kern = self.run_job(turbo.uvseam_transfer(points, indptr, flat, uv, res, rip, rfl))
+        self.same_dict(twin, kern, keys)
+        self.assertIn(0.0, set(np.asarray(kern["orient"]).tolist()))  # the vote's no-common-winding branch ran
 
     def test_fold_fix_and_layer_match(self):
         points, indptr, flat, uv, _ = fold_case()

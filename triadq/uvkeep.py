@@ -457,6 +457,23 @@ class FitStage:
         except StopIteration:
             self.done = True
 
+    def _lookup(self, uv, P, ip, fl):
+        """Generator: the per-side lookup of the active layer `uv` on result (P, ip, fl), sliced; returns the lookup dict,
+        or None when stopped."""
+
+        sa, s = self.sa, self.settings
+        tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, self.plan.seams["class"], False, self.use_fast)
+        if tr._job is not None:
+            self._now = tr
+        while not tr.done:
+            tr.step()
+            yield
+            if self._stopped:
+                tr.stop()
+                return None
+        self._now = None
+        return tr.result
+
     def _drive(self, stage):
         self._now = stage
         while not stage.done:
@@ -509,42 +526,72 @@ class FitStage:
             r = snap.result
             P, vchain, vparam = np.asarray(r["points"], np.float64), r["vchain"], r["vparam"]
             numbers.update(moved=int(r["moved"]), held=int(np.sum(r["held"])))
-        if soft and s.split:
-            if s.allowance is None:
-                budget = -1.0
-            else:
-                off = nf - plan.hard_spent - self.extra_so_far
-                budget = max(0.0, s.allowance * off - plan.hard_spent - self.extra_so_far)
-            cut = uvsnap.Split(P, ip, fl, seams, xyz, vchain, vparam, (), budget, use_fast=self.use_fast)
-            yield from self._drive(cut)
-            if self._stopped:
-                return
-            r = cut.result
-            P, ip, fl, origin = np.asarray(r["points"], np.float64), np.asarray(r["indptr"], np.int64), np.asarray(r["flat"], np.int64), np.asarray(r["origin"], np.int64)
-            numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
-                           faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
-                           split_budget=budget)
+        budget = -1.0
+        if soft and s.split and s.allowance is not None:
+            off = nf - plan.hard_spent - self.extra_so_far
+            budget = max(0.0, s.allowance * off - plan.hard_spent - self.extra_so_far)
         # per-side transfer: the active layer's lookup first (folds fixed after the split's seam UVs are laid over it),
-        # the other layers through the same lookup
+        # the other layers through the same lookup. A face whose fan triangles want opposite windings (orient 0: folded
+        # in 3D, or across a crease with one half leaning into a wall) shows the texture mirrored on part of it under any
+        # one winding; it is cut into its fan triangles, which can each wind their own way, and read again. So is a face
+        # the fold fix leaves folded, and a face with a zero-area fan triangle (closed by `close_flat`). The cut faces come
+        # out of the extra-face allowance: when they do not fit beside the split, the split runs again with less.
         name, uv = sa.layers[sa.active]
-        tr = uvseams.Transfer(sa.points, sa.indptr, sa.flat, uv, P, ip, fl, sa.material, s.repeat, s.texture_px, uvseams.UV_TOL_PX, seams["class"], False, self.use_fast)
-        if tr._job is not None:
-            self._now = tr
-        while not tr.done:
-            tr.step()
-            yield
-            if self._stopped:
-                tr.stop()
+        P0, ip0, fl0 = P, ip, fl
+        cut_seams, cut_xyz = seams, xyz
+        if soft and s.split and self.use_fast:  # part switches: cut faces spanning two unconnected source pieces
+            from .topology import _turbo as turbo
+            if turbo is not None:
+                tree = turbo.face_tree(sa.points, FlatFaces(sa.indptr, sa.flat))
+                got = {}
+                yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got)
+                if self._stopped:
+                    return
+                cut_seams = got["seams"]
+                cut_xyz = uvsnap.chain_xyz(cut_seams, sa.points)
+                numbers.update(part_switches=int(cut_seams.get("part_switches", 0)))
+        reserve = 0
+        while True:
+            P, ip, fl, origin = P0, ip0, fl0, np.arange(nf, dtype=np.int64)
+            if soft and s.split:
+                give = budget if budget < 0 else max(0.0, budget - reserve)
+                cut = uvsnap.Split(P, ip, fl, cut_seams, cut_xyz, vchain, vparam, (), give, use_fast=self.use_fast)
+                yield from self._drive(cut)
+                if self._stopped:
+                    return
+                r = cut.result
+                P, ip, fl, origin = np.asarray(r["points"], np.float64), np.asarray(r["indptr"], np.int64), np.asarray(r["flat"], np.int64), np.asarray(r["origin"], np.int64)
+                numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
+                               faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
+                               split_budget=give)
+            look = yield from self._lookup(uv, P, ip, fl)
+            if look is None:
                 return
-        self._now = None
-        look = tr.result
+            ready = {}
+            yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, ready)
+            if self._stopped:
+                return
+            halve = halve_mask(P, ip, fl, look["orient"]) | still_folded(ip, ready["uv"], ready["expected"])
+            cost = int((np.diff(ip)[halve] - 3).sum())
+            if soft and s.split and budget >= 0 and numbers["extra_faces"] + cost > budget and reserve < cost:
+                reserve = cost  # room for the cut faces: split again with less
+                continue
+            break
+        if halve.any():
+            ready = None
+            ip, fl, origin = fan_split(ip, fl, origin, halve)
+            numbers.update(extra_faces=numbers["extra_faces"] + cost, faces_halved=int(halve.sum()), halve_reserve=reserve)
+            look = yield from self._lookup(uv, P, ip, fl)
+            if look is None:
+                return
         out = {}
         for i, (nm, luv) in enumerate(sa.layers):
-            got = {}
-            yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+            got = ready if i == sa.active and ready is not None else {}
+            if not got:
+                yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
             if self._stopped:
                 return
-            out[i] = np.asarray(got["uv"], np.float64).reshape(-1, 2)
+            out[i] = close_flat(P, ip, fl, got["uv"], s.texture_px)
             if i == sa.active:
                 f = got["fold"]
                 numbers.update(folded_before=int(f["folded_before"]), folded_after=int(f["folded_after"]), fold_stuck=int(f["fold_stuck"]),
@@ -564,19 +611,104 @@ class FitStage:
             remember(c)
 
 
+def fans_with_area(points, indptr, flat) -> tuple:
+    """Per result face: how many of its fan triangles have area (twice-area above uvseams.DEGENERATE_SHARE of their
+    summed squared edges), and how many fan triangles it has."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    sizes = np.diff(ip)
+    fan = np.maximum(sizes - 2, 0)
+    tri_face = np.repeat(np.arange(len(sizes)), fan)
+    k = np.arange(len(tri_face)) - np.repeat(np.cumsum(fan) - fan, fan) + 1
+    s = ip[tri_face]
+    a, b, c = P[fl[s]], P[fl[s + k]], P[fl[s + k + 1]]
+    two_area = np.linalg.norm(np.cross(b - a, c - a), axis=1)
+    edges2 = ((b - a) ** 2).sum(1) + ((c - b) ** 2).sum(1) + ((a - c) ** 2).sum(1)
+    return np.bincount(tri_face, two_area > uvseams.DEGENERATE_SHARE * edges2, len(sizes)).astype(np.int64), fan
+
+
+def halve_mask(points, indptr, flat, orient) -> np.ndarray:
+    """Per result face of 4 or more corners with area: True when the lookup gave it no common winding (orient 0: its fan
+    triangles want opposite windings), or when some of its fan triangles have no area (a corner on the line between two
+    others: that sliver's winding is rounding, so it is cut off and closed by `close_flat`)."""
+
+    good, fan = fans_with_area(points, indptr, flat)
+    return (fan > 1) & (good > 0) & ((np.asarray(orient) == 0) | (good < fan))
+
+
+def still_folded(indptr, uv, expected) -> np.ndarray:
+    """Per result face of 4 or more corners: True when a fan triangle winds against its expected winding (or has no UV
+    area) after the fold fix."""
+
+    ip = np.asarray(indptr, np.int64)
+    q = np.asarray(uv, np.float64).reshape(-1, 2)
+    x = np.asarray(expected, np.float64)
+    sizes = np.diff(ip)
+    fan = np.maximum(sizes - 2, 0)
+    tri_face = np.repeat(np.arange(len(sizes)), fan)
+    k = np.arange(len(tri_face)) - np.repeat(np.cumsum(fan) - fan, fan) + 1
+    s = ip[tri_face]
+    a, b = q[s + k] - q[s], q[s + k + 1] - q[s]
+    bad = (a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1]) * x[tri_face] <= 0.0
+    return (fan > 1) & (x != 0.0) & (np.bincount(tri_face, bad, len(sizes)) > 0)
+
+
+SLIVER_UV_PX2 = 1e-3  # a fan triangle with twice its UV area below this many texels squared shows nothing (and its winding is rounding)
+
+
+def close_flat(points, indptr, flat, uv, texture_px: float = 1024.0) -> np.ndarray:
+    """`uv` (2 per corner) with the slivers closed. Every corner of a face with no 3D area goes to the mean of its UVs; an
+    end fan triangle (the first or last of its face) with next to no UV area (SLIVER_UV_PX2) gets its own corner onto
+    the nearer of its two neighbours in the face. Such a triangle shows no texture, but a single-precision rounding of
+    its UVs, or its rounding-noise normal, would give it a winding against the source's."""
+
+    ip = np.asarray(indptr, np.int64)
+    out = np.asarray(uv, np.float64).reshape(-1, 2).copy()
+    good, fan = fans_with_area(points, indptr, flat)
+    for f in np.flatnonzero(good == 0):
+        out[ip[f]:ip[f + 1]] = out[ip[f]:ip[f + 1]].mean(0)
+    tiny = SLIVER_UV_PX2 / (float(texture_px) ** 2)
+    s, e = ip[:-1], ip[1:]
+    for own, a, c in ((s + 1, s, s + 2), (e - 1, s, e - 2)):  # first fan triangle (0, 1, 2), last (0, n-2, n-1)
+        u0, u1, u2 = out[a], out[own], out[c]
+        area = np.abs((u1[:, 0] - u0[:, 0]) * (u2[:, 1] - u0[:, 1]) - (u2[:, 0] - u0[:, 0]) * (u1[:, 1] - u0[:, 1]))
+        for f in np.flatnonzero((fan > 0) & (good > 0) & (area <= tiny)):
+            near = a[f] if np.sum((out[a[f]] - out[own[f]]) ** 2) <= np.sum((out[c[f]] - out[own[f]]) ** 2) else c[f]
+            out[own[f]] = out[near]
+    return out
+
+
+def fan_split(indptr, flat, origin, mask) -> tuple:
+    """Cuts every face with mask True into its fan triangles (0, i, i+1); `origin` (source face per result face) follows."""
+
+    ip, fl, org, mask = np.asarray(indptr, np.int64), np.asarray(flat, np.int64), np.asarray(origin, np.int64), np.asarray(mask, bool)
+    sizes = np.diff(ip)
+    pieces = np.where(mask, sizes - 2, 1)
+    old = np.repeat(np.arange(len(sizes)), pieces)  # old face of each new face
+    j = np.arange(len(old)) - np.repeat(np.cumsum(pieces) - pieces, pieces)  # which fan triangle
+    cut = mask[old]
+    new_sizes = np.where(cut, 3, sizes[old])
+    new_ip = np.concatenate([[0], np.cumsum(new_sizes)]).astype(np.int64)
+    f_of = np.repeat(old, new_sizes)
+    r = np.arange(int(new_ip[-1])) - np.repeat(new_ip[:-1], new_sizes)
+    corner = ip[f_of] + np.where(cut[np.repeat(np.arange(len(old)), new_sizes)], np.where(r == 0, 0, np.repeat(j, new_sizes) + r), r)
+    return new_ip, fl[corner], org[old]
+
+
 def _layer_steps(sa: Source, luv, P, ip, fl, look: dict, texture_px: float, use_fast: bool, got: dict):
-    """Generator: one UV layer through the lookup with the fold fix (`uvseams.layer`), polling the faster job when there is one so no slice blocks. Fills got[uv], got[fold]."""
+    """Generator: one UV layer through the lookup with the fold fix (`uvseams.layer`), polling the faster job when there is one so no slice blocks. Fills got[uv], got[expected], got[fold]."""
 
     fast = uvseams.FAST.get("layer") if use_fast else None
     job = fast(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, sa.points) if fast is not None else None
     if job is not None:
         while not job.done():
             yield
-        u, _e, fold = job.result()
+        u, e, fold = job.result()
     else:
-        u, _e, fold = uvseams.layer(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, False, sa.points)
+        u, e, fold = uvseams.layer(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, False, sa.points)
         yield
-    got.update(uv=u, fold=fold)
+    got.update(uv=u, expected=e, fold=fold)
 
 
 def fit_stage(source, src, res, gs, only_transfer: bool = False, use_fast: bool = True):

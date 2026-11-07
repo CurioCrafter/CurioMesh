@@ -5,7 +5,7 @@
 
 NumPy only, no bpy. The reference lives in the kernel sources; this twin follows it step for step (same order of
 work, same ties, same float operations) so a parity test can compare the two within 1e-6. Long work runs as a
-sliceable stage (`Snap.step()` / `Split.step()` do about 4 ms) or, when the adapter installed a faster callable, as a
+sliceable stage (`Snap.step()` / `Split.step()` do about 2 ms) or, when the adapter installed a faster callable, as a
 background job the stage polls.
 
 Our own design and code. Textbook pieces: Dijkstra's shortest paths (Dijkstra 1959) inside a corridor around the
@@ -18,7 +18,9 @@ the remesh and the snap could not fit are cut, once per chain, along the source 
 Inputs: a result mesh (points, indptr, flat), the seam dict of `uvseams.extract` (chains, classes, gaps) and the welded
 source positions `xyz` (`chain_xyz`). `snap` moves vertices onto Soft chains (never flipping a face, never past
 `max_move`; refused vertices are held); `split` cuts the faces still crossed and hands back a new mesh, the seam vertex
-tags and per-corner UVs on the seams (`with_seam_uvs` lays them over a per-side transfer).
+tags and per-corner UVs on the seams (`with_seam_uvs` lays them over a per-side transfer). `part_switches` adds
+chains where the nearest source piece changes between unconnected pieces, which have no UV seam between them; call it
+on the snapped mesh and hand its seam dict (and `chain_xyz` of it) to `split` only.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ import time
 import numpy as np
 
 from .topology import _quad_points_valid
-from .uvseams import _edges, closest_bary
+from .uvseams import _closest_bary_many, _edges, closest_bary
 
 # Constants table: same names and values as the top of the matching .rs file (tests/test_uv_scaffold.py compares).
 SNAP_REACH = 1.0
@@ -50,7 +52,7 @@ WARP_COSINE = 0.5
 SKIPPED, ACCEPTED, REFUSED, NO_PATH, ON_EDGES, SHORT, PARTLY_HELD = 0, 1, 2, 3, 4, 5, 6
 KEPT, SPLIT, LEFT, CANNOT, BAKE = 0, 1, 2, 3, 4
 SOFT = 2
-SLICE_S = 0.004  # one step() of a stage does about this much work
+SLICE_S = 0.002  # one step() of a stage does about this much work (short: a loaded PC can stretch a slice several times)
 
 # Optional faster callables, set by the one adapter (uv_fast.py); the NumPy code runs when a name is missing.
 FAST: dict = {}
@@ -75,6 +77,9 @@ def chain_xyz(seams: dict, points) -> np.ndarray:
     points = np.asarray(points, np.float64).reshape(-1, 3)
     xyz = np.zeros((int(seams["n_welded"]), 3))
     xyz[np.asarray(seams["weld"], np.int64)] = points
+    extra = seams.get("extra_xyz")  # welded ids after the source's: the `part_switches` chain vertices
+    if extra is not None and len(extra):
+        xyz[len(xyz) - len(extra):] = extra
     return xyz.ravel()
 
 
@@ -107,6 +112,212 @@ def with_seam_uvs(uv, corner_uv) -> np.ndarray:
     keep = ~np.isnan(seam)
     out[keep] = seam[keep]
     return out
+
+
+def _parts_steps(fl, ip, weld, nw, out: dict):
+    """Generator: `out["part"]` = per source face its part (faces joined across shared welded edges; union-find)."""
+
+    nf = len(ip) - 1
+    counts = np.diff(ip)
+    face_of = np.repeat(np.arange(nf), counts)
+    nxt = np.arange(len(fl)) + 1
+    last = ip[1:] - 1
+    nxt[last[counts > 0]] = ip[:-1][counts > 0]
+    wa, wb = weld[fl], weld[fl[nxt]]
+    key = np.minimum(wa, wb) * nw + np.maximum(wa, wb)
+    order = np.argsort(key, kind="stable")
+    ks = key[order]
+    lab = np.arange(nf)
+
+    def find(x):
+        while lab[x] != x:
+            lab[x] = lab[lab[x]]
+            x = lab[x]
+        return x
+
+    fo = face_of[order].tolist()
+    yield
+    for n, i in enumerate(np.flatnonzero(ks[1:] == ks[:-1]).tolist()):
+        x, y = find(fo[i]), find(fo[i + 1])
+        if x != y:
+            lab[max(x, y)] = min(x, y)
+        if n % 4096 == 4095:
+            yield
+    part = np.empty(nf, np.int64)
+    for f in range(nf):
+        part[f] = find(f)
+        if f % 8192 == 8191:
+            yield
+    out["part"] = part
+
+
+def _walk_runs(adj):
+    """Polylines through a graph of degree <= 2 mostly: runs between ends / branch points, then closed loops (first
+    node repeated at the end)."""
+
+    seen = set()
+    runs = []
+    for v0 in sorted(adj):
+        if len(adj[v0]) == 2:
+            continue
+        for w0 in sorted(adj[v0]):
+            e = (min(v0, w0), max(v0, w0))
+            if e in seen:
+                continue
+            seen.add(e)
+            run, prev, cur = [v0], v0, w0
+            while True:
+                run.append(cur)
+                if len(adj[cur]) != 2:
+                    break
+                nxt = next(x for x in adj[cur] if x != prev)
+                e = (min(cur, nxt), max(cur, nxt))
+                if e in seen:
+                    break
+                seen.add(e)
+                prev, cur = cur, nxt
+            runs.append(run)
+    for v0 in sorted(adj):
+        for w0 in sorted(adj[v0]):
+            e = (min(v0, w0), max(v0, w0))
+            if e in seen:
+                continue
+            seen.add(e)
+            run, prev, cur = [v0], v0, w0
+            while cur != v0:
+                run.append(cur)
+                nxt = next(x for x in adj[cur] if x != prev)
+                e = (min(cur, nxt), max(cur, nxt))
+                if e in seen:
+                    break
+                seen.add(e)
+                prev, cur = cur, nxt
+            run.append(cur)
+            runs.append(run)
+    return [r for r in runs if len(r) >= 2]
+
+
+def _uv_at(src_P, src_ip, src_fl, src_uv, face, at):
+    """Source UV at closest points `at` (N, 3) on source polygons `face` (the fan triangle nearest to each point)."""
+
+    out = np.zeros((len(face), 2))
+    best = np.full(len(face), np.inf)
+    counts = src_ip[face + 1] - src_ip[face]
+    for j in range(1, int(counts.max()) - 1 if len(face) else 0):
+        i = np.flatnonzero(counts > j + 1)
+        c0 = src_ip[face[i]]
+        c1, c2 = c0 + j, c0 + j + 1
+        a, b, c = src_P[src_fl[c0]], src_P[src_fl[c1]], src_P[src_fl[c2]]
+        w = _closest_bary_many(at[i], a, b, c)  # elementwise: one point per triangle
+        q = w[:, :1] * a + w[:, 1:2] * b + w[:, 2:] * c
+        d = np.sqrt(((q - at[i]) ** 2).sum(1))
+        better = d < best[i]
+        k = i[better]
+        best[k] = d[better]
+        out[k] = (w[better, :1] * src_uv[c0[better]] + w[better, 1:2] * src_uv[c1[better]]) + w[better, 2:] * src_uv[c2[better]]
+    return out
+
+
+def part_switches(seams: dict, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, texture_px: float = 1024.0,
+                  steps: int = 16) -> dict:
+    """`part_switches_steps` in one call: the seam dict with the part switches added."""
+
+    out = {}
+    for _ in part_switches_steps(seams, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, out, texture_px, steps):
+        pass
+    return out["seams"]
+
+
+def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, out: dict,
+                        texture_px: float = 1024.0, steps: int = 16):
+    """Generator (yields between short pieces; `out["seams"]` at the end): the seam dict with **part switches** added as
+    Soft chains: on the result mesh, the lines where the nearest source piece changes between two unconnected pieces
+    (a bolt on a plate, a cap pushed into a body).
+
+    Unconnected pieces share no edge, so the UV seams have no chain there, yet a result face spanning both takes texture
+    from two places (on the bench models most faces left across seams were such faces). Each result edge whose two
+    ends are nearest different pieces gets the point where the nearest piece changes (bisection along the edge, `steps`
+    halvings), and the points of a face's two such edges are joined, so the chains run on the result surface itself
+    and the split cuts where the texture changes owner. uv_a / uv_b are the two pieces' UVs there (not oriented: they
+    only give the gap, which orders the split's budget; the corners keep the per-side transfer's UVs). New chain
+    vertices get welded ids after the source's (`chain_xyz` reads them from `extra_xyz`). `nearest(points) -> (closest
+    (N, 3), polygon, distance)` is the caller's lookup on the source polygons (the add-on's face tree). The source's
+    parts are kept in `seams["face_part"]` for the next call. Our own rule; bisection is textbook."""
+
+    sP = np.asarray(src_points, np.float64).reshape(-1, 3)
+    sip, sfl = np.asarray(src_indptr, np.int64), np.asarray(src_flat, np.int64)
+    suv = np.asarray(src_uv, np.float64).reshape(-1, 2)
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    res = dict(seams)
+    out["seams"] = res
+    mesh = _Mesh(P, indptr, flat, lazy=True)
+    yield from mesh.build(P, indptr, flat)
+    if mesh.nf == 0 or len(sip) < 3:
+        return
+    if "face_part" not in seams:
+        got = {}
+        yield from _parts_steps(sfl, sip, np.asarray(seams["weld"], np.int64), int(seams["n_welded"]), got)
+        seams["face_part"] = got["part"]
+    part = np.asarray(seams["face_part"], np.int64)
+    if part.min() == part.max():
+        return
+    vface = np.zeros(len(P), np.int64)
+    for i in range(0, len(P), 4096):
+        vface[i:i + 4096] = np.asarray(nearest(P[i:i + 4096])[1], np.int64)
+        yield
+    vpart = part[vface]
+    cross = np.flatnonzero(vpart[mesh.ea] != vpart[mesh.eb])
+    if not len(cross):
+        return
+    pa, pb = P[mesh.ea[cross]], P[mesh.eb[cross]]
+    first = vpart[mesh.ea[cross]]
+    lo, hi = np.zeros(len(cross)), np.ones(len(cross))
+    for _ in range(steps):
+        mid = 0.5 * (lo + hi)
+        same = part[np.asarray(nearest(pa + mid[:, None] * (pb - pa))[1], np.int64)] == first
+        lo, hi = np.where(same, mid, lo), np.where(same, hi, mid)
+        yield
+    x = pa + (0.5 * (lo + hi))[:, None] * (pb - pa)
+    at_a, fa, _ = nearest(pa + lo[:, None] * (pb - pa))
+    at_b, fb, _ = nearest(pa + hi[:, None] * (pb - pa))
+    fa, fb = np.asarray(fa, np.int64), np.asarray(fb, np.int64)
+    yield
+    uva = _uv_at(sP, sip, sfl, suv, fa, np.asarray(at_a).reshape(-1, 3))
+    yield
+    uvb = _uv_at(sP, sip, sfl, suv, fb, np.asarray(at_b).reshape(-1, 3))
+    yield
+    pair = np.sort(np.stack([part[fa], part[fb]], 1), 1).tolist()
+    point_of_edge = dict(zip(cross.tolist(), range(len(cross))))
+    edge_of = {(x_, y_): e for e, (x_, y_) in enumerate(zip(mesh.ea.tolist(), mesh.eb.tolist()))}
+    adj = {}
+    for f in range(mesh.nf):
+        if f % 1024 == 1023:
+            yield
+        fv = mesh.face(f)
+        n = len(fv)
+        ks = [k for k in (point_of_edge.get(edge_of.get((min(fv[i], fv[(i + 1) % n]), max(fv[i], fv[(i + 1) % n])))) for i in range(n)) if k is not None]
+        if len(ks) == 2 and pair[ks[0]] == pair[ks[1]]:
+            adj.setdefault(ks[0], set()).add(ks[1])
+            adj.setdefault(ks[1], set()).add(ks[0])
+    runs = _walk_runs(adj)
+    if not runs:
+        return
+    base = int(seams["n_welded"])
+    order = np.concatenate([np.asarray(r, np.int64) for r in runs])
+    gap = np.sqrt(((uva - uvb) ** 2).sum(1)) * texture_px
+    old_ip = np.asarray(seams["run_indptr"], np.int64)
+    cls = np.asarray(seams["class"])
+    old_extra = seams.get("extra_xyz")
+    res["run_indptr"] = np.r_[old_ip, np.cumsum([len(r) for r in runs]).astype(np.int64) + int(old_ip[-1])]
+    res["run_vertex"] = np.r_[np.asarray(seams["run_vertex"], np.int64), base + order]
+    res["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), uva[order].ravel()]
+    res["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), uvb[order].ravel()]
+    res["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), gap[order]]
+    res["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
+    res["n_welded"] = base + len(x)
+    res["extra_xyz"] = x if old_extra is None else np.r_[np.asarray(old_extra, np.float64).reshape(-1, 3), x]
+    res["part_switches"] = len(runs)
+    res["part_switch_first"] = len(cls)
 
 
 # ---------------------------------------------------------------- small helpers (scalar, same order as the reference)
@@ -187,7 +398,13 @@ def _bbox(pts, pad):
 class _Mesh:
     """Result topology: edges (first-corner order), neighbours, faces per vertex, mean edge per vertex."""
 
-    def __init__(self, points, indptr, flat):
+    def __init__(self, points, indptr, flat, lazy=False):
+        """`lazy`: build later through `build()`, a generator that yields between short pieces (the sliced stages)."""
+        if not lazy:
+            for _ in self.build(points, indptr, flat):
+                pass
+
+    def build(self, points, indptr, flat):
         P = np.asarray(points, np.float64).reshape(-1, 3)
         self.indptr = ip = np.asarray(indptr, np.int64)
         self.flat = fl = np.asarray(flat, np.int64)
@@ -214,19 +431,27 @@ class _Mesh:
         np.add.at(cnt, np.stack([self.ea, self.eb], 1).ravel(), 1)
         self.vedge = np.where(cnt > 0, s / np.maximum(cnt, 1), self.mean_edge)
         self.efaces = []
+        yield
         for e in range(ne):
             fs = face_of[occ[start[e]:start[e + 1]]].tolist()
             self.efaces.append([f for i, f in enumerate(fs) if i == 0 or fs[i - 1] != f])
+            if e & 255 == 255:
+                yield
         nb = [[] for _ in range(n)]
-        for x, y in zip(self.ea.tolist(), self.eb.tolist()):
+        for i, (x, y) in enumerate(zip(self.ea.tolist(), self.eb.tolist())):
             if x != y:
                 nb[x].append(y)
                 nb[y].append(x)
+            if i & 1023 == 1023:
+                yield
         self.nbr = [sorted(v) for v in nb]
+        yield
         vf = [[] for _ in range(n)]
         for f in range(self.nf):
             for v in fl[ip[f]:ip[f + 1]].tolist():
                 vf[v].append(f)
+            if f & 511 == 511:
+                yield
         self.vf = vf
 
     def face(self, f):
@@ -620,11 +845,13 @@ class _Dsu:
 def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, budget, out, stopped):
     """Generator behind `split`: fills `out`, yielding between pieces of work."""
 
-    mesh = _Mesh(points, indptr, flat)
+    mesh = _Mesh(points, indptr, flat, lazy=True)
+    yield from mesh.build(points, indptr, flat)
     n, nf = mesh.n, mesh.nf
     P = np.asarray(points, np.float64).reshape(-1, 3)
     pos = [tuple(p) for p in P.tolist()]
     chs = _chains(seams, xyz)
+    yield
     nc = len(chs)
     cls = np.asarray(seams["class"], np.int64)
     vc = np.asarray(vchain, np.int64).ravel()
@@ -639,13 +866,19 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
     def side_edge(a, b):
         return edge_of[(min(a, b), max(a, b))]
 
-    fnormal = [_unit(_newell(_face_pos(pos, mesh, f))) for f in range(nf)]
+    fnormal = []
+    for f in range(nf):
+        fnormal.append(_unit(_newell(_face_pos(pos, mesh, f))))
+        if f & 127 == 127:
+            yield
     enormal = []
     for e in range(len(mesh.ea)):
         s = (0.0, 0.0, 0.0)
         for f in mesh.efaces[e]:
             s = _add(s, fnormal[f])
         enormal.append(s)
+        if e & 255 == 255:
+            yield
     EN = np.array(enormal, np.float64).reshape(-1, 3)
     PA, PB = P[mesh.ea], P[mesh.eb]
     # Candidates: an edge's box padded by CROSS_REACH of its length, a face's box padded by the inside() plane tolerance.
@@ -660,6 +893,8 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
         for i in range(k):
             perim += _norm(_sub(fp[(i + 1) % k], fp[i]))
         FLO[f], FHI[f] = _bbox(fp, CROSS_REACH * perim / k)
+        if f & 127 == 127:
+            yield
     corner_map = {}
     for c, ch in enumerate(chs):
         if not ch.closed:
@@ -741,6 +976,8 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
 
     end_tagged = [[False, False] for _ in range(nc)]
     for v in range(n):
+        if v & 1023 == 1023:
+            yield
         if tag_c[v] < 0:
             continue
         c, prm = tag_c[v], tag_p[v]
@@ -758,7 +995,10 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
                     push(f, cc, (_V, v, 0), pp)
     Pv = np.array(pos, np.float64).reshape(-1, 3)
     reuse_tags = []
-    for e, c in cross_keys:
+    yield
+    for i_, (e, c) in enumerate(cross_keys):
+        if i_ & 127 == 127:
+            yield
         s, prm, reuse = crosses[(e, c)][1]
         if reuse is not None:
             reuse_tags.append((reuse, c, prm))
@@ -770,6 +1010,7 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
         if not active[c] or chs[c].closed:
             continue
         ch = chs[c]
+        yield
         for k, (cid, prm) in enumerate(((ch.start_id, 0.0), (ch.end_id, ch.end()))):
             x = ch.at(prm)
             if end_tagged[c][k]:
@@ -812,7 +1053,9 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
     # 3. Plans per face.
     face_list = sorted(fpts)
     plans = {}
-    for f in face_list:
+    for i_, f in enumerate(face_list):
+        if i_ & 15 == 15:
+            yield
         fv = mesh.face(f)
         k = len(fv)
         fe = [side_edge(fv[i], fv[(i + 1) % k]) for i in range(k)]
@@ -883,6 +1126,7 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
             used.update(x[0] for x in p["fan"][1])
     used = sorted(used)
     used_set = set(used)
+    yield
     dsu = _Dsu(nf)
     for node in used:
         if node[0] == _E:
@@ -894,6 +1138,7 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
         if node[0] == _E:
             touched.update(mesh.efaces[node[1]])
     touched = sorted(touched)
+    yield
 
     at = list(pos)
     node_id = {}
@@ -921,6 +1166,7 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
             at.append(_sub(x, _scale(nrm, _dot(_sub(x, cen), nrm))))
             c = next(c for c in corner_map[cid] if active[c])
             new_tag.append((c, 0.0 if chs[c].start_id == cid else chs[c].end()))
+    yield
     cross_by_edge = {}
     for (e, c) in sorted(crosses):
         cross_by_edge.setdefault(e, []).append(c)
@@ -986,7 +1232,9 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
     for r in sorted(runs):
         members = runs[r]
         damage, cost = 0.0, 0
-        for f in members:
+        for i_, f in enumerate(members):
+            if i_ & 7 == 7:
+                yield
             pc = pieces_of(f)
             cost += len(pc) - 1
             p = plans.get(f)
@@ -1041,6 +1289,7 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
         f = next((f for f in faces_at(cen) if _inside(_face_pos(pos, mesh, f), cen)), None)
         if f is not None:
             state[f] = BAKE
+        yield
     yield
 
     # 6. Output mesh.
@@ -1074,8 +1323,11 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
         for node, c, prm in ends:
             if node[0] == _V and tag_c[node[1]] < 0:
                 tag_c[node[1]], tag_p[node[1]] = c, prm
+    yield
     polys = []
     for f in range(nf):
+        if f & 1023 == 1023:
+            yield
         if chosen[f]:
             for pc in piece_cache[f]:
                 polys.append([[remap[v] for v in pc], f, True])
@@ -1101,7 +1353,10 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
                 a, b = pv[k], pv[(k + 1) % 3]
                 by_edge.setdefault((min(a, b), max(a, b)), []).append(i)
     gone = [False] * len(polys)
+    yield
     for i in range(len(polys)):
+        if i & 255 == 255:
+            yield
         if gone[i] or not polys[i][2] or len(polys[i][0]) != 3:
             continue
         tri = list(polys[i][0])
@@ -1166,7 +1421,7 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
             u = ch.uv(prm, side_b)
             corner_uv[2 * h], corner_uv[2 * h + 1] = u
             corner_side[h] = int(side_b)
-        if f % 256 == 255:
+        if f & 63 == 63:
             yield
     st = np.array(state, np.int64)
     out.update(done=not stop_hit, points=np.array(out_pts, np.float64).ravel(), indptr=np.array(ind, np.int64), flat=np.array(fl, np.int64),
@@ -1189,7 +1444,7 @@ def split(points, indptr, flat, seams: dict, xyz, vchain=(), vparam=(), seen_fac
 
 
 class _Stage:
-    """`step()` does about 4 ms of work (or polls the faster job); `done` turns True at the end and `result` holds the
+    """`step()` does about 2 ms of work (or polls the faster job); `done` turns True at the end and `result` holds the
     same dict the faster callable returns. `stop()` ends it early (`result["done"]` False)."""
 
     def __init__(self, job, steps):

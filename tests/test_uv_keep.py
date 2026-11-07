@@ -79,6 +79,23 @@ def fake_seams(classes, n_islands=2, pairs=None):
             "gap_px": np.ones(n), "class": np.array(classes, np.int64)}
 
 
+class Halves(unittest.TestCase):
+    def test_halve_split_and_close(self):
+        P = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0]], float)
+        ip, fl = np.array([0, 4, 7]), np.array([0, 1, 2, 3, 4, 5, 6])  # a quad, a zero-area triangle
+        self.assertEqual(uvkeep.halve_mask(P, ip, fl, [0.0, 0.0]).tolist(), [True, False])
+        self.assertEqual(uvkeep.halve_mask(P, ip, fl, [1.0, 0.0]).tolist(), [False, False])
+        nip, nfl, org = uvkeep.fan_split(ip, fl, np.array([7, 8]), np.array([True, False]))
+        self.assertEqual((nip.tolist(), nfl.tolist(), org.tolist()), ([0, 3, 6, 9], [0, 1, 2, 0, 2, 3, 4, 5, 6], [7, 7, 8]))
+        uv = np.array([[0, 0], [1, 0], [1, 1], [0, 1], [0.1, 0.1], [0.2, 0.3], [0.4, 0.2]], float)
+        uv[1] = [0.5, 0.5 + 1e-12]  # first fan triangle of the quad: next to no UV area
+        out = uvkeep.close_flat(P, ip, fl, uv)
+        np.testing.assert_array_equal(out[4:], np.repeat(uv[4:].mean(0)[None], 3, 0))  # no area: one UV
+        self.assertTrue(np.array_equal(out[1], out[0]) or np.array_equal(out[1], out[2]))
+        np.testing.assert_array_equal(out[[0, 2, 3]], uv[[0, 2, 3]])
+        self.assertEqual(uvkeep.still_folded(ip, out, [1.0, 1.0]).tolist(), [True, False])
+
+
 class Reconcile(unittest.TestCase):
     def test_pair_joins_when_it_fits(self):
         seams, rep = fake_seams([uvseams.HARD, uvseams.SOFT]), {}
