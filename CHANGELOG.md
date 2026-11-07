@@ -2,6 +2,24 @@
 
 ## 0.9.8.1 - unreleased
 
+Merged into main: `v0981-tidytools` (Look First, History and the Tidy Tools sets), `v0981-faceloops2` (Face Loops,
+Ring Round This, Redraw in Rows) and `v0981-sitefixes` (the fixes below, ported from the Blender-site build). Symmetrize
+and the experiment branches are not in this release.
+
+### Fixes from the Blender-site review
+- Previews are found by the add-on's own mark, never by name, so an object of yours called like a preview is never
+  touched; no preview or spare preview mesh is saved in the .blend, and none survive opening a file.
+- Segment edits (Make a Part, Undo Edit, Redo, Multires Detail) are undoable; Make LOD Set replaces its old LODs in one
+  undoable step.
+- Remove Shape, Remove Guide and Redraw delete only what the add-on made; saving segments never removes an attribute
+  of yours with the same name.
+- Even Rows no longer keeps a finished job in memory or waits forever on its helper Blender; the Flow Editor timer ends
+  when idle; Guided's load handler and Guided Preview survive registering twice and disable / enable.
+- Decimate reads Blender's current context; the Use Several Cores note shows only once a helper delivered; Scan and
+  Diagnostics show the numbers they measure; tooltips for Paint and Remember This Fix say what they change; messages
+  use the panel's style names; five unused fold-out settings removed.
+- Tidy Tools: one `lines` field on a tool's proposal for the pink Kept lines (was `kept` in two shapes and `lines`).
+
 ### QA bugs
 - **register() twice** no longer raises "already registered": the second call unregisters first and starts clean.
 - **Selected Faces Only** is switched off in 0.9.8 and hidden in the panel (its seam is not stitched yet); Start now

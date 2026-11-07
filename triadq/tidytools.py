@@ -538,7 +538,7 @@ class SealMiddle(Trial):
         note = f"{moved:,} seam vert{'ex' if moved == 1 else 'ices'} put on the plane, {merged:,} merged, {_plural(gaps, 'gap', 'gaps')} left"
         if crossing:
             note += f", {_plural(crossing, 'face crosses', 'faces cross')} it"
-        return Candidate(out, faces=new_faces, parent=parent, held=held, found=co[go] if moved else None, kept=_grid_patch(out, axis, offset, np.abs(side) <= tiny, edge), arrows=arrows, note=note)
+        return Candidate(out, faces=new_faces, parent=parent, held=held, found=co[go] if moved else None, lines=_grid_patch(out, axis, offset, np.abs(side) <= tiny, edge), arrows=arrows, note=note)
 
 
 # --------------------------------------------------------------------------- Look First for tools that already existed

@@ -141,7 +141,7 @@ class SealMiddleTest(unittest.TestCase):
         self.assertTrue(np.allclose(cand.co[middle, 0], 2.0))
         self.assertTrue(np.allclose(cand.co[:, 2], 0.0))
         self.assertIn("3 seam vertices put on the plane, 0 merged, 0 gaps left", cand.note)
-        self.assertGreater(len(cand.kept), 0)
+        self.assertGreater(len(cand.lines), 0)
         again = trial.make_base(cand.co, cand.faces, project=_flat, pick={"plane": (0, 2.0)})
         self.assertEqual(trial.finish(T.SealMiddle().run(again, {})).refusal, T.SEALED)  # Again: nothing left
 

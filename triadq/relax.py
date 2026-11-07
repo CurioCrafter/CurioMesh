@@ -439,7 +439,7 @@ class KeepLinesRelax(_Relax):
     def _finish(self, base, x, quads, settings, strength, rough, held) -> Candidate:
         cand = super()._finish(base, x, quads, settings, strength, rough, held)
         lines = self._plan(base, settings)[0]
-        cand.kept = lines
+        cand.lines = lines
         cand.numbers["lines"] = (f"lines kept {len(lines):,}", 0)
         if not len(lines):
             cand.note = NO_LINES

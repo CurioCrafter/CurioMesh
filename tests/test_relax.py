@@ -156,7 +156,7 @@ class KeepLinesRelaxTest(unittest.TestCase):
         self.assertTrue(stays.all())  # corners on a cube edge are still on it
         np.testing.assert_array_equal(cand.co[corner], co[corner])
         self.assertTrue(np.abs(cand.co[on_edge & ~corner] - co[on_edge & ~corner]).max() > 1e-4)  # and they slid
-        self.assertIsNotNone(cand.kept)
+        self.assertIsNotNone(cand.lines)
         self.assertTrue(cand.numbers["lines"][0].startswith("lines kept"))
 
     def test_no_lines_works_like_source_relax(self):

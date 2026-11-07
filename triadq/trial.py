@@ -152,10 +152,9 @@ class Candidate:
     note: str = ""
     refusal: str = ""
     found: np.ndarray | None = None  # (k, 3) spots the tool found to work on: the dashed Found rings
-    kept: np.ndarray | None = None  # pink Kept lines: (k, 2) int corner pairs of the candidate, or (k, 2, 3) float points
     tint: np.ndarray | None = None  # per corner -1..1, drawn instead of the move wash: blue grew, orange shrank
     rows: list = field(default_factory=list)  # a report's lines (Preview Tidy): {"key", "words", "spots", "cost", ...}
-    lines: np.ndarray | None = None  # (k, 2, 3) lines the tool keeps by meaning (hard edges, panel borders): the pink layer
+    lines: np.ndarray | None = None  # the pink Kept lines layer: (k, 2, 3) float points, or (k, 2) int corner pairs of the candidate (they follow its corners)
 
 
 class Trial:
@@ -263,7 +262,7 @@ def diff(base: Base, cand: Candidate) -> Candidate:
 def blend(base: Base, full: Candidate, s: float) -> Candidate:
     """An instant stand-in at strength `s`: each corner `s` of the way to where the full-strength run put it."""
     co = base.co + float(s) * (np.asarray(full.co) - base.co)
-    return diff(base, Candidate(co, strength=float(s), exact=False, held=list(full.held), note=full.note, kept=full.kept, lines=full.lines))
+    return diff(base, Candidate(co, strength=float(s), exact=False, held=list(full.held), note=full.note, lines=full.lines))
 
 
 def _tidiness(co, faces) -> float:
