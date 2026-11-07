@@ -117,6 +117,19 @@
   before and after.
 - Tools that need a click first (a strip, a pole) wait for it with the ask in the header and on the card; the thing
   under the mouse lights white and the picked one orange. Again opens the tool for a new click.
+- **Preview Tidy** (Cleanup): a report of the problems found in the area, one line each, only those found: corners
+  with two edges, doublets, triangle pairs that make quads, slivers and faces facing in. Each line has its count, how
+  much its fix would change the look, **Show** (the spots get a dashed ring and the view steps from one to the next)
+  and **Fix These** (its ghost shows; Enter keeps it). Each kept line is its own Ctrl+Z step and the list refreshes
+  and stays open for the next; Esc closes it. Nothing changes the outline, and no faces are joined across a
+  material or UV border.
+- **Seal the Middle** (Cleanup): puts every corner near the mirror plane onto it and merges the doubled ones, then
+  says what it did ("14 seam vertices put on the plane, 3 merged, 0 gaps left"). The plane shows as a pink grid with
+  arrows for the moves, and gaps or faces still crossing it get a red X. Works on a mirrored result, or on one whose
+  plane CurioMesh can find. One Ctrl+Z takes it back.
+- Look First can now draw dashed Found rings, pink Kept lines and a list of lines on the card, and a tool can stay
+  open after Enter. A mirrored result's tools now project onto the whole original, not one half of it, and blockout
+  results no longer stop a tool from opening.
 
 ## 0.9.8 - 2026-11-06
 

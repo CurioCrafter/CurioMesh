@@ -52,6 +52,8 @@ TOOLS: list[Tool] = [
     Tool("LOOPS", "curiomesh.tool_even_band", "Even the Band", "tt_even_band", "ALIGN_JUSTIFY"),
     Tool("POLES", "curiomesh.tool_cancel_pole_pair", "Cancel Pole Pair", "tt_cancel_pair", "UNLINKED"),
     Tool("POLES", "curiomesh.tool_open_poles", "Open Up Poles", "tt_open_poles", "PROP_ON"),
+    Tool("CLEANUP", "curiomesh.tool_preview_tidy", "Preview Tidy", "tt_preview_tidy", "VIEWZOOM"),
+    Tool("CLEANUP", "curiomesh.tool_seal_middle", "Seal the Middle", "mirror", "MOD_MIRROR"),
 ]
 FIRST_RUN = "curiomesh.tool_source_relax"  # the tool "Even out the roughest patch" opens
 
@@ -291,6 +293,49 @@ class CURIOMESH_OT_tool_open_poles(_Tool, bpy.types.Operator):
     rings: bpy.props.IntProperty(name="Rings", description="How many rings of quads round each pole share the change. More spreads it wider and moves more corners", default=2, min=1, soft_max=3, max=100000)
 
 
+class CURIOMESH_OT_tool_preview_tidy(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_preview_tidy"
+    bl_label = "Preview Tidy"
+    bl_description = "Lists the problems found in this area, each with a count, Show and Fix These. Nothing changes until you fix a line"
+    bl_options = {"REGISTER"}  # no UNDO flag: each Fix These pushes its own Undo step while the list stays open
+    trial = T.PreviewTidy
+
+    row: bpy.props.StringProperty(
+        name="Line",
+        description="Which line to fix when run from a script: corners, doublets, pairs, slivers or inward. Empty only opens the list",
+        default="",
+        options={"SKIP_SAVE"},
+    )
+
+
+def _mirror_plane(context) -> dict:
+    """{"plane": (axis, offset)} found on the result when it was not made mirrored, else {}."""
+    from mathutils.bvhtree import BVHTree
+
+    from . import symmetry
+
+    g = _guided()
+    job = (g.state["auto_base"] or {}).get("job")
+    res = g.state["res"]
+    if getattr(job, "mirror", None) or res is None or not len(res["faces"]):
+        return {}  # mirrored already: the Session reads the plane from the job
+    co = np.asarray(res["co"], dtype=np.float64)
+    tree = BVHTree.FromPolygons(co.tolist(), [list(f) for f in res["faces"]], all_triangles=False, epsilon=0.0)
+    best = symmetry.find_plane(co, tree)[0]
+    return {"plane": (best.axis, best.offset)} if best.ok() else {}
+
+
+class CURIOMESH_OT_tool_seal_middle(_Tool, bpy.types.Operator):
+    bl_idname = "curiomesh.tool_seal_middle"
+    bl_label = "Seal the Middle"
+    bl_description = "Puts every vertex near the mirror plane onto it and merges the doubled ones. Use it when the middle of a mirrored model has gaps or overlaps"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = T.SealMiddle
+
+    def _pick(self, context) -> dict:
+        return _mirror_plane(context)
+
+
 # --------------------------------------------------------------------------- panel operators
 
 
@@ -477,7 +522,7 @@ def _popover(key, label, tip):
 
 POPOVERS = tuple(_popover(key, label, tip) for key, label, _icon, _stock, tip in GROUPS)
 PANELS = (CURIOMESH_PT_guided_tools, CURIOMESH_PT_guided_history)  # registered by panel.py, in the main tab's order
-CLASSES = (CURIOMESH_OT_tool_source_relax, CURIOMESH_OT_tool_keep_lines_relax, CURIOMESH_OT_tool_square_up, CURIOMESH_OT_tool_relax_toward_detail, CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_even_band, CURIOMESH_OT_tool_cancel_pole_pair, CURIOMESH_OT_tool_open_poles, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
+CLASSES = (CURIOMESH_OT_tool_source_relax, CURIOMESH_OT_tool_keep_lines_relax, CURIOMESH_OT_tool_square_up, CURIOMESH_OT_tool_relax_toward_detail, CURIOMESH_OT_tool_smooth_corners, CURIOMESH_OT_tool_even_band, CURIOMESH_OT_tool_cancel_pole_pair, CURIOMESH_OT_tool_open_poles, CURIOMESH_OT_tool_preview_tidy, CURIOMESH_OT_tool_seal_middle, CURIOMESH_OT_tool_again, CURIOMESH_OT_tool_finish, CURIOMESH_OT_tool_intro, *POPOVERS)
 
 
 def register() -> None:
