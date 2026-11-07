@@ -22,7 +22,7 @@ PATTERNS = [
 UV_FILES = [
     "native/src/uv*.rs", "standalone/src/uv*.rs", "standalone/src/gui_uv.rs", "standalone/src/unwrap.rs",
     "triadq/uv*.py", "uv_layers.py", "uv_panel.py", "uv_draw.py", "uv_fast.py", "uv_hooks.py",
-    "tests/test_uv_*.py", "tests/uv_*.py",
+    "tests/test_uv_*.py", "tests/uv_*.py", "tests/blender_uv_*.py",
 ]
 ALLOWED = {"triadq/uvs.py", "tests/test_uvs.py"}
 SKIP_DIRS = {".git", "__pycache__", ".claude", "target"}
