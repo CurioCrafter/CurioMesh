@@ -435,6 +435,7 @@ DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vert
 
 def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
     """Reduce to `ratio`. `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders."""
+    context = bpy.context  # read at slice time: the operator's context a job was made with does not outlive the operator
 
     free = None if keep is None else np.flatnonzero(~keep)
     if len(set(kinds)) > 1:  # borders stay where they are, so no face ends up across two UV islands
