@@ -63,12 +63,14 @@ def _install_sight() -> None:
 
 # main-only: uv begin flat
 def _install_flat() -> None:
-    uvflat.set_fast(probe=turbo.uvflat_probe)
+    uvflat.set_fast(probe=turbo.uvflat_probe, flatten=turbo.uvflat_flatten, grid_layout=turbo.uvflat_grid_layout,
+                    quick_stretch=turbo.uvflat_quick_stretch, stretch=turbo.uvflat_stretch)
 # main-only: uv end flat
 
 # main-only: uv begin chart
 def _install_chart() -> None:
-    uvchart.set_fast(probe=turbo.uvchart_probe)
+    uvchart.set_fast(probe=turbo.uvchart_probe, build=turbo.uvchart_build, level=turbo.uvchart_level, uvs=turbo.uvchart_uvs,
+                     cuts=turbo.uvchart_cuts, keep_going=turbo.uvchart_pass)
 # main-only: uv end chart
 
 # main-only: uv begin pack

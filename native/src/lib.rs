@@ -1213,8 +1213,163 @@ fn uvflat_probe() -> usize {
     uvflat::probe()
 }
 
+fn uvflat_mesh<'a>(points: &'a [f64], indptr: &'a [i64], flat: &'a [i64]) -> PyResult<topo::Faces<'a>> {
+    check_faces(indptr, flat)?;
+    let n = points.len() / 3;
+    if points.len() % 3 != 0 || flat.iter().any(|&v| v < 0 || v as usize >= n) || points.iter().any(|x| !x.is_finite()) {
+        return Err(PyValueError::new_err("points or face vertex ids are invalid"));
+    }
+    Ok(topo::Faces { indptr, flat })
+}
+
+fn uvflat_stopped(stop: &StopFlag) -> PyResult<()> {
+    finished(!stop.0.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Flatten every chart of a mesh in one call (`uvflat::flatten`): returns (UVs per corner, stats rows of
+/// `uvflat::STATS_LEN`). rows: 0 Off, 1 Soft, 2 On, 3 Auto; start: 0 given, 1 LSCM pulled toward the given, 2 free.
+/// A stop returns the flip-free state each chart had reached (STOPPED = 1 in its row), so Keep going can resume.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvflat_flatten<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    chart: PyReadonlyArray1<'py, i64>,
+    start: PyReadonlyArray1<'py, f64>,
+    col: PyReadonlyArray1<'py, i64>,
+    row: PyReadonlyArray1<'py, i64>,
+    rows: u8,
+    start_mode: u8,
+    stretch_allowed: f64,
+    steps: usize,
+    max_factor_bytes: f64,
+    texture_px: f64,
+    stop: &StopFlag,
+) -> PyResult<(F64Array<'py>, F64Array<'py>)> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let (chart, start, col, row) = (slice(&chart, "chart")?, slice(&start, "start")?, slice(&col, "col")?, slice(&row, "row")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    let corners = flat.len();
+    if chart.len() != faces.count() || !(start.is_empty() || start.len() == 2 * corners) || col.len() != row.len() || !(col.is_empty() || col.len() == corners) {
+        return Err(PyValueError::new_err("flatten arrays are inconsistent"));
+    }
+    let rows = match rows {
+        0 => uvflat::Rows::Off,
+        1 => uvflat::Rows::Soft,
+        2 => uvflat::Rows::On,
+        _ => uvflat::Rows::Auto,
+    };
+    let start_mode = match start_mode {
+        0 => uvflat::Start::Given,
+        1 => uvflat::Start::Pull,
+        _ => uvflat::Start::Free,
+    };
+    let opts = uvflat::FlatOpts { rows, start: start_mode, stretch_allowed, steps, max_factor_bytes, texture_px, force_iterative: false };
+    let (uv, stats) = py.detach(|| uvflat::flatten(points, &faces, chart, start, col, row, &opts, &stop.0));
+    Ok((uv.into_pyarray(py), stats.into_pyarray(py)))
+}
+
+/// Exact grid UVs of a pole-free quad chart (the given faces): (UVs per vertex, column, row), NaN / -1 for vertices
+/// the faces do not use; None when the faces are not a grid.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn uvflat_grid_layout<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    stop: &StopFlag,
+) -> PyResult<Option<(F64Array<'py>, I64Array<'py>, I64Array<'py>)>> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    let n = points.len() / 3;
+    let found = py.detach(|| {
+        let ids: Vec<u32> = (0..faces.count() as u32).collect();
+        let (pts, ip, fl, global) = uvflat::sub_chart(points, &faces, &ids);
+        let g = uvflat::grid_layout(&uvflat::Chart { points: &pts, faces: topo::Faces { indptr: &ip, flat: &fl } }).ok()?;
+        let (mut uv, mut col, mut row) = (vec![f64::NAN; 2 * n], vec![-1i64; n], vec![-1i64; n]);
+        for (k, &v) in global.iter().enumerate() {
+            let v = v as usize;
+            uv[2 * v] = g.uv[2 * k];
+            uv[2 * v + 1] = g.uv[2 * k + 1];
+            col[v] = g.col[k];
+            row[v] = g.row[k];
+        }
+        Some((uv, col, row))
+    });
+    uvflat_stopped(stop)?;
+    Ok(found.map(|(uv, col, row)| (uv.into_pyarray(py), col.into_pyarray(py), row.into_pyarray(py))))
+}
+
+/// Stretch of a merge candidate (`uvflat::quick_stretch`): the given faces, UVs per vertex (2 per vertex of
+/// `points`), `free` per vertex (the band). Returns (band stretch, chart stretch, UVs per vertex after the band moved).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvflat_quick_stretch<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    uv: PyReadonlyArray1<'py, f64>,
+    free: PyReadonlyArray1<'py, bool>,
+    max_factor_bytes: f64,
+    stop: &StopFlag,
+) -> PyResult<(f64, f64, F64Array<'py>)> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let (uv, free) = (slice(&uv, "uv")?, slice(&free, "free")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    let n = points.len() / 3;
+    if uv.len() != 2 * n || free.len() != n {
+        return Err(PyValueError::new_err("quick_stretch arrays are inconsistent"));
+    }
+    let found = py.detach(|| {
+        let ids: Vec<u32> = (0..faces.count() as u32).collect();
+        let (pts, ip, fl, global) = uvflat::sub_chart(points, &faces, &ids);
+        let mut luv: Vec<f64> = global.iter().flat_map(|&v| [uv[2 * v as usize], uv[2 * v as usize + 1]]).collect();
+        let lfree: Vec<bool> = global.iter().map(|&v| free[v as usize]).collect();
+        let chart = uvflat::Chart { points: &pts, faces: topo::Faces { indptr: &ip, flat: &fl } };
+        let (band, all) = uvflat::quick_stretch(&chart, &mut luv, &lfree, max_factor_bytes, &stop.0)?;
+        let mut out = uv.to_vec();
+        for (k, &v) in global.iter().enumerate() {
+            out[2 * v as usize] = luv[2 * k];
+            out[2 * v as usize + 1] = luv[2 * k + 1];
+        }
+        Ok::<_, String>((band, all, out))
+    });
+    uvflat_stopped(stop)?;
+    let (band, all, out) = found.map_err(PyValueError::new_err)?;
+    Ok((band, all, out.into_pyarray(py)))
+}
+
+/// Chart stretch (`uvflat::stretch`) of the given faces with UVs per vertex: (quantile, per face).
+#[pyfunction]
+fn uvflat_stretch<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray1<'py, f64>,
+    indptr: PyReadonlyArray1<'py, i64>,
+    flat: PyReadonlyArray1<'py, i64>,
+    uv: PyReadonlyArray1<'py, f64>,
+    stop: &StopFlag,
+) -> PyResult<(f64, F64Array<'py>)> {
+    let (points, indptr, flat, uv) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?, slice(&uv, "uv")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    if uv.len() != 2 * (points.len() / 3) {
+        return Err(PyValueError::new_err("uv must hold 2 numbers per point"));
+    }
+    let (q, per) = py.detach(|| uvflat::stretch(&uvflat::Chart { points, faces }, uv));
+    uvflat_stopped(stop)?;
+    Ok((q, per.into_pyarray(py)))
+}
+
 fn register_uvflat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvflat_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_flatten, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_grid_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_quick_stretch, m)?)?;
+    m.add_function(wrap_pyfunction!(uvflat_stretch, m)?)?;
+    m.add("UVFLAT_STATS_LEN", uvflat::STATS_LEN)?;
     Ok(())
 }
 // main-only: uv end flat
@@ -1228,8 +1383,223 @@ fn uvchart_probe() -> usize {
     uvchart::probe()
 }
 
+type BoolArray<'py> = Bound<'py, PyArray1<bool>>;
+
+/// The Row Charts tree of one quad result (`uvchart::Tree`): patches, segments and the merge tree. `level(x)` is
+/// instant after the build.
+#[pyclass(frozen)]
+struct UvChartTree(uvchart::Tree);
+
+#[pymethods]
+impl UvChartTree {
+    /// `uvchart::num` columns: patches, irregular, turning, traces, Euler-cut patches and edges, ..., build ms.
+    fn numbers<'py>(&self, py: Python<'py>) -> F64Array<'py> {
+        self.0.numbers.to_vec().into_pyarray(py)
+    }
+
+    /// Patch per face.
+    fn patches<'py>(&self, py: Python<'py>) -> I64Array<'py> {
+        self.0.patch.iter().map(|&p| p as i64).collect::<Vec<_>>().into_pyarray(py)
+    }
+
+    /// Per edge in `seen_edge_px` order: (a, b, patch border, never glued, cut cost).
+    #[allow(clippy::type_complexity)]
+    fn edges<'py>(&self, py: Python<'py>) -> (I64Array<'py>, I64Array<'py>, BoolArray<'py>, BoolArray<'py>, F64Array<'py>) {
+        let t = &self.0.topo;
+        (
+            t.ea.iter().map(|&v| v as i64).collect::<Vec<_>>().into_pyarray(py),
+            t.eb.iter().map(|&v| v as i64).collect::<Vec<_>>().into_pyarray(py),
+            self.0.sep.clone().into_pyarray(py),
+            self.0.fixed.clone().into_pyarray(py),
+            self.0.cost.clone().into_pyarray(py),
+        )
+    }
+
+    /// Per vertex: 0 regular, 1 irregular, 2 turning vertex of a forced line.
+    fn irregular<'py>(&self, py: Python<'py>) -> I64Array<'py> {
+        (0..self.0.topo.nv).map(|v| if self.0.turning[v] { 2 } else { i64::from(self.0.irregular[v]) }).collect::<Vec<_>>().into_pyarray(py)
+    }
+
+    /// Per segment: (patch p, patch q, cost, seen px, edge ids CSR indptr, edge ids).
+    #[allow(clippy::type_complexity)]
+    fn segments<'py>(&self, py: Python<'py>) -> (I64Array<'py>, I64Array<'py>, F64Array<'py>, F64Array<'py>, I64Array<'py>, I64Array<'py>) {
+        let sg = &self.0.segments;
+        let mut ptr = vec![0i64];
+        let mut ids = Vec::new();
+        for s in sg {
+            ids.extend(s.edges.iter().map(|&e| e as i64));
+            ptr.push(ids.len() as i64);
+        }
+        (
+            sg.iter().map(|s| s.p as i64).collect::<Vec<_>>().into_pyarray(py),
+            sg.iter().map(|s| s.q as i64).collect::<Vec<_>>().into_pyarray(py),
+            sg.iter().map(|s| s.cost).collect::<Vec<_>>().into_pyarray(py),
+            sg.iter().map(|s| s.seen).collect::<Vec<_>>().into_pyarray(py),
+            ptr.into_pyarray(py),
+            ids.into_pyarray(py),
+        )
+    }
+
+    /// Per recorded merge, in merge order: (resulting stretch, cost removed, pole union, segments CSR indptr, ids).
+    #[allow(clippy::type_complexity)]
+    fn merges<'py>(&self, py: Python<'py>) -> (F64Array<'py>, F64Array<'py>, BoolArray<'py>, I64Array<'py>, I64Array<'py>) {
+        let ms = &self.0.merges;
+        let mut ptr = vec![0i64];
+        let mut ids = Vec::new();
+        for m in ms {
+            ids.extend(m.segs.iter().map(|&s| s as i64));
+            ptr.push(ids.len() as i64);
+        }
+        (
+            ms.iter().map(|m| m.stretch).collect::<Vec<_>>().into_pyarray(py),
+            ms.iter().map(|m| m.cost).collect::<Vec<_>>().into_pyarray(py),
+            ms.iter().map(|m| m.pole).collect::<Vec<_>>().into_pyarray(py),
+            ptr.into_pyarray(py),
+            ids.into_pyarray(py),
+        )
+    }
+
+    /// The charts at Stretch allowed `x` percent (cached): (chart per face, cut per edge, [charts, not disk, merges
+    /// used, segments glued, above the build stretch, ms]).
+    fn level<'py>(&self, py: Python<'py>, x: f64) -> (I64Array<'py>, BoolArray<'py>, F64Array<'py>) {
+        uvchart_level_out(py, &self.0, x)
+    }
+}
+
+fn uvchart_level_out<'py>(py: Python<'py>, tree: &uvchart::Tree, x: f64) -> (I64Array<'py>, BoolArray<'py>, F64Array<'py>) {
+    let l = py.detach(|| tree.level(x));
+    let numbers = vec![l.charts as f64, l.not_disk as f64, l.merges_used as f64, l.segments_glued as f64, f64::from(u8::from(l.above_build)), l.ms];
+    (l.chart.iter().map(|&c| c as i64).collect::<Vec<_>>().into_pyarray(py), l.cut.clone().into_pyarray(py), numbers.into_pyarray(py))
+}
+
+/// Build the Row Charts tree (`uvchart::Tree::build`): separatrices, patches, Euler check, segments, merge tree.
+/// `part_label` per face (empty = one part; materials folded in by the caller), `forced` vertex pairs, `seen_edge_px`
+/// per edge from uvsight (empty = all seen). A stop returns the tree reached so far (numbers[STOPPED] = 1).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvchart_build(
+    py: Python<'_>,
+    points: PyReadonlyArray1<'_, f64>,
+    indptr: PyReadonlyArray1<'_, i64>,
+    flat: PyReadonlyArray1<'_, i64>,
+    part_label: PyReadonlyArray1<'_, i64>,
+    forced: PyReadonlyArray1<'_, i64>,
+    seen_edge_px: PyReadonlyArray1<'_, f64>,
+    px_per_unit: f64,
+    out_of_sight: bool,
+    hidden_l: f64,
+    build_stretch: f64,
+    stop: &StopFlag,
+) -> PyResult<UvChartTree> {
+    let (points, indptr, flat) = (slice(&points, "points")?, slice(&indptr, "indptr")?, slice(&flat, "flat")?);
+    let (part_label, forced, seen) = (slice(&part_label, "part_label")?, slice(&forced, "forced")?, slice(&seen_edge_px, "seen_edge_px")?);
+    let faces = uvflat_mesh(points, indptr, flat)?;
+    if part_label.iter().any(|&p| p < 0 || p > u32::MAX as i64) {
+        return Err(PyValueError::new_err("part labels must be 0 .. 2^32-1"));
+    }
+    let labels: Vec<u32> = part_label.iter().map(|&p| p as u32).collect();
+    let input = uvchart::Input {
+        points,
+        faces,
+        part_label: &labels,
+        forced,
+        seen_edge_px: if seen.is_empty() { None } else { Some(seen) },
+        px_per_unit,
+        out_of_sight,
+        hidden_l,
+        build_stretch,
+    };
+    let tree = py.detach(|| uvchart::Tree::build(&input, &stop.0)).map_err(PyValueError::new_err)?;
+    Ok(UvChartTree(tree))
+}
+
+/// `UvChartTree.level` as a module function, so it can run as a job.
+#[pyfunction]
+fn uvchart_level<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, stop: &StopFlag) -> PyResult<(I64Array<'py>, BoolArray<'py>, F64Array<'py>)> {
+    let out = uvchart_level_out(py, &tree.0, x);
+    uvflat_stopped(stop)?;
+    Ok(out)
+}
+
+fn uvchart_opts(rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64) -> uvflat::FlatOpts {
+    let rows = match rows {
+        0 => uvflat::Rows::Off,
+        1 => uvflat::Rows::Soft,
+        2 => uvflat::Rows::On,
+        _ => uvflat::Rows::Auto,
+    };
+    uvflat::FlatOpts { rows, stretch_allowed, steps, max_factor_bytes, texture_px, ..Default::default() }
+}
+
+/// New UVs of a level (6.5): (UVs per corner, chart per face, stats rows of `uvflat::STATS_LEN` per chart, stretch
+/// per face).
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn uvchart_uvs<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64, stop: &StopFlag) -> PyResult<(F64Array<'py>, I64Array<'py>, F64Array<'py>, F64Array<'py>)> {
+    let opts = uvchart_opts(rows, stretch_allowed, steps, max_factor_bytes, texture_px);
+    let (uv, chart, stats, ratio) = py.detach(|| {
+        let l = tree.0.level(x);
+        let (uv, stats, ratio) = tree.0.flatten_cut(&l.cut, &l.chart, None, Some(&tree.0.start_uv), &opts, &stop.0);
+        (uv, l.chart.iter().map(|&c| c as i64).collect::<Vec<_>>(), stats, ratio)
+    });
+    uvflat_stopped(stop)?;
+    Ok((uv.into_pyarray(py), chart.into_pyarray(py), stats.into_pyarray(py), ratio.into_pyarray(py)))
+}
+
+/// Keep going state for New UVs (`uvchart::Cuts`).
+#[pyclass(frozen)]
+struct UvChartCuts(std::sync::Mutex<uvchart::Cuts>);
+
+#[pymethods]
+impl UvChartCuts {
+    /// (UVs per corner, chart per face, cut per edge, stretch per chart id, score, passes, moves).
+    #[allow(clippy::type_complexity)]
+    fn state<'py>(&self, py: Python<'py>) -> (F64Array<'py>, I64Array<'py>, BoolArray<'py>, F64Array<'py>, f64, usize, usize) {
+        let c = self.0.lock().unwrap();
+        (
+            c.uv.clone().into_pyarray(py),
+            c.chart.iter().map(|&x| x as i64).collect::<Vec<_>>().into_pyarray(py),
+            c.cut.clone().into_pyarray(py),
+            c.chart_str.clone().into_pyarray(py),
+            c.score,
+            c.passes,
+            c.moves,
+        )
+    }
+}
+
+/// Start Keep going from level x: its charts flattened.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn uvchart_cuts(py: Python<'_>, tree: &UvChartTree, x: f64, rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64, stop: &StopFlag) -> PyResult<UvChartCuts> {
+    let opts = uvchart_opts(rows, stretch_allowed, steps, max_factor_bytes, texture_px);
+    let cuts = py.detach(|| tree.0.start_cuts(x, &opts, &stop.0));
+    uvflat_stopped(stop)?;
+    Ok(UvChartCuts(std::sync::Mutex::new(cuts)))
+}
+
+/// One Keep going pass: (kind 0 none / 1 cut added / 2 cut closed, accepted, score before, score after, ms).
+/// Not accepted = the pass gained nothing and Keep going stops by itself.
+#[pyfunction]
+fn uvchart_pass(py: Python<'_>, tree: &UvChartTree, cuts: &UvChartCuts, stop: &StopFlag) -> PyResult<(u8, bool, f64, f64, f64)> {
+    let p = py.detach(|| {
+        let mut c = cuts.0.lock().unwrap();
+        tree.0.pass(&mut c, &stop.0)
+    });
+    Ok((p.kind, p.accepted, p.before, p.after, p.ms))
+}
+
 fn register_uvchart(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvchart_probe, m)?)?;
+    m.add_class::<UvChartTree>()?;
+    m.add_class::<UvChartCuts>()?;
+    m.add_function(wrap_pyfunction!(uvchart_build, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_level, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_uvs, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_cuts, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_pass, m)?)?;
+    m.add("UVCHART_NUMBERS_LEN", uvchart::NUMBERS_LEN)?;
+    m.add("UVCHART_STRETCH_ALLOWED_PCT", uvchart::STRETCH_ALLOWED_PCT)?;
     Ok(())
 }
 // main-only: uv end chart
