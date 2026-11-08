@@ -778,13 +778,14 @@ class BakeSpotsUV(UVTrial):
         straddle = yield from straddlers(base)
         done = prev.extra.get("baked", np.zeros(0, np.int64)) if prev is not None and settings.get("keep_going") else np.zeros(0, np.int64)
         todo = np.setdiff1d(np.flatnonzero(straddle), done)
-        if not len(todo):
-            return UVCand(None, refusal="No faces cross a seam: nothing to bake.")
         area = uvnew.face_areas(base.points, base.indptr, base.flat)
+        dens = _density(base)
+        todo = todo[area[todo] * dens * dens >= 1.0]  # a face under one texel shows no texture: its own island would only take page
+        if not len(todo):
+            return UVCand(None, refusal="No faces cross a seam where it shows: nothing to bake.")
         todo = todo[np.argsort(-area[todo], kind="stable")]  # most damage first: the biggest faces across a seam
         take = todo[: max(1, int(math.ceil(float(settings.get(self.handle, 1.0)) * len(todo))))]
         uv0 = prev.uv if prev is not None and settings.get("keep_going") and prev.uv is not None else base.uv
-        dens = _density(base)
         groups = _groups(base.indptr, base.flat, take)
         yield
         tris, tri_chart, placed_corners = [], [], []
