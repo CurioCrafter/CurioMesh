@@ -70,6 +70,16 @@ pub const STALL_WINDOW: usize = 50;
 pub const STALL_DROP: f64 = 0.01;
 /// Untangling stops after this many sweeps in a row that do not bring the fold count to a new low.
 pub const UNTANGLE_STALL: usize = 3;
+/// An untangling move goes only as far as needed: to the nearest spot where every fan triangle round the vertex is this
+/// many pixels clear of its opposite edge (or half the most it can be, when that is less). Most folds beside a seam are
+/// slivers a fraction of a pixel deep; moving their corner further only pulls it off the source's texture.
+pub const UNTANGLE_CLEAR_PX: f64 = 0.25;
+/// A corner on its side region's border (a seam or an open edge runs through it) never moves further than this many
+/// pixels from where it was read, so the seam's UV line stays where the source has it. Only faces that still fold after
+/// the ring fills move such corners further (within their shortest UV edge).
+pub const BORDER_MOVE_PX: f64 = 1.0;
+/// The give-back stops moving a vertex back toward its read UVs once the step left is at most this many pixels.
+pub const GIVE_BACK_PX: f64 = 0.01;
 
 /// What a seam chain asks of the remesh (spec 4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1282,11 +1292,14 @@ pub struct FoldReport {
     pub untangled: usize,
     /// Faces still folded after the ring fills that were read again through their reference triangle (`reread_folded`).
     pub reread: usize,
+    /// (vertex, side region) groups the give-back moved back toward their read UVs.
+    pub given_back: usize,
 }
 
 /// Fold fix (SPEC 4.8 step 4): untangling first (`untangle`: single free vertices of folded faces move into the
-/// spot that unfolds all their triangles), then the ring fills below for what is left, then untangling again. Only
-/// corners of folded faces' vertices and of faces inside a ring spot change; every other UV stays bit for bit.
+/// nearest spot that unfolds all their triangles; border corners at most `BORDER_MOVE_PX`), then the ring fills below
+/// for what is left, then untangling again (border corners free for what still folds after that), then the give-back (`give_back`: every move the fix does not need is taken back). Only corners of folded faces'
+/// vertices and of faces inside a ring spot change; every other UV stays bit for bit.
 #[allow(clippy::too_many_arguments)]
 pub fn fold_fix(res_points: &[f64], res_faces: &Faces, uv: &mut [f64], region: &[i64], expected: &[f64], join: &[f64], texture_px: f64, stop: &AtomicBool) -> FoldReport {
     let nf = res_faces.count();
@@ -1294,10 +1307,20 @@ pub fn fold_fix(res_points: &[f64], res_faces: &Faces, uv: &mut [f64], region: &
     if before == 0 {
         return FoldReport::default();
     }
-    let mut untangled = untangle(res_faces, uv, region, expected, join, stop);
+    let read = uv.to_vec();
+    let mut untangled = untangle(res_faces, uv, &read, region, expected, join, texture_px, BORDER_MOVE_PX, stop);
     let mut report = ring_fill(res_points, res_faces, uv, region, expected, join, texture_px, stop);
     if report.after > 0 && !stop.load(Ordering::Relaxed) {
-        untangled += untangle(res_faces, uv, region, expected, join, stop);
+        untangled += untangle(res_faces, uv, &read, region, expected, join, texture_px, BORDER_MOVE_PX, stop);
+        report.after = (0..nf).filter(|&f| folded(res_faces, uv, expected, f)).count();
+    }
+    if report.after > 0 && !stop.load(Ordering::Relaxed) {
+        // What still folds may move its border corners further (within their shortest UV edge, as before).
+        untangled += untangle(res_faces, uv, &read, region, expected, join, texture_px, f64::INFINITY, stop);
+        report.after = (0..nf).filter(|&f| folded(res_faces, uv, expected, f)).count();
+    }
+    if !stop.load(Ordering::Relaxed) {
+        report.given_back = give_back(res_faces, uv, &read, region, expected, texture_px);
         report.after = (0..nf).filter(|&f| folded(res_faces, uv, expected, f)).count();
     }
     report.before = before;
@@ -1342,6 +1365,37 @@ fn chebyshev(g: &[[f64; 2]], h: &[f64]) -> Option<([f64; 2], f64)> {
     best
 }
 
+/// The point nearest `x0` with g_l . x + h_l >= want_l for every row l (rows of unit length): x0 itself, its projection
+/// onto one row's line, or the meeting point of two rows' lines, whichever is nearest and meets every row (the nearest
+/// point of a convex polygon is one of these). None when none does.
+fn nearest_within(g: &[[f64; 2]], h: &[f64], want: &[f64], x0: [f64; 2]) -> Option<[f64; 2]> {
+    let n = g.len();
+    let meets = |x: [f64; 2]| (0..n).all(|l| g[l][0] * x[0] + g[l][1] * x[1] + h[l] >= want[l] - 1e-12 * (1.0 + want[l].abs()));
+    let mut best: Option<([f64; 2], f64)> = None;
+    let mut take = |x: [f64; 2]| {
+        let d = (x[0] - x0[0]).powi(2) + (x[1] - x0[1]).powi(2);
+        if meets(x) && best.is_none_or(|b| d < b.1) {
+            best = Some((x, d));
+        }
+    };
+    take(x0);
+    for l in 0..n {
+        let s = want[l] - (g[l][0] * x0[0] + g[l][1] * x0[1] + h[l]);
+        take([x0[0] + s * g[l][0], x0[1] + s * g[l][1]]);
+    }
+    for l in 0..n {
+        for m in l + 1..n {
+            let det = g[l][0] * g[m][1] - g[l][1] * g[m][0];
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let (a, b) = (want[l] - h[l], want[m] - h[m]);
+            take([(a * g[m][1] - b * g[l][1]) / det, (g[l][0] * b - g[m][0] * a) / det]);
+        }
+    }
+    best.map(|b| b.0)
+}
+
 /// Four rows keeping x within `r` of `x0` on each UV axis (g . x + h >= t form, unit rows).
 fn box_rows(g: &mut Vec<[f64; 2]>, h: &mut Vec<f64>, x0: [f64; 2], r: f64) {
     g.extend([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]);
@@ -1349,13 +1403,16 @@ fn box_rows(g: &mut Vec<[f64; 2]>, h: &mut Vec<f64>, x0: [f64; 2], r: f64) {
 }
 
 /// Untangling (the idea of Freitag, Plassmann 2000, "Local optimization-based simplicial mesh untangling and
-/// improvement", written our own way for UV fans): each free vertex of a folded face, one at a time, moves toward the
-/// point that makes the worst of its fan triangles as large as possible (`chebyshev`), only when that point unfolds all
-/// of them, and stops halfway so the move stays small. A vertex is free when all its faces lie in one side region, its
-/// corners share one UV (within `join`) and no open edge touches it; any other vertex moves per wedge (its corners
-/// of one region sharing one UV), within its shortest UV edge. Sweeps repeat while they bring the fold count to a
-/// new low (`UNTANGLE_STALL`). Returns the number of moves.
-fn untangle(faces: &Faces, uv: &mut [f64], region: &[i64], expected: &[f64], join: &[f64], stop: &AtomicBool) -> usize {
+/// improvement", written our own way for UV fans): each free vertex of a folded face, one at a time, moves when the
+/// point that makes the worst of its fan triangles as large as possible (`chebyshev`, margin t) unfolds all of them, and
+/// then only to the nearest point where every one is clear by min(t / 2, `UNTANGLE_CLEAR_PX`) (`nearest_within`), so
+/// the move stays as small as the fold allows. A vertex is free when all its faces lie in one side region, its corners
+/// share one UV (within `join`) and no open edge touches it; any other vertex moves per wedge (its corners of one region
+/// sharing one UV), within its shortest UV edge and within `border_px` pixels of its read UV (`read`). Sweeps repeat while
+/// they bring the fold count to a new low (`UNTANGLE_STALL`). Returns the number of moves.
+#[allow(clippy::too_many_arguments)]
+fn untangle(faces: &Faces, uv: &mut [f64], read: &[f64], region: &[i64], expected: &[f64], join: &[f64], texture_px: f64, border_px: f64, stop: &AtomicBool) -> usize {
+    let tex = if texture_px > 0.0 { texture_px } else { TEXTURE_PX_DEFAULT };
     let nf = faces.count();
     let n_points = faces.flat.iter().map(|&v| v as usize + 1).max().unwrap_or(0);
     let mut vc_ptr = vec![0usize; n_points + 1];
@@ -1474,24 +1531,20 @@ fn untangle(faces: &Faces, uv: &mut [f64], region: &[i64], expected: &[f64], joi
                         continue;
                     }
                     box_rows(&mut g, &mut hh, x, shortest);
+                    if border_px.is_finite() {
+                        box_rows(&mut g, &mut hh, [read[2 * cs[0]], read[2 * cs[0] + 1]], border_px / tex);
+                    }
                 } else if g.len() < 3 {
                     continue;
                 }
                 let worst = m0.iter().cloned().fold(f64::INFINITY, f64::min);
-                let Some((xs, t)) = chebyshev(&g, &hh) else { continue };
+                let Some((_, t)) = chebyshev(&g, &hh) else { continue };
                 if t <= worst.max(0.0) {
                     continue;
                 }
-                let goal = 0.5 * t;
-                let mut step = 0.0f64;
-                for l in 0..m0.len() {
-                    let m1 = g[l][0] * xs[0] + g[l][1] * xs[1] + hh[l];
-                    if m0[l] < goal && m1 > m0[l] {
-                        step = step.max((goal - m0[l]) / (m1 - m0[l]));
-                    }
-                }
-                let step = step.min(1.0);
-                let xn = [x[0] + step * (xs[0] - x[0]), x[1] + step * (xs[1] - x[1])];
+                let goal = (0.5 * t).min(UNTANGLE_CLEAR_PX / tex);
+                let want: Vec<f64> = (0..g.len()).map(|l| if l < m0.len() { goal } else { 0.0 }).collect();
+                let Some(xn) = nearest_within(&g, &hh, &want, x) else { continue };
                 for &h in cs {
                     uv[2 * h] = xn[0];
                     uv[2 * h + 1] = xn[1];
@@ -1654,6 +1707,114 @@ fn ring_fill(res_points: &[f64], res_faces: &Faces, uv: &mut [f64], region: &[i6
     }
     report.after = (0..nf).filter(|&f| folded(res_faces, uv, expected, f)).count();
     report
+}
+
+/// Give-back (the fold fix's last step): every vertex whose UVs the fix moved goes back toward its read UVs (`read`), all
+/// its corners in one side region at once, as far as that folds none of its faces the fix had left unfolded and thins
+/// none of their fan triangles below `UNTANGLE_CLEAR_PX` (or below what it had, when less: a sliver left a hair's breadth
+/// from folding turns over when its UVs are stored in single precision) (the whole way, else half of it, a quarter...,
+/// down to `GIVE_BACK_PX`). The ring fills move every corner inside a spot, and most
+/// of those moves are not needed by the fold; each pulls a corner off the source's texture (beside a seam it then sits
+/// on the wrong side). Repeats while a pass moves any vertex back. Returns the (vertex, region) groups moved back.
+fn give_back(faces: &Faces, uv: &mut [f64], read: &[f64], region: &[i64], expected: &[f64], texture_px: f64) -> usize {
+    let nf = faces.count();
+    let tex = if texture_px > 0.0 { texture_px } else { TEXTURE_PX_DEFAULT };
+    let (least, clear) = (GIVE_BACK_PX / tex, UNTANGLE_CLEAR_PX / tex);
+    let off = |uv: &[f64], h: usize| uv[2 * h] != read[2 * h] || uv[2 * h + 1] != read[2 * h + 1];
+    let mut moved: Vec<(i64, i64)> = Vec::new();
+    for f in 0..nf {
+        for h in faces.indptr[f] as usize..faces.indptr[f + 1] as usize {
+            if off(uv, h) {
+                moved.push((faces.flat[h], region[f]));
+            }
+        }
+    }
+    if moved.is_empty() {
+        return 0;
+    }
+    moved.sort_unstable();
+    moved.dedup();
+    // (vertex, region, face, corner) of every corner of a moved (vertex, region), in that order.
+    let mut groups: Vec<(i64, i64, usize, usize)> = Vec::new();
+    for f in 0..nf {
+        for h in faces.indptr[f] as usize..faces.indptr[f + 1] as usize {
+            if moved.binary_search(&(faces.flat[h], region[f])).is_ok() {
+                groups.push((faces.flat[h], region[f], f, h));
+            }
+        }
+    }
+    groups.sort_unstable();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < groups.len() {
+        let mut j = i + 1;
+        while j < groups.len() && (groups[j].0, groups[j].1) == (groups[i].0, groups[i].1) {
+            j += 1;
+        }
+        runs.push((i, j));
+        i = j;
+    }
+    let mut total = 0;
+    loop {
+        let mut back = 0;
+        for &(a, b) in &runs {
+            let run = &groups[a..b];
+            if !run.iter().any(|g| off(uv, g.3)) || run.iter().any(|g| read[2 * g.3].is_nan()) {
+                continue;
+            }
+            let was: Vec<bool> = run.iter().map(|g| folded(faces, uv, expected, g.2)).collect();
+            let room: Vec<f64> = run.iter().map(|g| clearance(faces, uv, expected, g.2).min(clear)).collect();
+            let kept: Vec<[f64; 2]> = run.iter().map(|g| [uv[2 * g.3], uv[2 * g.3 + 1]]).collect();
+            let far = run.iter().zip(&kept).map(|(g, k)| (k[0] - read[2 * g.3]).abs().max((k[1] - read[2 * g.3 + 1]).abs())).fold(0.0, f64::max);
+            let mut share = 1.0;
+            let mut ok = false;
+            while share * far > least {
+                for (g, k) in run.iter().zip(&kept) {
+                    for c in 0..2 {
+                        uv[2 * g.3 + c] = if share == 1.0 { read[2 * g.3 + c] } else { k[c] + share * (read[2 * g.3 + c] - k[c]) };
+                    }
+                }
+                if run.iter().zip(was.iter().zip(&room)).any(|(g, (&w, &r))| !w && (folded(faces, uv, expected, g.2) || clearance(faces, uv, expected, g.2) < r)) {
+                    share *= 0.5;
+                } else {
+                    ok = true;
+                    break;
+                }
+            }
+            if ok {
+                back += 1;
+            } else {
+                for (g, k) in run.iter().zip(&kept) {
+                    uv[2 * g.3] = k[0];
+                    uv[2 * g.3 + 1] = k[1];
+                }
+            }
+        }
+        total += back;
+        if back == 0 {
+            break;
+        }
+    }
+    total
+}
+
+/// How far face f's thinnest fan triangle is from folding: twice its UV area, signed by `expected`, over its longest UV
+/// edge (its smallest height; negative when it winds the wrong way). Infinite for a face with expected 0 or NaN UVs.
+fn clearance(faces: &Faces, uv: &[f64], expected: &[f64], f: usize) -> f64 {
+    let s = faces.indptr[f] as usize;
+    let n = faces.indptr[f + 1] as usize - s;
+    if expected[f] == 0.0 || uv[2 * s].is_nan() {
+        return f64::INFINITY;
+    }
+    let q = |i: usize| [uv[2 * (s + i)], uv[2 * (s + i) + 1]];
+    (1..n.saturating_sub(1))
+        .map(|i| {
+            let (a, b, c) = (q(0), q(i), q(i + 1));
+            let area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+            let l2 = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).max((c[0] - b[0]).powi(2) + (c[1] - b[1]).powi(2)).max((a[0] - c[0]).powi(2) + (a[1] - c[1]).powi(2));
+            if l2 > 0.0 { area * expected[f] / l2.sqrt() } else { 0.0 }
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Spot id per active face: the lowest face id of its group (faces of one region sharing a vertex).
