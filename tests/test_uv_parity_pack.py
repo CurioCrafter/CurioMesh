@@ -72,6 +72,57 @@ def no_overlap_raster(rects, page):
     return int(count.max()) <= 1
 
 
+def random_charts(n, seed):
+    """n charts of one to three triangles (some boxy), in texels, as `pack_into` takes them: (tris, tri_chart, as_box)."""
+
+    rng = random.Random(seed)
+    tris, charts, flags = [], [], []
+    for c in range(n):
+        w, h = rng.uniform(4, 40), rng.uniform(4, 40)
+        x0, y0 = rng.uniform(0, 5), rng.uniform(0, 5)
+        tris += [x0, y0, x0 + w, y0, x0, y0 + h]
+        charts.append(c)
+        if rng.random() < 0.6:
+            tris += [x0 + w, y0, x0 + w, y0 + h, x0, y0 + h]
+            charts.append(c)
+        flags.append(int(rng.random() < 0.4))
+    return tris, charts, flags
+
+
+def touched_blocks(tris, charts, placed, c, s):
+    """Blocks of s texels chart c touches after `pack_into` placed it: a set of (bx, by)."""
+
+    ok, dx, dy, q = placed[c]
+    mine = [v for t, ch in enumerate(charts) if ch == c for v in tris[6 * t:6 * t + 6]]
+    pts = [v + (dx if i % 2 == 0 else dy) for i, v in enumerate(uvpack.turn_tris(mine, q))]
+    y0 = int(min(pts[1::2]) // 1)
+    out = set()
+    for y, rows in enumerate(uvpack.raster(pts, y0, int(-(-max(pts[1::2]) // 1)) - y0), y0):
+        for a, b in rows:
+            out |= {(bx, y // s) for bx in range(a // s, (b - 1) // s + 1)}
+    return out
+
+
+def block_gap_breaks(tris, charts, placed, page, k):
+    """Pairs of charts whose touched blocks, each grown by one block, meet at some mip level up to k (and charts off the page)."""
+
+    bad = []
+    n = len(placed)
+    for j in range(0, k + 1):
+        s = 1 << j
+        grown = []
+        for c in range(n):
+            blocks = touched_blocks(tris, charts, placed, c, s)
+            if any(bx < 1 or by < 1 or bx > page // s - 2 or by > page // s - 2 for bx, by in blocks):
+                bad.append((c, "page edge", j))
+            grown.append({(bx + i, by + o) for bx, by in blocks for i in (-1, 0, 1) for o in (-1, 0, 1)})
+        for a in range(n):
+            for b in range(a):
+                if grown[a] & grown[b]:
+                    bad.append((a, b, j))
+    return bad
+
+
 class Twin(unittest.TestCase):
     def test_four_equal_squares_fill_the_page(self):
         r = uvpack.fill_page([1, 1, 1, 1], [1, 1, 1, 1], page=(1024, 1024), k=-1)
@@ -129,6 +180,24 @@ class Twin(unittest.TestCase):
                     self.assertFalse(taken[y, a:b].any(), f"chart {c} overlaps")
                     taken[y, a:b] = True
 
+    def test_pack_into_keeps_the_block_gap_and_is_the_same_every_time(self):
+        tris, charts, flags = random_charts(30, 5)
+        for k in (0, 1, 2):
+            first = uvpack.pack_into((256, 256), k, [], tris, charts, 30, as_box=flags, turn_ok=[1] * 30)
+            self.assertEqual(first, uvpack.pack_into((256, 256), k, [], tris, charts, 30, as_box=flags, turn_ok=[1] * 30), "same input, same layout")
+            self.assertTrue(all(p[0] for p in first), f"k {k}")
+            self.assertEqual(block_gap_breaks(tris, charts, first, 256, k), [], f"k {k}: blocks two charts touch, grown by one block, must never meet")
+
+    def test_a_small_chart_sits_in_the_bay_of_a_big_one(self):
+        # an L: 80 x 80 minus the 60 x 60 corner; a 20 x 20 square has no room beside it on a 96 page, but fits in the notch
+        big = [0, 0, 80, 0, 0, 20, 80, 0, 80, 20, 0, 20, 0, 20, 20, 20, 0, 80, 20, 20, 20, 80, 0, 80]
+        small = [0, 0, 20, 0, 0, 20, 20, 0, 20, 20, 0, 20]
+        placed = uvpack.pack_into((96, 96), 1, [], big + small, [0] * 4 + [1] * 2, 2, as_box=[0, 0], turn_ok=[0, 0])
+        self.assertTrue(all(p[0] for p in placed))
+        (_, bx, by, _), (_, sx, sy, _) = placed
+        self.assertTrue(sx >= bx + 20 and sy >= by + 20 and sx + 20 <= bx + 80 and sy + 20 <= by + 80, "the small square sits in the notch of the L")
+        self.assertEqual(block_gap_breaks(big + small, [0] * 4 + [1] * 2, placed, 96, 1), [])
+
     def test_slices_stay_short(self):
         w, h = random_boxes(60, 4)
         stage = uvpack.FillPage(w, h, page=(1024, 1024), k=1, passes=1, use_fast=False)
@@ -166,6 +235,19 @@ class Parity(unittest.TestCase):
             ref = uvpack.pack_into((128, 128), k, seed, tris, charts, 6, as_box=flags, turn_ok=[1] * 6)
             ok, dx, dy, q = wait(turbo.uvpack_pack_into(seed, tris, charts, 6, flags, [1] * 6, 128, 128, k))
             self.assertEqual([(bool(a), int(b), int(c), int(d)) for a, b, c, d in zip(ok, dx, dy, q)], [(bool(a), b, c, d) for a, b, c, d in ref], f"k {k}")
+
+    def test_pack_into_with_effort_matches_the_twin_when_it_fits_and_when_it_does_not(self):
+        for n, page in ((30, 256), (40, 160)):  # roomy, then too tight for every chart
+            tris, charts, flags = random_charts(n, 11 + n)
+            for k in (-1, 1, 2):
+                for effort in range(4):
+                    ref = uvpack.pack_into((page, page), k + uvpack.EFFORT_STEP * effort, [], tris, charts, n, as_box=flags, turn_ok=[1] * n)
+                    ok, dx, dy, q = wait(turbo.uvpack_pack_into([], tris, charts, n, flags, [1] * n, page, page, k + uvpack.EFFORT_STEP * effort))
+                    self.assertEqual([(bool(a), int(b), int(c), int(d)) for a, b, c, d in zip(ok, dx, dy, q)], [(bool(a), b, c, d) for a, b, c, d in ref], f"n {n} k {k} effort {effort}")
+        # effort never places fewer charts
+        tris, charts, flags = random_charts(40, 51)
+        counts = [sum(p[0] for p in uvpack.pack_into((160, 160), 1 + uvpack.EFFORT_STEP * e, [], tris, charts, 40, as_box=flags)) for e in range(4)]
+        self.assertEqual(counts, sorted(counts))
 
     def test_every_policy_matches_the_twin_and_keeps_the_gap(self):
         # both placement rules (best short side fit, bottom-left) x every orientation policy, native against twin
