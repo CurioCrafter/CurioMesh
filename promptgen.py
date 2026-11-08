@@ -115,7 +115,7 @@ def build(info: dict) -> str:
 def _changed(group) -> list[str]:
     out = []
     for prop in group.bl_rna.properties:
-        if prop.identifier == "rna_type" or prop.type in {"POINTER", "COLLECTION"} or prop.is_readonly or prop.is_array:
+        if prop.identifier == "rna_type" or prop.type in {"POINTER", "COLLECTION"} or prop.is_readonly or getattr(prop, "is_array", False):  # only number and bool properties have is_array
             continue
         try:
             value = getattr(group, prop.identifier)

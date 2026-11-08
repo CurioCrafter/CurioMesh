@@ -47,6 +47,15 @@ class HelpPrompt(unittest.TestCase):
         for name in set(re.findall(pat, steps)):
             self.assertIn(f'"{name}"', src, name)
 
+    def test_changed_reads_string_props(self):
+        # Blender's StringProperty and EnumProperty have no is_array: gather() crashed on them
+        from types import SimpleNamespace as NS
+
+        props = [NS(identifier="name", type="STRING", is_readonly=False, default=""),
+                 NS(identifier="detail", type="FLOAT", is_readonly=False, is_array=False, default=0.5)]
+        group = NS(bl_rna=NS(properties=props), name="mine", detail=0.5)
+        self.assertEqual(promptgen._changed(group), ["name=mine"])
+
 
 if __name__ == "__main__":
     unittest.main()

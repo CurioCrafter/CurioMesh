@@ -66,6 +66,7 @@ def snapshot(context=None) -> dict:
     return {
         "base": base,
         "out": None if base is None else base.get("out"),
+        "id": None if base is None else base.get("id"),  # the parts table is keyed by it: an undone part redo keeps its table
         "report": None if base is None else base.get("report"),
         "res": guided.state["res"],
         "org": {k: list(organize.org[k]) if k == "passes" else organize.org[k] for k in ORG_KEYS},
@@ -95,6 +96,8 @@ def restore(context, snap: dict, sliders: bool = False) -> bool:
     base = snap["base"]
     if base is not None:
         base["out"], base["report"] = snap["out"], snap["report"]
+        if snap.get("id") is not None:
+            base["id"] = snap["id"]
     guided.state["auto_base"] = base
     guided.state["res"] = snap["res"]
     org = snap["org"]
