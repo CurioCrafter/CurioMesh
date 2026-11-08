@@ -71,7 +71,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
+    seg.update(reviewing=False, review_mode="PARTS", seg_bad_was=None, tryall=None, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
 
 
 def ready() -> bool:
@@ -474,7 +474,9 @@ def commit(runner: PartJob) -> None:
     guided.state["message"] = runner.status()
     from . import history
 
-    if runner.new_tries:  # a part was remade: one Ctrl+Z step back to the result before it
+    if getattr(runner, "quiet", False):  # Try Every Method records one step for the whole run
+        pass
+    elif runner.new_tries:  # a part was remade: one Ctrl+Z step back to the result before it
         history.record(bpy.context, getattr(runner, "step_name", "Redo Part"), f"{len(base['out']['faces']):,} faces", push=True)
     else:  # only the check after a swap: that swap's step keeps the checked result
         history.refresh(bpy.context)
@@ -1046,5 +1048,6 @@ def unregister() -> None:
         except Exception:
             pass
     seglive.unregister()
+    segment_goals.stop_try_all(quiet=True)
     reset()
     issue_panel.ui.update(res=None, cur=-1, diff=None, batch=None, batch_key=None)  # its GPU batches go with the draw handler

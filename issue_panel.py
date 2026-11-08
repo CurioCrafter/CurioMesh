@@ -22,6 +22,7 @@ from .triadq import issues
 LISTED = 8  # spots shown in the panel; Next Issue walks through all of them
 SPOT_COLOUR = (1.0, 0.45, 0.0, 0.6)
 CURRENT_COLOUR = (1.0, 1.0, 0.0, 0.95)
+MARK_COLOUR = (0.1, 0.85, 1.0, 0.5)  # parts you marked in Fix Bad Spots
 KIND_WORDS = {
     "inward": "turned inward", "sunk": "sunk into your mesh", "crossing": "crossing", "folded_over": "folded over",
     "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping",
@@ -96,6 +97,19 @@ def _go(context, index: int) -> None:
     overlay.tag_redraw()
 
 
+def step(context, n: int) -> None:
+    """Go to the next (n = 1) or previous (n = -1) bad spot, worst first, and frame it."""
+    _go(context, ui["cur"] + n if ui["cur"] >= 0 else (0 if n > 0 else -1))
+
+
+def focus_part(part: int) -> None:
+    """Make the worst spot on this part the current one (no move of the view)."""
+    for i, s in enumerate(spots()):
+        if int(s.get("part", -1)) == part:
+            ui["cur"] = i
+            return
+
+
 class _IssueOp:
     bl_options = {"INTERNAL"}
 
@@ -143,7 +157,7 @@ class CURIOMESH_OT_issue_step(_IssueOp, bpy.types.Operator):
     step: bpy.props.IntProperty(name="Step", description="1 goes to the next bad spot, -1 to the one before", default=1)
 
     def execute(self, context):
-        _go(context, ui["cur"] + self.step if ui["cur"] >= 0 else (0 if self.step > 0 else -1))
+        step(context, self.step)
         return {"FINISHED"}
 
 
@@ -154,18 +168,23 @@ def spot_part(index: int) -> int:
 
 
 class _SpotPartOp(_IssueOp):
-    index: bpy.props.IntProperty(name="Spot", description="Which bad spot, 0 is the worst")
+    index: bpy.props.IntProperty(name="Spot", description="Which bad spot, 0 is the worst. Ignored when Marked is on", default=-1)
+    marked: bpy.props.BoolProperty(name="Marked", description="Work on the parts you marked instead of one spot", default=False, options={"SKIP_SAVE"})
 
     @classmethod
     def poll(cls, context):
         from . import segments
 
         segments.ensure()
-        return bool(spots()) and segments.ready() and not segments.mirrored() and _g().progress_info() is None
+        return (bool(spots()) or bool(segments.seg["sel"])) and segments.ready() and not segments.mirrored() and _g().progress_info() is None
 
     def _part(self):
+        """The part to work on (a list when Marked is on), or None."""
         from . import segments
 
+        if self.marked:
+            parts = sorted(p for p in segments.seg["sel"] if 0 <= p < len(segments.seg["parts"]))
+            return parts or None
         p = spot_part(self.index)
         return p if 0 <= p < len(segments.seg["parts"]) else None
 
@@ -179,6 +198,8 @@ class CURIOMESH_OT_issue_redo(_SpotPartOp, tidytools.PartSwap, bpy.types.Operato
     def description(cls, context, properties):
         from . import segments
 
+        if properties.marked:
+            return "Shows the marked parts remade with smaller quads, which usually clears folded or crossing faces. Enter keeps them, Esc changes nothing. The old versions stay in their tries"
         p = spot_part(properties.index)
         if not 0 <= p < len(segments.seg["parts"]):
             return cls.bl_description
@@ -207,6 +228,8 @@ class CURIOMESH_OT_issue_keep_original(_SpotPartOp, tidytools.PartSwap, bpy.type
     def description(cls, context, properties):
         from . import segments
 
+        if properties.marked:
+            return f"Shows your own faces back on the marked parts, about {segments.original_cost(sorted(segments.seg['sel'])):,} more faces, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it"
         p = spot_part(properties.index)
         if not 0 <= p < len(segments.seg["parts"]):
             return cls.bl_description
@@ -259,27 +282,35 @@ def _record(context) -> dict:
     return rec
 
 
+def _as_parts(p) -> list[int]:
+    return [] if p is None else [int(p)] if isinstance(p, (int, np.integer)) else [int(q) for q in p]
+
+
 def redo_plan(p, index: int) -> dict:
-    """The plan of Redo This Spot for part `p` (None: the spot is on no part that can be redone). Nothing changes yet,
-    except that a ready size is kept in the part's tries."""
+    """The plan of Redo This Spot for part `p` (a part, a list of marked parts, or None: the spot is on no part that can
+    be redone). Nothing changes yet, except that a ready size is kept in the part's tries."""
     from . import ladder, segments
 
-    if p is None:
-        return {"name": "Redo This Spot", "tries": {}, "todo": [], "sizes": {}, "why": "This spot is not on a part that can be redone"}
-    ui["cur"] = index
-    segments.select([p])
-    wanted, todo, why = ladder.size_plan([p], bigger=False)
-    return {"name": "Redo This Spot", "tries": {q: i for q, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "why": why[0] if why else ""}
+    parts = _as_parts(p)
+    name = "Redo This Spot" if len(parts) < 2 else "Redo Marked Spots"
+    if not parts:
+        return {"name": name, "tries": {}, "todo": [], "sizes": {}, "why": "This spot is not on a part that can be redone"}
+    if index >= 0:
+        ui["cur"] = index
+    segments.select(parts)
+    wanted, todo, why = ladder.size_plan(parts, bigger=False)
+    return {"name": name, "tries": {q: i for q, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "why": why[0] if why else ""}
 
 
 def original_plan(p, index: int) -> dict:
-    """The plan of Keep Original Here for part `p` (None: no part)."""
+    """The plan of Keep Original Here for part `p` (a part, a list of parts, or None: no part)."""
     from . import segments
 
-    tries = segments.original_tries([p]) if p is not None else {}
-    if p is not None:
+    parts = _as_parts(p)
+    tries = segments.original_tries(parts) if parts else {}
+    if parts and index >= 0:
         ui["cur"] = index
-    return {"name": "Keep Original Here", "tries": tries, "todo": [], "why": "" if tries else "This part could not be put back"}
+    return {"name": "Keep Original Here" if len(parts) < 2 else "Keep Original on Marked", "tries": tries, "todo": [], "why": "" if tries else "This part could not be put back"}
 
 
 def put_back_plan(part: int = -1) -> dict:
@@ -377,20 +408,32 @@ def draw_reports(layout) -> None:
 
 
 def draw_overlay(guided, preview, res, flat, batch_for_shader) -> None:
-    """All spots in orange, the current one in yellow, when Show Bad Faces is on. Called from the segment view's draw."""
+    """Marked parts in blue, all spots in orange and the current one in yellow, when Show Bad Faces is on. Called from the segment view's draw."""
+    from . import segments
+
     found = res.get("issue_spots")
-    if not found or ui["res"] is not res:
+    if ui["res"] is not res:
+        return
+    found = found or []
+    piece = segments.seg.get("piece")
+    marked = frozenset(segments.seg["sel"]) if segments.seg.get("review_mode") == "SPOTS" and piece is not None and len(piece) == len(res["faces"]) else frozenset()
+    if not found and not marked:
         return
     matrix = tuple(round(x, 5) for row in preview.matrix_world for x in row)
-    key = (id(res), matrix, ui["cur"])
+    key = (id(res), matrix, ui["cur"], marked)
     if ui["batch_key"] != key:
         ui["batch"] = []
         tris = guided._fan(res["faces"]).reshape(-1, 3)
         owner = np.repeat(np.arange(len(res["faces"])), [len(f) - 2 for f in res["faces"]])
+        layers = []
+        if marked:
+            layers.append((MARK_COLOUR, np.isin(np.asarray(piece), list(marked))))
         for colour, picked in ((SPOT_COLOUR, [s for i, s in enumerate(found) if i != ui["cur"]]), (CURRENT_COLOUR, [found[ui["cur"]]] if 0 <= ui["cur"] < len(found) else [])):
             mask = np.zeros(len(res["faces"]), bool)
             for s in picked:
                 mask[s["faces"]] = True
+            layers.append((colour, mask))
+        for colour, mask in layers:
             corners = tris[mask[owner]].reshape(-1)
             if len(corners):
                 pos = guided._world(preview.matrix_world, res["co"][corners]).astype(np.float32)
@@ -401,10 +444,110 @@ def draw_overlay(guided, preview, res, flat, batch_for_shader) -> None:
         batch.draw(flat)
 
 
+# --------------------------------------------------------------------------- marking parts (Fix Bad Spots)
+
+
+def has_op(idname: str) -> bool:
+    """True when `curiomesh.<idname>` is registered (a button for an operator another module may not have)."""
+    try:
+        getattr(bpy.ops.curiomesh, idname).get_rna_type()
+        return True
+    except (AttributeError, KeyError, RuntimeError):
+        return False
+
+
+def bad_faces(parts) -> int:
+    """Faces in bad spots that sit on these parts."""
+    parts = set(parts)
+    return sum(len(s["faces"]) for s in spots() if int(s.get("part", -1)) in parts)
+
+
+def bad_part_ids() -> list[int]:
+    """Parts with a bad spot on them, worst spot's part first."""
+    from . import segments
+
+    return segments.bad_parts()
+
+
+def mark(what: str) -> None:
+    """CURRENT: mark or unmark the part of the spot you are on. ALL: mark every part with a bad spot. CLEAR: unmark all."""
+    from . import segments
+
+    if what == "CLEAR":
+        segments.select([])
+    elif what == "ALL":
+        segments.select(bad_part_ids())
+    else:
+        p = spot_part(ui["cur"])
+        if p >= 0:
+            segments.select([p], extend=True)
+
+
+class CURIOMESH_OT_issue_mark(_IssueOp, bpy.types.Operator):
+    bl_idname = "curiomesh.issue_mark"
+    bl_label = "Mark"
+    bl_description = "Marks parts for Redo Marked and Keep Original on Marked"
+
+    what: bpy.props.EnumProperty(
+        name="What", description="Which parts to mark",
+        items=[("CURRENT", "This One", "Mark, or unmark, the part of the spot you are on"), ("ALL", "All Bad", "Mark every part that has a bad spot"), ("CLEAR", "Clear", "Unmark every part")],
+        default="CURRENT",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        from . import segments
+
+        return segments.ready()
+
+    def execute(self, context):
+        mark(self.what)
+        return {"FINISHED"}
+
+
+def marked_card(layout) -> None:
+    """Fix Bad Spots: where you are in the list, what is marked, and the fixes for the marked parts."""
+    from . import icons, segments
+
+    found = spots()
+    marked = sorted(p for p in segments.seg["sel"] if p < len(segments.seg["parts"]))
+    box = layout.box()
+    if found:
+        cur = ui["cur"] if 0 <= ui["cur"] < len(found) else 0
+        spot = found[cur]
+        row = box.row(align=True)
+        row.operator("curiomesh.issue_step", text="", icon="TRIA_LEFT").step = -1
+        row.label(text=f"Spot {cur + 1} of {len(found)}: {summary(spot['kinds'])}")
+        row.operator("curiomesh.issue_step", text="", icon="TRIA_RIGHT").step = 1
+    else:
+        box.label(text="No bad spots found", icon="CHECKMARK")
+    row = box.row(align=True)
+    row.operator("curiomesh.issue_mark", text="Mark This", icon="CHECKBOX_HLT").what = "CURRENT"
+    row.operator("curiomesh.issue_mark", text="Mark All Bad", icon="ERROR").what = "ALL"
+    row.operator("curiomesh.issue_mark", text="", icon="X").what = "CLEAR"
+    if not marked:
+        sub = box.row()
+        sub.active = False
+        sub.label(text="Click parts in the view to mark them", icon="INFO")
+        return
+    bad = bad_faces(marked)
+    box.label(text=f"{len(marked)} marked" + (f", {bad:,} bad faces" if bad else ""), icon="CHECKBOX_HLT")
+    row = box.row()
+    row.scale_y = 1.3
+    op = row.operator("curiomesh.issue_redo", text="Redo Marked", icon="FILE_REFRESH")
+    op.marked = True
+    op = box.operator("curiomesh.issue_keep_original", text=f"Keep Original on Marked (+{segments.original_cost(marked):,} faces)", **icons.kw("keep_original", "LOOP_BACK"))
+    op.marked = True
+    box.operator("ed.undo", text="Undo Last Fix", icon="LOOP_BACK")
+    if has_op("send_problem"):  # defined in parts_export.py
+        box.operator("curiomesh.send_problem", text="Send as a Problem", icon="URL")
+
+
 CLASSES = (
     CURIOMESH_OT_issue_view,
     CURIOMESH_OT_issue_select,
     CURIOMESH_OT_issue_step,
+    CURIOMESH_OT_issue_mark,
     CURIOMESH_OT_issue_redo,
     CURIOMESH_OT_issue_keep_original,
     CURIOMESH_OT_issue_put_back,
