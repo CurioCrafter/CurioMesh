@@ -48,6 +48,9 @@ STOP_TEXEL_SHARE = 0.02
 STALL_WINDOW = 50
 STALL_DROP = 0.01
 UNTANGLE_STALL = 3
+UNTANGLE_CLEAR_PX = 0.25  # an untangling move goes only to the nearest spot this many px clear (or half the most possible)
+BORDER_MOVE_PX = 1.0  # a corner on its side region's border moves at most this far from its read UV in one untangling
+GIVE_BACK_PX = 0.01  # the give-back stops once the step left back toward the read UVs is at most this many px
 
 IGNORE, SHIFT, SOFT, HARD = 0, 1, 2, 3
 SLICE_S = 0.004  # one step() of a stage does about this much work
@@ -1290,11 +1293,17 @@ def _fold_fix_steps(res_points, res_indptr, res_flat, uv, region, expected, join
         report["after"] = 0
         return
     moves = [0]
-    yield from _untangle_steps(res_indptr, res_flat, uv, region, ex, join, moves)
+    read = np.array(uv, np.float64, copy=True)
+    yield from _untangle_steps(res_indptr, res_flat, uv, read, region, ex, join, texture_px, BORDER_MOVE_PX, moves)
     yield from _ring_fill_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report)
     if report["after"] > 0:
-        yield from _untangle_steps(res_indptr, res_flat, uv, region, ex, join, moves)
+        yield from _untangle_steps(res_indptr, res_flat, uv, read, region, ex, join, texture_px, BORDER_MOVE_PX, moves)
         report["after"] = sum(folded(ri, uv, ex, f) for f in range(nf))
+    if report["after"] > 0:  # what still folds may move its border corners further
+        yield from _untangle_steps(res_indptr, res_flat, uv, read, region, ex, join, texture_px, math.inf, moves)
+        report["after"] = sum(folded(ri, uv, ex, f) for f in range(nf))
+    yield from _give_back_steps(res_indptr, res_flat, uv, read, region, ex, texture_px)
+    report["after"] = sum(folded(ri, uv, ex, f) for f in range(nf))
     report["before"] = before
     report["untangled"] = moves[0]
 
@@ -1329,8 +1338,40 @@ def _chebyshev(g, h):
     return best
 
 
-def _untangle_steps(res_indptr, res_flat, uv, region, expected, join, moves: list):
+def _nearest_within(g, h, want, x0):
+    """Twin of the kernel's `nearest_within`: the point nearest x0 meeting g_l . x + h_l >= want_l for every row."""
+
+    n = len(g)
+
+    def meets(x):
+        return all(g[l][0] * x[0] + g[l][1] * x[1] + h[l] >= want[l] - 1e-12 * (1.0 + abs(want[l])) for l in range(n))
+
+    best = None
+
+    def take(x):
+        nonlocal best
+        d = (x[0] - x0[0]) ** 2 + (x[1] - x0[1]) ** 2
+        if meets(x) and (best is None or d < best[1]):
+            best = (x, d)
+
+    take(x0)
+    for l in range(n):
+        s = want[l] - (g[l][0] * x0[0] + g[l][1] * x0[1] + h[l])
+        take((x0[0] + s * g[l][0], x0[1] + s * g[l][1]))
+    for l in range(n):
+        for m in range(l + 1, n):
+            det = g[l][0] * g[m][1] - g[l][1] * g[m][0]
+            if abs(det) < 1e-12:
+                continue
+            a, b = want[l] - h[l], want[m] - h[m]
+            take(((a * g[m][1] - b * g[l][1]) / det, (g[l][0] * b - g[m][0] * a) / det))
+    return None if best is None else best[0]
+
+
+def _untangle_steps(res_indptr, res_flat, uv, read, region, expected, join, texture_px, border_px, moves: list):
     """Generator twin of the kernel's untangling (moves[0] counts the vertex moves)."""
+
+    tex = texture_px if texture_px > 0.0 else TEXTURE_PX_DEFAULT
 
     ri = [int(x) for x in res_indptr]
     rf = [int(x) for x in res_flat]
@@ -1426,23 +1467,23 @@ def _untangle_steps(res_indptr, res_flat, uv, region, expected, join, moves: lis
                         continue
                     g += [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
                     hh += [shortest - x[0], shortest + x[0], shortest - x[1], shortest + x[1]]
+                    if border_px < math.inf:
+                        r, y = border_px / tex, (float(read[2 * cs[0]]), float(read[2 * cs[0] + 1]))
+                        g += [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
+                        hh += [r - y[0], r + y[0], r - y[1], r + y[1]]
                 elif len(g) < 3:
                     continue
                 worst = min(m0)
                 sol = _chebyshev(g, hh)
                 if sol is None:
                     continue
-                xs, t = sol
+                t = sol[1]
                 if t <= max(worst, 0.0):
                     continue
-                goal = 0.5 * t
-                step = 0.0
-                for l in range(len(m0)):
-                    m1 = g[l][0] * xs[0] + g[l][1] * xs[1] + hh[l]
-                    if m0[l] < goal and m1 > m0[l]:
-                        step = max(step, (goal - m0[l]) / (m1 - m0[l]))
-                step = min(step, 1.0)
-                xn = (x[0] + step * (xs[0] - x[0]), x[1] + step * (xs[1] - x[1]))
+                goal = min(0.5 * t, UNTANGLE_CLEAR_PX / tex)
+                xn = _nearest_within(g, hh, [goal if l < len(m0) else 0.0 for l in range(len(g))], x)
+                if xn is None:
+                    continue
                 for h in cs:
                     uv[2 * h], uv[2 * h + 1] = xn
                 moved += 1
@@ -1450,6 +1491,82 @@ def _untangle_steps(res_indptr, res_flat, uv, region, expected, join, moves: lis
         yield
         if moved == 0:
             break
+
+
+def _clearance(res_indptr, uv, expected, f) -> float:
+    """Twin of the kernel's `clearance`: the thinnest fan triangle's twice UV area, signed by expected, over its longest edge."""
+
+    s, n = int(res_indptr[f]), int(res_indptr[f + 1] - res_indptr[f])
+    if expected[f] == 0.0 or uv[2 * s] != uv[2 * s]:
+        return math.inf
+    a = (float(uv[2 * s]), float(uv[2 * s + 1]))
+    out = math.inf
+    for i in range(1, n - 1):
+        b = (float(uv[2 * (s + i)]), float(uv[2 * (s + i) + 1]))
+        c = (float(uv[2 * (s + i + 1)]), float(uv[2 * (s + i + 1) + 1]))
+        area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+        l2 = max((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2, (c[0] - b[0]) ** 2 + (c[1] - b[1]) ** 2, (a[0] - c[0]) ** 2 + (a[1] - c[1]) ** 2)
+        out = min(out, area * expected[f] / math.sqrt(l2) if l2 > 0.0 else 0.0)
+    return out
+
+
+def _give_back_steps(res_indptr, res_flat, uv, read, region, expected, texture_px):
+    """Generator twin of the kernel's give-back: moved (vertex, region) groups go back toward `read` as far as that folds
+    none of their faces left unfolded (whole way, half, a quarter... down to GIVE_BACK_PX). Returns the groups moved."""
+
+    ri = [int(x) for x in res_indptr]
+    rf = [int(x) for x in res_flat]
+    region = [int(x) for x in region]
+    nf = len(ri) - 1
+    tex = texture_px if texture_px > 0.0 else TEXTURE_PX_DEFAULT
+    least, clear = GIVE_BACK_PX / tex, UNTANGLE_CLEAR_PX / tex
+
+    def off(h):
+        return uv[2 * h] != read[2 * h] or uv[2 * h + 1] != read[2 * h + 1]
+
+    moved = {(rf[h], region[f]) for f in range(nf) for h in range(ri[f], ri[f + 1]) if off(h)}
+    if not moved:
+        return 0
+    groups = sorted((rf[h], region[f], f, h) for f in range(nf) for h in range(ri[f], ri[f + 1]) if (rf[h], region[f]) in moved)
+    runs, i = [], 0
+    while i < len(groups):
+        j = i + 1
+        while j < len(groups) and groups[j][:2] == groups[i][:2]:
+            j += 1
+        runs.append(groups[i:j])
+        i = j
+    total = 0
+    while True:
+        back = 0
+        for count, run in enumerate(runs):
+            if count % 256 == 255:
+                yield
+            if not any(off(g[3]) for g in run) or any(read[2 * g[3]] != read[2 * g[3]] for g in run):
+                continue
+            was = [folded(ri, uv, expected, g[2]) for g in run]
+            room = [min(_clearance(ri, uv, expected, g[2]), clear) for g in run]
+            kept = [(float(uv[2 * g[3]]), float(uv[2 * g[3] + 1])) for g in run]
+            far = max(max(abs(k[0] - read[2 * g[3]]), abs(k[1] - read[2 * g[3] + 1])) for g, k in zip(run, kept))
+            share, ok = 1.0, False
+            while share * far > least:
+                for g, k in zip(run, kept):
+                    for c in range(2):
+                        uv[2 * g[3] + c] = read[2 * g[3] + c] if share == 1.0 else k[c] + share * (read[2 * g[3] + c] - k[c])
+                if any(not w and (folded(ri, uv, expected, g[2]) or _clearance(ri, uv, expected, g[2]) < r) for g, w, r in zip(run, was, room)):
+                    share *= 0.5
+                else:
+                    ok = True
+                    break
+            if ok:
+                back += 1
+            else:
+                for g, k in zip(run, kept):
+                    uv[2 * g[3]], uv[2 * g[3] + 1] = k
+        total += back
+        yield
+        if back == 0:
+            break
+    return total
 
 
 def _ring_fill_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report: dict):
