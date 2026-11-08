@@ -277,21 +277,22 @@ def wrap_label(layout, text: str, icon: str = "NONE", width: int = 38, limit: in
 
 
 def apply_hud_default(scene=None) -> None:
-    """Give each scene's HUD toggle the preferred default once (new scenes and files that never had it)."""
+    """Switch each scene's dashboard off once (new scenes and files saved when it was on by default). Only the user turns it on."""
     scenes = [scene] if scene is not None else list(bpy.data.scenes)
     for sc in scenes:
         settings = getattr(sc, "curiomesh_settings", None)
         if settings is None or sc.get("curiomesh_hud_init"):
             continue
         sc["curiomesh_hud_init"] = True
-        if not get_prefs().hud_default:  # the property default is already on
-            settings.hud_enabled = False
+        settings.hud_enabled = False  # the dashboard never turns itself on, not even in files saved while it was on by default
 
 
 def tag_redraw() -> None:
     wm = bpy.context.window_manager
     if wm is None:
         return
+    if not bpy.app.timers.is_registered(_hud_tick):
+        ensure_ticker()
     for window in wm.windows:
         for area in window.screen.areas:
             if area.type == "VIEW_3D":
@@ -556,6 +557,88 @@ def _sidebar_inset() -> float:
     return 0.0
 
 
+HUD_FULL_H, HUD_JOB_EXTRA, HUD_STRIP_H = 168, 36, 30  # box heights before scaling: full, extra while a job runs, collapsed strip
+HUD_RECTS: dict = {}  # region pointer -> [(x0, y0, x1, y1, action)] in region pixels; _draw_hud rewrites them each frame
+HUD_HOVER: dict = {"action": None}
+HUD_TICK_SECONDS = 0.25
+
+
+def hit_test(rects, x, y):
+    """The action of the button under (x, y), or None."""
+    for x0, y0, x1, y1, action in rects:
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            return action
+    return None
+
+
+def clock(seconds) -> str:
+    minutes, secs = divmod(int(round(max(0.0, seconds))), 60)
+    return f"{minutes}:{secs:02d}"
+
+
+def job_info():
+    """The job running now as plain data for the dashboard, or None. Reads guided.progress_info and the job's own counters."""
+    import math
+    import time
+
+    try:
+        from . import guided  # late: guided imports this module
+
+        info = guided.progress_info()
+        if info is None:
+            return None
+        frac, words = info
+        runner = guided.state["work"]["runner"]
+    except Exception:
+        return None
+    done, total = getattr(runner, "progress", None) or (0, 0)
+    started = getattr(runner, "started", None)
+    left_of = getattr(runner, "seconds_left", None)
+    try:
+        left = left_of() if left_of else None
+    except Exception:
+        left = None
+    now = time.perf_counter()
+    return {
+        "frac": min(1.0, max(0.0, float(frac))),
+        "stage": str(getattr(runner, "stage", "") or words),
+        "done": int(done),
+        "total": int(total),
+        "elapsed": now - started if started else None,
+        "left": left,
+        "alive_tick": math.modf(now * 1.5)[0],  # 0 to 1, repeating: the draw turns it into the pulse
+    }
+
+
+def job_text(job: dict) -> str:
+    """'42%  piece 3 of 8  1:12 elapsed  about 2:00 left' (parts left out when not known)."""
+    parts = [f"{job['frac'] * 100:.0f}%"]
+    if job["total"]:
+        parts.append(f"piece {min(job['done'] + 1, job['total'])} of {job['total']}")
+    if job["elapsed"] is not None:
+        parts.append(f"{clock(job['elapsed'])} elapsed")
+    if job["left"] is not None:
+        parts.append(f"about {clock(job['left'])} left")
+    return "  ".join(parts)
+
+
+def _hud_tick():
+    """Redraw while a job runs so the box never looks frozen. Does nothing else; stops by itself when the job ends."""
+    settings = _settings()
+    live = settings is not None and settings.hud_enabled and job_info() is not None
+    tag_redraw()
+    return HUD_TICK_SECONDS if live else None
+
+
+def ensure_ticker() -> None:
+    """Start the redraw ticker if the dashboard is on and a job runs. Safe to call often (guided and the panel may call it)."""
+    if bpy.app.timers.is_registered(_hud_tick):
+        return
+    settings = _settings()
+    if settings is not None and settings.hud_enabled and job_info() is not None:
+        bpy.app.timers.register(_hud_tick, first_interval=HUD_TICK_SECONDS)
+
+
 def hud_model(context) -> dict:
     """Everything the HUD shows, as plain data (testable without a GPU)."""
     settings = _settings()
@@ -570,7 +653,7 @@ def hud_model(context) -> dict:
     showing_result = preview is not None and preview.type == "MESH" and obj is not None and obj in (guided.state_source(), preview)
     if showing_result:
         obj = preview
-    model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": "", "original": False}
+    model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": "", "original": False, "job": job_info()}
     if settings is not None:
         model["target"] = int(settings.target_faces)
         model["batch"] = settings.batch_status
@@ -615,21 +698,46 @@ def _text_right(xr, y, size, color, text):
     return _text(xr - width, y, size, color, text)
 
 
+def _hud_button(shader, x_right, y_mid, s, text, action, rects, hover, active=False):
+    """One small button for the HUD. Draws it with its right edge at x_right and records its rect. Returns the next free right edge."""
+    import blf
+
+    blf.size(0, 10 * s)
+    tw = blf.dimensions(0, text)[0]
+    bw, bh = tw + 12 * s, 16 * s
+    x0, y0 = x_right - bw, y_mid - bh / 2
+    shader.bind()
+    colour = (0.85, 0.3, 0.3, 1.0) if active else (0.4, 0.45, 0.6, 1.0) if hover == action else (0.2, 0.22, 0.3, 1.0)
+    _fill(shader, _rounded_rect(x0, y0, bw, bh, 4 * s, 3), colour)
+    _text(x0 + 6 * s, y0 + 4 * s, 10 * s, (1, 1, 1, 1), text)
+    rects.append((x0, y0, x0 + bw, y0 + bh, action))
+    return x0 - 4 * s
+
+
 def _draw_hud() -> None:
     global LAST_DRAW_ERROR
     try:
         import gpu
 
+        context = bpy.context
+        ptr = context.region.as_pointer()
+        HUD_RECTS.pop(ptr, None)  # a stale rect must never catch a click once the box is gone
         settings = _settings()
         if settings is None or not settings.hud_enabled:
             return
-        context = bpy.context
         prefs = get_prefs()
         model = hud_model(context)
+        job = model["job"]
+        if job is not None:
+            ensure_ticker()
+        collapsed = bool(settings.hud_collapsed)
         ui = _ui_scale()
         s = ui * float(prefs.hud_scale)
         accent = (0.45, 0.55, 1.0) if model["original"] else accent_for_ratio(model["ratio"])
-        w, h = 330 * s, 168 * s
+        if job is not None:
+            accent = (0.35, 0.7, 1.0)
+        w = 330 * s
+        h = (HUD_STRIP_H if collapsed else HUD_FULL_H + (HUD_JOB_EXTRA if job is not None else 0)) * s
         pad = 14 * s
         corner = prefs.hud_corner
         safe_top = (36 + (140 if corner == "TOP_RIGHT" else 0)) * ui if corner.startswith("TOP") else 0.0
@@ -654,25 +762,50 @@ def _draw_hud() -> None:
 
         left = x + pad + 6 * s
         right = x + w - pad
-        top = y + h - pad
+        top = y + h - (pad if not collapsed else 15 * s)
+        rects: list = []
+        hover = HUD_HOVER["action"]
+        # Buttons sit on the title row, right to left: Collapse, Hide, and Stop (only while a job runs).
+        mid = top - 6 * s
+        bx = _hud_button(shader, right, mid, s, "+" if collapsed else "-", "collapse", rects, hover)
+        bx = _hud_button(shader, bx, mid, s, "Hide", "hide", rects, hover)
+        if job is not None:
+            bx = _hud_button(shader, bx, mid, s, "Stop", "stop", rects, hover, active=hover == "stop")
+        HUD_RECTS[ptr] = rects
         _text(left, top - 10 * s, 11 * s, (*accent, 1.0), "CURIOMESH")
-        _text(left + 95 * s, top - 10 * s, 11 * s, muted, model["name"][:18] or "no mesh")
-        _text_right(right, top - 10 * s, 10 * s, (*accent, 1.0), "ORIGINAL" if model["original"] else quality_word(model["ratio"]))
+        if job is not None:  # the alive dot: it pulses, so a slow step never looks frozen
+            pulse = 0.35 + 0.65 * abs(2.0 * job["alive_tick"] - 1.0)
+            dot = 4 * s
+            shader.bind()
+            _fill(shader, _rounded_rect(bx - dot * 1.5, mid - dot, dot * 2, dot * 2, dot, 4), (0.4, 0.95, 0.6, pulse))
+        if collapsed:
+            tail = f"{job['frac'] * 100:.0f}%  {job['stage']}" if job is not None else (f"{model['ratio'] * 100:.0f}% quads" if model["ratio"] is not None else "")
+            room = max(8, int((bx - 2 * s * 4 - left - 82 * s) / (5.4 * s)))
+            _text(left + 82 * s, top - 10 * s, 10 * s, muted, ((model["name"][:10] + "  " if model["name"] else "") + tail)[:room])
+            gpu.state.blend_set("NONE")
+            return
+        _text(left + 95 * s, top - 10 * s, 11 * s, muted, model["name"][:8] or "no mesh")
 
         ratio = model["ratio"]
-        big = f"{ratio * 100:.1f}%" if ratio is not None else "--"
+        if job is not None:
+            big = f"{job['frac'] * 100:.0f}%"
+            bar_ratio, bar_colour, big_word = job["frac"], (0.35, 0.7, 1.0), "done"
+        else:
+            big = f"{ratio * 100:.1f}%" if ratio is not None else "--"
+            bar_ratio, bar_colour, big_word = ratio, accent, "quads"
         bw = _text(left, top - 52 * s, 32 * s, (1, 1, 1, 1), big)
-        _text(left + bw + 8 * s, top - 52 * s, 11 * s, muted, "quads")
+        _text(left + bw + 8 * s, top - 52 * s, 11 * s, muted, big_word)
+        _text_right(right, top - 52 * s, 10 * s, (*accent, 1.0), "WORKING" if job is not None else "ORIGINAL" if model["original"] else quality_word(model["ratio"]))
 
         bar_x, bar_y, bar_w, bar_h = left, top - 66 * s, w - 2 * pad - 6 * s, 7 * s
         shader.bind()
         _fill(shader, _rounded_rect(bar_x, bar_y, bar_w, bar_h, 3.5 * s, 3), (0.2, 0.22, 0.28, 1.0))
-        if ratio:
-            fill_w = max(bar_h, bar_w * min(1.0, ratio))
-            _fill(shader, _rounded_rect(bar_x, bar_y, fill_w, bar_h, 3.5 * s, 3), (*accent, 1.0))
-        # Goal tick at 95 % quads.
-        tick_x = bar_x + bar_w * 0.95
-        _fill(shader, [(tick_x, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y + bar_h + 2 * s), (tick_x, bar_y + bar_h + 2 * s)], (0.85, 0.87, 0.95, 0.9))
+        if bar_ratio:
+            fill_w = max(bar_h, bar_w * min(1.0, bar_ratio))
+            _fill(shader, _rounded_rect(bar_x, bar_y, fill_w, bar_h, 3.5 * s, 3), (*bar_colour[:3], 1.0))
+        if job is None:  # goal tick at 95 % quads
+            tick_x = bar_x + bar_w * 0.95
+            _fill(shader, [(tick_x, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y + bar_h + 2 * s), (tick_x, bar_y + bar_h + 2 * s)], (0.85, 0.87, 0.95, 0.9))
 
         col_w = (w - 2 * pad - 6 * s) / 3
         cells = (
@@ -684,11 +817,16 @@ def _draw_hud() -> None:
             _text(cx, top - 90 * s, 10 * s, label, cell_label)
             _text(cx, top - 106 * s, 14 * s, color, value)
 
-        if model["batch"]:
-            _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), model["batch"][:46])
-        elif model["info"]:
-            _text(left, top - 124 * s, 10 * s, label, model["info"][:46])
-        _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + model["hint"][:44])
+        if job is not None:
+            _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), job_text(job)[:56])
+            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + job["stage"][:44])
+            _text(left, top - 164 * s, 10 * s, label, f"Quads so far: {ratio * 100:.1f}%" if ratio is not None else "Quads so far: --")
+        else:
+            if model["batch"]:
+                _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), model["batch"][:46])
+            elif model["info"]:
+                _text(left, top - 124 * s, 10 * s, label, model["info"][:46])
+            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + model["hint"][:44])
         gpu.state.blend_set("NONE")
     except Exception as exc:
         LAST_DRAW_ERROR = repr(exc)
@@ -714,6 +852,103 @@ class CURIOMESH_OT_toggle_heatmap(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def run_hud_action(context, action: str) -> None:
+    """What each dashboard button does. Also the one place tests and the agent layer can call."""
+    settings = context.scene.curiomesh_settings
+    if action == "stop":
+        bpy.ops.curiomesh.guided_stop_work()
+    elif action == "hide":
+        settings.hud_enabled = False
+        HUD_RECTS.clear()
+    elif action == "collapse":
+        settings.hud_collapsed = not settings.hud_collapsed
+    HUD_HOVER["action"] = None
+    tag_redraw()
+
+
+def _hud_rects_here(context):
+    region = context.region
+    return HUD_RECTS.get(region.as_pointer()) if region is not None and context.area is not None and context.area.type == "VIEW_3D" else None
+
+
+class CURIOMESH_OT_hud_click(bpy.types.Operator):
+    bl_idname = "curiomesh.hud_click"
+    bl_label = "Dashboard Button"
+    bl_description = "Press a button on the dashboard (Stop, Hide, Collapse)"
+    bl_options = {"INTERNAL"}
+
+    hover: bpy.props.BoolProperty(default=False, options={"SKIP_SAVE", "HIDDEN"})
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_hud_rects_here(context))  # no dashboard drawn here: the keymap item costs nothing and the click goes on
+
+    def invoke(self, context, event):
+        action = hit_test(_hud_rects_here(context) or (), event.mouse_region_x, event.mouse_region_y)
+        if self.hover:
+            if action != HUD_HOVER["action"]:
+                HUD_HOVER["action"] = action
+                context.area.tag_redraw()
+            return {"PASS_THROUGH"}
+        if action is None:
+            return {"PASS_THROUGH"}
+        self._action = action
+        context.window_manager.modal_handler_add(self)  # take the release as well, so the viewport tool never sees half a click
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type == "ESC":
+            return {"CANCELLED"}
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            if hit_test(_hud_rects_here(context) or (), event.mouse_region_x, event.mouse_region_y) == self._action:
+                run_hud_action(context, self._action)
+            return {"FINISHED"}
+        return {"RUNNING_MODAL"}
+
+
+class CURIOMESH_OT_hud_toggle(bpy.types.Operator):
+    bl_idname = "curiomesh.hud_toggle"
+    bl_label = "Show Dashboard"
+    bl_description = "Show or hide the dashboard in the 3D view. It stays off until you turn it on"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def description(cls, context, properties):
+        on = getattr(getattr(context.scene, "curiomesh_settings", None), "hud_enabled", False)
+        return "Hide the dashboard from the 3D view" if on else "Show the dashboard (quad quality, job progress and a Stop button) in the 3D view"
+
+    def execute(self, context):
+        settings = context.scene.curiomesh_settings
+        settings.hud_enabled = not settings.hud_enabled
+        if not settings.hud_enabled:
+            HUD_RECTS.clear()
+        tag_redraw()
+        return {"FINISHED"}
+
+
+_keymap_items: list = []
+
+
+def _add_keymap() -> None:
+    kc = bpy.context.window_manager.keyconfigs.addon  # None when Blender runs without a window
+    if kc is None:
+        return
+    km = kc.keymaps.new(name="3D View", space_type="VIEW_3D")
+    for event_type, value, hover in (("LEFTMOUSE", "PRESS", False), ("MOUSEMOVE", "ANY", True)):
+        item = km.keymap_items.new(CURIOMESH_OT_hud_click.bl_idname, event_type, value)
+        item.properties.hover = hover
+        _keymap_items.append((km, item))
+
+
+def _remove_keymap() -> None:
+    while _keymap_items:
+        km, item = _keymap_items.pop()
+        try:
+            km.keymap_items.remove(item)
+        except Exception:
+            pass
+
+
 def _init_hud_default():
     try:
         apply_hud_default()
@@ -727,7 +962,7 @@ def _on_load_post(*_args):
     bpy.app.timers.register(_init_hud_default, first_interval=0.2)
 
 
-CLASSES = (CURIOMESH_OT_toggle_heatmap,)
+CLASSES = (CURIOMESH_OT_toggle_heatmap, CURIOMESH_OT_hud_click, CURIOMESH_OT_hud_toggle)
 
 
 def register() -> None:
@@ -739,6 +974,7 @@ def register() -> None:
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_heatmap, (), "WINDOW", "POST_VIEW"))
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_hud, (), "WINDOW", "POST_PIXEL"))
     _draw_handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_watch, (), "WINDOW", "POST_PIXEL"))
+    _add_keymap()
 
 
 def unregister() -> None:
@@ -748,6 +984,11 @@ def unregister() -> None:
         handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_init_hud_default):
         bpy.app.timers.unregister(_init_hud_default)
+    if bpy.app.timers.is_registered(_hud_tick):
+        bpy.app.timers.unregister(_hud_tick)
+    _remove_keymap()
+    HUD_RECTS.clear()
+    HUD_HOVER["action"] = None
     while _draw_handles:
         try:
             bpy.types.SpaceView3D.draw_handler_remove(_draw_handles.pop(), "WINDOW")
