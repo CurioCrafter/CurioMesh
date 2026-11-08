@@ -57,6 +57,9 @@ class Settings:
     view_check: bool = True  # the camera check holds snap moves that would spend more than Most Detail Loss allows
     detail: float = DEFAULT_DETAIL  # Most Detail Loss, percent of the source's picture pixels
     view_pixels: int = VIEW_PIXELS
+    switch_by: str = "part"  # the split cuts the Soft chains plus where the nearest unconnected "part" changes, or every "side" switch (costs more faces per mended face under a small allowance, R5keep)
+    reread: bool = True  # faces whose corners all lie within one side's owner ball read that side
+    switch_snap: bool = True  # corners just over a side line move onto it (zero faces) before any split
 
 
 def settings_of(gs) -> Settings:
@@ -68,7 +71,7 @@ def settings_of(gs) -> Settings:
     detail = getattr(gs, "auto_detail", None)
     if isinstance(detail, (int, float)) and detail > 0:
         s.detail = float(detail)
-    for key in ("allowance", "split", "snap", "move_share", "texture_px", "repeat", "cut_here", "view_check", "detail", "view_pixels"):
+    for key in ("allowance", "split", "snap", "move_share", "texture_px", "repeat", "cut_here", "view_check", "detail", "view_pixels", "switch_by", "reread", "switch_snap"):
         if key in ov:
             setattr(s, key, ov[key])
     return s
@@ -153,12 +156,28 @@ def _triaged(sa: Source, f_target: float, allowance: float, settings: Settings) 
 
 
 def _kinds(seams: dict) -> np.ndarray:
-    """Kind of each island: islands joined across every chain that is not Hard."""
+    """Kind of each island: islands joined across every chain that is not Hard, then those groups merged wherever no
+    Hard chain runs between them (a greedy colouring of the groups by their Hard neighbours). Only a Hard chain keeps
+    the search apart; loose pieces and islands with no border between them stay one kind, as with Seam Fit off (kinds
+    per loose piece cost the search 8 % more faces on spinning_wheel_01 with no Hard chain at all, R5keep)."""
 
     isl = seams["chain_island"].reshape(-1, 2)
-    join = seams["class"] != HARD
-    root = uvseams._min_labels(seams["n_islands"], isl[join, 0], isl[join, 1])
-    return uvseams._first_order(root)[0]
+    hard = seams["class"] == HARD
+    root = uvseams._min_labels(seams["n_islands"], isl[~hard, 0], isl[~hard, 1])
+    group, n = uvseams._first_order(root)
+    nbr = [set() for _ in range(int(n))]
+    for a, b in zip(group[isl[hard, 0]].tolist(), group[isl[hard, 1]].tolist()):
+        if a != b:
+            nbr[a].add(b)
+            nbr[b].add(a)
+    colour = np.full(int(n), -1, np.int64)
+    for g in range(int(n)):
+        taken = {int(colour[h]) for h in nbr[g] if colour[h] >= 0}
+        c = 0
+        while c in taken:
+            c += 1
+        colour[g] = c
+    return colour[group]
 
 
 def _risk(seams: dict) -> np.ndarray:
@@ -442,6 +461,9 @@ class FitStage:
         self.done, self.candidate, self.numbers = False, None, {"estimate": True}
         self._stopped = False
         self._now = None
+        self._trees = None  # closest points per source side, built as the re-read needs them
+        self._judge = None  # the camera check's judge, once the snap has drawn it
+        self._last_flipped = None  # the UV Check's flipped faces from the last `_straddling`
         self._steps = self._run()
 
     def stop(self) -> None:
@@ -473,6 +495,101 @@ class FitStage:
                 return None
         self._now = None
         return tr.result
+
+    def _straddling(self, uv, P, ip, fl, origin=None):
+        """Generator: per result face True when the UV Check (its owner-set rule) calls it across a seam after a plain
+        per-side transfer; the side switches cut only those. None without the native check."""
+
+        from .topology import _turbo as turbo
+
+        sa, s = self.sa, self.settings
+        if turbo is None or not hasattr(turbo, "uvscore_check"):
+            return None
+        look = yield from self._lookup(uv, P, ip, fl)
+        if look is None:
+            return None
+        got = {}
+        yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+        job = turbo.uvscore_check(P, ip, fl, got["uv"], self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, uv, sa.material, texture_px=s.texture_px)
+        if job is None:
+            return None
+        while not job.done():
+            yield
+            if self._stopped:
+                job.stop()
+                return None
+        res = job.result()
+        self._last_flipped = np.asarray(res[2]).astype(bool)
+        return np.asarray(res[1]).astype(bool)
+
+    def _reread(self, look, tree, P, ip, fl, n_before, vchain):
+        """Generator: a face whose corners all lie within one side's owner ball reads that side (`uvsnap.ball_sides_steps`,
+        `uvsnap.side_reread_steps`): the lookup's vote by the face centre can pick a side some corners are far from."""
+
+        if tree is None or not self.settings.reread:
+            return
+        from .topology import _turbo as turbo
+
+        sa = self.sa
+        region = np.asarray(self.plan.seams["region"], np.int64)
+        pts = np.asarray(P, np.float64).reshape(-1, 3)
+        _at, near_f, d0 = tree.nearest(pts)
+        label = region[np.asarray(near_f, np.int64)]
+        if self._trees is None:
+            self._trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, lambda a, b: turbo.face_tree(a, b))
+        got = {}
+        self._before = {k: np.array(look[k], copy=True) for k in ("ids", "w", "shift", "slid", "ref_ids", "ref_w", "ref_face", "orient", "region")}
+        yield from uvsnap.ball_sides_steps(look["region"], pts, ip, fl, label, d0, self._trees, got)
+        yield from uvsnap.side_reread_steps(look, got["sides"], sa.points, sa.indptr, sa.flat, region, pts, ip, fl, None, got, trees=self._trees,
+                                            src_uv=sa.layers[sa.active][1])
+        self.numbers_reread = int(got.get("reread", 0))
+
+    def _face_material(self, ip, origin):
+        """Material per face of the current mesh (the UV Check matches source faces of the same material), () when unknown."""
+
+        if self.material is None or len(self.material) != len(self.indptr) - 1:
+            return ()
+        if origin is None:
+            return self.material if len(ip) - 1 == len(self.material) else ()
+        return self.material[np.asarray(origin, np.int64)] if len(origin) == len(ip) - 1 else ()
+
+    def _layer_checked(self, uv, P, ip, fl, look, got, origin=None):
+        """Generator: the active layer through the lookup; then the UV Check's flip test, and every re-read face that
+        shows the texture turned over gets the lookup's own read back (and the layer is read again). The re-read only
+        moves texture that was across a seam; it never turns any over."""
+
+        sa, s = self.sa, self.settings
+        yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+        before = getattr(self, "_before", None)
+        if before is None or len(before["region"]) != len(ip) - 1:
+            return
+        changed = np.asarray(look["region"]) != before["region"]
+        if not changed.any():
+            return
+        from .topology import _turbo as turbo
+
+        job = turbo.uvscore_check(P, ip, fl, got["uv"], self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, uv, sa.material, texture_px=s.texture_px)
+        if job is None:
+            return
+        while not job.done():
+            yield
+        bad = changed & np.asarray(job.result()[2]).astype(bool)
+        if not bad.any():
+            return
+        ipa = np.asarray(ip, np.int64)
+        corner = np.concatenate([np.arange(ipa[f], ipa[f + 1]) for f in np.flatnonzero(bad).tolist()])
+        for k in ("ids", "w"):
+            look[k].reshape(-1, 3)[corner] = before[k].reshape(-1, 3)[corner]
+        for k in ("shift", "slid"):
+            look[k][corner] = before[k][corner]
+        for k in ("ref_ids", "ref_w"):
+            look[k].reshape(-1, 3)[bad] = before[k].reshape(-1, 3)[bad]
+        for k in ("ref_face", "orient", "region"):
+            look[k][bad] = before[k][bad]
+        self.numbers_reread = max(0, int(getattr(self, "numbers_reread", 0)) - int(bad.sum()))
+        self.numbers_reread_undone = int(getattr(self, "numbers_reread_undone", 0)) + int(bad.sum())
+        got.clear()
+        yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, got)
 
     def _drive(self, stage):
         self._now = stage
@@ -509,6 +626,7 @@ class FitStage:
                     if self._stopped:
                         return
                     judge = got.get("judge")
+                    self._judge = judge
                     snap = None if judge is not None else first
                 if judge is not None:  # the first pass had the plain limit; priced by the camera check, then the real pass
                     view = {}
@@ -524,6 +642,7 @@ class FitStage:
             if self._stopped:
                 return
             r = snap.result
+            move_used = move
             P, vchain, vparam = np.asarray(r["points"], np.float64), r["vchain"], r["vparam"]
             numbers.update(moved=int(r["moved"]), held=int(np.sum(r["held"])))
         budget = -1.0
@@ -539,20 +658,67 @@ class FitStage:
         name, uv = sa.layers[sa.active]
         P0, ip0, fl0 = P, ip, fl
         cut_seams, cut_xyz = seams, xyz
-        if soft and s.split and self.use_fast:  # part switches: cut faces spanning two unconnected source pieces
+        tree = None
+        if soft and s.split and self.use_fast:  # side switches: cut faces where the nearest source side changes
             from .topology import _turbo as turbo
             if turbo is not None:
                 tree = turbo.face_tree(sa.points, FlatFaces(sa.indptr, sa.flat))
+                only = None
+                if s.switch_by == "side" or s.switch_snap:
+                    only = yield from self._straddling(uv, P, ip, fl)
+                    if self._stopped:
+                        return
+                if s.switch_snap and only is not None:  # zero faces first: corners over a side line move onto it
+                    region = np.asarray(seams["region"], np.int64)
+                    lim = np.asarray(move_used, np.float64) if s.snap else s.move_share * uvsnap.vertex_edge(P, ip, fl)
+                    side_of = lambda q: region[np.asarray(tree.nearest(np.asarray(q).reshape(-1, 3))[1], np.int64)]  # noqa: E731
+                    got = {}
+                    yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, lim, only, got)
+                    if self._stopped:
+                        return
+                    if self._judge is not None and len(got["moved"]):  # the camera check prices these moves too (SPEC 4.10)
+                        view = {}
+                        yield from view_limit(self._judge, P, got["points"], ip, fl, lim, s.detail, view)
+                        numbers.update(side_view_held=int(view["held"]))
+                        if view["held"]:
+                            got = {}
+                            yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, view["limit"], only, got)
+                            if self._stopped:
+                                return
+                    before_slide = np.asarray(P, np.float64).reshape(-1, 3)
+                    P = np.asarray(got["points"], np.float64)
+                    numbers.update(side_moved=int(len(got["moved"])))
+                    if len(got["moved"]):  # a slide that turns a face's texture over is taken back (the UV Check's flip test)
+                        was = self._last_flipped
+                        only = yield from self._straddling(uv, P, ip, fl)
+                        if self._stopped:
+                            return
+                        if only is not None and was is not None:
+                            now = self._last_flipped & ~was
+                            if now.any():
+                                Q = P.reshape(-1, 3).copy()
+                                face_of = np.repeat(np.arange(len(ip) - 1), np.diff(ip))
+                                vs = np.unique(fl[now[face_of]])
+                                Q[vs] = before_slide[vs]
+                                P = Q.ravel()
+                                numbers.update(side_slides_undone=int(len(vs)))
+                                if s.switch_by == "side":
+                                    only = yield from self._straddling(uv, P, ip, fl)
+                    P0 = P
+                if s.switch_by != "side":
+                    only = None
                 got = {}
-                yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got)
+                yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got, by=s.switch_by, only=only)
                 if self._stopped:
                     return
                 cut_seams = got["seams"]
                 cut_xyz = uvsnap.chain_xyz(cut_seams, sa.points)
-                numbers.update(part_switches=int(cut_seams.get("part_switches", 0)))
+                numbers.update(part_switches=int(cut_seams.get("part_switches", 0)), straddling_before=int(np.sum(only)) if only is not None else -1)
+        n_before = len(P0) // 3 if P0.ndim == 1 else len(P0)
         reserve = 0
         while True:
             P, ip, fl, origin = P0, ip0, fl0, np.arange(nf, dtype=np.int64)
+            r_vchain = np.asarray(vchain, np.int64) if len(vchain) else np.full(n_before, -1, np.int64)
             if soft and s.split:
                 give = budget if budget < 0 else max(0.0, budget - reserve)
                 cut = uvsnap.Split(P, ip, fl, cut_seams, cut_xyz, vchain, vparam, (), give, use_fast=self.use_fast)
@@ -561,14 +727,16 @@ class FitStage:
                     return
                 r = cut.result
                 P, ip, fl, origin = np.asarray(r["points"], np.float64), np.asarray(r["indptr"], np.int64), np.asarray(r["flat"], np.int64), np.asarray(r["origin"], np.int64)
+                r_vchain = np.asarray(r["vchain"], np.int64)
                 numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
                                faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
                                split_budget=give)
             look = yield from self._lookup(uv, P, ip, fl)
             if look is None:
                 return
+            yield from self._reread(look, tree, P, ip, fl, n_before, r_vchain)
             ready = {}
-            yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, ready)
+            yield from self._layer_checked(uv, P, ip, fl, look, ready, origin)
             if self._stopped:
                 return
             halve = halve_mask(P, ip, fl, look["orient"]) | still_folded(ip, ready["uv"], ready["expected"])
@@ -584,11 +752,15 @@ class FitStage:
             look = yield from self._lookup(uv, P, ip, fl)
             if look is None:
                 return
+            yield from self._reread(look, tree, P, ip, fl, n_before, r_vchain)
         out = {}
         for i, (nm, luv) in enumerate(sa.layers):
             got = ready if i == sa.active and ready is not None else {}
             if not got:
-                yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+                if i == sa.active:
+                    yield from self._layer_checked(luv, P, ip, fl, look, got, origin)
+                else:
+                    yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
             if self._stopped:
                 return
             out[i] = close_flat(P, ip, fl, got["uv"], s.texture_px)
@@ -596,6 +768,8 @@ class FitStage:
                 f = got["fold"]
                 numbers.update(folded_before=int(f["folded_before"]), folded_after=int(f["folded_after"]), fold_stuck=int(f["fold_stuck"]),
                                fold_untangled=int(f.get("fold_untangled", 0)), fold_reread=int(f.get("fold_reread", 0)))
+        numbers["side_reread"] = int(getattr(self, "numbers_reread", 0))
+        numbers["side_reread_undone"] = int(getattr(self, "numbers_reread_undone", 0))
         layers = [(nm, out[i]) for i, (nm, _u) in enumerate(sa.layers)]
         mat = (self.material if self.material is not None else np.zeros(nf, np.int64))[origin]
         pts = P.reshape(-1, 3)
