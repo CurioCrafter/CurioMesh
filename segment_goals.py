@@ -1577,8 +1577,10 @@ def draw_tried(layout, record: dict) -> None:
         sub.active = False
         sub.label(text=f"Same as another: {', '.join(same)}")
     was = record.get("was")
-    if was is not None and was != record["cur"] and was < len(tries):
-        layout.operator("curiomesh.seg_try", text="Back to How It Was", icon="LOOP_BACK").index = was
+    if was is not None and was < len(tries):
+        row = layout.row()  # always drawn once there is a "how it was": greyed out when already back, so nothing below jumps
+        row.enabled = was != record["cur"]
+        row.operator("curiomesh.seg_try", text="Back to How It Was", icon="LOOP_BACK").index = was
 
 
 def draw_try_all(layout) -> None:
