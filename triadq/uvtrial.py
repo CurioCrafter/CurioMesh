@@ -240,7 +240,8 @@ class SeamFit(T.Trial):
         cand.fit = c
         cand.fit_extra = extra + int(n.get("extra_faces", 0))
         split, left = int(n.get("faces_split", 0)), int(n.get("faces_left", 0)) + int(n.get("faces_for_baking", 0))
-        cand.numbers["split"] = (f"{split} faces split, {int(n.get('moved', 0))} points moved", 1 if split or n.get("moved") else 0)
+        moved = int(n.get("moved", 0)) + int(n.get("side_moved", 0))  # side_moved: the side-line snap's moves
+        cand.numbers["split"] = (f"{split} faces split, {moved} points moved", 1 if split or moved else 0)
         cand.numbers["left"] = (f"{left} left for baking" if left else "every seam fitted", -1 if left else 1)
         notes = list(c.messages)
         if int(n.get("held", 0)):
