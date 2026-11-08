@@ -215,11 +215,13 @@ _FORM_PURPOSE = {
 }
 
 
-def issue_url(version: str, blender: str, use: str) -> str:
-    """The issue-form link. Only version numbers and the Use: no mesh, names, paths or note text."""
+def issue_url(version: str, blender: str, use: str, fixed: bool = False) -> str:
+    """The issue-form link. Only version numbers, the Use and a fixed "yes": no mesh, names, paths or note text."""
     q = {FORM_FIELDS["version"]: version, FORM_FIELDS["blender"]: blender}
     if use in _FORM_PURPOSE:
         q[FORM_FIELDS["use"]] = _FORM_PURPOSE[use]
+    if fixed:
+        q["fix"] = "Yes, the fixed part is in the zip. How:"
     return ISSUE_URL + "&" + urllib.parse.urlencode(q)
 
 
@@ -302,29 +304,42 @@ class CURIOMESH_OT_send_problem(bpy.types.Operator):
     bl_options = {"INTERNAL"}
 
     note: bpy.props.StringProperty(name="Note", description="What is wrong with these parts. It is saved in the zip, not put in the link")
+    kind: bpy.props.EnumProperty(name="Kind", items=(
+        ("PROBLEM", "Send as a Problem", "These parts came out bad and a redo did not fix them"),
+        ("FIX", "Share a Fix", "You fixed these parts (by hand, a redo or an AI): share the fixed parts and how"),
+    ), options={"SKIP_SAVE"})
+
+    @classmethod
+    def description(cls, context, props):
+        if props.kind == "FIX":
+            return "Save the fixed parts, your original surface and the settings in a zip and open the issue form, so the fix can become part of CurioMesh. CurioMesh sends nothing: you attach the zip yourself"
+        return cls.bl_description
 
     @classmethod
     def poll(cls, context):
         return _poll(cls)
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=420)
+        title = "Share a Fix" if self.kind == "FIX" else "Send as a Problem"
+        return context.window_manager.invoke_props_dialog(self, width=420, title=title)
 
     def draw(self, context):
         col = self.layout.column(align=True)
         col.label(text="CurioMesh sends nothing. It saves a zip of the marked")
         col.label(text="parts and opens the issue form. You attach the zip yourself.")
-        col.prop(self, "note")
+        col.label(text="The zip holds pieces of your mesh: only share what you may.")
+        col.prop(self, "note", text="How you fixed it" if self.kind == "FIX" else "What is wrong")
 
     def execute(self, context):
+        note = f"[Fix that worked] {self.note}" if self.kind == "FIX" else self.note
         try:
-            out = report_parts(None, None, self.note)
+            out = report_parts(None, None, note)
         except PartsError as exc:
             self.report({"ERROR"}, f"{exc} {exc.hint}".strip())
             return {"CANCELLED"}
         try:
             version = ".".join(str(i) for i in _version())
-            bpy.ops.wm.url_open(url=issue_url(version, bpy.app.version_string, context.scene.curiomesh_guided.auto_profile))
+            bpy.ops.wm.url_open(url=issue_url(version, bpy.app.version_string, context.scene.curiomesh_guided.auto_profile, self.kind == "FIX"))
         except Exception:  # no browser: the zip is still saved
             pass
         guided.state["message"] = f"Report saved to {out['path']}. Attach it to the issue form. {WARNING}"

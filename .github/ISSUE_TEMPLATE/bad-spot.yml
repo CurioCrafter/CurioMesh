@@ -62,7 +62,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **The zip:** press **Save for a Report** in the CurioMesh panel (agents: `parts.report`), then drag the zip into the box below. Drop a fixed part's `returned` folder in as a zip too.
+        **The zip:** in the CurioMesh panel open **Help Make It Better**, mark the spots and press **Send as a Problem** or **Share a Fix** (or **Save for a Report**) (agents: `parts.report`), then drag the zip into the box below. Drop a fixed part's `returned` folder in as a zip too.
   - type: textarea
     id: zip
     attributes:

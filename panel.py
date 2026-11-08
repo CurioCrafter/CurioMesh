@@ -859,6 +859,35 @@ class CURIOMESH_PT_guided_apply(_Sub, bpy.types.Panel):
         draw_finish(self.layout, context, context.scene.curiomesh_guided)
 
 
+class CURIOMESH_PT_better(_Sub, bpy.types.Panel):
+    """Help Make It Better: mark spots in the 3D view, then share them (or a fix) on GitHub."""
+    bl_label = "Help Make It Better"
+    bl_idname = "CURIOMESH_PT_better"
+    bl_options = {"DEFAULT_CLOSED"}
+    help_topic = "better"
+
+    @classmethod
+    def poll(cls, context):
+        return _auto_tab(context)
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.label(text="Share spots CurioMesh gets wrong, or your fix.")
+        if segments.ready():
+            draw_review_button(layout, 1.0)
+            n = len(segments.seg["sel"])
+            layout.label(text=f"{n} part(s) marked" if n else "Click bad spots in the 3D view to mark them", icon="RESTRICT_SELECT_OFF")
+            row = layout.row(align=True)
+            row.operator("curiomesh.send_problem", text="Send as a Problem", icon="ERROR").kind = "PROBLEM"
+            row.operator("curiomesh.send_problem", text="Share a Fix", icon="CHECKMARK").kind = "FIX"
+        else:
+            layout.label(text="Run Auto first to pick spots.", icon="INFO")
+        row = layout.row(align=True)
+        row.operator("wm.url_open", text="Report a Bug", icon="URL").url = G.problem_url()
+        row.operator("wm.url_open", text="How to Help", icon="HELP").url = G.REPO_URL + "/blob/main/CONTRIBUTING.md"
+
+
 class CURIOMESH_PT_pop_bake(_Popover, bpy.types.Panel):
     bl_label = "Bake"
     bl_idname = "CURIOMESH_PT_pop_bake"
@@ -1244,7 +1273,7 @@ class CURIOMESH_PT_guided_advanced(_Pro, bpy.types.Panel):
 
 tidytools.CURIOMESH_PT_guided_history.draw_header_preset = lambda self, context: helpmod.help_button(self.layout, "history")  # History has no "?" of its own
 
-MAIN_PANELS = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_adjust, *tidytools.PANELS, CURIOMESH_PT_guided_parts, *segment_goals.PANELS, CURIOMESH_PT_guided_apply)
+MAIN_PANELS = (CURIOMESH_PT_guided, CURIOMESH_PT_guided_adjust, *tidytools.PANELS, CURIOMESH_PT_guided_parts, *segment_goals.PANELS, CURIOMESH_PT_guided_apply, CURIOMESH_PT_better)
 PRO_PANELS = (
     CURIOMESH_PT_pro_engine,
     CURIOMESH_PT_pro_computer,

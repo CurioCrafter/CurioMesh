@@ -30,6 +30,11 @@ class SendProblemUrl(unittest.TestCase):
         self.assertEqual(q["version"], ["0.9.9"])
         self.assertTrue(url.startswith("https://github.com/CurioCrafter/CurioMesh/issues/new?template=bad-spot.yml&"))
 
+    def test_fix_link_only_adds_fixed_yes(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(_load().issue_url("0.9.9", "4.2", "GAME", True)).query)
+        self.assertEqual(set(q), {"template", "version", "blender", "purpose", "fix"})
+        self.assertTrue(q["fix"][0].startswith("Yes"))
+
     def test_unknown_use_leaves_purpose_out(self):
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(_load().issue_url("1", "4", "CUSTOM")).query)
         self.assertNotIn("purpose", q)
