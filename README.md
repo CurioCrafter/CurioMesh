@@ -20,6 +20,8 @@ changed. Then you redo only the part that still looks wrong. It runs on your PC 
 **Who it is for:** 3D artists, technical artists and game developers who need a lower-poly, all-quad version of a high-poly
 model, a sculpt or a photogrammetry scan, and want to fix single parts instead of redoing the whole mesh.
 
+**Why this one:** most retopology tools remesh the whole model in one go and leave you to judge it. CurioMesh splits the model into parts, measures every part against your original by camera, and lets you (or your AI agent) redo just the parts that came out wrong. **Help it get better everywhere:** send the spots it gets wrong, or your fixes, with one button in the add-on ([how](CONTRIBUTING.md)). Each one becomes a test case that agentic AI such as Claude Opus 5.5 helps turn into a fix for everyone.
+
 **[Download the add-on](https://github.com/CurioCrafter/CurioMesh/releases/latest)** · [Install it](#install) · [Try it in four steps](#quick-start)
 
 **If CurioMesh saved you time, please [star it on GitHub](https://github.com/CurioCrafter/CurioMesh/stargazers).** It is free and made by one person, and stars are how other artists find it. Something broke? [Open an issue](https://github.com/CurioCrafter/CurioMesh/issues/new) (the add-on's **Report a Problem** button fills in your versions).
