@@ -23,7 +23,7 @@ from .operators import (
     CURIOMESH_OT_remesh,
 )
 from . import batch, fix_select, game_export, guided, history, live, overlay, panel, region, tidytools
-from . import agent_mailbox, parts_export, parts_import  # main-only
+from . import agent_mailbox, help, parts_export, parts_import, promptgen  # main-only
 from . import uv_panel  # main-only: uv
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
@@ -114,11 +114,6 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         default=D["flow_editor"],
     )
 
-    hud_default: bpy.props.BoolProperty(
-        name="HUD On in New Scenes",
-        description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet",
-        default=D["hud_default"],
-    )
     hud_corner: bpy.props.EnumProperty(
         name="Corner",
         description="Which corner of the viewport the dashboard sits in",
@@ -215,7 +210,6 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         box = layout.box()
         box.label(text="Dashboard (HUD)", icon="OVERLAY")
         col = box.column()
-        col.prop(self, "hud_default")
         col.prop(self, "hud_corner")
         offsets = col.row(align=True)
         offsets.use_property_split = False
@@ -302,6 +296,8 @@ def register():
     fix_select.register()
     game_export.register()
     uv_panel.register()  # main-only: uv
+    help.register()  # main-only
+    promptgen.register()  # main-only
     panel.register()
     agent_mailbox.register()  # main-only
     parts_export.register()  # main-only
@@ -318,6 +314,8 @@ def unregister():
     parts_export.unregister()  # main-only
     agent_mailbox.unregister()  # main-only
     panel.unregister()
+    promptgen.unregister()  # main-only
+    help.unregister()  # main-only
     uv_panel.unregister()  # main-only: uv
     game_export.unregister()
     fix_select.unregister()

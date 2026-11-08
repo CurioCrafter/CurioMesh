@@ -87,7 +87,6 @@ PREF_DEFAULTS = {
     "show_guided": True,
     "pro_mode": False,
     "flow_editor": False,
-    "hud_default": True,
     "hud_corner": "BOTTOM_LEFT",
     "hud_offset_x": 70,
     "hud_offset_y": 40,
