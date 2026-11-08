@@ -177,6 +177,9 @@ def install(base: dict, src_labels: np.ndarray, out: dict, saved=None) -> None:
     view.refresh_list()
     _g().state["res"] = out
     _g().state["draw_key"] = None
+    from . import history
+
+    history.refresh(bpy.context)  # the step on screen keeps the result with its parts, so Ctrl+Z comes back to this mesh
     overlay.tag_redraw()
 
 
@@ -987,6 +990,31 @@ def halve(segment: int) -> str:
     return split(segment, side, side[mapping])
 
 
+def rename_part(piece: int, name: str) -> bool:
+    """Give a part a name of its own. False (nothing changed) for an empty name."""
+    if not name.strip():
+        return False
+    view.seg["parts"][piece]["name"] = name.strip()
+    save()
+    return True
+
+
+def claim_result_faces(faces) -> str:
+    """Faces of the result on screen (by number) become one new part, with the faces of your mesh beside them: what
+    painting them does. Returns a problem, or ''."""
+    from mathutils.kdtree import KDTree
+
+    src_centres, res_centres = _centres()
+    res_mask = np.zeros(len(res_centres), dtype=bool)
+    res_mask[np.asarray(list(faces), dtype=np.int64)] = True
+    tree = KDTree(len(res_centres))
+    for i, c in enumerate(res_centres.tolist()):
+        tree.insert(c, i)
+    tree.balance()
+    owner = np.fromiter((tree.find(c)[1] for c in src_centres.tolist()), dtype=np.int64, count=len(src_centres))
+    return claim(res_mask[owner], res_mask)
+
+
 def set_locked(pieces, on: bool) -> None:
     for p in pieces:
         view.seg["parts"][p]["locked"] = on
@@ -1120,9 +1148,7 @@ class CURIOMESH_OT_seg_rename(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
-        if self.name.strip():
-            view.seg["parts"][next(iter(view.seg["sel"]))]["name"] = self.name.strip()
-            save()
+        rename_part(next(iter(view.seg["sel"])), self.name)
         return {"FINISHED"}
 
 
@@ -1395,28 +1421,36 @@ class CURIOMESH_OT_seg_goal(bpy.types.Operator):
 
     def execute(self, context):
         gs = context.scene.curiomesh_guided
-        todo = []
-        changed = False
-        detail = round(gs.seg_goal_detail, 3)
-        for p in sorted(view.seg["sel"]):
-            record = view.seg["parts"][p]
-            wanted = {"goal": gs.seg_goal, "goal_detail": gs.seg_goal_detail, "choice": gs.seg_method}
-            changed |= any(record.get(k) != v for k, v in wanted.items())
-            record.update(wanted)
-            tried = next((i for i, t in enumerate(record["tries"]) if t["method"] == gs.seg_goal and t.get("detail") == detail and t.get("choice") == _choice_of(gs.seg_goal, gs.seg_method)), None)
-            if tried is None:
-                todo.append(p)
-            elif record["cur"] != tried:
-                view.use_try(context, p, tried)
-        if changed:  # only a real change is written on your object
-            save()
-        # A whole loose piece at the search's own size can keep what the search measured and only change method.
-        keeps_size = abs(gs.seg_goal_detail - 0.5) < 1e-3 and gs.seg_goal == "REDUCE" and all(view.seg["parts"][p].get("whole") for p in todo)
-        if todo and keeps_size and gs.seg_method != "AUTO":
-            view.start_redo(context, todo, gs.seg_method)
-        elif todo:
-            start_goal(context, todo)
+        redo_parts(context, sorted(view.seg["sel"]), gs.seg_goal, gs.seg_goal_detail, gs.seg_method)
         return {"FINISHED"}
+
+
+def redo_parts(context, pieces, goal: str, goal_detail: float, method: str) -> tuple[list, list]:
+    """Redo for a Use, Detail and Method (what the Redo button does, also for an agent). A part that already has a try
+    made this way just switches to it. Returns (parts switched to a try now, parts a background redo was started for)."""
+    todo, switched = [], []
+    changed = False
+    detail = round(goal_detail, 3)
+    for p in pieces:
+        record = view.seg["parts"][p]
+        wanted = {"goal": goal, "goal_detail": goal_detail, "choice": method}
+        changed |= any(record.get(k) != v for k, v in wanted.items())
+        record.update(wanted)
+        tried = next((i for i, t in enumerate(record["tries"]) if t["method"] == goal and t.get("detail") == detail and t.get("choice") == _choice_of(goal, method)), None)
+        if tried is None:
+            todo.append(p)
+        elif record["cur"] != tried:
+            view.use_try(context, p, tried)
+            switched.append(p)
+    if changed:  # only a real change is written on your object
+        save()
+    # A whole loose piece at the search's own size can keep what the search measured and only change method.
+    keeps_size = abs(goal_detail - 0.5) < 1e-3 and goal == "REDUCE" and all(view.seg["parts"][p].get("whole") for p in todo)
+    if todo and keeps_size and method != "AUTO":
+        view.start_redo(context, todo, method)
+    elif todo:
+        start_goal(context, todo)
+    return switched, todo
 
 
 def _choice_of(goal: str, method: str):

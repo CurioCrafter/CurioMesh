@@ -30,7 +30,7 @@ from .profiles import METHOD_ITEMS
 
 METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
 ORIGINAL = "ORIGINAL"  # a try that is your own faces, untouched
-METHOD_NAMES.update(ORIGINAL="Original", KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
+METHOD_NAMES.update(ORIGINAL="Original", KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision", OUTSIDE="From Outside")
 KIND_ITEMS = [(k, P.KIND_WORDS[k], "") for k in P.KINDS]
 MAX_TRIES = 0  # results kept per part; 0 keeps every one, so nothing you made is thrown away
 LIST_ROWS = 300  # parts shown in the worst-first list
@@ -176,6 +176,11 @@ def ensure() -> None:
     """Make the table for the result on screen, when it is a new one."""
     base = _g().state["auto_base"]
     if base is None:
+        if seg["parts"]:
+            reset()
+            refresh_list()
+        return
+    if base["job"] is None:  # an imported result has no job to make the table from: no parts, nothing to redo
         if seg["parts"]:
             reset()
             refresh_list()

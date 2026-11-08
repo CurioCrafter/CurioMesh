@@ -61,7 +61,7 @@ What is good (from the README's examples, Game Asset at Detail 6):
 
 ## 6. Retry when it is not good
 
-Change one thing per retry, at most three retries, and keep the best result:
+Change one thing per retry and keep the best result. Keep retrying while the numbers improve; stop when a retry gains nothing:
 - `view_changed_pct` too high (shape lost, thin parts gone): lower Detail (6 to 3, then 1.5). Faces go up.
 - Too many faces for the user: raise Detail (6 to 10), or switch to `LOW_POLY`, or use `--reduce-to`.
 - Defect kinds in `issues.totals` (inward, folded, crossing, sunk): run the `curiomesh-fix-bad-faces` skill on the output. If one whole part is bad, rerun with `--keep-original-bad`.

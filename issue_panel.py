@@ -185,15 +185,7 @@ class CURIOMESH_OT_issue_redo(_SpotPartOp, tidytools.PartSwap, bpy.types.Operato
         return f"Shows {segments.name_of(p)} ({segments.seg['parts'][p]['after']:,} faces now) remade with smaller quads, which usually clears folded or crossing faces. Enter keeps it; the old version stays in its tries"
 
     def plan(self, context) -> dict:
-        from . import ladder, segments
-
-        p = self._part()
-        if p is None:
-            return {"name": "Redo This Spot", "tries": {}, "todo": [], "sizes": {}, "why": "This spot is not on a part that can be redone"}
-        ui["cur"] = self.index
-        segments.select([p])
-        wanted, todo, why = ladder.size_plan([p], bigger=False)
-        return {"name": "Redo This Spot", "tries": {q: i for q, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "why": why[0] if why else ""}
+        return redo_plan(self._part(), self.index)
 
     def keep(self, context, plan: dict) -> bool:
         from . import ladder
@@ -221,13 +213,7 @@ class CURIOMESH_OT_issue_keep_original(_SpotPartOp, tidytools.PartSwap, bpy.type
         return f"Shows your own faces back on {segments.name_of(p)}, about {segments.original_cost([p]):,} more faces, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it"
 
     def plan(self, context) -> dict:
-        from . import segments
-
-        p = self._part()
-        tries = segments.original_tries([p]) if p is not None else {}
-        if p is not None:
-            ui["cur"] = self.index
-        return {"name": "Keep Original Here", "tries": tries, "todo": [], "why": "" if tries else "This part could not be put back"}
+        return original_plan(self._part(), self.index)
 
     def keep(self, context, plan: dict) -> bool:
         from . import segments
@@ -258,17 +244,7 @@ class CURIOMESH_OT_issue_put_back(tidytools.PartSwap, bpy.types.Operator):
         return segments.ready() and _g().progress_info() is None and bool(original_parts())
 
     def plan(self, context) -> dict:
-        from . import segments
-
-        wanted = {}
-        for p in original_parts() if self.part < 0 else [self.part]:
-            if not 0 <= p < len(segments.seg["parts"]):
-                continue
-            tries = segments.seg["parts"][p]["tries"]
-            index = next((i for i in range(len(tries) - 1, -1, -1) if tries[i]["method"] != segments.ORIGINAL), None)
-            if index is not None:
-                wanted[p] = index
-        return {"name": "Put Reduced Back", "tries": wanted, "todo": [], "why": "" if wanted else "These parts have no reduced faces to go back to"}
+        return put_back_plan(self.part)
 
     def keep(self, context, plan: dict) -> bool:
         from . import segments
@@ -281,6 +257,61 @@ def _record(context) -> dict:
     rec = dict(res["issues"])
     rec["meta"] = dict(rec.get("meta", {}), source=_g().state["source"], blend=os.path.basename(bpy.data.filepath))
     return rec
+
+
+def redo_plan(p, index: int) -> dict:
+    """The plan of Redo This Spot for part `p` (None: the spot is on no part that can be redone). Nothing changes yet,
+    except that a ready size is kept in the part's tries."""
+    from . import ladder, segments
+
+    if p is None:
+        return {"name": "Redo This Spot", "tries": {}, "todo": [], "sizes": {}, "why": "This spot is not on a part that can be redone"}
+    ui["cur"] = index
+    segments.select([p])
+    wanted, todo, why = ladder.size_plan([p], bigger=False)
+    return {"name": "Redo This Spot", "tries": {q: i for q, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "why": why[0] if why else ""}
+
+
+def original_plan(p, index: int) -> dict:
+    """The plan of Keep Original Here for part `p` (None: no part)."""
+    from . import segments
+
+    tries = segments.original_tries([p]) if p is not None else {}
+    if p is not None:
+        ui["cur"] = index
+    return {"name": "Keep Original Here", "tries": tries, "todo": [], "why": "" if tries else "This part could not be put back"}
+
+
+def put_back_plan(part: int = -1) -> dict:
+    """The plan of Put Reduced Back for one part, or -1 for every part showing your own faces."""
+    from . import segments
+
+    wanted = {}
+    for p in original_parts() if part < 0 else [part]:
+        if not 0 <= p < len(segments.seg["parts"]):
+            continue
+        tries = segments.seg["parts"][p]["tries"]
+        index = next((i for i in range(len(tries) - 1, -1, -1) if tries[i]["method"] != segments.ORIGINAL), None)
+        if index is not None:
+            wanted[p] = index
+    return {"name": "Put Reduced Back", "tries": wanted, "todo": [], "why": "" if wanted else "These parts have no reduced faces to go back to"}
+
+
+def save_report(path: str) -> dict:
+    """Write the issue record to `path` (what Save Issue Report does). Raises OSError."""
+    rec = _record(bpy.context)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh, indent=1)
+    return rec
+
+
+def compare_report(path: str) -> dict:
+    """Compare the result's spots with the report at `path` and keep the answer for the panel (what Compare does).
+    Raises OSError, or ValueError and friends for a file that is not one of our reports."""
+    with open(path, encoding="utf-8") as fh:
+        old = json.load(fh)
+    ui["diff"] = issues.compare(old, _record(bpy.context))
+    return ui["diff"]
 
 
 class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
@@ -300,8 +331,7 @@ class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         try:
-            with open(self.filepath, "w", encoding="utf-8") as fh:
-                json.dump(_record(context), fh, indent=1)
+            save_report(self.filepath)
         except OSError as exc:
             self.report({"ERROR"}, f"Could not save the issue report: {exc}")
             return {"CANCELLED"}
@@ -318,9 +348,7 @@ class CURIOMESH_OT_issue_compare(_IssueOp, bpy.types.Operator, ImportHelper):
 
     def execute(self, context):
         try:
-            with open(self.filepath, encoding="utf-8") as fh:
-                old = json.load(fh)
-            ui["diff"] = issues.compare(old, _record(context))
+            compare_report(self.filepath)
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:  # not a report, or not one of ours
             self.report({"ERROR"}, f"Could not read that report: {exc}")
             return {"CANCELLED"}
