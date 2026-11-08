@@ -483,7 +483,7 @@ def _src_normal(sP, sip, sfl, faces) -> np.ndarray:
 
 class RegionTrees:
     """Closest-point lookups over the source polygons of one side region at a time, built when first asked (the
-    native face tree over that region's polygons; `tree_of(points, FlatFaces)`). `eps` is the UV Check's owner-ball
+    fast face tree over that region's polygons; `tree_of(points, FlatFaces)`). `eps` is the UV Check's owner-ball
     reach (SPEC 9.1) for this source."""
 
     def __init__(self, src_points, src_indptr, src_flat, src_region, tree_of):
@@ -574,7 +574,7 @@ def side_reread_steps(look: dict, sides, src_points, src_indptr, src_flat, src_r
     against `sides` (from `ball_sides_steps` or `face_sides`): every corner and the reference from the nearest point of
     that side. The lookup votes with the face centre, which on a face cut along a side switch, or on a coarse face
     beside a crease, can lie nearest the other side; the corners then read the wrong side's texture. `tree_of(points,
-    FlatFaces) -> tree with .nearest` builds a lookup over some source polygons (the native face tree); `trees` (a
+    FlatFaces) -> tree with .nearest` builds a lookup over some source polygons (the fast face tree); `trees` (a
     RegionTrees) reuses the lookups already built. With `src_uv` (the active layer, per source corner) a face is left as
     the lookup read it when its new reads would wind two ways (a crease where the side's texture turns over): the fold
     fix and the halving judge those. Fills out["reread"] (faces changed). Our own rule."""
