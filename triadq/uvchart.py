@@ -11,6 +11,12 @@ forced line or another trace (motorcycle graphs: Eppstein, Goodrich, Kim, Tamsto
 (greedy pair merges after Garland, Willmott, Heckbert 2001; grid unions measured exactly from the glued grid) and
 `level(x)`, which applies every recorded merge whose stretch fits and skips the others.
 
+Compact charts (R4): the queue ranks a union by its irregularity, outline^2 / (4 pi area), the outline weighted by
+what a cut there costs (its length, less on a fold, more where it is seen): the shape term of hierarchical face
+clustering (Garland, Willmott, Heckbert 2001) and the compactness terms of chart growing (D-Charts: Julius, Kraevoy,
+Sheffer 2005; Cohen-Steiner, Alliez, Desbrun 2004), as a merge order. A union more irregular than `SHAPE_MAX` (plain
+lengths) and than both its parts is refused (ours).
+
 A union is refused when its layout would lie over itself (a flip-free disk layout is one-to-one exactly when its
 border does not cross itself: Floater 2003, "One-to-one piecewise linear mappings over triangulations"). The merge
 tree runs in rounds of rising stretch (`round_caps`), like the kernel.
@@ -27,6 +33,7 @@ faster tree, with the same `level(x)` and `numbers()`.
 from __future__ import annotations
 
 import heapq
+import math
 import time
 
 import numpy as np
@@ -42,7 +49,9 @@ ROUND_LOWEST = 0.01
 BAND_RINGS = 2
 PX_PER_DIAGONAL = 1024.0
 GRID_SLACK = 0.01
-SAME_STRETCH = 1e-9
+FOLD_DISCOUNT = 0.9
+SEEN_WEIGHT = 4.0
+SHAPE_MAX = 4.0
 NUMBERS_LEN = 21
 
 NUMBER_COLUMNS = ("patches", "irregular", "turning", "traces", "euler_cut_patches", "euler_cut_edges", "not_disk_patches", "segments",
@@ -409,19 +418,73 @@ def _lies_over(local, uv: np.ndarray, before: np.ndarray) -> bool:
     return _sides_cross(now[open_], now[nxt][open_], np.stack([a[open_], b[open_]], 1))
 
 
-def _key(added: float, cost: float) -> tuple:
+def _key(added: float, cost: float, irregular: float) -> tuple:
+    """Rank of a merge (R4): most compact union first, then cost removed; a union that cannot be measured last."""
+
     if not np.isfinite(added):
         return (2, 0.0, -cost)
-    if added <= SAME_STRETCH:
-        return (0, 0.0 if abs(added) <= SAME_STRETCH else added, -cost)
-    return (1, -(cost / added), 0.0)
+    return (0, irregular, -cost)
+
+
+def _outline_w(length_px: float, seen_px: float, cos: float, out_of_sight: bool) -> float:
+    return length_px * (1.0 - FOLD_DISCOUNT * (1.0 - max(cos, 0.0))) + (SEEN_WEIGHT * seen_px if out_of_sight else 0.0)
+
+
+def _irregularity(outline: float, area: float) -> float:
+    """outline^2 / (4 pi area); a disk is 1."""
+
+    return outline * outline / (4.0 * math.pi * area) if area > 0.0 else float("inf")
+
+
+def _newell(points, t: Topo, f: int) -> list:
+    n = [0.0, 0.0, 0.0]
+    for h in t.face_corners(f):
+        p, q = points[t.flat[h]], points[t.flat[t.next(h)]]
+        n[0] += (p[1] - q[1]) * (p[2] + q[2])
+        n[1] += (p[2] - q[2]) * (p[0] + q[0])
+        n[2] += (p[0] - q[0]) * (p[1] + q[1])
+    return n
+
+
+def _face_area(points, t: Topo, f: int) -> float:
+    n = _newell(points, t, f)
+    return 0.5 * math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+
+
+def _fold_cos(points, t: Topo) -> list:
+    """Per edge: cosine of the angle between its two faces' normals (1 on a border edge)."""
+
+    normals = []
+    for f in range(t.nf):
+        n = _newell(points, t, f)
+        ln = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+        normals.append([n[0] / ln, n[1] / ln, n[2] / ln] if ln > 0.0 else [0.0, 0.0, 0.0])
+    out = []
+    for e in range(t.ne):
+        h0, h1 = t.euse[e]
+        if h1 < 0:
+            out.append(1.0)
+            continue
+        a, b = normals[t.cface[h0]], normals[t.cface[h1]]
+        out.append(a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
+    return out
+
+
+def _total(values) -> float:
+    """Plain left-to-right sum (as the kernel; `sum()` of floats compensates)."""
+
+    acc = 0.0
+    for x in values:
+        acc += x
+    return acc
 
 
 class Segment:
-    __slots__ = ("edges", "p", "q", "cost", "seen")
+    __slots__ = ("edges", "p", "q", "cost", "seen", "weight", "length")
 
-    def __init__(self, edges, p, q, cost, seen):
+    def __init__(self, edges, p, q, cost, seen, weight=0.0, length=0.0):
         self.edges, self.p, self.q, self.cost, self.seen = edges, p, q, cost, seen
+        self.weight, self.length = weight, length
 
 
 class ChartTree:
@@ -572,6 +635,9 @@ class Charts:
         seen = np.maximum(self.seen_edge_px, 0.0) if self.seen_edge_px is not None else length_px.copy()
         cost = seen + length_px / L if self.out_of_sight else length_px.copy()
         cost_l, seen_l = cost.tolist(), seen.tolist()
+        fold = _fold_cos(points.tolist(), t)
+        length_l = length_px.tolist()
+        outline_l = [_outline_w(length_l[e], seen_l[e], fold[e], self.out_of_sight) for e in range(ne)]
         # Forced lines.
         forced_line = [False] * ne
         if self.forced is not None:
@@ -719,10 +785,12 @@ class Charts:
                         v, e = t.other(x, v), x
                     else:
                         break
-            segments.append(Segment(lst, pr[0], pr[1], sum(cost_l[x] for x in lst), sum(seen_l[x] for x in lst)))
+            segments.append(Segment(lst, pr[0], pr[1], sum(cost_l[x] for x in lst), sum(seen_l[x] for x in lst),
+                                    _total(outline_l[x] for x in lst), _total(length_l[x] for x in lst)))
         num[7] = len(segments)
         yield 0.22
         tree.topo, tree.points, tree.cost, tree.seen = t, points, cost, seen
+        tree.outline, tree.length_px = outline_l, length_l
         tree.irregular, tree.turning, tree.sep, tree.fixed, tree.cut_base = irregular, turning, sep, fixed, cut_base
         tree.patch, tree.n_patches, tree.patch_chi, tree.segments, tree.build_stretch = patch, n_patches, patch_chi, segments, self.build_stretch
         self.tree = tree
@@ -778,7 +846,18 @@ class Charts:
         stretch, grid = [float("inf")] * np_, [False] * np_
         chi, ver = list(tree.patch_chi), [0] * np_
         glued_seg = [False] * len(tree.segments)
-        last: dict = {}
+        ppu = float(tree._numbers[19])
+        ppu2 = ppu * ppu
+        pts_l = tree.points.tolist()
+        area, weight, length = [0.0] * np_, [0.0] * np_, [0.0] * np_
+        for p in range(np_):
+            for f in members[p]:
+                area[p] += _face_area(pts_l, t, f) * ppu2
+                for h in t.face_corners(f):
+                    e = t.cedge[h]
+                    if tree.cut_base[e]:
+                        weight[p] += tree.outline[e]
+                        length[p] += tree.length_px[e]
         for p in range(np_):
             local = _Local(t, tree.points, members[p], dsu.find)
             g, uv = yield from self._patch_layout(tree, local)
@@ -844,6 +923,16 @@ class Charts:
                     total += max(ln[0], ln[1])
             return (diff / total if total > 0 and np.isfinite(diff) else float("inf")), c
 
+        def shape(a, b, lst):
+            """Irregularity of the union by outline weight; by plain length, and the larger of its parts'."""
+
+            ar = area[a] + area[b]
+            w = _total(tree.segments[s].weight for s in lst)
+            ln = _total(tree.segments[s].length for s in lst)
+            by_weight = _irregularity(max(weight[a] + weight[b] - 2.0 * w, 0.0), ar)
+            plain = _irregularity(max(length[a] + length[b] - 2.0 * ln, 0.0), ar)
+            return by_weight, plain, max(_irregularity(length[a], area[a]), _irregularity(length[b], area[b]))
+
         heap: list = []
         seq = [0]
         refused: dict = {}  # pairs whose union lay over itself: (smaller chart, its version then)
@@ -862,10 +951,8 @@ class Charts:
                 ref = refused.get((a, b))
                 if ref is not None and ver[ref[0]] == ref[1]:
                     continue
-                key = last.get((a, b))
-                if key is None:
-                    mis, c = estimate(lst)
-                    key = _key(mis, c)
+                mis, c = estimate(lst)
+                key = _key(mis, c, shape(a, b, lst)[0])
                 seq[0] += 1
                 st = last_st.get((a, b))
                 if st is not None and st > 1.0 + cap[0]:
@@ -940,9 +1027,9 @@ class Charts:
                     if ev is None:
                         continue
                 added = ev["stretch"] - max(stretch[a], stretch[b])
+                irr, plain, parts = shape(a, b, ev["glued"])
                 if not exact:
-                    k2 = _key(added, ev["cost"])
-                    last[(a, b)] = k2
+                    k2 = _key(added, ev["cost"], irr)
                     seq[0] += 1
                     heapq.heappush(heap, (k2, a, b, seq[0], va, vb, True))
                     cached = ((a, b, va, vb), ev)
@@ -955,12 +1042,20 @@ class Charts:
                     cached = ((a, b, va, vb), ev)
                     parked.append(((key, a, b, _, va, vb, True), ev["stretch"]))
                     continue
+                if plain > SHAPE_MAX and plain > parts:
+                    # Too irregular: not tried again until the smaller chart changes (as a union that lies over).
+                    small = a if len(faces[a]) <= len(faces[b]) else b
+                    refused[(a, b)] = (small, ver[small])
+                    continue
                 if _lies_over(ev["local"], ev["uv"], ev["before"]):
                     lay_over += 1
                     # Not tried again until the smaller chart changes (as the kernel).
                     small = a if len(faces[a]) <= len(faces[b]) else b
                     refused[(a, b)] = (small, ver[small])
                     continue
+                ar = area[a] + area[b]
+                wt = max(weight[a] + weight[b] - 2.0 * _total(tree.segments[s].weight for s in ev["glued"]), 0.0)
+                ln = max(length[a] + length[b] - 2.0 * _total(tree.segments[s].length for s in ev["glued"]), 0.0)
                 for s in ev["glued"]:
                     _glue(t, dsu, tree.segments[s].edges)
                     glued_seg[s] = True
@@ -977,6 +1072,7 @@ class Charts:
                 segs[r] = [s for s in segs[r] + segs[o] if not glued_seg[s]]
                 segs[o] = []
                 stretch[r], grid[r], chi[r] = ev["stretch"], not ev["pole"], 1
+                area[r], weight[r], length[r] = ar, wt, ln
                 ver[a] += 1
                 ver[b] += 1
                 top = max(top, ev["stretch"])

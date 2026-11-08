@@ -113,6 +113,16 @@ class Twin(unittest.TestCase):
         self.assertEqual(uvchart.round_caps(1.0)[0], 0.0125)
         self.assertEqual(uvchart.round_caps(1.0)[-1], 1.0)
 
+    def test_folds_weigh_less_and_compact_unions_rank_first(self):
+        # R4: a cut along a 90 deg fold weighs (1 - FOLD_DISCOUNT) of its length; the queue takes the most compact union first.
+        tree = uvchart.build(*cube(3), use_fast=False, merge=False)
+        for sg in tree.segments:
+            self.assertAlmostEqual(sg.weight, (1.0 - uvchart.FOLD_DISCOUNT) * sg.length, places=9)
+        square, strip = uvchart._irregularity(4.0, 1.0), uvchart._irregularity(26.0, 12.0)  # a 12:1 strip
+        self.assertAlmostEqual(square, 4.0 / np.pi)
+        self.assertLess(uvchart._key(0.1, 1.0, square), uvchart._key(0.0, 5.0, strip))
+        self.assertGreater(strip, uvchart.SHAPE_MAX)
+
     def test_slices_stay_short(self):
         stage = uvchart.Charts(*cube(4), use_fast=False)
         longest = 0.0
