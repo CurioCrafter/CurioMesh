@@ -26,6 +26,23 @@ model, a sculpt or a photogrammetry scan, and want to fix single parts instead o
 
 <p align="center"><img src="docs/trailer/trailer.webp" alt="CurioMesh trailer: Clean Rows retopology of a bust and a scan, the three layout styles, a game asset with a baked normal map lit in Godot, and export to Unreal, Unity, Godot and Roblox" width="800"></p>
 
+## Which CurioMesh?
+
+There are three builds. They share the same ideas, but not the same features.
+
+| | **GitHub add-on** (this page) | **Blender Extensions build** | **Standalone** |
+|---|---|---|---|
+| Where to get it | [GitHub Releases](https://github.com/CurioCrafter/CurioMesh/releases/latest) only | extensions.blender.org | [Standalone releases](https://github.com/CurioCrafter/CurioMesh/releases?q=standalone) on GitHub |
+| Blender needed | ✓ 3.6 to 5.2 | ✓ 4.2 and newer | ✗ |
+| Native speed core (Rust) | ✓ | ✗ Python only | ✓ same reducer as the add-on |
+| Background helpers and threads | ✓ | ✗ no threads; optional background Blenders, off by default | not needed |
+| Agent tools | ✓ new in 0.9.9 | ✗ | ✗ command line only (`curiomesh batch`, `curiomesh measure`) |
+| History and Tidy Tools | ✓ new in 0.9.9 | ✗ not in 0.9.8 | ✗ (Redo this spot and Put back only) |
+| Parts exchange | ✓ new in 0.9.9 | ✗ | ✗ |
+| Released | ✓ 0.9.8 is out; 0.9.9 is not | each version goes through the site's review | ✓ 0.4.1 |
+
+The GitHub add-on is the fastest build inside Blender and has every feature. The Blender Extensions build follows that site's rules, so it is the most limited. Standalone has no Blender in the loop, so it can be faster; that is not measured yet. It has fewer tools.
+
 ## Contents
 
 | | |
@@ -34,7 +51,7 @@ model, a sculpt or a photogrammetry scan, and want to fix single parts instead o
 | **The panel, in order** | [Adjust](#adjust) · [Fix](#fix) · [Finish](#finish) |
 | **Going further** | [Hard Surface](#hard-surface) · [Shape the flow](#shape-the-flow) · [Parts](#parts) · [Blockout and Hulls](#blockout-and-hulls) · [Pro tab and classic tools](#pro-tab-and-classic-tools) |
 | **Trust and speed** | [How it checks results](#how-it-checks-results) · [Results](#results) · [Big scans and small PCs](#big-scans-and-small-pcs) |
-| **Around the add-on** | [Agent skills](#agent-skills) · [FAQ](#faq) · [Known limits](#known-limits) · [Contributing](#contributing) · [Credits](#credits) · [License](#license) |
+| **Around the add-on** | [Which CurioMesh?](#which-curiomesh) · [Agent skills](#agent-skills) · [FAQ](#faq) · [Known limits](#known-limits) · [Contributing](#contributing) · [Credits](#credits) · [License](#license) |
 
 **Honest limits up front:** quads can look slanted on smooth surfaces, fine ornaments go jagged at high reduction, it does not find edge
 loops for faces and joints on its own, and big scans take minutes, sometimes tens of minutes. See [Known limits](#known-limits).
@@ -546,6 +563,32 @@ scripts, so keep the five folders together. You still need CurioMesh installed i
 
 Then ask, for example: *"Retopologise `crate.fbx` for a game with CurioMesh, about 3,000 faces, and fix any bad faces."*
 
+### Starter prompt
+
+Copy this into your agent, fill in the three lines at the top, and it works through every tool on your model:
+
+```text
+Use the curiomesh-agent skill to retopologise a model with CurioMesh.
+
+Model: <path to the file, or the object's name in my open Blender>
+What it is for: <game asset / film / 3D print / scan clean-up / ...>
+What I care about: <e.g. about 5,000 faces, keep the face and hands detailed, clean loops round the eyes>
+
+1. Connect (my open Blender if I gave an object name, otherwise a headless one), then run session.info and
+   commands.list so you know every command.
+2. Pick the Use that fits, read settings.list, set what my notes ask for, and run auto.start. Wait for it with
+   job.status.
+3. Read result.numbers and result.report. Note the History step.
+4. Improve it with the tools, one at a time: Auto Fix, Tidy Up, Face Loops, the issue fixes. After each, read the
+   numbers again. Keep it if it is better and run it again while it keeps improving; if it is worse, history.jump
+   back to the step you noted.
+5. If a few parts are still bad, mark them with parts.worst or issues.list and build better topology for them
+   with the parts exchange (parts.export, then parts.import). You can mark several at once.
+6. Stop when nothing improves. Tell me the before and after numbers, what you kept, and what is still not
+   good. Export only if I asked for it.
+Never change objects I did not name. Ask before raising Most Detail Loss.
+```
+
 Agent tools (one command for everything a person can do, plus sending bad parts out and bringing better ones back) are in the GitHub add-on only: see [docs/AGENTS.md](docs/AGENTS.md) and [docs/PARTS_EXCHANGE.md](docs/PARTS_EXCHANGE.md).
 
 The scripts also work by hand: `blender -b --factory-startup --python skills/curiomesh-retopo/scripts/curiomesh_run.py -- model.obj --use GAME --detail 6 --out model_low.glb --report report.json`.
@@ -661,6 +704,22 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Install](#install) for which versions 
 [Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
 ## Contributing
+
+### Help make it better
+
+Found a spot CurioMesh got wrong, or made a better version of it yourself? Send it in. It becomes a test case, and the owner works on it in later versions.
+
+1. In the panel, mark the bad parts and press **Save for a Report** (agents: `parts.report`). CurioMesh writes one zip next to your .blend, or where you choose. The zip holds the part files, a `report.md` (CurioMesh, Blender and OS versions, the Use and changed settings, the part numbers, the issue list for those parts and your note) and `settings.json`.
+2. Open a [Bad spot or fixed part](https://github.com/CurioCrafter/CurioMesh/issues/new?template=bad-spot.yml) issue and drag the zip into it.
+3. Fixed it yourself, or had your AI do it through the [parts exchange](docs/PARTS_EXCHANGE.md) (**Send to Agent**, then **Bring Back**)? Say so in the form and tell us how. A better part is as welcome as a bad one. Code is welcome too, as a pull request.
+
+CurioMesh never uploads anything. You attach the zip yourself.
+
+**Privacy:** the zip holds pieces of your mesh. Send only meshes you have the right to share, and look inside the zip before you attach it. The form asks you to agree that what you send may be used as a CurioMesh test case under [CC0](https://creativecommons.org/publicdomain/zero/1.0/).
+
+More about sending changes is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Other ways to help
 
 - **Questions and help:** [Q&A](https://github.com/CurioCrafter/CurioMesh/discussions/categories/q-a)
 - **Show your retopology:** [Show and tell](https://github.com/CurioCrafter/CurioMesh/discussions/categories/show-and-tell). Before and after screenshots and the settings you used help everyone.
