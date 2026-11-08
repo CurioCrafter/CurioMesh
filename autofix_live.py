@@ -474,6 +474,20 @@ def _same_size(rep: dict) -> bool:
     return not (ladder.active() and ladder.lad["shown"] != rep["shown"])
 
 
+def draw_working(box) -> None:
+    """Three fixed rows in the panel's status box: title, progress, Stop. Replaces the old block that pushed the sliders down."""
+    job = fx["job"]
+    long = len(job.status) > 30
+    box.label(text=job.status[:36] if long else "Auto Fix is working", icon="TIME")
+    pct = min(max(float(job.fraction), 0.0), 1.0)
+    if hasattr(box, "progress"):
+        box.progress(factor=pct, type="BAR", text=f"{pct * 100:.0f}%" if long else job.status)
+    else:
+        filled = int(round(pct * 20))
+        box.label(text=f"[{'#' * filled}{'-' * (20 - filled)}] {pct * 100:.0f}%")
+    box.operator("curiomesh.autofix_stop", text="Stop (keeps what it fixed)", icon="CANCEL")
+
+
 def draw_readout(layout, context) -> None:
     """Under the verdict: the progress box with Stop while Auto Fix works, then what it did."""
     guided = _g()
@@ -481,15 +495,9 @@ def draw_readout(layout, context) -> None:
     if rep is None or guided.state["auto_base"] is None or rep["base_id"] != guided.state["auto_base"]["id"]:
         return
     pg = context.scene.curiomesh_autofix
-    box = layout.box()
-    if job is not None and job.busy:
-        box.label(text="Auto Fix is working", icon="TIME")
-        guided.draw_progress(box, job.fraction, job.status)
-        box.operator("curiomesh.autofix_stop", icon="CANCEL")
-        sub = box.row()
-        sub.active = False
-        sub.label(text="Stop keeps what it fixed so far.")
+    if job is not None and job.busy:  # progress and Stop are in the status box at the foot of the main panel (draw_working)
         return
+    box = layout.box()
     if not _same_size(rep):
         overlay.wrap_label(box, "Auto Fix ran on the size before.", icon="INFO", width=WIDTH, limit=2)
         box.operator("curiomesh.autofix_run_here", icon="PLAY")

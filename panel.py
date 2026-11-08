@@ -175,12 +175,30 @@ def draw_dashboard_button(layout, context) -> None:
     helpmod.help_button(row, "dashboard")
 
 
-def draw_review_button(layout, scale: float = 1.3) -> None:
-    """Fix Bad Spots: walk the bad spots worst first, mark parts in the 3D view, redo them."""
+def _slot(layout, text: str, rows: int, icon: str = "NONE", width: int = WIDTH) -> None:
+    """A message in exactly `rows` label rows (blank rows when there is nothing to say), so what sits below never moves."""
+    import textwrap
+
+    lines = textwrap.wrap(str(text), width=width) if text else []
+    if len(lines) > rows:
+        lines = lines[:rows]
+        lines[-1] = lines[-1][: width - 3] + "..."
+    for i in range(rows):
+        shown = i < len(lines)
+        layout.label(text=lines[i] if shown else "", icon=icon if i == 0 and shown else "BLANK1")
+
+
+def draw_review_button(layout, scale: float = 1.5, count: int | None = None) -> None:
+    """Fix Bad Spots: walk the bad spots worst first, mark parts in the 3D view, redo them.
+    With a count it is the main action: big, red while there are bad spots, and in the same place (greyed out) when there are none."""
     row = layout.row()
     row.scale_y = scale
     reviewing = bool(segments.seg.get("reviewing")) and segments.seg.get("review_mode") == "SPOTS"
-    row.operator("curiomesh.seg_review", text="Stop (Esc)" if reviewing else "Fix Bad Spots", icon="VIEWZOOM", depress=reviewing).mode = "SPOTS"
+    text = "Stop (Esc)" if reviewing else (f"Fix Bad Spots ({count})" if count else "Fix Bad Spots")
+    if count is not None and not reviewing:
+        row.alert = count > 0
+        row.enabled = count > 0
+    row.operator("curiomesh.seg_review", text=text, icon="VIEWZOOM", depress=reviewing).mode = "SPOTS"
 
 
 def draw_empty(layout, context) -> None:
@@ -321,37 +339,56 @@ def draw_verdict(layout, gs) -> None:
     col.active = False
     fewer = 100.0 * (1.0 - after / max(report["before"], 1))
     later = " (before fixes)" if gs.bool_on and len(gs.bool_shapes) else ""
-    col.label(text=f"{after:,} faces ({fewer:.0f}% fewer), looks {max(0.0, 100.0 - report['loss']):.0f}% the same{later}")
+    stats = [(f"{after:,} faces ({fewer:.0f}% fewer), looks {max(0.0, 100.0 - report['loss']):.0f}% the same{later}", "NONE")]
     if report.get("topology") is not None:
-        col.label(text=f"Tidiness {report['topology']:.0f}: {V.tidiness_words(report['topology'])}")
+        stats.append((f"Tidiness {report['topology']:.0f}: {V.tidiness_words(report['topology'])}", "NONE"))
     if report.get("shading") is not None and not _compact():
-        col.label(text=f"Shading {max(0.0, 100.0 - report['shading']):.0f}% the same")
+        stats.append((f"Shading {max(0.0, 100.0 - report['shading']):.0f}% the same", "NONE"))
     if report.get("asked") and asked is None:
-        col.label(text=f"You asked for about {report['asked']:,}")
+        stats.append((f"You asked for about {report['asked']:,}", "NONE"))
         short = G.short_of_target(report["asked"], after)
         if short:
-            overlay.wrap_label(col, short, icon="ERROR", width=WIDTH, limit=3)
+            import textwrap
+
+            stats += [(line, "ERROR" if i == 0 else "BLANK1") for i, line in enumerate(textwrap.wrap(short, width=WIDTH)[:3])]
     follows = report.get("guides")
     if follows:
-        col.label(text=f"Guides: {follows['strokes']} strokes, nearest edge {100.0 * follows['mean']:.2f}% of the size away")
+        stats.append((f"Guides: {follows['strokes']} strokes, nearest edge {100.0 * follows['mean']:.2f}% of the size away", "NONE"))
     bend = report.get("bend")
     if bend:
-        col.label(text=f"Joint lines: {bend['found']} of {bend['loops']} loops found, gap {100.0 * bend['gap']:.0f}% of asked")
+        stats.append((f"Joint lines: {bend['found']} of {bend['loops']} loops found, gap {100.0 * bend['gap']:.0f}% of asked", "NONE"))
+    for text, icon in stats + [("", "NONE")] * (3 - len(stats)):  # at least three rows, so the spots box below stays put
+        col.label(text=text, icon=icon)
+    box2 = layout.box()  # always drawn: the same rows with or without bad spots
+    line = box2.row()
     if bad:
-        box2 = layout.box()
-        line = box2.row()
         line.alert = level == "BAD"
         line.label(text=f"{len(bad)} spot{'s' if len(bad) != 1 else ''} with bad faces", **icons.kw("view_bad", "ERROR"))
-        draw_review_button(box2, 1.0)
-    elif not _compact():
-        sub = layout.row()
-        sub.active = False
-        sub.label(text="Next: try the sliders below, then Apply", icon="FORWARD")
+    else:
+        line.active = False
+        line.label(text="No bad spots", **icons.kw("status_good", "CHECKMARK"))
+    draw_review_button(box2, 1.5, len(bad))
+    sub = box2.row()
+    sub.active = False
+    sub.label(text="Mark parts to fix, or try the sliders below" if bad else "Next: try the sliders below, then Apply", icon="FORWARD")
 
 
 def draw_status(layout, gs, searching, done) -> None:
     message = G.status()
-    if message and not searching and not (done and message == G.state["auto_base"]["summary"]):  # while searching the bar already says it
+    show = bool(message) and not searching and not (done and message == G.state["auto_base"]["summary"])  # while searching the bar already says it
+    if done:  # a result is shown: this box is always drawn at the same height, so the Adjust sliders below never jump
+        import textwrap
+
+        box = layout.box()
+        if autofix_live.busy():
+            autofix_live.draw_working(box)
+            return
+        problem = show and G._is_problem(message)
+        box.alert = problem
+        text = " | ".join(message.split(" | ")[:2]) if show else ""
+        _slot(box, text, max(3, min(8, len(textwrap.wrap(text, width=32)))) if problem else 3, "ERROR" if problem else "INFO", 32)
+        return
+    if show:
         box = layout.box()
         box.alert = G._is_problem(message)
         for i, chunk in enumerate(message.split(" | ")[:2]):
@@ -602,17 +639,19 @@ def part_edits() -> int:
 
 def draw_adjust(layout, gs) -> None:
     _help(layout, "adjust")
-    if autofix_live.busy():  # the sliders would swap the result under the fixes
-        layout.label(text="Auto Fix is working. Stop keeps what it fixed so far.", icon="INFO")
-        layout = layout.column()
-        layout.enabled = False
-    elif tidylive.busy():  # the sliders would change the result under the open preview
-        layout.label(text="Finish or cancel the open tool first.", icon="INFO")
-        layout = layout.column()
-        layout.enabled = False
     edits = part_edits() if segments.ready() else 0
-    if edits and ladder.active():
-        overlay.wrap_label(layout, f"Quad Size and Rows replace your {edits} part edit{'s' if edits != 1 else ''}", icon="ERROR", width=WIDTH, limit=2)
+    if autofix_live.busy():  # the sliders would swap the result under the fixes
+        note, icon = "Auto Fix is working. Wait or press Stop.", "INFO"
+    elif tidylive.busy():  # the sliders would change the result under the open preview
+        note, icon = "Finish or cancel the open tool.", "INFO"
+    elif edits and ladder.active():
+        note, icon = f"Sliders replace your {edits} part edit{'s' if edits != 1 else ''}", "ERROR"
+    else:
+        note, icon = "", "NONE"
+    _slot(layout, note, 1, icon)  # always one row: the sliders under it do not move when a note comes and goes
+    if autofix_live.busy() or tidylive.busy():
+        layout = layout.column()
+        layout.enabled = False
     if ladder.active():
         col = layout.column(align=True)
         row = col.row()
@@ -629,9 +668,7 @@ def draw_adjust(layout, gs) -> None:
             row.label(text=ladder.STYLE_WORDS.get(a[0], a[0]) if not moved else f"{len(moved)} pieces {ladder.STYLE_WORDS.get(b[0], b[0])}")
         col.prop(gs, "quad_order", text="", slider=True)
         _ends(col, "fewest faces", "even rows")
-        note = ladder.status()
-        if note:
-            overlay.wrap_label(layout, note, icon="TIME", width=WIDTH, limit=2)
+        _slot(layout, ladder.status(), 2, "TIME")
     col = layout.column(align=True)
     col.label(text="Tidy Up", **icons.kw("tidy", "MESH_GRID"))
     col.prop(gs, "organize", text="", slider=True)
@@ -642,14 +679,10 @@ def draw_adjust(layout, gs) -> None:
         grid.prop(gs, prop, toggle=True)
     col.prop(gs, "tidy_selected", toggle=True, icon="RESTRICT_SELECT_OFF")
     if organize.active():
-        text = organize.meter_text(gs)
-        if text:
-            sub = layout.column(align=True)
-            sub.active = False
-            overlay.wrap_label(sub, text, width=WIDTH, limit=3)
-        note = organize.status()
-        if note:
-            overlay.wrap_label(layout, note, icon="TIME", width=WIDTH, limit=2)
+        sub = layout.column(align=True)
+        sub.active = False
+        _slot(sub, organize.meter_text(gs), 3)
+        _slot(layout, organize.status(), 2, "TIME")
     faceloops.draw(layout, gs)
     draw_view_strip(layout, gs)
     layout.popover(panel="CURIOMESH_PT_pop_finetune", text="Fine-tune...", icon="PREFERENCES")
@@ -761,7 +794,7 @@ def draw_fix(layout, context, gs) -> None:
         layout.label(text="Parts appear when the search is done", icon="INFO")
         return
     _help(layout, "fix")
-    draw_review_button(layout)
+    draw_review_button(layout, 1.5, len(issue_panel.spots()))
     draw_spots_line(layout)
     layout.label(text="Parts", **icons.kw("view_parts", "MOD_EXPLODE"))
     row = layout.row()
