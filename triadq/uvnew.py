@@ -9,7 +9,9 @@ sight or hidden parts get fewer pixels); 2. patches and the merge tree (`uvchart
 and their flat layouts (quad ARAP, Straight rows; the faster `uvs` callable when the adapter installed one, else the
 NumPy twin chart by chart); 4. per chart: Hidden-parts scale, box by rotating calipers (Toussaint 1983) or the rows
 axis for On charts; 5. pages: MaxRects boxes at the largest scale that fits (`uvpack.FillPage`, Jylanki 2010), whole
-texels (Carr, Hoberock, Crane, Hart 2006) and the gap of SPEC 8.2; 6. corner UVs written back in mesh order.
+texels (Carr, Hoberock, Crane, Hart 2006) and the gap of SPEC 8.2; 5b. with the compiled packer, the outline packing (`_nest`: the page as a
+grid of gap blocks, every chart owning what it touches plus a ring) replaces the box layout when it fits more; it never reads a clock, so
+the same mesh and settings give the same layout, and `keep_going()` tries more orders on it; 6. corner UVs written back in mesh order.
 
 Nothing here calls compiled code: the faster callables come in through the cores' `FAST` tables (`uv_fast.install()`),
 which is also how `uvsight` gets its pictures. `again()` reruns from the stage that a changed setting touches and keeps
@@ -18,6 +20,7 @@ the pictures and the merge tree, so a Stretch allowed or Gap change costs the la
 
 from __future__ import annotations
 
+import copy
 from math import log2
 import time
 
@@ -35,20 +38,24 @@ SELF_CHECK_FACES = 1  # every chart is checked for lying over itself (a fold of 
 CHECK_BATCH = 24  # charts checked in one call
 STRETCH_CHUNK = 8000  # triangles measured per slice in the stretch check
 CELLS_PER_TRI = 8  # grid cells per triangle (on average) in the overlap test's spatial hash
-CHECK_PAIRS = 400  # triangle pairs tested in one go (a slice)
+CHECK_PAIRS = 200  # triangle pairs tested in one go (a slice)
 WRITE_CHUNK = 20000  # corners written per slice
 LADDER_AHEAD = 3  # lower Stretch allowed levels the compiled kernel lays out at the same time when charts must be redone
 QUICK_FACES = 6000  # a mesh with this many faces or more gets a first layout before the repairs (Settings.quick_first)
 TRI_CHUNK = 4000  # triangles turned into grid entries per slice
-STRIPE_ENTRIES = 6000  # grid entries sorted together (a stripe)
+FACE_CHUNK = 6000  # faces whose triangles are built and measured in one slice
+STRIPE_ENTRIES = 4000  # grid entries sorted together (a stripe)
 _H1, _H2, _H3 = np.int64(73856093), np.int64(19349663), np.int64(83492791)  # hash of (chart, cell) (Teschner et al. 2003)
 OVERLAP_EPS = 1e-4  # triangles overlapping by less than this share of a median triangle's side count as touching
 REDO_FACES = 64  # charts this small are laid out again on their own when their layout stretches too much
 REDO_MEDIAN = 1.25  # ... or when more than half their area stretches more than this (L2 stretch)
 ATTACH_FACES = 16  # charts this small are hinged onto a neighbour when that overlaps nothing (a setting; 0 = never)
 ATTACH_TOL = 0.05  # border layouts that agree within this share of an edge are glued along the whole shared border
-BOX_LIKE = 0.85  # a chart covering this share of its box is packed as a box (on the block grid, half the gap of an outline)
-NEST_FILL = 0.85  # first guess of the outline packing: outlines and their gap ring cover this share of the page
+BOX_LIKE = 0.98  # a chart covering this share of its box is reserved as a box (cheaper rows); every other chart follows its outline
+PY_PACK_SECONDS_PER_BOX = 3e-5  # the Python packer's time for one box in one pack (turns Time per pass into a number of packs)
+PY_MIN_PACKS = 8  # the Python packer always runs at least this many packs
+NEST_START = 0.8  # first guess of the outline packing: the blocks the charts own (touched plus ring) cover this share of the page
+NEST_MAX_TRIES = 40  # a safety stop for the scale search (it ends at NEST_TOL long before)
 NEST_GROW = 1.05  # the outline scale grows by this factor while everything still fits
 NEST_TOL = 0.005  # the outline scale search ends when the bracket is this narrow
 ROWS_INDEX = {"off": 0, "soft": 1, "on": 2, "auto": 3}
@@ -78,10 +85,11 @@ class Settings:
         self.all_sides = True
         self.texture_px = TEXTURE_PX
         self.clean_px = CLEAN_DOWN_TO_PX
-        self.time_per_pass = 2.0  # seconds one search (Fill the page) may run before it shows what it has
+        self.time_per_pass = 2.0  # seconds' worth of search the pure-Python packer may do before it shows what it has (counted in packs, so the layout is the same every time); the compiled packer runs to the end
         self.density = None  # px per mesh unit; None = Fill the page
         self.quick_first = True  # big meshes: show a first layout before small charts are laid out again or joined to a neighbour, then the full one
         self.hidden_l = 0.0  # 0 = the cores' default L
+        self.nest_effort = 0  # Keep going level of the outline packing: each more tries one more placement order (see `NewUVs.keep_going`)
         for key, value in kw.items():
             if not hasattr(self, key):
                 raise TypeError(f"unknown New UVs setting {key!r}")
@@ -115,6 +123,7 @@ class Result:
         self.timing: dict = {}
         self.overlap_pct = None
         self.stretch_allowed = None
+        self.nest_effort = 0  # the Keep going level the outline packing ran at
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -144,6 +153,22 @@ def _drive(gen):
             next(gen)
     except StopIteration as done:
         return done.value
+
+
+def _stable_order(keys) -> np.ndarray:
+    """`np.argsort(keys, kind="stable")` for non-negative integer keys in linear time: an LSD radix sort over 16-bit digits (numpy sorts
+    16-bit integers by radix; a stable sort of 64-bit ones takes several milliseconds on a large mesh, which is a slice)."""
+
+    keys = np.asarray(keys)
+    if len(keys) < 4096 or int(keys.min()) < 0:
+        return np.argsort(keys, kind="stable")
+    top = int(keys.max())
+    order = np.argsort((keys & 0xFFFF).astype(np.uint16), kind="stable")
+    shift = 16
+    while top >> shift:
+        order = order[np.argsort(((keys[order] >> shift) & 0xFFFF).astype(np.uint16), kind="stable")]
+        shift += 16
+    return order
 
 
 def _next_corner(indptr, flat) -> np.ndarray:
@@ -341,6 +366,8 @@ class NewUVs:
         self.revision = 0  # counts the layouts put in `result`: the first one, the full one, the outline-packed one; a preview redraws when it changes
         self.first_ready = False  # True once `result` holds a complete layout (box packing); the outline packing may still improve it
         self._active = None  # the sliced core stage being polled
+        self._nest_state = None
+        self.gained = None  # Keep going run: did the scale grow
         self._keep = _keep or {}
         self._work = self._run()
 
@@ -410,6 +437,21 @@ class NewUVs:
     # -- stages -------------------------------------------------------------------------------------------------------
     def _run(self):
         s, pts, indptr, flat = self.settings, self.points, self.indptr, self.flat
+        parent = self._keep.get("nest_from")
+        if parent is not None:  # Keep going: the layout of the run before, packed again with more effort
+            res = copy.copy(parent.result)
+            res.timing, res.messages = dict(parent.result.timing), list(parent.result.messages)
+            self.sight, self.tree, self.result = parent.sight, parent.tree, res
+            self._nest_state = parent._nest_state
+            self.first_ready, self.revision = True, 1
+            before, t5 = res.scale, time.perf_counter()
+            yield from self._finish_nest(res, self._nest_state[0])
+            res.timing["keep_going_s"] = time.perf_counter() - t5
+            self.gained = res.scale > before * (1.0 + uvpack.MIN_GAIN)
+            self.revision += 1
+            self._tick("done", 1.0)
+            yield
+            return
         nf = len(indptr) - 1
         if nf == 0 or len(pts) == 0:
             raise ValueError("The mesh has no faces to unwrap.")
@@ -508,16 +550,29 @@ class NewUVs:
             yield
 
         # the outline packing improves the layout in the background of the preview
+        self._nest_state = (ctx, base_messages)
+        t5 = time.perf_counter()
+        yield from self._finish_nest(res, ctx)
+        res.timing["nest_s"] = time.perf_counter() - t5
+        res.timing["total_s"] = time.perf_counter() - t0
+        res.timing["pack_s"] = res.timing["total_s"] - res.timing["flatten_s"] - res.timing["charts_s"] - res.timing["seen_s"]
+        res.messages = list(self.messages) + base_messages
+        self.revision += 1
+        self._tick("done", 1.0)
+        yield
+
+    def _finish_nest(self, res, ctx):
+        """Generator: the outline packing of a layout, written into `res` (scale and corner UVs) when it beats what `res` holds."""
+
+        s = self.settings
         lu, lv, chart, nchart, width, height, area2, page, k, corner_chart = (ctx[key] for key in ("lu", "lv", "chart", "nchart", "width", "height", "area2", "page", "k", "corner_chart"))
         nest = None
         if s.density is None and not self._stop:
             self._tick("nest", 0.92)
-            t5 = time.perf_counter()
             nest = yield from self._nest(lu, lv, chart, nchart, width, height, area2, res.scale, page, k)
-            res.timing["nest_s"] = time.perf_counter() - t5
         if nest is not None:
             sc, ok, dx, dy, quarter = nest
-            out = np.empty_like(corner_uv)
+            out = np.empty_like(res.uv)
             for i in range(0, len(out), WRITE_CHUNK):
                 sl = slice(i, i + WRITE_CHUNK)
                 x, y = lu[sl] * sc, lv[sl] * sc
@@ -528,12 +583,25 @@ class NewUVs:
                 out[sl, 1] = (ty + dy[cc]) / page[1]
                 yield
             res.scale, res.uv = sc, out
-        res.timing["total_s"] = time.perf_counter() - t0
-        res.timing["pack_s"] = res.timing["total_s"] - res.timing["flatten_s"] - res.timing["charts_s"] - res.timing["seen_s"]
-        res.messages = list(self.messages) + base_messages
-        self.revision += 1
-        self._tick("done", 1.0)
-        yield
+        res.nest_effort = int(s.nest_effort)
+
+    def keep_going(self):
+        """Keep going for the layout: a run that continues the outline packing of this finished run with one more placement order
+        and a finer search (the charts, the pictures and everything before the packing are reused, so a pass takes the packing's
+        time only). Its result is never worse than this one's; `gained` says whether the scale grew. Call it on the new run
+        until `gained` is False or `exhausted` is True: that is when a pass gains nothing, and it stops by itself. None when
+        this run did not pack outlines (a fixed Pixel density, or no compiled packer)."""
+
+        if not self.done or self.error is not None or getattr(self, "_nest_state", None) is None or self.settings.density is not None:
+            return None
+        return NewUVs(self.points, self.indptr, self.flat, self.material, self.forced, self.settings.copy(nest_effort=self.settings.nest_effort + 1), self.budget,
+                      _keep={"sight": self.sight, "tree": self.tree, "nest_from": self})
+
+    @property
+    def exhausted(self) -> bool:
+        """True when Keep going has no more placement orders to try."""
+
+        return self.settings.nest_effort >= len(uvpack.ORDER_MODES) - 1
 
     def _layout(self, res, chart, corner_uv, chart_rows, area, seen_face, x_now):
         """Generator: the corner UVs of charts laid out in the plane, on the page as boxes (stages 4 to 6 of the pipeline).
@@ -556,10 +624,10 @@ class NewUVs:
         res.on_chart = on[chart]
         col = np.full(len(flat), -1, np.int64)
         row = np.full(len(flat), -1, np.int64)
-        order = np.argsort(corner_chart, kind="stable")
+        order = _stable_order(corner_chart)
         yield
         bounds = np.searchsorted(corner_chart[order], np.arange(nchart + 1))
-        face_order = np.argsort(chart, kind="stable")
+        face_order = _stable_order(chart)
         yield
         fbounds = np.searchsorted(chart[face_order], np.arange(nchart + 1))
         angle = np.zeros(nchart)
@@ -622,7 +690,9 @@ class NewUVs:
                 res.messages.append("Pixel density does not fit the page: the largest density that fits was used.")
         if fill is None:
             for gap_k in (k, -1):
-                stage = uvpack.FillPage(width.tolist(), height.tolist(), [True] * nchart, weight.tolist(), page, gap_k, budget=float(s.time_per_pass))
+                # the kernel runs to the end; the Python twin stops after a number of packs worked out from Time per pass: the same layout every time
+                packs = 0 if uvpack.FAST.get("fill_page") else max(PY_MIN_PACKS, int(float(s.time_per_pass) / (max(nchart, 1) * PY_PACK_SECONDS_PER_BOX)))
+                stage = uvpack.FillPage(width.tolist(), height.tolist(), [True] * nchart, weight.tolist(), page, gap_k, max_packs=packs)
                 yield from self._poll(stage)
                 fill = stage.result
                 if fill is not None:
@@ -669,6 +739,7 @@ class NewUVs:
         nf = len(indptr) - 1
         size = np.bincount(chart, minlength=len(rows))
         tri = _fan(indptr, np.arange(nf))
+        yield
         tface = np.repeat(np.arange(nf), np.maximum(np.diff(indptr) - 2, 0))
         yield
         q3 = self.points[flat[tri]]
@@ -676,7 +747,10 @@ class NewUVs:
         a3 = 0.5 * np.linalg.norm(np.cross(q3[:, 1] - q3[:, 0], q3[:, 2] - q3[:, 0]), axis=1)
         yield
         a2 = 0.5 * np.abs(_tri_area2(corner_uv[tri]))
-        ratio = np.bincount(chart[tface], weights=a2, minlength=len(rows)) / np.maximum(np.bincount(chart[tface], weights=a3, minlength=len(rows)), 1e-30)
+        yield
+        tch0 = chart[tface]
+        yield
+        ratio = np.bincount(tch0, weights=a2, minlength=len(rows)) / np.maximum(np.bincount(tch0, weights=a3, minlength=len(rows)), 1e-30)
         L = np.empty(len(tri))
         for i in range(0, len(tri), STRETCH_CHUNK):
             yield
@@ -698,7 +772,7 @@ class NewUVs:
         if not len(todo):
             return corner_uv, rows, 0
         corner_uv, rows = corner_uv.copy(), np.asarray(rows).copy()
-        order = np.argsort(chart, kind="stable")
+        order = _stable_order(chart)
         bounds = np.searchsorted(chart[order], np.arange(len(rows) + 1))
         fixed = 0
         for c in todo:
@@ -774,24 +848,31 @@ class NewUVs:
         same = flat[A] == flat[B]
         B0 = np.where(same, B, nxt[B])  # the other face's corner at A's start vertex
         B1 = np.where(same, nxt[B], B)  # ... at A's end vertex
+        yield
         length = np.linalg.norm(pts[flat[nxt[A]]] - pts[flat[A]], axis=1)
+        yield
         # both directions: small-side corners (a0, a1), other-side corners (b0, b1)
         sa0, sa1 = np.concatenate([A, B0]), np.concatenate([nxt[A], B1])
         sb0, sb1 = np.concatenate([B0, A]), np.concatenate([B1, nxt[A]])
+        yield
         slen = np.concatenate([length, length])
         sface, oface = owner[sa0], owner[sb0]
         yield
         half = len(A)  # the shared edges of a face: first those where it is the first corner's face, then the others (the order of one stable sort of `sface`)
-        by1 = np.argsort(sface[:half], kind="stable")
+        by1 = _stable_order(sface[:half])
         yield
-        by2 = np.argsort(sface[half:], kind="stable")
+        by2 = _stable_order(sface[half:])
         fstart1 = np.searchsorted(sface[:half][by1], np.arange(nf + 1))
         yield
         fstart2 = np.searchsorted(sface[half:][by2], np.arange(nf + 1))
-        face_order = np.argsort(chart, kind="stable")
+        face_order = _stable_order(chart)
         yield
         cbounds = np.searchsorted(chart[face_order], np.arange(len(rows) + 1))
-        csign = np.sign(np.bincount(chart, weights=_signed_areas(corner_uv, indptr, np.arange(nf)), minlength=len(rows)))
+        signed = np.empty(nf)
+        for i in range(0, nf, FACE_CHUNK):  # a few thousand faces at a time
+            signed[i : i + FACE_CHUNK] = _signed_areas(corner_uv, indptr, np.arange(i, min(nf, i + FACE_CHUNK)))
+            yield
+        csign = np.sign(np.bincount(chart, weights=signed, minlength=len(rows)))
         yield
         added = {}  # host -> face arrays joined to it so far
         moved = 0
@@ -849,11 +930,12 @@ class NewUVs:
         return renum.reshape(-1).astype(np.int64), corner_uv, np.asarray(rows)[used]
 
     def _nest(self, lu, lv, chart, nchart, width, height, area, s0, page, k):
-        """Charts packed by their outline instead of their box (SPEC 7.4 row intervals, `uvpack.pack_into`): small charts
-        sit in the free rows of big charts' boxes, so a larger scale often fits. The search starts where the outlines
-        with their gap ring would cover `NEST_FILL` of the page, grows by `NEST_GROW` while that fits, then halves the
-        bracket; it ends at `NEST_TOL` or after Time per pass (said so). The box layout stays when no outline layout beats
-        it. Returns (scale, ok, dx, dy, quarter turns per chart) or None."""
+        """Charts packed by their outline instead of their box (SPEC 7.4, `uvpack.pack_into`: the page as a grid of gap blocks,
+        every chart owning the blocks it touches plus a ring, so small charts sit in the bays of big ones). The scale search
+        is plain arithmetic on what the packer answers (no clock): a first guess from the blocks the charts should own
+        (`NEST_START` of the page), a growing step while everything fits, then bisection down to `NEST_TOL`; the same mesh
+        and settings give the same layout. The box layout stays when no outline layout beats it. More effort than this is
+        Keep going's (`Settings.nest_effort`). Returns (scale, ok, dx, dy, quarter turns per chart) or None."""
 
         fast = uvpack.FAST.get("pack_into")
         if fast is None or nchart == 0:
@@ -868,12 +950,12 @@ class NewUVs:
         tri = np.stack([base, base + 1 + j, base + 2 + j], 1)
         tri_chart = chart[fan_face].astype(np.int64)
         yield
-        boxy = (area >= BOX_LIKE * width * height).astype(np.uint8)  # fills its box: placed on the block grid, less gap
+        boxy = (area >= BOX_LIKE * width * height).astype(np.uint8)  # fills its box: reserved as a box
         turn_ok = np.ones(nchart, np.uint8)
         total = float(area.sum())
         if not total > 0:
             return None
-        # outline length per chart, for the first guess: area s^2 + ring (loose gap x outline) s = NEST_FILL x page
+        # open edge length per chart: the blocks a chart owns grow with it, for the first guess
         local = np.column_stack((lu, lv))
         nxt = np.arange(1, len(flat) + 1)
         nxt[indptr[1:] - 1] = indptr[:-1]
@@ -885,13 +967,19 @@ class NewUVs:
         yield
         edge_len = np.linalg.norm(local[nxt] - local, axis=1)
         outline = float((edge_len * open_).sum())
-        ring = 2 * uvpack.block(k) - 1 if k >= 0 else 0
-        b = ring * outline
-        guess = (-b + np.sqrt(b * b + 4.0 * total * NEST_FILL * page[0] * page[1])) / (2.0 * total)
-        lo, hi, s_try = float(s0), None, float(max(guess, s0 * (1.0 + NEST_TOL)))
-        best, start = None, time.perf_counter()
+        g = uvpack.block(k) if k >= 0 else 1
+        # owned texels ~ area s^2 + outline s (G / 2 + G for the blocks a border touches and the ring) + 4 G^2 per chart
+        b = outline * (1.5 * g if k >= 0 else 0.0)
+        c = (4.0 * g * g * nchart if k >= 0 else 0.0) - NEST_START * page[0] * page[1]
+        guess = (-b + np.sqrt(b * b - 4.0 * total * c)) / (2.0 * total)
+        effort = int(self.settings.nest_effort)
+        tol = NEST_TOL / (1 << effort)  # Keep going searches finer
+        k_call = k + uvpack.EFFORT_STEP * effort
+        lo, hi = float(s0), None
+        s_try = float(s0 * (1.0 + tol) if effort else max(guess, s0 * (1.0 + tol)))  # Keep going starts just above what is already packed
+        best = None
         yield
-        while True:
+        for attempt in range(NEST_MAX_TRIES):
             x, y = lu * s_try, lv * s_try
             yield
             tris = np.empty((len(tri), 6))
@@ -899,7 +987,7 @@ class NewUVs:
                 tris[:, m] = src[tri[:, col]]
             yield
             tris = tris.ravel()
-            job = fast(np.zeros(0), tris, tri_chart, nchart, boxy, turn_ok, page[0], page[1], k)
+            job = fast(np.zeros(0), tris, tri_chart, nchart, boxy, turn_ok, page[0], page[1], k_call)
             if job is None:
                 return best
             self._active = job
@@ -916,13 +1004,9 @@ class NewUVs:
             else:
                 hi = s_try
             s_try = lo * NEST_GROW if hi is None else float(np.sqrt(lo * hi))
-            if hi is not None and hi <= lo * (1.0 + NEST_TOL):
+            if hi is not None and hi <= lo * (1.0 + tol):
                 break
             if self._stop:
-                break
-            if time.perf_counter() - start > float(self.settings.time_per_pass):
-                self.messages.append(f"Outline packing stopped after {self.settings.time_per_pass:g} s with the layout still improving. "
-                                     "Keep going continues, or raise Time per pass.")
                 break
         return best
 
@@ -940,9 +1024,13 @@ class NewUVs:
         local = local.reshape(-1)
         yield
         nt = np.maximum(np.diff(self.indptr)[faces] - 2, 0)
-        tri = _fan(self.indptr, faces)
+        parts = []
+        for i in range(0, len(faces), FACE_CHUNK):  # the triangles' corners a few thousand faces at a time
+            parts.append(corner_uv[_fan(self.indptr, faces[i : i + FACE_CHUNK])])
+            yield
+        t, tchart = np.concatenate(parts), np.repeat(local, nt)
         yield
-        flags = yield from overlapping_charts(corner_uv[tri], np.repeat(local, nt), len(ids))
+        flags = yield from overlapping_charts(t, tchart, len(ids))
         return ids[flags]
 
     def _split_overlapping(self, tree, chart, corner_uv, rows, x):
@@ -960,7 +1048,7 @@ class NewUVs:
         next_id = nchart
 
         def grouped(labels, count):
-            order = np.argsort(labels, kind="stable")
+            order = _stable_order(labels)
             return order, np.searchsorted(labels[order], np.arange(count + 1))
 
         ladder, jobs, started = [], {}, set()  # the lower levels in order; the compiled kernel lays out a few of them at the same time
@@ -1425,9 +1513,10 @@ def overlapping_charts(t: np.ndarray, tchart: np.ndarray, nchart: int, chunk: in
                 queued += len(a)
             if queued >= chunk:
                 yield from flush()
-            if d % 8 == 0:
+            if d % 2 == 0:
                 yield False
         yield from flush()
+        yield False
     return flags
 
 
