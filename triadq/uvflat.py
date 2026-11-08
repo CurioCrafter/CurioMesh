@@ -35,6 +35,9 @@ STRETCH_QUANTILE = 0.99
 FACTOR_MAX_BYTES = 2.0e9
 ND_LEAF = 64
 STATS_LEN = 17
+# Twin only: systems with at most this many unpinned unknowns are solved directly (dense, like the kernel's direct
+# factor) instead of by CG; a merge band has ~20. Well under a millisecond per solve at this size.
+DIRECT_MAX = 128
 
 ROWS = {"off": 0, "soft": 1, "on": 2, "auto": 3}
 STARTS = {"given": 0, "pull": 1, "free": 2}
@@ -370,6 +373,10 @@ class _System:
         self.v = np.concatenate([vals[keep], np.ones(int(pinned.sum()))])
         self.m, self.pinned = m, pinned
         self.diag = np.bincount(self.r[self.r == self.c], weights=self.v[self.r == self.c], minlength=m)
+        self.dense = None
+        if m - int(pinned.sum()) <= DIRECT_MAX:
+            self.dense = np.zeros((m, m))
+            np.add.at(self.dense, (self.r, self.c), self.v)
 
     def mul(self, x: np.ndarray) -> np.ndarray:
         return np.bincount(self.r, weights=self.v * x[self.c], minlength=self.m)
@@ -386,8 +393,12 @@ class _System:
         """Jacobi-preconditioned CG from `x` (changed in place), a generator yielding after every iteration. Same stop
         rule as the kernel: the moves still to come (this step's largest move times rho/(1-rho), rho the residual's mean
         shrink per iteration over `RATE_WINDOW` iterations) shift no unknown by more than `tol` (twice in a row), or the
-        residual stalls (counted in info["stalled"]). No iteration cap."""
+        residual stalls (counted in info["stalled"]). No iteration cap. A small system (`DIRECT_MAX`) is solved
+        directly instead, without yielding."""
 
+        if self.dense is not None:
+            x[:] = np.linalg.solve(self.dense, b)
+            return
         r = b - self.mul(x)
         z = r / self.diag
         p = z.copy()
@@ -654,8 +665,12 @@ class Flatten:
             m01 = np.bincount(el.elem, weights=el.w * du[:, 0] * el.e[:, 1], minlength=nel)
             m10 = np.bincount(el.elem, weights=el.w * du[:, 1] * el.e[:, 0], minlength=nel)
             m11 = np.bincount(el.elem, weights=el.w * du[:, 1] * el.e[:, 1], minlength=nel)
-            th = np.arctan2(m10 - m01, m00 + m11)
-            c, s = np.cos(th)[el.elem], np.sin(th)[el.elem]
+            # cos and sin of the rotation straight from its vector (the kernel's form); zero gives the identity.
+            rx, ry = m00 + m11, m10 - m01
+            h = np.sqrt(rx * rx + ry * ry)
+            zero_h = h == 0.0
+            h = np.where(zero_h, 1.0, h)
+            c, s = np.where(zero_h, 1.0, rx / h)[el.elem], np.where(zero_h, 0.0, ry / h)[el.elem]
             re = np.stack([c * el.e[:, 0] - s * el.e[:, 1], s * el.e[:, 0] + c * el.e[:, 1]], 1)
             energy = float((el.w * ((du - re) ** 2).sum(1)).sum())
             converged = steps >= self.steps if self.steps > 0 else (steps > 0 and abs(last - energy) <= ARAP_CHANGE * max(last, 1e-300))
