@@ -562,14 +562,50 @@ def size_plan(pieces, bigger: bool) -> tuple[dict, list, list[str]]:
     return wanted, todo, why
 
 
+def build_sizes(context, todo: list, bigger: bool, name: str = ""):
+    """Look First for a size that is not worked out yet: build the redo as tries in the background and change nothing
+    on screen. Returns the job (watch `busy`, then `finish_build`), or None when it could not start."""
+    seg = segments.seg
+    saved = {p: seg["parts"][p]["goal_detail"] for p in todo}
+    for p in todo:
+        record = seg["parts"][p]
+        record["goal_detail"] += -GOAL_STEP if bigger else GOAL_STEP
+    if not segments.segment_goals.start_goal(context, todo, name or "Redo", hold=True):
+        for p in todo:
+            seg["parts"][p]["goal_detail"] = saved[p]
+        return None
+    runner = _g().state["work"]["runner"]
+    runner.direction = -1 if bigger else 1
+    runner.saved_detail = saved
+    return runner
+
+
+def finish_build(runner) -> dict:
+    """The redo of `build_sizes` is over (or stopped): the parts keep their old numbers and the tries it made are
+    returned as {part: (try index, None)}, which `apply_sizes` keeps."""
+    seg = segments.seg
+    for p, detail in runner.saved_detail.items():
+        seg["parts"][p]["goal_detail"] = detail
+    if runner._stopped:
+        return {}
+    if not runner.committed:
+        segments.commit(runner)
+    return {p: (i, None) for p, i in runner.held.items()}
+
+
 def apply_sizes(context, wanted: dict, todo: list, bigger: bool, name: str = "") -> int:
     """Make a `size_plan`: one Ctrl+Z step for the swapped parts, and one when the background redo finishes."""
     seg, changed = segments.seg, 0
     name = name or ("Bigger Quads" if bigger else "Smaller Quads")
     if wanted:
         rungs = {p: seg["parts"][p].get("rung") for p in wanted}
-        for p, (_index, rung) in wanted.items():
-            seg["parts"][p]["rung"] = rung
+        for p, (index, rung) in wanted.items():
+            if rung is None:  # a try built for Look First: its size becomes the part's size
+                seg["parts"][p]["goal_detail"] = seg["parts"][p]["tries"][index]["detail"]
+            else:
+                seg["parts"][p]["rung"] = rung
+        if any(rung is None for _i, rung in wanted.values()):
+            segments.segment_goals.save()
         if segments.use_tries(context, {p: index for p, (index, _rung) in wanted.items()}, name):
             changed += len(wanted)
         else:
@@ -607,7 +643,7 @@ class CURIOMESH_OT_part_size(tidytools.PartSwap, bpy.types.Operator):
     def plan(self, context) -> dict:
         wanted, todo, why = size_plan(sorted(segments.seg["sel"]), self.bigger)
         name = "Bigger Quads" if self.bigger else "Smaller Quads"
-        return {"name": name, "tries": {p: i for p, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "why": why[0] if why else ""}
+        return {"name": name, "tries": {p: i for p, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "bigger": bool(self.bigger), "why": why[0] if why else ""}
 
     def keep(self, context, plan: dict) -> bool:
         return apply_sizes(context, plan["sizes"], plan["todo"], self.bigger, plan["name"]) > 0

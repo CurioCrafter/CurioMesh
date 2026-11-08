@@ -1170,6 +1170,14 @@ class LiveTool:
         return {}
 
     def invoke(self, context, event):
+        refused = self._open(context, event)
+        if refused is not None:
+            return refused
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _open(self, context, event):
+        """Open the preview. Returns None when it is open (the caller makes the operator modal), else the result to give back."""
         area, region = _view(context)
         if region is None:
             self.report({"WARNING"}, "Open a 3D view first: the preview is drawn there.")
@@ -1193,9 +1201,8 @@ class LiveTool:
         self._timer = context.window_manager.event_timer_add(1.0 / 60.0, window=context.window)
         words = HINT_PICK if s.trial.picks else HINT if s.handle else HINT_NONE
         area.header_text_set(words.format(name=s.trial.name, handle=s.handle, ask=s.trial.asks.get(s.trial.picks[0], "click on the result") if s.trial.picks else ""))
-        context.window_manager.modal_handler_add(self)
         overlay.tag_redraw()
-        return {"RUNNING_MODAL"}
+        return None
 
     def _finish(self, context) -> None:
         s = self._s

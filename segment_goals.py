@@ -775,6 +775,11 @@ class GoalJob(view.PartJob):
                 "build": (made[0], made[1], np.asarray([int(m) if str(m).lstrip("-").isdigit() else 0 for m in made[2]], dtype=np.int32)),
             }
         self.progress = (len(self.pieces), len(self.pieces))
+        if self.hold:  # Look First draws the new faces itself and the check follows when they are kept
+            if self.note and not self.warnings:
+                self.warnings = [self.note]
+            self.fraction = 1.0
+            return
         self.stage = "Looking at the whole object"
         self.fraction = 0.85
         if self.new_tries:
@@ -789,15 +794,18 @@ class GoalJob(view.PartJob):
         self.fraction = 1.0
 
 
-def start_goal(context, pieces, name: str = "Redo Part") -> bool:
+def start_goal(context, pieces, name: str = "Redo Part", hold: bool = False) -> bool:
+    """hold: only make the tries (Look First shows them before they are kept); the result and Ctrl+Z are untouched."""
     from . import history
 
     guided = _g()
     if guided.state["auto_base"] is None or not pieces:
         return False
-    history.before(context)  # the result before the redo is the step Ctrl+Z goes back to
+    if not hold:
+        history.before(context)  # the result before the redo is the step Ctrl+Z goes back to
     guided.stop_work()
     runner = GoalJob(context, pieces)
+    runner.hold = hold
     runner.step_name = name  # the History entry when it finishes
     guided.state["work"] = {"key": guided.state["auto_base"].get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     guided.state["message"] = runner.status()

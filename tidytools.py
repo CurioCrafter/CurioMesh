@@ -223,20 +223,91 @@ class PartSwap(tidylive.LiveTool):
         return "PART"
 
     def invoke(self, context, event):
-        from . import segments
-
         plan = self.plan(context)
         if plan["why"] and not plan["tries"] and not plan["todo"]:
             self.report({"WARNING"}, plan["why"])
             return {"CANCELLED"}
-        made = segments.preview_tries(plan["tries"]) if not plan["todo"] else None
-        if made is None or tidylive._view(context)[1] is None:
-            return self.execute(context)  # a redo in the background: nothing to show before it is done
+        self._building = None
+        if tidylive._view(context)[1] is None:
+            return self.execute(context)  # no 3D view to draw the preview in
+        if plan["todo"]:  # sizes not worked out yet: build them as tries first (nothing changes), then show them
+            return self._build(context, plan)
+        return self._show(context, event, plan, modal=False)
+
+    def _build(self, context, plan):
+        from . import ladder
+
+        runner = ladder.build_sizes(context, plan["todo"], bool(plan.get("bigger")), plan["name"])
+        if runner is None:
+            return self.execute(context)
+        self._building, self._plan = runner, plan
+        self._wait = context.window_manager.event_timer_add(0.1, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, f"{plan['name']}: building the new faces. The preview opens when they are ready; Esc cancels")
+        return {"RUNNING_MODAL"}
+
+    def _stop_waiting(self, context) -> None:
+        if getattr(self, "_wait", None) is not None:
+            context.window_manager.event_timer_remove(self._wait)
+            self._wait = None
+
+    def modal(self, context, event):
+        runner = getattr(self, "_building", None)
+        if runner is None:
+            return super().modal(context, event)
+        if event.type == "ESC" and event.value == "PRESS":
+            return self._abandon(context)
+        if event.type != "TIMER" or runner.busy:
+            return {"PASS_THROUGH"}
+        from . import ladder
+
+        self._building = None
+        self._stop_waiting(context)
+        built = ladder.finish_build(runner)
+        plan = dict(self._plan)
+        if not built:
+            self.report({"WARNING"}, (runner.warnings[0] if runner.warnings else "") or f"{plan['name']}: nothing changed")
+            return {"CANCELLED"}
+        plan.update(todo=[], tries={**plan["tries"], **{p: i for p, (i, _r) in built.items()}}, sizes={**plan.get("sizes", {}), **built})
+        if runner.warnings:
+            self.report({"WARNING"}, runner.warnings[0])
+        shown = self._show(context, event, plan, modal=True)
+        return {"RUNNING_MODAL"} if shown is None else shown
+
+    def _abandon(self, context):
+        from . import ladder
+
+        runner, self._building = self._building, None
+        self._stop_waiting(context)
+        _guided().stop_work()
+        ladder.finish_build(runner)  # the parts get their old numbers back; the result was never touched
+        self.report({"INFO"}, f"{self._plan['name']}: cancelled, nothing changed")
+        return {"CANCELLED"}
+
+    def cancel(self, context):
+        if getattr(self, "_building", None) is not None:
+            self._abandon(context)
+        else:
+            super().cancel(context)
+
+    def _show(self, context, event, plan, modal: bool):
+        """Open the preview of `plan` (its tries all exist). modal: already running as a modal, so only open it. Returns
+        None when open and modal, else the result to give back."""
+        from . import segments
+
+        made = segments.preview_tries(plan["tries"])
+        if made is None:
+            if modal:
+                self.report({"WARNING"}, f"{plan['name']}: nothing to show")
+                return {"CANCELLED"}
+            return self.execute(context)
         self._plan = plan
         segments.select(sorted(plan["tries"]))
         old = np.asarray(segments.seg["piece"]).copy()
         self.trial = type("SwapNow", (T.SwapParts,), {"name": plan["name"], "swap": (made[0], made[1], made[3], old, tuple(plan["tries"]))})
-        return super().invoke(context, event)
+        if not modal:
+            return super().invoke(context, event)
+        return self._open(context, event)
 
     def _keep(self, context):
         s = self._s

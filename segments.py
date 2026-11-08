@@ -299,6 +299,8 @@ class PartJob:
         self.report = None
         self.committed = False
         self.new_tries: dict[int, dict] = {}
+        self.hold = False  # Look First: keep what it makes as tries only; the result on screen stays as it is
+        self.held: dict[int, int] = {}  # part -> index of the try it made, once held
         self.started = time.perf_counter()
         self._stopped = False
         self._search = self._run()
@@ -434,6 +436,21 @@ class PartJob:
         self.fraction = 1.0
 
 
+def _remember_try(record: dict, new: dict) -> int:
+    """Put a made result into the part's tries (replacing one made the same way). Returns its index."""
+    same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"] and t.get("detail") == new.get("detail")), None)
+    if same is None:
+        record["tries"].append(new)
+        same = len(record["tries"]) - 1
+    else:
+        record["tries"][same] = new
+    if MAX_TRIES and len(record["tries"]) > MAX_TRIES:
+        drop = next(i for i in range(len(record["tries"])) if i != same)
+        record["tries"].pop(drop)
+        same -= drop < same
+    return same
+
+
 def commit(runner: PartJob) -> None:
     """A part job finished: the new result becomes the one Apply writes, and the tries are remembered."""
     guided = _g()
@@ -443,25 +460,21 @@ def commit(runner: PartJob) -> None:
         guided.state["message"] = runner.status()
         return
     runner.committed = True
-    if base is None or base is not runner.base or runner.report is None:
+    if base is None or base is not runner.base or (runner.report is None and not getattr(runner, "hold", False)):
         guided.state["message"] = runner.status()
         return
     for p, new in runner.new_tries.items():
         record = seg["parts"][p]
-        same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"] and t.get("detail") == new.get("detail")), None)
-        if same is None:
-            record["tries"].append(new)
-            same = len(record["tries"]) - 1
-        else:
-            record["tries"][same] = new
-        if MAX_TRIES and len(record["tries"]) > MAX_TRIES:
-            drop = next(i for i in range(len(record["tries"])) if i != same)
-            record["tries"].pop(drop)
-            same -= drop < same
+        same = _remember_try(record, new)
+        if getattr(runner, "hold", False):  # Look First shows this try before it is kept: nothing else changes
+            runner.held[p] = same
+            continue
         record.update(cur=same, method=new["method"], after=new["after"], change=new["change"], topology=new.get("topology"))
         methods = getattr(runner.job, "methods", None)
         if methods is not None and record.get("whole"):
             methods[record.get("loose", p)] = new["method"]
+    if getattr(runner, "hold", False):
+        return
     base["out"] = dict(runner.output)
     base["report"] = runner.report
     base["id"] = time.perf_counter_ns()
