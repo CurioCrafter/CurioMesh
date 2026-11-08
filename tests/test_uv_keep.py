@@ -112,10 +112,19 @@ class Reconcile(unittest.TestCase):
         uvkeep._reconcile(seams, 1.0, 0.0, 10.0, rep)
         self.assertEqual(list(seams["class"]), [uvseams.SOFT])
 
+    def test_kinds_split_only_at_hard_chains(self):
+        # islands 0 | 1 | 2 in a row (Hard, Hard) and a loose island 3: 0 and 2 share a kind, so does 3 (no border to it)
+        seams = fake_seams([uvseams.HARD, uvseams.HARD], 4, [(0, 1), (1, 2)])
+        k = uvkeep._kinds(seams)
+        self.assertNotEqual(k[0], k[1])
+        self.assertNotEqual(k[1], k[2])
+        self.assertEqual(k[0], k[2])
+        self.assertEqual(k[3], k[0])
+
     def test_too_many_kinds_reports_instead_of_dropping(self):
         sa = two_island_source()
         nf = len(sa.indptr) - 1
-        seams = fake_seams([uvseams.HARD, uvseams.HARD], 3, [(0, 1), (1, 2)])
+        seams = fake_seams([uvseams.HARD, uvseams.HARD, uvseams.HARD], 3, [(0, 1), (1, 2), (0, 2)])  # three kinds: each meets both others
         seams["island"] = np.zeros(nf, np.int64)
         seams["island"][nf // 3:2 * nf // 3], seams["island"][2 * nf // 3:] = 1, 2
         real, old = uvkeep.chart_codes, uvkeep._triaged

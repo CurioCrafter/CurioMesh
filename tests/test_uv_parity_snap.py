@@ -268,6 +268,47 @@ class Twin(unittest.TestCase):
             xs = pts[cut["flat"][cut["indptr"][f]:cut["indptr"][f + 1]], 0]
             self.assertTrue(np.all(xs <= 4.0 + 1e-3) or np.all(xs >= 4.0 - 1e-3), f)
 
+    def test_side_switches_cut_both_sides_of_a_thin_strip(self):
+        # source: 16 x 1 strip of faces over x in [0, 8], side 1 only at x in [2, 2.5]; result faces 4 wide hold the
+        # strip inside, so each long edge holds two switches (one bisection per edge would find one)
+        sp, si, sf = grid(16, 1, 8.0, 1.0)
+        suv = sp[sf][:, :2] / 8.0
+        region = np.zeros(16, np.int64)
+        region[4] = 1
+        suv[si[4]:si[5]] += 0.25  # the strip's own island: a gap in UV at both its borders
+
+        def nearest(Q):
+            Q = np.asarray(Q, float).reshape(-1, 3)
+            return Q.copy(), np.clip(np.floor(Q[:, 0] / 0.5), 0, 15).astype(np.int64), np.zeros(len(Q))
+
+        seams = dict(weld=np.arange(len(sp)), n_welded=len(sp), run_indptr=np.zeros(1, np.int64), run_vertex=np.zeros(0, np.int64),
+                     uv_a=np.zeros(0), uv_b=np.zeros(0), **{"class": np.zeros(0, np.uint8)}, gap_px=np.zeros(0), region=region)
+        P, I, F = grid(2, 1, 8.0, 1.0)
+        got = uvsnap.part_switches(seams, sp, si, sf, suv, P, I, F, nearest, by="side")
+        self.assertEqual(int(got["part_switches"]), 2)
+        cut = uvsnap.split(P, I, F, got, uvsnap.chain_xyz(got, sp), use_fast=False)
+        pts = cut["points"].reshape(-1, 3)
+        for f in range(len(cut["indptr"]) - 1):
+            xs = pts[cut["flat"][cut["indptr"][f]:cut["indptr"][f + 1]], 0]
+            for x0 in (2.0, 2.5):
+                self.assertTrue(np.all(xs <= x0 + 1e-3) or np.all(xs >= x0 - 1e-3), (f, xs))
+
+    def test_side_line_snap_moves_corners_onto_the_line(self):
+        P, I, F = grid(4, 4, 4.0, 4.0)  # unit quads; the side changes at x = 1.6, inside the second column
+        got = {}
+        for _ in uvsnap.switch_snap_steps(P, I, F, lambda q: (np.asarray(q).reshape(-1, 3)[:, 0] > 1.6).astype(np.int64), np.full(len(P), 0.5), None, got):
+            pass
+        Q = got["points"].reshape(-1, 3)
+        self.assertEqual(len(got["moved"]), 5)  # the x = 2 column, 0.4 from the line
+        self.assertTrue(np.allclose(Q[got["moved"], 0], 1.6, atol=1e-3))
+        for f in range(len(I) - 1):
+            c = Q[F[I[f]:I[f + 1]]]
+            self.assertGreater(float(np.cross(c, np.roll(c, -1, 0)).sum(0)[2]), 0.0)  # nothing turned over
+        got = {}
+        for _ in uvsnap.switch_snap_steps(P, I, F, lambda q: (np.asarray(q).reshape(-1, 3)[:, 0] > 1.6).astype(np.int64), np.full(len(P), 0.3), None, got):
+            pass
+        self.assertEqual(len(got["moved"]), 0)  # the move limit holds
+
     def test_stage_slices_stay_short(self):
         P, I, F = grid(24, 24, 8.0, 8.0)
         seams, xyz = seams_of([line(30, k=60)])

@@ -17,6 +17,12 @@ clustering (Garland, Willmott, Heckbert 2001) and the compactness terms of chart
 Sheffer 2005; Cohen-Steiner, Alliez, Desbrun 2004), as a merge order. A union more irregular than `SHAPE_MAX` (plain
 lengths) and than both its parts is refused (ours).
 
+Thin tubes (R5, `_tube_cuts`): a part that wraps round and is a long strip of surface (springs, chain links, rope, wire)
+is cut across into pieces and each piece once along its length on its least-seen side, started from Tutte's embedding
+on a convex outline of the strip (Tutte 1963, Floater 1997) and kept when the UV Check's own stretch allows it. A union
+refused for its shape is still made when its gap ring outweighs its box and its box with the ring takes less page than
+its parts' (`_min_box`: rotating calipers, Toussaint 1983). Ours, as the kernel.
+
 A union is refused when its layout would lie over itself (a flip-free disk layout is one-to-one exactly when its
 border does not cross itself: Floater 2003, "One-to-one piecewise linear mappings over triangulations"). The merge
 tree runs in rounds of rising stretch (`round_caps`), like the kernel.
@@ -52,11 +58,17 @@ GRID_SLACK = 0.01
 FOLD_DISCOUNT = 0.9
 SEEN_WEIGHT = 4.0
 SHAPE_MAX = 4.0
-NUMBERS_LEN = 21
+GAP_PX = 8.0
+TUBE_ASPECT = 3.0
+PIECE_ASPECT = 6.0
+TUBE_L2_MEDIAN = 1.08
+TUBE_L2_BAD = 1.3
+TUBE_BAD_SHARE = 0.002
+NUMBERS_LEN = 22
 
 NUMBER_COLUMNS = ("patches", "irregular", "turning", "traces", "euler_cut_patches", "euler_cut_edges", "not_disk_patches", "segments",
                   "merges", "grid_merges", "pole_merges", "quick_calls", "exact_evals", "build_ms", "stopped", "grid_patches", "dropped",
-                  "top_stretch", "forced_edges", "px_per_unit", "lay_over")
+                  "top_stretch", "forced_edges", "px_per_unit", "lay_over", "tube_faces")
 LEVEL_COLUMNS = ("charts", "not_disk", "merges_used", "segments_glued", "above_build", "ms")
 
 # Optional faster callables, set by the one adapter (uv_fast.py); the NumPy code runs when a name is missing.
@@ -720,6 +732,17 @@ class Charts:
             active = nxt
             yield 0.1
         sep = [(traced[e] or forced_line[e]) and not t.wall[e] for e in range(ne)]
+        # Thin tubes (R5): a part that is a long strip of surface is laid out as strip pieces.
+        tubes = yield from _tube_cuts(t, points, cost_l, forced_line, self._flatten)
+        tube_uv: dict = {}
+        for faces_, cut_, cuv in tubes:
+            for f in faces_:
+                for h in t.face_corners(f):
+                    sep[t.cedge[h]] = False
+            for e in cut_:
+                sep[e] = True
+            tube_uv.update(cuv)
+        num[21] = sum(len(x[0]) for x in tubes)
         cut_base = [sep[e] or t.wall[e] for e in range(ne)]
         # Patches and the Euler check (6.2.3).
         d = _Dsu(nf)
@@ -795,7 +818,7 @@ class Charts:
         tree.patch, tree.n_patches, tree.patch_chi, tree.segments, tree.build_stretch = patch, n_patches, patch_chi, segments, self.build_stretch
         self.tree = tree
         if self.merge:
-            yield from self._merge_tree(tree, members)
+            yield from self._merge_tree(tree, members, tube_uv)
         num[13] = (time.perf_counter() - started) * 1e3
         num[14] = float(self._stop)
 
@@ -829,7 +852,7 @@ class Charts:
             return True, g[0]
         return False, (arap if arap is not None else np.full((local.n, 2), np.nan))
 
-    def _merge_tree(self, tree, members):
+    def _merge_tree(self, tree, members, tube_uv=None):
         t = tree.topo
         np_ = tree.n_patches
         dsu = _Undo(len(t.flat))
@@ -858,10 +881,16 @@ class Charts:
                     if tree.cut_base[e]:
                         weight[p] += tree.outline[e]
                         length[p] += tree.length_px[e]
+        hull: list = [[] for _ in range(np_)]
         for p in range(np_):
             local = _Local(t, tree.points, members[p], dsu.find)
-            g, uv = yield from self._patch_layout(tree, local)
+            if tube_uv and len(local.corner) and int(local.corner[0]) in tube_uv:
+                g, uv = False, np.full((local.n, 2), np.nan)
+                uv[local.flat] = np.array([tube_uv[int(h)] for h in local.corner])
+            else:
+                g, uv = yield from self._patch_layout(tree, local)
             local.scatter(uv, corner_uv)
+            hull[p] = _hull_of(local.corner.tolist(), corner_uv[local.corner])
             per = self._face_stretch(tree, local, uv)
             for f, x in zip(local.faces, per):
                 face_str[f] = x
@@ -932,6 +961,22 @@ class Charts:
             by_weight = _irregularity(max(weight[a] + weight[b] - 2.0 * w, 0.0), ar)
             plain = _irregularity(max(length[a] + length[b] - 2.0 * ln, 0.0), ar)
             return by_weight, plain, max(_irregularity(length[a], area[a]), _irregularity(length[b], area[b]))
+
+        def saves_page(a, b, ev):
+            """A chart whose gap ring outweighs its box: does the union's box with its ring take less page than the
+            parts' (the kernel's `saves_page`)?"""
+
+            pts = np.asarray(ev["uv"], float)
+            wu, hu = _min_box(pts)
+            wu, hu = wu * ppu, hu * ppu
+            if wu * hu > 2.0 * GAP_PX * (wu + hu):
+                return False
+
+            def page(x):
+                w, h = _min_box(x)
+                return (w * ppu + GAP_PX) * (h * ppu + GAP_PX)
+
+            return page(pts) <= page(corner_uv[hull[a]]) + page(corner_uv[hull[b]])
 
         heap: list = []
         seq = [0]
@@ -1042,7 +1087,7 @@ class Charts:
                     cached = ((a, b, va, vb), ev)
                     parked.append(((key, a, b, _, va, vb, True), ev["stretch"]))
                     continue
-                if plain > SHAPE_MAX and plain > parts:
+                if plain > SHAPE_MAX and plain > parts and not saves_page(a, b, ev):
                     # Too irregular: not tried again until the smaller chart changes (as a union that lies over).
                     small = a if len(faces[a]) <= len(faces[b]) else b
                     refused[(a, b)] = (small, ver[small])
@@ -1063,7 +1108,10 @@ class Charts:
                 ev["local"].scatter(ev["uv"], corner_uv)
                 for f, x in zip(ev["local"].faces, ev["per"]):
                     face_str[f] = x
+                ids_ = hull[a] + hull[b] + ev["local"].corner.tolist()
+                new_hull = _hull_of(ids_, corner_uv[ids_])
                 r, o = (a, b) if len(faces[a]) >= len(faces[b]) else (b, a)
+                hull[r], hull[o] = new_hull, []
                 cpar[o] = r
                 for f in faces[o]:
                     owner[f] = r
@@ -1202,3 +1250,443 @@ def _tree_cotree(t: Topo, cut, patch, p: int, members, cost) -> list:
             if deg[w] == 1:
                 queue.append(w)
     return sorted(e for e, x in on.items() if x)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Thin tubes (R5) and chart boxes on the page
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _dijkstra(t: Topo, sources, weight, inside) -> dict:
+    """Shortest paths over the edges with `inside`, from the given sources: vertex -> (distance, edge taken). Ties pop
+    the larger vertex first, as the kernel's heap."""
+
+    dist = {s: (0.0, -1) for s in sources}
+    heap = [(0.0, -s) for s in sources]
+    heapq.heapify(heap)
+    while heap:
+        d, nv = heapq.heappop(heap)
+        v = -nv
+        if d > dist[v][0]:
+            continue
+        for e in t.vedge[v]:
+            if not inside(e):
+                continue
+            w = t.other(e, v)
+            nd = d + max(weight(e), 0.0)
+            old = dist.get(w)
+            if old is None or nd < old[0]:
+                dist[w] = (nd, e)
+                heapq.heappush(heap, (nd, -w))
+    return dist
+
+
+def _farthest(dist: dict):
+    """(vertex, distance) of the largest distance, the smaller vertex on a tie; None when empty."""
+
+    if not dist:
+        return None
+    v = min(dist, key=lambda x: (-dist[x][0], x))
+    return v, dist[v][0]
+
+
+def _path_back(t: Topo, dist: dict, v: int) -> tuple:
+    path = []
+    while True:
+        e = dist[v][1]
+        if e < 0:
+            break
+        path.append(e)
+        v = t.other(e, v)
+    return path, v
+
+
+def _weighted_quantile(values, w, q: float) -> float:
+    order = np.argsort(np.asarray(values, float), kind="stable")
+    acc, total = 0.0, float(np.sum(w))
+    for i in order:
+        acc += w[i]
+        if acc >= q * total:
+            return float(values[i])
+    return float(values[order[-1]]) if len(order) else float("nan")
+
+
+def _l2_stretch(local: _Local, uv: np.ndarray) -> tuple:
+    """The UV Check's stretch of one chart (SPEC 9.1, as the kernel's `l2_stretch`): per fan triangle, the root mean square
+    of the singular values of the map from the triangle to the UV, the UVs scaled to the surface area; returns the
+    median weighted by surface area and the surface area above `TUBE_L2_BAD`."""
+
+    tris = []
+    for f in range(len(local.indptr) - 1):
+        lo, hi = int(local.indptr[f]), int(local.indptr[f + 1])
+        for i in range(lo + 1, hi - 1):
+            tris.append((local.flat[lo], local.flat[i], local.flat[i + 1]))
+    if not tris:
+        return float("inf"), 0.0
+    tri = np.array(tris, np.int64)
+    x0, x1, x2 = local.points[tri[:, 0]], local.points[tri[:, 1]], local.points[tri[:, 2]]
+    e1, e2 = x1 - x0, x2 - x0
+    l1 = np.linalg.norm(e1, axis=1)
+    area = 0.5 * np.linalg.norm(np.cross(e1, e2), axis=1)
+    ok = (l1 > 0) & (area > 0)
+    tri, e1, e2, l1, area = tri[ok], e1[ok], e2[ok], l1[ok], area[ok]
+    bx = (e1 * e2).sum(1) / l1
+    by = 2.0 * area / l1
+    u = np.asarray(uv, float)
+    d1, d2 = u[tri[:, 1]] - u[tri[:, 0]], u[tri[:, 2]] - u[tri[:, 0]]
+    a3, a2 = float(area.sum()), float((0.5 * np.abs(d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0])).sum())
+    if not (a3 > 0 and a2 > 0):
+        return float("inf"), 0.0
+    s = math.sqrt(a3 / a2)
+    det = l1 * by  # e1 = (l1, 0), e2 = (bx, by)
+    inv = np.stack([np.stack([by / det, -bx / det], 1), np.stack([np.zeros_like(det), l1 / det], 1)], 1)
+    j00 = d1[:, 0] * inv[:, 0, 0] + d2[:, 0] * inv[:, 1, 0]
+    j01 = d1[:, 0] * inv[:, 0, 1] + d2[:, 0] * inv[:, 1, 1]
+    j10 = d1[:, 1] * inv[:, 0, 0] + d2[:, 1] * inv[:, 1, 0]
+    j11 = d1[:, 1] * inv[:, 0, 1] + d2[:, 1] * inv[:, 1, 1]
+    vals = s * np.sqrt((j00 * j00 + j01 * j01 + j10 * j10 + j11 * j11) / 2.0)
+    bad = float(area[~(vals <= TUBE_L2_BAD)].sum())
+    return _weighted_quantile(vals, area, 0.5), bad
+
+
+def _strip_start(t: Topo, local: _Local, ends, area: float):
+    """Start layout of a strip chart (as the kernel's `strip_start`): Tutte's embedding (Tutte 1963, Floater 1997) with
+    the border on a convex outline as long as the cut and as wide as the loops, a point (with a bevel) at an end that is
+    a point. None when the border does not fit that shape."""
+
+    n = local.n
+    loop = uvflat._border_loop(local.indptr, local.flat, n)
+    m = len(loop)
+    if m < 3:
+        return None
+    glob = np.empty(n, np.int64)
+    glob[local.flat] = np.array([t.flat[h] for h in local.corner], np.int64)
+    p = local.points[np.array(loop)]
+    seg = np.linalg.norm(np.roll(p, -1, axis=0) - p, axis=1)
+    at = np.concatenate([[0.0], np.cumsum(seg)]).tolist()
+    total = at[m]
+    if not total > 0:
+        return None
+    oa = [i for i in range(m) if glob[loop[i]] == ends[0]]
+    ob = [i for i in range(m) if glob[loop[i]] == ends[1]]
+    if not oa or not ob or len(oa) > 2 or len(ob) > 2 or ends[0] == ends[1]:
+        return None
+
+    def fwd(i, j):
+        return (at[j] - at[i]) % total
+
+    def pick(o, other):
+        if len(o) == 1:
+            return o[0], o[0]
+        inside = any(fwd(o[0], k) < fwd(o[0], o[1]) for k in other)
+        return (o[0], o[1]) if not inside else (o[1], o[0])
+
+    a1, a2 = pick(oa, ob)
+    b1, b2 = pick(ob, oa)
+    ra, rb = fwd(a1, a2), fwd(b1, b2)
+    bottom, top = fwd(a2, b1), fwd(b2, a1)
+    long_ = 0.5 * (bottom + top)
+    if len(oa) == 2 and len(ob) == 2:
+        wide = 0.5 * (ra + rb)
+    elif len(oa) == 2:
+        wide = ra
+    elif len(ob) == 2:
+        wide = rb
+    else:
+        wide = area / max(long_, 1e-300)
+    if not (long_ > 0 and wide > 0):
+        return None
+    bevel = min(0.5 * wide, 0.25 * long_)
+    ha = 0.0 if len(oa) == 2 else bevel
+    hb = 0.0 if len(ob) == 2 else bevel
+    left = [(0.0, wide), (0.0, 0.0)] if len(oa) == 2 else [(0.0, 0.5 * wide)]
+    right = [(long_, 0.0), (long_, wide)] if len(ob) == 2 else [(long_, 0.5 * wide)]
+    lower = [left[-1]] + ([(ha, 0.0)] if ha > 0 else []) + ([(long_ - hb, 0.0)] if hb > 0 else []) + [right[0]]
+    upper = [right[-1]] + ([(long_ - hb, wide)] if hb > 0 else []) + ([(ha, wide)] if ha > 0 else []) + [left[0]]
+
+    def along(line, x):
+        lens = [math.hypot(line[k + 1][0] - line[k][0], line[k + 1][1] - line[k][1]) for k in range(len(line) - 1)]
+        tot = sum(lens)
+        if len(line) == 1 or not tot > 0:
+            return line[0]
+        want = min(max(x, 0.0), 1.0) * tot
+        for k, ln in enumerate(lens):
+            if want <= ln or k + 1 == len(lens):
+                r = min(want / ln, 1.0) if ln > 0 else 0.0
+                return (line[k][0] + r * (line[k + 1][0] - line[k][0]), line[k][1] + r * (line[k + 1][1] - line[k][1]))
+            want -= ln
+        return line[-1]
+
+    runs = [(a1, ra, left), (a2, bottom, lower), (b1, rb, right), (b2, top, upper)]
+    uv = np.zeros((n, 2))
+    for i in range(m):
+        cands = [r for r in runs if r[1] > 0 or r[0] == i]
+        start, ln, line = min(cands, key=lambda r: fwd(r[0], i))  # the first of equal ones, as the kernel
+        uv[loop[i]] = along(line, fwd(start, i) / ln if ln > 0 else 0.0)
+    scale = max(long_, wide)
+    a, b = [], []
+    for poly in uvflat._faces(local.indptr, local.flat):
+        k = len(poly)
+        a.extend(int(poly[i]) for i in range(k))
+        b.extend(int(poly[(i + 1) % k]) for i in range(k))
+    a, b = np.array(a), np.array(b)
+    half = np.full(len(a), 0.5)
+    system = uvflat._System(n, np.concatenate([a, b, a, b]), np.concatenate([a, b, b, a]), np.concatenate([half, half, -half, -half]), loop)
+    info: dict = {}
+    for axis in range(2):
+        x = uv[:, axis].copy()
+        for _ in system.cg(system.rhs(np.zeros(n), uv[:, axis]), x, scale * 1e-9, info):
+            pass
+        uv[:, axis] = x
+    return uv if np.isfinite(uv).all() else None
+
+
+def _tube_cuts(t: Topo, points: np.ndarray, cost, forced_line, flatten):
+    """Thin tubes (R5, as the kernel's `tube_cuts`): parts whose surface is a long strip laid out as strip pieces.
+    `flatten(local, start)` is a generator returning the ARAP layout. Generator; returns a list of (faces, cut edges,
+    {corner: uv})."""
+
+    ne, nf = t.ne, t.nf
+    d = _Dsu(nf)
+    for e in range(ne):
+        if not t.wall[e] and not forced_line[e]:
+            f0, f1 = t.faces_of(e)
+            d.union(f0, f1)
+    ids: dict = {}
+    comp = [ids.setdefault(d.find(f), len(ids)) for f in range(nf)]
+    nc = len(ids)
+    members: list = [[] for _ in range(nc)]
+    bad = [False] * nc
+    for f in range(nf):
+        members[comp[f]].append(f)
+        for h in t.face_corners(f):
+            bad[comp[f]] |= forced_line[t.cedge[h]]
+
+    part_chi = _chi_per(t, t.wall, comp, nc)  # a tube wraps round: a part that is already a disk is left to the merge tree
+    pts_l = points.tolist()
+
+    def len3(e):  # summed in the kernel's order
+        p, q = pts_l[t.ea[e]], pts_l[t.eb[e]]
+        return math.sqrt((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2]))
+
+    cands = []
+    for c in range(nc):
+        if bad[c] or part_chi[c] == 1 or len(members[c]) < 4:
+            continue
+        faces = members[c]
+
+        def in_part(e, c=c):
+            f0, f1 = t.faces_of(e)
+            return comp[f0] == c and (f1 < 0 or comp[f1] == c)
+
+        area = _total(_face_area(pts_l, t, f) for f in faces)
+        if not area > 0:
+            continue
+        v0 = t.flat[t.indptr[faces[0]]]
+        u = _farthest(_dijkstra(t, [v0], len3, in_part))[0]
+        su = _dijkstra(t, [u], len3, in_part)
+        diameter = _farthest(su)[1]
+        if not diameter > 0:
+            continue
+        sf = {f: _total(su[t.flat[h]][0] if t.flat[h] in su else 0.0 for h in t.face_corners(f)) / len(t.face_corners(f)) for f in faces}
+
+        def pieces_of(band, faces=faces):
+            loc = {f: k for k, f in enumerate(faces)}
+            dd = _Dsu(len(faces))
+            for f in faces:
+                for h in t.face_corners(f):
+                    e = t.cedge[h]
+                    if t.wall[e]:
+                        continue
+                    f0, f1 = t.faces_of(e)
+                    if band(f0) == band(f1):
+                        dd.union(loc[f0], loc[f1])
+            return {f: dd.find(k) for f, k in loc.items()}
+
+        def mid(f, sf=sf, diameter=diameter):
+            return 1 if 0.4 * diameter <= sf[f] <= 0.6 * diameter else 0
+
+        mp = pieces_of(mid)
+        halves = {mp[f] for f in faces if mid(f) == 1}
+        closed = not any(t.wall[t.cedge[h]] for f in faces for h in t.face_corners(f))
+        length = 2.0 * diameter if closed and len(halves) >= 2 else diameter
+        if not length * length / area >= TUBE_ASPECT:
+            continue
+        width = PIECE_ASPECT * (area / length)
+        bins = max(int(math.floor(diameter / width + 0.5)), 1)
+
+        def bin_(f, sf=sf, diameter=diameter, bins=bins):
+            return min(max(int(math.floor(sf[f] / diameter * bins)), 0), bins - 1)
+
+        piece = pieces_of(bin_)
+        groups: dict = {}
+        for f in faces:
+            groups.setdefault(piece[f], []).append(f)
+        rings = []
+        for f in faces:
+            for h in t.face_corners(f):
+                e = t.cedge[h]
+                if not t.wall[e]:
+                    f0, f1 = t.faces_of(e)
+                    if f0 == f and piece[f0] != piece[f1]:
+                        rings.append(e)
+        is_ring = set(rings)
+        out, ok = [], True
+        for k in sorted(groups):
+            pf = groups[k]
+
+            def inside(e, k=k, piece=piece):
+                f0, f1 = t.faces_of(e)
+                return piece.get(f0) == k and (f1 < 0 or piece.get(f1) == k)
+
+            border = [t.cedge[h] for f in pf for h in t.face_corners(f) if t.wall[t.cedge[h]] or t.cedge[h] in is_ring]
+            ld = _Dsu(t.nv)
+            for e in border:
+                ld.union(t.ea[e], t.eb[e])
+            root = {v: ld.find(v) for e in border for v in (t.ea[e], t.eb[e])}
+            roots = sorted(set(root.values()))
+
+            def on(r, root=root):
+                return sorted(v for v, x in root.items() if x == r)
+
+            def inner(e, inside=inside, is_ring=is_ring):
+                return inside(e) and not t.wall[e] and e not in is_ring
+
+            if len(roots) == 0:
+                lp = _dijkstra(t, [u], len3, inside)
+                frm, to = [u], [_farthest(lp)[0]]
+            elif len(roots) == 1:
+                rim = on(roots[0])
+                far = _farthest(_dijkstra(t, rim, len3, inner))
+                if far is None:
+                    ok = False
+                    break
+                frm, to = [far[0]], rim
+            elif len(roots) == 2:
+                frm, to = on(roots[0]), on(roots[1])
+            else:
+                ok = False
+                break
+            dist = _dijkstra(t, frm, lambda e: cost[e], inner)
+            reach = [(dist[v][0], v) for v in to if v in dist]
+            if not reach:
+                ok = False
+                break
+            end = min(reach)[1]
+            path, start = _path_back(t, dist, end)
+            out.append((pf, path, (start, end)))
+        if ok:
+            cands.append((out, rings))
+        yield
+    if not cands:
+        return []
+    cut = list(t.wall)
+    label = [-1] * nf
+    np_ = 0
+    for pieces, rings in cands:
+        for e in rings:
+            cut[e] = True
+        for pf, path, _ in pieces:
+            for e in path:
+                cut[e] = True
+            for f in pf:
+                label[f] = np_
+            np_ += 1
+    lab = [x if x >= 0 else np_ for x in label]
+    chi = _chi_per(t, cut, lab, np_ + 1)
+    wr = _wedges(t, cut)
+    laid = []
+    for pieces, _ in cands:
+        for pf, path, ends in pieces:
+            got = None
+            if chi[label[pf[0]]] == 1:
+                local = _Local(t, points, pf, lambda h: wr[h])
+                area = _total(_face_area(pts_l, t, f) for f in pf)
+                start = _strip_start(t, local, ends, area)
+                uv = None if start is None else (yield from flatten(local, start))
+                if uv is not None and np.isfinite(uv).all():
+                    med, badarea = _l2_stretch(local, uv)
+                    if med <= TUBE_L2_MEDIAN and uvflat.count_flips(local.indptr, local.flat, uv) == 0:
+                        cuv = {int(h): uv[local.flat[k]] for k, h in enumerate(local.corner)}
+                        sides = [(cuv[h], cuv[t.next(h)], (wr[h], wr[t.next(h)])) for f in pf for h in t.face_corners(f) if cut[t.cedge[h]]]
+                        p = np.array([s[0] for s in sides]).reshape(-1, 2)
+                        q = np.array([s[1] for s in sides]).reshape(-1, 2)
+                        v = np.array([s[2] for s in sides], np.int64).reshape(-1, 2)
+                        if not _sides_cross(p, q, v):
+                            got = (cuv, badarea, area)
+            laid.append(got)
+            yield
+    total = _total(_face_area(pts_l, t, f) for f in range(nf))
+    order = sorted((j for j in range(len(laid)) if laid[j] is not None), key=lambda j: (laid[j][1] / max(laid[j][2], 1e-300), j))
+    keep = [False] * len(laid)
+    spent = 0.0
+    for j in order:
+        if spent + laid[j][1] <= TUBE_BAD_SHARE * total:
+            spent += laid[j][1]
+            keep[j] = True
+    tubes, j = [], 0
+    for pieces, rings in cands:
+        faces, cutl, cuv = [], [], {}
+        kept = set()
+        for pf, path, _ in pieces:
+            if keep[j]:
+                cuv.update(laid[j][0])
+                kept.update(pf)
+                faces.extend(pf)
+                cutl.extend(path)
+            j += 1
+        if faces:
+            cutl.extend(e for e in rings if any(f in kept for f in t.faces_of(e)))
+            tubes.append((faces, cutl, cuv))
+    return tubes
+
+
+def _hull_of(ids, pts) -> list:
+    """Ids on the convex hull of the points (Andrew's monotone chain), as the kernel's `hull_of`."""
+
+    items = [(i, (float(p[0]), float(p[1]))) for i, p in zip(ids, pts) if np.isfinite(p[0]) and np.isfinite(p[1])]
+    items.sort(key=lambda x: (x[1][0], x[1][1]))
+    dedup = []
+    for it in items:
+        if not dedup or dedup[-1][1] != it[1]:
+            dedup.append(it)
+    if len(dedup) < 3:
+        return [x[0] for x in dedup]
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    out: list = []
+    for seq in (dedup, dedup[::-1]):
+        start = len(out)
+        for q in seq:
+            while len(out) >= start + 2 and cross(out[-2][1], out[-1][1], q[1]) <= 0.0:
+                out.pop()
+            out.append(q)
+        out.pop()
+    return [x[0] for x in out]
+
+
+def _min_box(pts) -> tuple:
+    """Sides (w, h) of the smallest-area box around the points, one side along a hull edge (Toussaint 1983)."""
+
+    pts = np.asarray(pts, float).reshape(-1, 2)
+    hull = pts[_hull_of(range(len(pts)), pts)] if len(pts) else pts
+    if len(hull) < 3:
+        if len(hull) == 0:
+            return 0.0, 0.0
+        span = hull.max(0) - hull.min(0)
+        return float(span[0]), float(span[1])
+    best = (float("inf"), 0.0, 0.0)
+    for i in range(len(hull)):
+        d = hull[(i + 1) % len(hull)] - hull[i]
+        ln = math.hypot(d[0], d[1])
+        if ln <= 0:
+            continue
+        ux, uy = d[0] / ln, d[1] / ln
+        x = hull[:, 0] * ux + hull[:, 1] * uy
+        y = -hull[:, 0] * uy + hull[:, 1] * ux
+        w, h = float(x.max() - x.min()), float(y.max() - y.min())
+        if w * h < best[0]:
+            best = (w * h, w, h)
+    return best[1], best[2]
