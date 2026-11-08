@@ -42,6 +42,15 @@ class Rules(unittest.TestCase):
         box = (r.max(0) - r.min(0)).prod()
         self.assertLessEqual(box, (p.max(0) - p.min(0)).prod() + 1e-9)
 
+    def test_hull_of_many_points_is_the_hull_of_all_of_them(self):
+        rng = np.random.default_rng(3)
+        p = rng.normal(size=(4000, 2)) * [3.0, 1.0]
+        h = uvnew._hull(p)
+        a, b = h, np.roll(h, -1, axis=0)
+        side = (b[:, 0] - a[:, 0])[None] * (p[:, 1:2] - a[:, 1][None]) - (b[:, 1] - a[:, 1])[None] * (p[:, 0:1] - a[:, 0][None])
+        self.assertTrue((side >= -1e-9).all())  # every point lies left of (or on) every hull edge: counter-clockwise and nothing outside
+        self.assertTrue(all(any(np.allclose(v, q) for q in p[:: 1]) for v in h[:5]))
+
     def test_cut_edges_mark_only_uv_splits(self):
         mesh = grid(2, 1)
         uv = mesh[0][mesh[2]][:, :2].copy()
@@ -56,6 +65,49 @@ class Rules(unittest.TestCase):
         self.assertFalse(any(uvnew.overlap_pairs(t, 1e-9)))  # neighbours share edges and corners only
         t2 = np.concatenate([t, t[:1] + [0.3, 0.3]])  # one triangle laid over another by a fraction of a face
         self.assertTrue(any(uvnew.overlap_pairs(t2, 1e-9)))
+
+    def test_all_charts_at_once_find_what_one_by_one_finds(self):
+        g = grid(6, 6)
+        uv = g[0][g[2]][:, :2].copy()
+        t = uv[uvnew._fan(g[1], np.arange(36))]  # 72 triangles, one flat chart
+        run_ = lambda tt, cc, n: uvnew._drive(uvnew.overlapping_charts(tt, cc, n))  # noqa: E731
+        self.assertFalse(run_(t, np.zeros(len(t), np.int64), 1).any())
+        bad = np.concatenate([t, t[:1] + [0.3, 0.3]])  # one triangle laid over another by a fraction of a face
+        flags = run_(np.concatenate([bad, t + [50.0, 0.0]]), np.concatenate([np.zeros(len(bad), np.int64), np.ones(len(t), np.int64)]), 2)
+        self.assertEqual(flags.tolist(), [True, False])  # only the chart that folds is named
+        self.assertTrue(run_(np.concatenate([t[:1], t[1:2][:, ::-1]]), np.zeros(2, np.int64), 1)[0])  # a face wound against the rest
+        self.assertTrue(run_(np.zeros((1, 3, 2)), np.zeros(1, np.int64), 1)[0])  # no area
+
+    def test_edge_table_and_seams_match_the_sorted_reference(self):
+        points, indptr, flat = grid(7, 5)
+        nxt = np.arange(1, len(flat) + 1)
+        nxt[indptr[1:] - 1] = indptr[:-1]
+        keys = np.minimum(flat, flat[nxt]).astype(np.uint64) << np.uint64(32) | np.maximum(flat, flat[nxt]).astype(np.uint64)
+        _, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+        rank = np.empty(len(first), np.int64)
+        rank[np.argsort(first, kind="stable")] = np.arange(len(first))
+        ids, ne = uvnew.edge_ids(indptr, flat)
+        self.assertEqual((ids.tolist(), ne), (rank[inverse.reshape(-1)].tolist(), len(first)))
+        old = uvnew.STRIPE_ENTRIES
+        try:
+            uvnew.STRIPE_ENTRIES = 16  # many stripes
+            self.assertEqual(uvnew.edge_ids(indptr, flat)[0].tolist(), ids.tolist())
+        finally:
+            uvnew.STRIPE_ENTRIES = old
+
+    def test_the_box_layout_is_shown_before_the_outline_packing_ends(self):
+        mesh = cube(4)
+        stage = uvnew.NewUVs(*mesh, settings=uvnew.Settings(out_of_sight=False, hidden_pct=100.0, texture_px=256, time_per_pass=1.0))
+        seen = None
+        while not stage.done:
+            stage.step()
+            if stage.first_ready and seen is None:
+                seen = stage.result.uv.copy()
+            if stage.waiting:
+                time.sleep(0.0005)
+        self.assertIsNotNone(seen)
+        self.assertEqual(seen.shape, stage.result.uv.shape)
+        self.assertLessEqual(stage.result.timing["first_s"], stage.result.timing["total_s"])
 
     def test_a_small_chart_joins_its_neighbour_without_overlap(self):
         points, indptr, flat = grid(20, 1)  # twenty faces in a row
