@@ -23,6 +23,7 @@ from .operators import (
     CURIOMESH_OT_remesh,
 )
 from . import batch, fix_select, game_export, guided, history, live, overlay, panel, region, tidytools
+from . import agent_mailbox, parts_export, parts_import  # main-only
 from . import uv_panel  # main-only: uv
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
 
@@ -302,6 +303,9 @@ def register():
     game_export.register()
     uv_panel.register()  # main-only: uv
     panel.register()
+    agent_mailbox.register()  # main-only
+    parts_export.register()  # main-only
+    parts_import.register()  # main-only
     apply_category()
 
 
@@ -310,6 +314,9 @@ def unregister():
     if not _registered:
         return
     _registered = False
+    parts_import.unregister()  # main-only
+    parts_export.unregister()  # main-only
+    agent_mailbox.unregister()  # main-only
     panel.unregister()
     uv_panel.unregister()  # main-only: uv
     game_export.unregister()

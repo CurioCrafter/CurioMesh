@@ -130,7 +130,7 @@ class CurioUVSettings(bpy.types.PropertyGroup):
                                         description="The texture these UVs are made for. Gap and pixel snapping use it")
     clean_down_to: bpy.props.IntProperty(name="Gap: clean down to (px)", default=uvnew.CLEAN_DOWN_TO_PX, min=1, soft_max=4096,
                                          description="The gap keeps islands apart down to this mip size")
-    sharpen_cuts: bpy.props.EnumProperty(name="Sharpen cuts", items=SHARPEN, default="CREASED", update=_sync,
+    sharpen_cuts: bpy.props.EnumProperty(name="Sharp edges at cuts", items=SHARPEN, default="CREASED", update=_sync,
                                          description="Which cuts become sharp edges for the normal map")
 
 

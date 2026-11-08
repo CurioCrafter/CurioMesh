@@ -78,6 +78,7 @@ Rows for the UV features: seam keeping, New UVs, packing and bake-safe UVs. Each
 Scaffold only (stubs, marked binding blocks, adapter, layer read/write helpers, hash check). No published method and
 no third-party code or UI: nothing to cite, no thresholds. The `UvJob` worker-thread handle follows the add-on's own
 existing pattern (a daemon thread polled by the caller). Row for G1: "UV scaffold: our own plumbing, no outside source".
+`turbo.py` UV bindings: wrappers only, no method.
 
 ### K4
 
@@ -322,6 +323,8 @@ crossings with vertex reuse, fan and successive cuts, damage-ordered face allowa
 geometry (Ericson 2005, Newell 1972); no boundary strips (differs from the strip insertion in Empyrean's public docs)".
 
 ### A1c
+
+File: `triadq/uvclassic.py`.
 - Per-face pairing fallback (drop only the pairs whose two triangles disagree on the shared edge UVs) and island-aware transfer are our own design; the lookup is K1 (uvseams, SPEC 4.8). Pairing on the dual graph: Blossom-Quad, Remacle et al. 2012 (already in ORIGINALITY). No other tool consulted.
 
 ### A1

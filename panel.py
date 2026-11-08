@@ -697,6 +697,10 @@ def draw_part_card(layout, gs) -> None:
         box.label(text=f"{segments.name_of(selected[0])}: {r['after']:,} faces, {segments.method_name(r['method'])}", icon="OBJECT_DATA")
     else:
         box.label(text=f"{len(selected)} parts, {sum(segments.seg['parts'][p]['after'] for p in selected):,} faces", icon="OBJECT_DATA")
+    row = box.row(align=True)  # main-only
+    row.operator("curiomesh.parts_export", text="Send to Agent", icon="EXPORT")  # main-only
+    row.operator("curiomesh.parts_import", text="Bring Back", icon="IMPORT")  # main-only
+    row.operator("curiomesh.parts_report", text="", icon="FILE_TEXT")  # main-only
     if segments.mirrored():
         overlay.wrap_label(box, "Redo is off on this result (Mirror, Even Rows, a very large piece or an imported job)", icon="INFO", width=32, limit=3)
         return
@@ -948,6 +952,7 @@ def draw_computer(layout, gs) -> None:
     row = sub.row(align=True)
     row.operator("curiomesh.guided_export_job", text="Export Job", icon="EXPORT")
     row.operator("curiomesh.guided_import_result", text="Import Result", icon="IMPORT")
+    sub.prop(bpy.context.window_manager, "curiomesh_agent_on", toggle=True, icon="CONSOLE")  # main-only
 
 
 class CURIOMESH_PT_pro_computer(_Pro, bpy.types.Panel):
