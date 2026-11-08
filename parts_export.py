@@ -16,6 +16,7 @@ import os
 import platform
 import shutil
 import tempfile
+import urllib.parse
 
 import bpy
 import numpy as np
@@ -202,6 +203,26 @@ def report_parts(ids=None, path=None, note=""):
     return {"path": path, "parts": [p["id"] for p in parts], "skipped": skipped}
 
 
+# --------------------------------------------------------------------------- Send as a Problem
+
+ISSUE_URL = "https://github.com/CurioCrafter/CurioMesh/issues/new?template=bad-spot.yml"
+# The only things the link carries: form field id (.github/ISSUE_TEMPLATE/bad-spot.yml) for each.
+FORM_FIELDS = {"version": "version", "blender": "blender", "use": "purpose"}
+# Use id -> the form's "What the mesh is for" option; a Use with no match leaves the dropdown empty.
+_FORM_PURPOSE = {
+    "GAME": "Game asset", "LOW_POLY": "Game asset", "ANIMATION": "Animation or character", "SUBDIV": "Subdivision or sculpt base",
+    "SCULPT": "Subdivision or sculpt base", "SCAN": "Scan or photogrammetry clean-up", "HARD": "Hard surface or machine part",
+}
+
+
+def issue_url(version: str, blender: str, use: str) -> str:
+    """The issue-form link. Only version numbers and the Use: no mesh, names, paths or note text."""
+    q = {FORM_FIELDS["version"]: version, FORM_FIELDS["blender"]: blender}
+    if use in _FORM_PURPOSE:
+        q[FORM_FIELDS["use"]] = _FORM_PURPOSE[use]
+    return ISSUE_URL + "&" + urllib.parse.urlencode(q)
+
+
 # --------------------------------------------------------------------------- operators
 
 
@@ -274,6 +295,65 @@ class CURIOMESH_OT_parts_report(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CURIOMESH_OT_send_problem(bpy.types.Operator):
+    bl_idname = "curiomesh.send_problem"
+    bl_label = "Send as a Problem"
+    bl_description = "Save the marked parts in a zip and open the issue form in your browser. CurioMesh sends nothing: you attach the zip yourself"
+    bl_options = {"INTERNAL"}
+
+    note: bpy.props.StringProperty(name="Note", description="What is wrong with these parts. It is saved in the zip, not put in the link")
+
+    @classmethod
+    def poll(cls, context):
+        return _poll(cls)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.label(text="CurioMesh sends nothing. It saves a zip of the marked")
+        col.label(text="parts and opens the issue form. You attach the zip yourself.")
+        col.prop(self, "note")
+
+    def execute(self, context):
+        try:
+            out = report_parts(None, None, self.note)
+        except PartsError as exc:
+            self.report({"ERROR"}, f"{exc} {exc.hint}".strip())
+            return {"CANCELLED"}
+        try:
+            version = ".".join(str(i) for i in _version())
+            bpy.ops.wm.url_open(url=issue_url(version, bpy.app.version_string, context.scene.curiomesh_guided.auto_profile))
+        except Exception:  # no browser: the zip is still saved
+            pass
+        guided.state["message"] = f"Report saved to {out['path']}. Attach it to the issue form. {WARNING}"
+        self.report({"INFO"}, guided.state["message"])
+        bpy.ops.curiomesh.problem_saved("INVOKE_DEFAULT", path=out["path"])
+        return {"FINISHED"}
+
+
+class CURIOMESH_OT_problem_saved(bpy.types.Operator):
+    bl_idname = "curiomesh.problem_saved"
+    bl_label = "Zip saved"
+    bl_description = "Shows where the zip for the issue form was saved"
+    bl_options = {"INTERNAL"}
+
+    path: bpy.props.StringProperty(options={"SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_popup(self, width=460)
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.label(text="Zip saved. Attach it to the issue form yourself:")
+        col.label(text=self.path)
+        col.operator("wm.path_open", text="Open Folder").filepath = os.path.dirname(self.path)
+
+    def execute(self, context):
+        return {"FINISHED"}
+
+
 # --------------------------------------------------------------------------- agent commands (read by agentcmd)
 
 _IDS = {"type": "array", "items": {"type": "integer"}, "description": "Part numbers; without it the marked parts"}
@@ -300,7 +380,7 @@ COMMANDS = {
     },
 }
 
-CLASSES = (CURIOMESH_OT_parts_export, CURIOMESH_OT_parts_report)
+CLASSES = (CURIOMESH_OT_parts_export, CURIOMESH_OT_parts_report, CURIOMESH_OT_send_problem, CURIOMESH_OT_problem_saved)
 
 
 def register() -> None:
