@@ -27,7 +27,7 @@ HELP = {
     "fix": ("Fix", "Go through the parts that need a look. Mark the bad ones, then redo them with smaller or bigger quads, or keep the original."),
     "part_edit": ("Edit Parts", "Merge, split, lock or rename the parts of the result. Locked parts stay as they are when you redo others."),
     "part_finder": ("Part Finder", "Find parts by what is wrong with them, such as folded or crossing faces, and select them."),
-    "better": ("Help Make It Better", "Found a spot CurioMesh gets wrong, or fixed one yourself? Press Pick Bad Spots, click those spots in the 3D view, then Send as a Problem or Share a Fix. CurioMesh saves a zip and opens the GitHub form; nothing is sent until you attach the zip and post it. Code and test help: How to Help."),
+    "better": ("Help Make It Better", "Found a spot CurioMesh gets wrong, or fixed one yourself? Press Fix Bad Spots, click those spots in the 3D view, then Send as a Problem or Share a Fix. CurioMesh saves a zip and opens the GitHub form; nothing is sent until you attach the zip and post it. Code and test help: How to Help."),
     "finish": ("Finish", "Write the result into your scene. Then bake textures or export a file if you need to."),
     "bake": ("Bake", "Copy the colours and detail of your original onto the new mesh as textures."),
     "lod": ("LOD Set", "Make a few lighter copies of the result for a game, each with fewer faces than the last."),
