@@ -21,6 +21,13 @@
 //!   a flip-free disk layout is one-to-one exactly when its border does not cross itself (the border condition for
 //!   one-to-one piecewise linear maps, Floater 2003, "One-to-one piecewise linear mappings over triangulations"),
 //!   so only border sides that moved are tested, against a cell grid (ours).
+//! - Compact charts (R4): the merge queue ranks a union by its irregularity, outline^2 / (4 pi area) (a disk is 1),
+//!   with the outline weighted by what a cut there costs: its length, less on a fold (shading changes there anyway),
+//!   more where the camera sees it. That is the shape term of hierarchical face clustering (Garland, Willmott,
+//!   Heckbert 2001) and the compactness/boundary terms of chart growing (D-Charts: Julius, Kraevoy, Sheffer 2005;
+//!   variational shape approximation: Cohen-Steiner, Alliez, Desbrun 2004), used here as a merge order. A union that
+//!   is more irregular than `SHAPE_MAX` (plain lengths) and than both its parts is refused: branching, fractal charts
+//!   waste the page in gap rings and box corners, and their long borders are seen (our rule).
 //! - Keep going: one discrete cut move per pass on patch borders, accepted only when the score drops (idea of
 //!   discrete cut moves: Li, Kaufman, Kim, Sorkine-Hornung, Jacobson, Sheffer 2018, "OptCuts"; our moves and score).
 
@@ -59,8 +66,14 @@ pub const BAND_RINGS: usize = 2;
 pub const PX_PER_DIAGONAL: f64 = 1024.0;
 /// A grid layout is kept while its stretch is within this share of the best layout (else ARAP lays the chart out).
 pub const GRID_SLACK: f64 = 0.01;
-/// Stretch changes this small count as none (rounding noise must not reorder the queue).
-pub const SAME_STRETCH: f64 = 1e-9;
+/// Outline weight of a cut (R4): `length_px * (1 - FOLD_DISCOUNT * (1 - cos fold)) + SEEN_WEIGHT * seen_px`, the
+/// fold angle between the edge's two faces (90 deg and more: the most discount), seen pixels only with seams out of
+/// sight. Measured on 13 models (bench/uvplan/uv_defaults.md, R4chart).
+pub const FOLD_DISCOUNT: f64 = 0.9;
+pub const SEEN_WEIGHT: f64 = 4.0;
+/// A merge whose union's irregularity (plain lengths, outline^2 / (4 pi area)) is above this and above both parts' is
+/// refused (a square is 1.27, a 10:1 strip 3.85).
+pub const SHAPE_MAX: f64 = 4.0;
 /// Numbers in `Tree::numbers` (see `num`).
 pub const NUMBERS_LEN: usize = 21;
 
@@ -506,6 +519,9 @@ pub struct Segment {
     pub q: u32,
     pub cost: f64,
     pub seen: f64,
+    /// Outline weight (`outline_w`) and length (px) of the segment: what gluing it takes off the charts' outlines.
+    pub weight: f64,
+    pub length: f64,
 }
 
 /// One recorded merge: the segments it glued and the resulting chart stretch (worst 1 %).
@@ -533,6 +549,9 @@ pub struct Tree {
     pub topo: Topo,
     pub seen: Vec<f64>,
     pub cost: Vec<f64>,
+    /// Outline weight per edge (`outline_w`) and length (px), for the charts' irregularity in the merge tree.
+    pub outline: Vec<f64>,
+    pub length_px: Vec<f64>,
     pub irregular: Vec<bool>,
     pub turning: Vec<bool>,
     /// Patch borders: traces, forced lines, part borders, Euler cuts.
@@ -594,15 +613,51 @@ impl Ord for Cand {
     }
 }
 
-/// Rank of a merge: stretch added <= 0 first, by (stretch added, -cost removed); then by cost removed / stretch added.
-fn key_of(added: f64, cost: f64) -> Key {
+/// Rank of a merge (R4): the union's irregularity by outline weight (most compact first), then cost removed; a union
+/// that cannot be measured comes last. Stretch decides through the rounds' caps, not the order inside a round.
+fn key_of(added: f64, cost: f64, irregular: f64) -> Key {
     if !added.is_finite() {
         Key { class: 2, a: 0.0, b: -cost }
-    } else if added <= SAME_STRETCH {
-        Key { class: 0, a: if added.abs() <= SAME_STRETCH { 0.0 } else { added }, b: -cost }
     } else {
-        Key { class: 1, a: -(cost / added), b: 0.0 }
+        Key { class: 0, a: irregular, b: -cost }
     }
+}
+
+/// Outline weight of one edge (px): see `FOLD_DISCOUNT`.
+fn outline_w(length_px: f64, seen_px: f64, cos: f64, out_of_sight: bool) -> f64 {
+    length_px * (1.0 - FOLD_DISCOUNT * (1.0 - cos.max(0.0))) + if out_of_sight { SEEN_WEIGHT * seen_px } else { 0.0 }
+}
+
+/// Irregularity of a chart: outline^2 / (4 pi area); a disk is 1.
+fn irregularity(outline: f64, area: f64) -> f64 {
+    if area > 0.0 { outline * outline / (4.0 * std::f64::consts::PI * area) } else { f64::INFINITY }
+}
+
+/// Per edge: cosine of the angle between its two faces' normals (Newell normals; 1 on a border edge).
+fn fold_cos(points: &[f64], t: &Topo) -> Vec<f64> {
+    let normal = |f: usize| {
+        let mut n = [0f64; 3];
+        for h in t.face_corners(f) {
+            let (a, b) = (t.flat[h] as usize, t.flat[t.next(h)] as usize);
+            let (p, q) = (&points[3 * a..3 * a + 3], &points[3 * b..3 * b + 3]);
+            n[0] += (p[1] - q[1]) * (p[2] + q[2]);
+            n[1] += (p[2] - q[2]) * (p[0] + q[0]);
+            n[2] += (p[0] - q[0]) * (p[1] + q[1]);
+        }
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if l > 0.0 { [n[0] / l, n[1] / l, n[2] / l] } else { [0.0; 3] }
+    };
+    let fnorm: Vec<[f64; 3]> = (0..t.nf).map(normal).collect();
+    (0..t.ne())
+        .map(|e| {
+            let [h0, h1] = t.euse[e];
+            if h1 == NONE {
+                return 1.0;
+            }
+            let (a, b) = (fnorm[t.cface[h0 as usize] as usize], fnorm[t.cface[h1 as usize] as usize]);
+            a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+        })
+        .collect()
 }
 
 /// A candidate measured exactly (tentative glue undone afterwards). Grid union: `local` is the whole union laid out
@@ -669,6 +724,8 @@ impl Tree {
             None => length_px.clone(),
         };
         let cost: Vec<f64> = (0..ne).map(|e| if input.out_of_sight { seen[e] + length_px[e] / l } else { length_px[e] }).collect();
+        let fold = fold_cos(points, &t);
+        let outline: Vec<f64> = (0..ne).map(|e| outline_w(length_px[e], seen[e], fold[e], input.out_of_sight)).collect();
         // Forced lines (6.2.1): walls, given pairs, part borders.
         let mut fixed = t.wall.clone();
         let mut forced_line = vec![false; ne];
@@ -876,7 +933,9 @@ impl Tree {
             }
             let c: f64 = list.iter().map(|&x| cost[x as usize]).sum();
             let s: f64 = list.iter().map(|&x| seen[x as usize]).sum();
-            segments.push(Segment { edges: list, p: pr.0, q: pr.1, cost: c, seen: s });
+            let w: f64 = list.iter().map(|&x| outline[x as usize]).sum();
+            let len: f64 = list.iter().map(|&x| length_px[x as usize]).sum();
+            segments.push(Segment { edges: list, p: pr.0, q: pr.1, cost: c, seen: s, weight: w, length: len });
         }
         numbers[num::SEGMENTS] = segments.len() as f64;
         let mut tree = Tree {
@@ -884,6 +943,8 @@ impl Tree {
             topo: t,
             seen,
             cost,
+            outline,
+            length_px,
             irregular,
             turning,
             sep,
@@ -963,7 +1024,6 @@ impl Tree {
             glued_seg: vec![false; self.segments.len()],
             quick: 0,
             vals: vec![BTreeSet::new(); np],
-            last: HashMap::default(),
             bnd: vec![Vec::new(); np],
             refused: HashMap::default(),
             cap: f64::INFINITY,
@@ -971,12 +1031,20 @@ impl Tree {
             parked: Vec::new(),
             cloc: vec![0; t.corners()],
             eglue: vec![0; t.ne()],
+            area: vec![0.0; np],
+            weight: vec![0.0; np],
+            length: vec![0.0; np],
         };
+        let ppu2 = self.numbers[num::PX_PER_UNIT] * self.numbers[num::PX_PER_UNIT];
         for (p, m) in members.iter().enumerate() {
             for &f in m {
+                b.area[p] += face_area(&self.points, t, f as usize) * ppu2;
                 for h in t.face_corners(f as usize) {
-                    if self.cut_base[t.cedge[h] as usize] {
+                    let e = t.cedge[h] as usize;
+                    if self.cut_base[e] {
                         b.bnd[p].push(h as u32);
+                        b.weight[p] += self.outline[e];
+                        b.length[p] += self.length_px[e];
                     }
                 }
             }
@@ -1051,10 +1119,10 @@ impl Tree {
                     }
                 };
                 let added = ev.stretch - b.stretch[c.a as usize].max(b.stretch[c.b as usize]);
+                let (irr, plain, parts) = b.shape(c.a, c.b, &ev.glued);
                 if !c.exact {
                     seq += 1;
-                    let key = key_of(added, ev.cost);
-                    b.last.insert((c.a, c.b), key);
+                    let key = key_of(added, ev.cost, irr);
                     heap.push(Cand { key, exact: true, seq, ..c });
                     memo.insert((c.a, c.b), (c.va, c.vb, ev));
                     continue;
@@ -1073,6 +1141,12 @@ impl Tree {
                         memo.retain(|k, v| ok(&mut b, k, v));
                         memo_live = memo.len();
                     }
+                    continue;
+                }
+                if plain > SHAPE_MAX && plain > parts {
+                    // Too irregular: not tried again until the smaller chart changes (as a union that lies over).
+                    let small = if b.faces[c.a as usize].len() <= b.faces[c.b as usize].len() { c.a } else { c.b };
+                    b.refused.insert((c.a, c.b), (small, b.ver[small as usize]));
                     continue;
                 }
                 if b.lies_over(c.a, c.b, &ev) {
@@ -1159,9 +1233,6 @@ struct Build<'t> {
     quick: usize,
     /// Per chart: (stretch bits, face) of its faces, so the worst 1 % is read from the top end only.
     vals: Vec<BTreeSet<(u64, u32)>>,
-    /// The last measured key of a chart pair: a pair whose chart grew is queued again under it, not re-measured
-    /// at once.
-    last: HashMap<(u32, u32), Key, FxBuild>,
     /// Per chart: its border sides (corner h = the side from h to the next corner of its face).
     bnd: Vec<Vec<u32>>,
     /// Pairs refused because the union lay over itself: (smaller chart, its version then).
@@ -1176,6 +1247,10 @@ struct Build<'t> {
     /// the union under test, 2 glued for good.
     cloc: Vec<u32>,
     eglue: Vec<u32>,
+    /// Per chart: area (px^2), outline weight and outline length (px) of its border sides, for its irregularity.
+    area: Vec<f64>,
+    weight: Vec<f64>,
+    length: Vec<f64>,
 }
 
 /// The candidate queue in two heaps, not measured yet (`open`) and measured (`done`), popped as one: measuring ahead
@@ -1340,6 +1415,20 @@ impl Build<'_> {
         (if total > 0.0 && diff.is_finite() { diff / total } else { f64::INFINITY }, c)
     }
 
+    /// Irregularity of the union of a and b glued along `glued` by outline weight; and by plain length, with the larger
+    /// of its parts' (for `SHAPE_MAX`).
+    fn shape(&self, a: u32, b: u32, glued: &[u32]) -> (f64, f64, f64) {
+        let segs = &self.tree.segments;
+        let (a, b) = (a as usize, b as usize);
+        let area = self.area[a] + self.area[b];
+        let w: f64 = glued.iter().map(|&s| segs[s as usize].weight).sum();
+        let l: f64 = glued.iter().map(|&s| segs[s as usize].length).sum();
+        let by_weight = irregularity((self.weight[a] + self.weight[b] - 2.0 * w).max(0.0), area);
+        let plain = irregularity((self.length[a] + self.length[b] - 2.0 * l).max(0.0), area);
+        let parts = irregularity(self.length[a], self.area[a]).max(irregularity(self.length[b], self.area[b]));
+        (by_weight, plain, parts)
+    }
+
     fn push_for(&mut self, heap: &mut Queue, seq: &mut u64, r: u32) {
         if self.chi[r as usize] != 1 {
             return;
@@ -1352,13 +1441,9 @@ impl Build<'_> {
             if matches!(self.refused.get(&(a, b)), Some(&(c, v)) if self.ver[c as usize] == v) {
                 continue;
             }
-            let key = match self.last.get(&(a, b)) {
-                Some(k) => *k,
-                None => {
-                    let (mis, c) = self.estimate(&list);
-                    key_of(mis, c)
-                }
-            };
+            // The shape changes whenever a chart grows, so the key is estimated afresh (all open segments glued).
+            let (mis, c) = self.estimate(&list);
+            let key = key_of(mis, c, self.shape(a, b, &list).0);
             *seq += 1;
             let c = Cand { key, a, b, va: self.ver[a as usize], vb: self.ver[b as usize], exact: false, seq: *seq };
             match self.last_st.get(&(a, b)) {
@@ -1613,6 +1698,11 @@ impl Build<'_> {
         let tree = self.tree;
         let t = &tree.topo;
         let mut chi_new = self.chi[a as usize] + self.chi[b as usize];
+        let (ua, ub) = (a as usize, b as usize);
+        let segs = &tree.segments;
+        let area = self.area[ua] + self.area[ub];
+        let weight = (self.weight[ua] + self.weight[ub] - 2.0 * ev.glued.iter().map(|&s| segs[s as usize].weight).sum::<f64>()).max(0.0);
+        let length = (self.length[ua] + self.length[ub] - 2.0 * ev.glued.iter().map(|&s| segs[s as usize].length).sum::<f64>()).max(0.0);
         for &s in &ev.glued {
             let (g, m) = glue(t, &mut self.dsu, &tree.segments[s as usize].edges);
             chi_new += g - m;
@@ -1659,6 +1749,9 @@ impl Build<'_> {
         let eg = &self.eglue;
         self.bnd[r as usize].retain(|&h| eg[t.cedge[h as usize] as usize] != 2);
         self.stretch[r as usize] = ev.stretch;
+        self.area[r as usize] = area;
+        self.weight[r as usize] = weight;
+        self.length[r as usize] = length;
         self.grid[r as usize] = !ev.pole;
         self.chi[r as usize] = 1;
         self.ver[a as usize] += 1;
@@ -2534,7 +2627,7 @@ pub mod tests {
             let edges: Vec<u32> = (0..t.ne() as u32).filter(|&e| t.ea[e as usize] % 7 == c && t.eb[e as usize] == t.ea[e as usize] + 7).collect();
             let [f0, f1] = t.faces_of(edges[0] as usize);
             let (p, q) = (tree.patch[f0 as usize], tree.patch[f1 as usize]);
-            segs.push(Segment { edges, p: p.min(q), q: p.max(q), cost: 1.0, seen: 1.0 });
+            segs.push(Segment { edges, p: p.min(q), q: p.max(q), cost: 1.0, seen: 1.0, weight: 1.0, length: 1.0 });
         }
         tree.segments = segs;
         tree.merges = vec![Merge { segs: vec![0], stretch: 1.5, cost: 1.0, pole: false }, Merge { segs: vec![1], stretch: 1.01, cost: 1.0, pole: false }];

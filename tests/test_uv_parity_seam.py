@@ -67,6 +67,16 @@ def fold_case():
     return points, indptr, flat, uv, before
 
 
+def sliver_case():
+    """8x8 plane, middle vertex read 0.2 px past its right neighbour's column: the faces on its right fold by a sliver."""
+
+    points, indptr, flat = grid(8, 8, 8.0, 8.0)
+    uv = np.stack([points[flat, 0] / 8, points[flat, 1] / 8], 1).ravel()
+    before = uv.copy()
+    uv[2 * np.flatnonzero(flat == 40)] = 5 / 8 + 0.2 / 1024
+    return points, indptr, flat, uv, before
+
+
 def crease():
     """A floor (z = 0, x in 0..4) and a wall (x = 4, z in 0..2) at 90 deg in one island: floor UV (x, y) / 8, wall UV
     (4 + z, y) / 8 (the wall unrolled beside the floor, same winding as seen from outside the corner)."""
@@ -189,6 +199,18 @@ class Twin(unittest.TestCase):
         far = np.repeat(cheb >= 3, 8)
         np.testing.assert_array_equal(uv[far], before[far])
 
+    def test_fold_fix_moves_a_sliver_only_as_far_as_needed(self):
+        points, indptr, flat, uv, before = sliver_case()
+        nf = len(indptr) - 1
+        region, expected = np.zeros(nf, np.int64), np.ones(nf)
+        thrown = uv.copy()
+        report = uvseams.fold_fix(points, indptr, flat, uv, region, expected)
+        self.assertGreater(report["before"], 0)
+        self.assertEqual(report["after"], 0)
+        moved = np.abs(uv - thrown).reshape(-1, 2).max(1) * 1024
+        self.assertTrue(np.all(moved[flat != 40] == 0))  # nothing else moves
+        self.assertLess(moved[flat == 40].max(), 0.5)  # 0.2 px back over the line, 0.25 px clear: not to the ring's middle
+
     def test_triage_small_island(self):
         points, indptr, flat = grid(8, 8, 8.0, 8.0)
         small = np.repeat(np.arange(64) == 27, 4)
@@ -281,6 +303,16 @@ class Parity(unittest.TestCase):
         np.testing.assert_allclose(t_uv, k_uv, atol=1e-6, rtol=0)
         np.testing.assert_array_equal(t_exp, k_exp)
         self.assertEqual({k: t_fold[k] for k in k_fold}, k_fold)
+
+    def test_sliver_fold_fix_matches(self):
+        points, indptr, flat, uv, _ = sliver_case()
+        look = self.run_job(turbo.uvseam_transfer(points, indptr, flat, uv, points, indptr, flat, fix_folds=False))
+        k_uv, k_exp, k_fold = self.run_job(turbo.uvseam_layer(indptr, flat, uv, points, indptr, flat, look))
+        t_uv, t_exp, t_fold = uvseams.layer(indptr, flat, uv, points, indptr, flat, look, use_fast=False)
+        np.testing.assert_allclose(t_uv, k_uv, atol=1e-6, rtol=0)
+        self.assertEqual({k: t_fold[k] for k in k_fold}, k_fold)
+        self.assertGreater(k_fold["folded_before"], 0)
+        self.assertEqual(k_fold["folded_after"], 0)
 
     def test_triage_matches(self):
         points, indptr, flat = grid(8, 8, 8.0, 8.0)
