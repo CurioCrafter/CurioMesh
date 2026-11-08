@@ -1585,20 +1585,38 @@ def draw_tried(layout, record: dict) -> None:
 
 def draw_try_all(layout) -> None:
     s = view.seg.get("tryall")
-    guided = _g()
     if s is None:
         layout.operator("curiomesh.seg_try_all", text="Try Every Method", icon="SORTTIME")
-        note = view.seg.get("tryall_note")
-        if note:
+    else:
+        layout.label(text=f"Way {min(s['done'], s['total'])} of {s['total']}: {s['label']}", icon="TIME")
+    draw_work_slot(layout, s)
+
+
+def draw_work_slot(layout, tryall=None) -> None:
+    """Always exactly three rows under Redo / Try Every Method: progress, what it is doing and Stop while working,
+    the last Try Every Method note (or blank rows) when idle. The tried list and buttons below never jump."""
+    import textwrap
+
+    busy = _g().progress_info()
+    if busy is not None:
+        fraction = min(max(float(busy[0]), 0.0), 1.0)
+        if hasattr(layout, "progress"):
+            layout.progress(factor=fraction, type="BAR", text=f"{fraction * 100:.0f}%")
+        else:
+            layout.label(text=f"{fraction * 100:.0f}%")
+        layout.label(text=textwrap.shorten(str(busy[1]), 40, placeholder="..."))
+    else:
+        lines = textwrap.wrap(str(view.seg.get("tryall_note") or "") if tryall is None else "", 40)[:2]
+        for i in range(2):
             sub = layout.row()
             sub.active = False
-            sub.label(text=note)
-        return
-    layout.label(text=f"Way {min(s['done'], s['total'])} of {s['total']}: {s['label']}", icon="TIME")
-    busy = guided.progress_info()
-    if busy is not None:
-        guided.draw_progress(layout, *busy)
-    layout.operator("curiomesh.seg_try_all", text="Stop", icon="CANCEL").stop = True
+            sub.label(text=lines[i] if i < len(lines) else "")
+    if tryall is not None:
+        layout.operator("curiomesh.seg_try_all", text="Stop", icon="CANCEL").stop = True
+    elif busy is not None:
+        layout.operator("curiomesh.guided_stop_work", icon="CANCEL")
+    else:
+        layout.label(text="")
 
 
 def can_send_problem() -> bool:
@@ -1645,9 +1663,8 @@ def draw_selected(layout, gs) -> None:
     row.operator("curiomesh.seg_goal", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
     if len(selected) == 1:
         draw_try_all(box)
-    if guided.progress_info() is not None and view.seg.get("tryall") is None:
-        guided.draw_progress(box, *guided.progress_info())
-        box.operator("curiomesh.guided_stop_work", icon="CANCEL")
+    else:
+        draw_work_slot(box)
     if len(selected) == 1:
         draw_tried(box, view.seg["parts"][selected[0]])
     if not spots_mode and can_send_problem():
