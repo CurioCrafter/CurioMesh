@@ -23,9 +23,11 @@ from .operators import (
     CURIOMESH_OT_remesh,
 )
 from . import batch, fix_select, game_export, guided, history, live, overlay, panel, region, tidytools
-from . import agent_mailbox, parts_export, parts_import  # main-only
+from . import agent_mailbox, help, parts_export, parts_import, promptgen  # main-only
 from . import uv_panel  # main-only: uv
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
+from . import translations
+from .translations import tr
 
 D = overlay.PREF_DEFAULTS
 
@@ -70,6 +72,14 @@ SUBPANEL_TOGGLES = (
 class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
+    language: bpy.props.EnumProperty(
+        name="Language",
+        description=translations.LANGUAGE_TIP,
+        items=translations.LANGUAGE_ITEMS,
+        get=translations.get_language,
+        set=translations.set_language,
+        options={"SKIP_SAVE"},
+    )
     panel_tab: bpy.props.StringProperty(
         name="Sidebar Tab",
         description="Name of the tab in the 3D Viewport sidebar (N panel) that holds CurioMesh",
@@ -114,11 +124,6 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         default=D["flow_editor"],
     )
 
-    hud_default: bpy.props.BoolProperty(
-        name="HUD On in New Scenes",
-        description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet",
-        default=D["hud_default"],
-    )
     hud_corner: bpy.props.EnumProperty(
         name="Corner",
         description="Which corner of the viewport the dashboard sits in",
@@ -199,6 +204,10 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         layout.use_property_decorate = False
 
         box = layout.box()
+        box.label(text="Language", icon="WORLD")
+        box.prop(self, "language")
+
+        box = layout.box()
         box.label(text="Panels", icon="WINDOW")
         col = box.column()
         col.prop(self, "panel_tab")
@@ -210,12 +219,11 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         shown.label(text="Show these panels")
         flow = shown.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
         for name, label in SUBPANEL_TOGGLES:
-            flow.prop(self, name, text=label, toggle=True)
+            flow.prop(self, name, text=tr(label), toggle=True)
 
         box = layout.box()
         box.label(text="Dashboard (HUD)", icon="OVERLAY")
         col = box.column()
-        col.prop(self, "hud_default")
         col.prop(self, "hud_corner")
         offsets = col.row(align=True)
         offsets.use_property_split = False
@@ -290,6 +298,7 @@ def register():
     if _registered:
         unregister()  # a second register() (scripts, reloads) starts clean instead of raising "already registered"
     _registered = True
+    translations.register()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_settings = bpy.props.PointerProperty(type=CURIOMESH_PG_settings)
@@ -302,6 +311,8 @@ def register():
     fix_select.register()
     game_export.register()
     uv_panel.register()  # main-only: uv
+    help.register()  # main-only
+    promptgen.register()  # main-only
     panel.register()
     agent_mailbox.register()  # main-only
     parts_export.register()  # main-only
@@ -318,6 +329,8 @@ def unregister():
     parts_export.unregister()  # main-only
     agent_mailbox.unregister()  # main-only
     panel.unregister()
+    promptgen.unregister()  # main-only
+    help.unregister()  # main-only
     uv_panel.unregister()  # main-only: uv
     game_export.unregister()
     fix_select.unregister()
@@ -331,6 +344,7 @@ def unregister():
         del bpy.types.Scene.curiomesh_settings
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    translations.unregister()
 
 
 if __name__ == "__main__":

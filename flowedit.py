@@ -24,6 +24,7 @@ from . import flowstroke as F
 from . import guides, overlay, region
 from .triadq import checks, issues, loopscore
 from .triadq import segment as S
+from .translations import tip, tr
 
 KIND_KEY = "curiomesh_flow"  # custom property of a stroke's curve: FLOW, RING or EDGE
 REACH_KEY = "curiomesh_flow_reach"  # custom property: quad widths round the stroke that are redone (else flowstroke.REACH)
@@ -357,7 +358,7 @@ class _FlowTool:
         guided.state["source"] = self.obj.name
         self.stroke, self.last, self.anchor = None, None, None
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set(self.HINT)
+        context.workspace.status_text_set(tr(self.HINT))
         return {"RUNNING_MODAL"}
 
     def _finish(self, context):
@@ -395,7 +396,7 @@ def _make_draw():
 
         @classmethod
         def description(cls, context, properties):
-            return next(d for k, _n, d in KIND_ITEMS if k == properties.kind)
+            return tip(next(d for k, _n, d in KIND_ITEMS if k == properties.kind))
 
         def invoke(self, context, event):
             return _FlowTool.invoke(self, context, event)
@@ -410,7 +411,7 @@ def _make_draw():
             src = guided._source_data(self.obj)
             kind = self.kind if self.kind != "AUTO" else F.recognise(raw, normals, crease_test(src))
             add_stroke(context, self.obj, kind, F.tidy(kind, raw), raw)
-            context.workspace.status_text_set(f"Recognised: {F.NAMES[kind]}.  F/R/E: change to Flow/Ring/Edge  Keep drawing, or Right click/Enter/Esc: done")
+            context.workspace.status_text_set(tr(f"Recognised: {F.NAMES[kind]}.  F/R/E: change to Flow/Ring/Edge  Keep drawing, or Right click/Enter/Esc: done"))
             self._changed(context)
 
         def modal(self, context, event):
@@ -539,7 +540,7 @@ def _make_draw():
 
         @classmethod
         def description(cls, context, properties):
-            return {"EYE": "Click the middle of an eye: a closed ring round it (and the other eye with Both Sides)", "MOUTH": "Click the middle of the mouth: a closed ring round the lips", "NOSE_MOUTH": "Click the middle of the mouth: lines from beside the nose round the mouth corners"}[properties.shape]
+            return tip({"EYE": "Click the middle of an eye: a closed ring round it (and the other eye with Both Sides)", "MOUTH": "Click the middle of the mouth: a closed ring round the lips", "NOSE_MOUTH": "Click the middle of the mouth: lines from beside the nose round the mouth corners"}[properties.shape])
 
         def invoke(self, context, event):
             return _FlowTool.invoke(self, context, event)
@@ -618,7 +619,7 @@ class CURIOMESH_OT_flow_change(bpy.types.Operator):
 
     @classmethod
     def description(cls, context, properties):
-        return {"FLOW": "Make the last stroke a Flow line: the rows run along it", "RING": "Make the last stroke a Ring: a closed edge loop with rings round it", "EDGE": "Make the last stroke an Edge: a run of edges exactly on it"}[properties.kind]
+        return tip({"FLOW": "Make the last stroke a Flow line: the rows run along it", "RING": "Make the last stroke a Ring: a closed edge loop with rings round it", "EDGE": "Make the last stroke an Edge: a run of edges exactly on it"}[properties.kind])
 
     def execute(self, context):
         return {"FINISHED"} if change_last(context, self.kind) else {"CANCELLED"}
@@ -661,10 +662,10 @@ def draw_tools(layout, gs) -> None:
     last = fe["last"]
     if last is not None and bpy.data.objects.get(last[0]) is not None:
         row = col.row(align=True)
-        row.label(text=f"Last: {F.NAMES[last[1]]}")
+        row.label(text=tr(f"Last: {F.NAMES[last[1]]}"))
         for kind in F.KINDS:
             if kind != last[1]:
-                row.operator("curiomesh.flow_change", text=F.NAMES[kind]).kind = kind
+                row.operator("curiomesh.flow_change", text=tr(F.NAMES[kind])).kind = kind
     if active() and fe["meter"]:
         overlay.wrap_label(col, fe["meter"], icon="MESH_GRID", width=36, limit=5)
 

@@ -15,6 +15,7 @@ import numpy as np
 from mathutils.bvhtree import BVHTree
 
 from .triadq import checks, repair
+from .translations import tip, tr
 
 KIND_WORDS = {"inward": "inward", "sunk": "sunk", "crossing": "crossing", "folded_over": "folded over", "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping", "touching": "touching parts"}
 
@@ -256,7 +257,7 @@ class CURIOMESH_OT_fix_find(_FixOp, bpy.types.Operator):
     bl_description = "Check the selected faces (and the rings around them) and leave only the bad ones selected. Nothing selected: the whole mesh"
 
     def execute(self, context):
-        self.report({"INFO"}, find_bad(context, context.edit_object, context.scene.curiomesh_fix.grow))
+        self.report({"INFO"}, tr(find_bad(context, context.edit_object, context.scene.curiomesh_fix.grow)))
         return {"FINISHED"}
 
 
@@ -278,14 +279,14 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
 
     @classmethod
     def description(cls, context, props):
-        return FIXES[props.how][2] if props.how in FIXES else "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad"
+        return tip(FIXES[props.how][2] if props.how in FIXES else "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad")
 
     def execute(self, context):
         text, warning = run_fix(context, context.edit_object, self.how, context.scene.curiomesh_fix.grow)
         if warning:
-            self.report({"WARNING"}, warning)
+            self.report({"WARNING"}, tr(warning))
             return {"CANCELLED"}
-        self.report({"INFO"}, text)
+        self.report({"INFO"}, tr(text))
         return {"FINISHED"}
 
 
@@ -314,9 +315,9 @@ class CURIOMESH_PT_fix(bpy.types.Panel):
         row.operator("curiomesh.fix_run", text="Fix All", icon="CHECKMARK").how = "ALL"
         col = layout.column(align=True)
         for key, (_fn, label, _tip, icon) in FIXES.items():
-            col.operator("curiomesh.fix_run", text=label, icon=icon).how = key
+            col.operator("curiomesh.fix_run", text=tr(label), icon=icon).how = key
         if fs.last:
-            layout.label(text=fs.last, icon="INFO")
+            layout.label(text=tr(fs.last), icon="INFO")
 
 
 CLASSES = (CURIOMESH_PG_fix, CURIOMESH_OT_fix_find, CURIOMESH_OT_fix_run, CURIOMESH_PT_fix)

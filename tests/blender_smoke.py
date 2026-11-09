@@ -1066,20 +1066,18 @@ def run_ui_prefs_case(module):
     if any(abs(a - b) > 1e-5 for a, b in zip(region.SEAM_COLOR, overlay.pref_color(overlay.get_prefs(), "region_seam_color"))):
         raise AssertionError("ui prefs: region seam colour default mismatch")
 
-    # HUD default applies once per scene and only ever turns the HUD off.
+    # The dashboard starts off, and the once-per-scene default only ever switches it off.
     scene = bpy.context.scene
     if "curiomesh_hud_init" in scene.keys():
         del scene["curiomesh_hud_init"]
     settings.hud_enabled = True
-    prefs.hud_default = False
     overlay.apply_hud_default(scene)
     if settings.hud_enabled:
-        raise AssertionError("ui prefs: hud_default False did not switch the HUD off")
+        raise AssertionError("ui prefs: the dashboard default did not switch it off")
     settings.hud_enabled = True
     overlay.apply_hud_default(scene)
     if not settings.hud_enabled:
         raise AssertionError("ui prefs: hud default applied twice")
-    prefs.hud_default = True
 
     # Every panel draws, in several states, with no unknown icon / property / operator.
     states = []

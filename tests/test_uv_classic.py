@@ -151,16 +151,16 @@ class Obj:
 
 class Transfer(unittest.TestCase):
     def setUp(self):
-        self.saved = dict(uvseams.FAST), uvseams.transfer, uvseams.layer
+        self.saved = dict(uvseams.FAST), uvseams.Transfer, uvseams.layer
         uvseams.FAST["transfer"] = object()  # "native core present"; the calls below run the NumPy twin
         t, lay = self.saved[1:]
-        uvseams.transfer = lambda *a, **k: t(*a, use_fast=False, **k)
+        uvseams.Transfer = lambda *a, **k: t(*a, use_fast=False, **k)
         uvseams.layer = lambda *a, **k: lay(*a, use_fast=False, **k)
 
     def tearDown(self):
         uvseams.FAST.clear()
         uvseams.FAST.update(self.saved[0])
-        uvseams.transfer, uvseams.layer = self.saved[1:]
+        uvseams.Transfer, uvseams.layer = self.saved[1:]
 
     def test_island_aware_drift_and_all_layers(self):
         points, indptr, flat, uv = two_islands()

@@ -57,6 +57,7 @@ import numpy as np
 from . import history, overlay
 from .triadq import autofix
 from .triadq import trial as T
+from .translations import tr
 
 BUDGET = 0.008  # seconds of work per timer tick: half a 60 Hz frame
 REST = 0.15  # seconds after the handle stops: the exact run starts
@@ -990,7 +991,7 @@ def _chip(shader, cx, cy, text, colour, size, scale, alpha=0.55) -> float:
     import blf
 
     blf.size(0, size)
-    cw = blf.dimensions(0, text)[0] + 14 * scale
+    cw = blf.dimensions(0, tr(text))[0] + 14 * scale
     overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 20 * scale, 4 * scale), (*colour[:3], alpha))
     overlay._text(cx + 7 * scale, cy + 6 * scale, size, (1, 1, 1, 1 if alpha > 0.3 else 0.5), text)
     return cw
@@ -1060,7 +1061,7 @@ def _draw_card(shader, s, region, dial, scale) -> None:
         for key, words in s.trial.toggles:
             on = bool(s.settings.get(key))
             blf.size(0, small)
-            cw = blf.dimensions(0, words)[0] + 10 * scale
+            cw = blf.dimensions(0, tr(words))[0] + 10 * scale
             overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 17 * scale, 4 * scale), (*(PINK if on else SLATE)[:3], 0.5 if on else 0.3))
             overlay._text(cx + 5 * scale, cy + 5 * scale, small, (1, 1, 1, 1.0 if on else 0.6), words)
             chips["toggle:" + key] = (cx, cy, cx + cw, cy + 17 * scale)
@@ -1170,14 +1171,22 @@ class LiveTool:
         return {}
 
     def invoke(self, context, event):
+        refused = self._open(context, event)
+        if refused is not None:
+            return refused
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _open(self, context, event):
+        """Open the preview. Returns None when it is open (the caller makes the operator modal), else the result to give back."""
         area, region = _view(context)
         if region is None:
-            self.report({"WARNING"}, "Open a 3D view first: the preview is drawn there.")
+            self.report({"WARNING"}, tr("Open a 3D view first: the preview is drawn there."))
             return {"CANCELLED"}
         close("")  # one preview at a time: opening a second cancels the first
         s = Session(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
         if s.error:
-            self.report({"WARNING"}, s.error)
+            self.report({"WARNING"}, tr(s.error))
             return {"CANCELLED"}
         obj = _preview()
         self._edit = obj is not None and obj.mode == "EDIT"
@@ -1192,10 +1201,9 @@ class LiveTool:
         _add_handlers()
         self._timer = context.window_manager.event_timer_add(1.0 / 60.0, window=context.window)
         words = HINT_PICK if s.trial.picks else HINT if s.handle else HINT_NONE
-        area.header_text_set(words.format(name=s.trial.name, handle=s.handle, ask=s.trial.asks.get(s.trial.picks[0], "click on the result") if s.trial.picks else ""))
-        context.window_manager.modal_handler_add(self)
+        area.header_text_set(tr(words.format(name=s.trial.name, handle=s.handle, ask=s.trial.asks.get(s.trial.picks[0], "click on the result") if s.trial.picks else "")))
         overlay.tag_redraw()
-        return {"RUNNING_MODAL"}
+        return None
 
     def _finish(self, context) -> None:
         s = self._s
@@ -1230,7 +1238,7 @@ class LiveTool:
         name = s.trial.name
         numbers = numbers_text(s.cand, s.trial, s.cap)
         if not commit(context, s.cand, name, numbers, trial=s.trial):
-            self.report({"WARNING"}, f"{name}: nothing to keep")
+            self.report({"WARNING"}, tr(f"{name}: nothing to keep"))
             close("")
             self._finish(context)
             return {"CANCELLED"}
@@ -1275,7 +1283,7 @@ class LiveTool:
             if s.pump(BUDGET):
                 s.area.tag_redraw()
             if s.error:
-                self.report({"WARNING"}, s.error)
+                self.report({"WARNING"}, tr(s.error))
                 close("")
                 self._finish(context)
                 return {"CANCELLED"}
@@ -1395,7 +1403,7 @@ class LiveTool:
         s = work_out(context, self.trial(), self._settings(), self._scope(context), self._pick(context))
         why = why_not_kept(s)
         if why:
-            self.report({"WARNING"}, why)
+            self.report({"WARNING"}, tr(why))
             return {"CANCELLED"}
         numbers = numbers_text(s.cand, s.trial, s.cap)
         if not commit(context, s.cand, s.trial.name, numbers, trial=s.trial):

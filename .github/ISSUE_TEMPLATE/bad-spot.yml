@@ -1,0 +1,78 @@
+name: Bad spot or fixed part
+description: Send a spot CurioMesh got wrong, or a better version of it, as a test case.
+title: "Bad spot: "
+labels: ["test-case"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. CurioMesh never uploads anything, so you attach the zip yourself.
+        The zip holds pieces of your mesh. Look inside before you attach it, and send only meshes you have the right to share.
+  - type: dropdown
+    id: build
+    attributes:
+      label: CurioMesh version and build
+      description: The version number is in the add-on's preferences and in the first line of report.md.
+      options:
+        - GitHub add-on
+        - Blender Extensions build
+        - Standalone
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CurioMesh version number
+      placeholder: "0.9.9"
+    validations:
+      required: true
+  - type: input
+    id: blender
+    attributes:
+      label: Blender version
+      description: Leave empty for Standalone.
+      placeholder: "4.2 LTS"
+  - type: dropdown
+    id: purpose
+    attributes:
+      label: What the mesh is for
+      options:
+        - Game asset
+        - Animation or character
+        - Subdivision or sculpt base
+        - Scan or photogrammetry clean-up
+        - Hard surface or machine part
+        - 3D printing
+        - Film or render
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What is wrong
+      description: Which part, what it looks like, what you expected. Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Did you fix it, and how
+      description: Say "no" if you did not. If you did, by hand or with an AI through the parts exchange? Which settings or steps?
+  - type: markdown
+    attributes:
+      value: |
+        **The zip:** in the CurioMesh panel open **Help Make It Better**, mark the spots and press **Send as a Problem** or **Share a Fix** (or **Save for a Report**) (agents: `parts.report`), then drag the zip into the box below. Drop a fixed part's `returned` folder in as a zip too.
+  - type: textarea
+    id: zip
+    attributes:
+      label: Drag the zip here
+  - type: checkboxes
+    id: agree
+    attributes:
+      label: Before you send
+      options:
+        - label: I have the right to share this mesh.
+          required: true
+        - label: I agree it may be used as a CurioMesh test case under CC0.
+          required: true

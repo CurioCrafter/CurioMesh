@@ -13,10 +13,13 @@ installed and with the NumPy twin when it is not. No `bpy` import: only the mesh
 from __future__ import annotations
 
 from dataclasses import replace
+import time
 
 import numpy as np
 
 from . import uvseams
+
+WAIT = "wait"  # yielded while the faster kernel works: a timer slice ends at once instead of spinning
 
 
 def pair(mesh, prep, seeds):
@@ -154,6 +157,19 @@ def preserve_textures(source, target, config, allow_python_bvh: bool = True):
     (not a transfer mode, no source UVs, or the transfer gave nothing usable). Without the faster kernel the NumPy
     twin of the same transfer runs (same result, slower)."""
 
+    steps = preserve_textures_steps(source, target, config)
+    while True:
+        try:
+            if next(steps) == WAIT:
+                time.sleep(0.0005)
+        except StopIteration as end:
+            return end.value
+
+
+def preserve_textures_steps(source, target, config, stopped=lambda: False):
+    """`preserve_textures` as a generator for a timer: the transfer yields between short steps (`WAIT` while the faster
+    kernel works). `stopped()` True ends it early with None, so the old transfer runs."""
+
     if str(config.texture_mode or "PROJECT").upper() not in {"TRANSFER", "PROJECT"}:
         return None
     layers = [layer.name for layer in source.data.uv_layers]
@@ -166,7 +182,14 @@ def preserve_textures(source, target, config, allow_python_bvh: bool = True):
         active = source.data.uv_layers.active.name if source.data.uv_layers.active else layers[0]
         layers.sort(key=lambda n: n != active)  # the active layer first: it makes the lookup the others reuse
         first = read_uv(source.data, layers[0])
-        out = uvseams.transfer(sp, si, sf, first.ravel(), rp, ri, rf, material=material, fix_folds=FIX_FOLDS)
+        stage = uvseams.Transfer(sp, si, sf, first.ravel(), rp, ri, rf, material=material, fix_folds=FIX_FOLDS)
+        while not stage.done:
+            if stopped():
+                stage.stop()
+                return None
+            stage.step()
+            yield WAIT if stage._job is not None else None
+        out = stage.result
         if not out.get("done", True):
             return None
         results = {layers[0]: out["uv"]}

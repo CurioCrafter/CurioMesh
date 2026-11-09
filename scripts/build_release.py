@@ -90,6 +90,7 @@ def release_metadata(root: Path) -> tuple[str, str]:
 def source_files(root: Path) -> list[Path]:
     files = sorted(root.glob("*.py")) + [root / name for name in sorted(ROOT_FILES)]
     files.extend(sorted(path for path in (root / "triadq").rglob("*.py") if path.is_file()))
+    files.extend(sorted((root / "translations").glob("*.py")))  # the four language tables (translations/__init__.py)
     files.append(root / "triadq" / "patterns.json")
     files.append(root / "triadq" / "cases_table.json")
     files.extend(sorted(path for path in (root / "docs").rglob("*.md") if path.is_file()))

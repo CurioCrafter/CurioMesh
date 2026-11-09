@@ -70,7 +70,13 @@ class CURIOMESH_PG_settings(bpy.types.PropertyGroup):
     debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", description="Print step-by-step details to the system console", default=False)
 
     hud_enabled: bpy.props.BoolProperty(
-        name="HUD", description="Show the quad-quality dashboard in the 3D viewport (position and size: add-on Preferences)", default=True, update=_redraw_update
+        name="Dashboard",
+        description="Show the dashboard in the 3D view: quad quality, and live progress with a Stop button while CurioMesh works. Off until you turn it on (position and size: add-on Preferences)",
+        default=False,
+        update=_redraw_update,
+    )
+    hud_collapsed: bpy.props.BoolProperty(
+        name="Small Dashboard", description="Shrink the dashboard to one line", default=False, update=_redraw_update
     )
     heatmap_enabled: bpy.props.BoolProperty(
         name="Heatmap",

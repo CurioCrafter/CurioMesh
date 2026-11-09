@@ -25,6 +25,7 @@ from .triadq import loopspoles as LP
 from .triadq import hardtidy as HT
 from .triadq import tidytools as T
 from .triadq import trial as TT
+from .translations import tip, tr
 
 WIDTH = 36
 
@@ -178,7 +179,7 @@ class CURIOMESH_OT_tool_every(_Tool, bpy.types.Operator):
     def description(cls, context, properties):
         trial = trial_of(properties.tool) if properties.tool else None
         many = trial.kinds[0][2] if trial is not None and trial.kinds else "spots"
-        return f"Fix every spot like this: finds every {many} in Work On and shows every fix first. Enter keeps the ones that got better"
+        return tip(f"Fix every spot like this: finds every {many} in Work On and shows every fix first. Enter keeps the ones that got better")
 
     @classmethod
     def poll(cls, context):
@@ -189,7 +190,7 @@ class CURIOMESH_OT_tool_every(_Tool, bpy.types.Operator):
 
     def _bind(self) -> bool:
         if not finds_spots(self.tool):
-            self.report({"WARNING"}, "This tool has no spots to find. Open it by itself instead.")
+            self.report({"WARNING"}, tr("This tool has no spots to find. Open it by itself instead."))
             return False
         self.trial = _every_class(self.tool)
         return True
@@ -223,20 +224,91 @@ class PartSwap(tidylive.LiveTool):
         return "PART"
 
     def invoke(self, context, event):
-        from . import segments
-
         plan = self.plan(context)
         if plan["why"] and not plan["tries"] and not plan["todo"]:
-            self.report({"WARNING"}, plan["why"])
+            self.report({"WARNING"}, tr(plan["why"]))
             return {"CANCELLED"}
-        made = segments.preview_tries(plan["tries"]) if not plan["todo"] else None
-        if made is None or tidylive._view(context)[1] is None:
-            return self.execute(context)  # a redo in the background: nothing to show before it is done
+        self._building = None
+        if tidylive._view(context)[1] is None:
+            return self.execute(context)  # no 3D view to draw the preview in
+        if plan["todo"]:  # sizes not worked out yet: build them as tries first (nothing changes), then show them
+            return self._build(context, plan)
+        return self._show(context, event, plan, modal=False)
+
+    def _build(self, context, plan):
+        from . import ladder
+
+        runner = ladder.build_sizes(context, plan["todo"], bool(plan.get("bigger")), plan["name"])
+        if runner is None:
+            return self.execute(context)
+        self._building, self._plan = runner, plan
+        self._wait = context.window_manager.event_timer_add(0.1, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, tr(f"{plan['name']}: building the new faces. The preview opens when they are ready; Esc cancels"))
+        return {"RUNNING_MODAL"}
+
+    def _stop_waiting(self, context) -> None:
+        if getattr(self, "_wait", None) is not None:
+            context.window_manager.event_timer_remove(self._wait)
+            self._wait = None
+
+    def modal(self, context, event):
+        runner = getattr(self, "_building", None)
+        if runner is None:
+            return super().modal(context, event)
+        if event.type == "ESC" and event.value == "PRESS":
+            return self._abandon(context)
+        if event.type != "TIMER" or runner.busy:
+            return {"PASS_THROUGH"}
+        from . import ladder
+
+        self._building = None
+        self._stop_waiting(context)
+        built = ladder.finish_build(runner)
+        plan = dict(self._plan)
+        if not built:
+            self.report({"WARNING"}, tr((runner.warnings[0] if runner.warnings else "") or f"{plan['name']}: nothing changed"))
+            return {"CANCELLED"}
+        plan.update(todo=[], tries={**plan["tries"], **{p: i for p, (i, _r) in built.items()}}, sizes={**plan.get("sizes", {}), **built})
+        if runner.warnings:
+            self.report({"WARNING"}, tr(runner.warnings[0]))
+        shown = self._show(context, event, plan, modal=True)
+        return {"RUNNING_MODAL"} if shown is None else shown
+
+    def _abandon(self, context):
+        from . import ladder
+
+        runner, self._building = self._building, None
+        self._stop_waiting(context)
+        _guided().stop_work()
+        ladder.finish_build(runner)  # the parts get their old numbers back; the result was never touched
+        self.report({"INFO"}, tr(f"{self._plan['name']}: cancelled, nothing changed"))
+        return {"CANCELLED"}
+
+    def cancel(self, context):
+        if getattr(self, "_building", None) is not None:
+            self._abandon(context)
+        else:
+            super().cancel(context)
+
+    def _show(self, context, event, plan, modal: bool):
+        """Open the preview of `plan` (its tries all exist). modal: already running as a modal, so only open it. Returns
+        None when open and modal, else the result to give back."""
+        from . import segments
+
+        made = segments.preview_tries(plan["tries"])
+        if made is None:
+            if modal:
+                self.report({"WARNING"}, tr(f"{plan['name']}: nothing to show"))
+                return {"CANCELLED"}
+            return self.execute(context)
         self._plan = plan
         segments.select(sorted(plan["tries"]))
         old = np.asarray(segments.seg["piece"]).copy()
         self.trial = type("SwapNow", (T.SwapParts,), {"name": plan["name"], "swap": (made[0], made[1], made[3], old, tuple(plan["tries"]))})
-        return super().invoke(context, event)
+        if not modal:
+            return super().invoke(context, event)
+        return self._open(context, event)
 
     def _keep(self, context):
         s = self._s
@@ -245,7 +317,7 @@ class PartSwap(tidylive.LiveTool):
         kept = self.keep(context, plan)
         self._finish(context)
         if not kept:
-            self.report({"WARNING"}, f"{plan['name']}: nothing to keep")
+            self.report({"WARNING"}, tr(f"{plan['name']}: nothing to keep"))
             return {"CANCELLED"}
         self._remember(context, plan, numbers)
         return {"FINISHED"}
@@ -258,10 +330,10 @@ class PartSwap(tidylive.LiveTool):
     def execute(self, context):
         plan = self.plan(context)
         if not self.keep(context, plan):
-            self.report({"WARNING"}, plan["why"] or f"{plan['name']}: nothing changed")
+            self.report({"WARNING"}, tr(plan["why"] or f"{plan['name']}: nothing changed"))
             return {"CANCELLED"}
         if plan["why"]:
-            self.report({"WARNING"}, plan["why"])
+            self.report({"WARNING"}, tr(plan["why"]))
         self._remember(context, plan, "")
         return {"FINISHED"}
 
@@ -324,8 +396,8 @@ class CURIOMESH_OT_tool_source_relax(_Tool, bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.first:
-            return "Opens Source Relax on the roughest part of your result and shows the change before anything is kept. Enter keeps it, Esc leaves everything as it was"
-        return cls.bl_description
+            return tip("Opens Source Relax on the roughest part of your result and shows the change before anything is kept. Enter keeps it, Esc leaves everything as it was")
+        return tip(cls.bl_description)
 
     def _scope(self, context) -> str:
         if not self.first:
@@ -342,7 +414,7 @@ class CURIOMESH_OT_tool_source_relax(_Tool, bpy.types.Operator):
     def invoke(self, context, event):
         out = super().invoke(context, event)
         if self.first and "RUNNING_MODAL" in out:
-            tidylive.live["session"].area.header_text_set("Drag the orange ring to see more or less. Enter keeps it, Esc cancels, B shows before/after.")
+            tidylive.live["session"].area.header_text_set(tr("Drag the orange ring to see more or less. Enter keeps it, Esc cancels, B shows before/after."))
         return out
 
     def _keep(self, context):
@@ -742,7 +814,7 @@ def _marker_draw_pixel() -> None:
         chips, cx, cy = {}, x + pad, y + 8 * scale
         for name, text, lit in (("apply", "Apply  Enter", tidylive.TEAL), ("cancel", "Cancel  Esc", tidylive.SLATE)):
             blf.size(0, size)
-            cw = blf.dimensions(0, text)[0] + 14 * scale
+            cw = blf.dimensions(0, tr(text))[0] + 14 * scale
             overlay._fill(shader, overlay._rounded_rect(cx, cy, cw, 20 * scale, 4 * scale), (*lit[:3], 0.55))
             overlay._text(cx + 7 * scale, cy + 6 * scale, size, (1, 1, 1, 1), text)
             chips[name] = (cx, cy, cx + cw, cy + 20 * scale)
@@ -780,7 +852,7 @@ def marker_invoke(op, context, event):
         "hover": None, "drag": None, "note": "", "chips": {}, "key": None, "batches": None,
     }
     marker_live["handles"] = [bpy.types.SpaceView3D.draw_handler_add(_marker_draw_view, (), "WINDOW", "POST_VIEW"), bpy.types.SpaceView3D.draw_handler_add(_marker_draw_pixel, (), "WINDOW", "POST_PIXEL")]
-    area.header_text_set(MARKER_HINT)
+    area.header_text_set(tr(MARKER_HINT))
     context.window_manager.modal_handler_add(op)
     area.tag_redraw()
     return {"RUNNING_MODAL"}
@@ -924,7 +996,7 @@ class CURIOMESH_OT_tool_finish(bpy.types.Operator):
 
     @classmethod
     def description(cls, context, properties):
-        return cls.bl_description if properties.keep else "Closes the tool and changes nothing. Same as Esc or right-click"
+        return tip(cls.bl_description if properties.keep else "Closes the tool and changes nothing. Same as Esc or right-click")
 
     @classmethod
     def poll(cls, context):
@@ -949,7 +1021,7 @@ class CURIOMESH_OT_tool_intro(bpy.types.Operator):
 
     @classmethod
     def description(cls, context, properties):
-        return "Shows the first-time button and what tools do again" if properties.show else cls.bl_description
+        return tip("Shows the first-time button and what tools do again" if properties.show else cls.bl_description)
 
     def execute(self, context):
         prefs = overlay.get_prefs()
@@ -1007,12 +1079,12 @@ def draw_tools(layout, context) -> None:
         grid = layout.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
         grid.scale_y = 1.4
         for key, label, icon, stock, _tip in groups:
-            grid.popover(panel=f"CURIOMESH_PT_tools_{key.lower()}", text=label, **icons.kw(icon, stock))
+            grid.popover(panel=f"CURIOMESH_PT_tools_{key.lower()}", text=tr(label), **icons.kw(icon, stock))
     if ts is not None and ts.last_tool:
         row = layout.row(align=True)
         sub = row.row(align=True)
         sub.active = False
-        sub.label(text=f"Last: {ts.last_name}" + (f"  {ts.last_numbers}" if ts.last_numbers else ""))
+        sub.label(text=tr(f"Last: {ts.last_name}" + (f"  {ts.last_numbers}" if ts.last_numbers else "")))
         row.operator("curiomesh.tool_again", text="Again", icon="FILE_REFRESH")
         row.operator("ed.undo", text="", icon="LOOP_BACK")
     if tidylive.live["note"]:
@@ -1064,10 +1136,10 @@ class _GroupPopover:
         col = self.layout.column(align=True)
         for tool in shown_tools(context, self.GROUP):
             if not finds_spots(tool.idname):  # manual only: the row is just the tool
-                col.operator(tool.idname, text=tool.label, **icons.kw(tool.icon, tool.stock))
+                col.operator(tool.idname, text=tr(tool.label), **icons.kw(tool.icon, tool.stock))
                 continue
             row = col.row(align=True)
-            row.operator(tool.idname, text=tool.label, **icons.kw(tool.icon, tool.stock))
+            row.operator(tool.idname, text=tr(tool.label), **icons.kw(tool.icon, tool.stock))
             row.operator("curiomesh.tool_every", text="", **icons.kw("tt_fix_every", "SHADERFX")).tool = tool.idname
 
 

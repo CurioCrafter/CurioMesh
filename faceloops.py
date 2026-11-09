@@ -27,6 +27,7 @@ from .triadq import organize as O
 from .triadq import rings as RG
 from .triadq import strips as S
 from .triadq.patterns import Topology
+from .translations import tr
 
 WIGGLY, UNEVEN, SHORT = SF.WIGGLY, SF.UNEVEN, SF.SHORT  # Fix This: straighten, even out, or take away a dead end
 SHARP_DEG = 60.0  # an edge folding more than this holds its vertices: Tidy Up's 35 held 40% of a coarse bust's face
@@ -423,7 +424,7 @@ class CURIOMESH_OT_strip_pick(bpy.types.Operator):
         context.scene.curiomesh_guided.organize_flow = True
         self.drag, self.goal = None, None
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set(self.HINT)
+        context.workspace.status_text_set(tr(self.HINT))
         return {"RUNNING_MODAL"}
 
     def _done(self, context):
@@ -447,7 +448,7 @@ class CURIOMESH_OT_strip_pick(bpy.types.Operator):
         pole = _pole_near(context, event)
         if pole is not None:
             self.drag = {"kind": "pole", "res": res, "vertex": pole}
-            context.workspace.status_text_set("Drag to move the pole. Let go to keep it, right-click to cancel.")
+            context.workspace.status_text_set(tr("Drag to move the pole. Let go to keep it, right-click to cancel."))
             return True
         found, under = selected(), _under_mouse(context, event)
         if found is None or under is None or strips(res).labels[under] != strips(res).labels[found[1]]:
@@ -460,7 +461,7 @@ class CURIOMESH_OT_strip_pick(bpy.types.Operator):
         across = xy[1] - xy[0]
         width = max(float(np.linalg.norm(across)), 4.0)
         self.drag = {"kind": "strip", "res": res, "strip": strip, "start": np.asarray((event.mouse_x, event.mouse_y), dtype=np.float64), "along": across / width, "width": width, "project": _project(), "amount": 0.0}
-        context.workspace.status_text_set("Drag to move the strip. Let go to keep it, right-click to cancel.")
+        context.workspace.status_text_set(tr("Drag to move the strip. Let go to keep it, right-click to cancel."))
         return True
 
     def _follow(self, context, event) -> None:
@@ -487,7 +488,7 @@ class CURIOMESH_OT_strip_pick(bpy.types.Operator):
             edit(context, "slide", d["amount"])
             bpy.ops.ed.undo_push(message="Slide Strip")
         self.goal = None
-        context.workspace.status_text_set(self.HINT)
+        context.workspace.status_text_set(tr(self.HINT))
 
     def modal(self, context, event):
         if self.drag is not None:
@@ -580,14 +581,14 @@ class CURIOMESH_OT_strip_ring(bpy.types.Operator):
         fl["ring_show"] = None
         overlay.tag_redraw()
         if error:
-            self.report({"WARNING"}, error)
+            self.report({"WARNING"}, tr(error))
             return {"CANCELLED"}
         return {"FINISHED"}
 
     def invoke(self, context, event):
         self.stage, self.found = 0, None
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set(self.HINT)
+        context.workspace.status_text_set(tr(self.HINT))
         return {"RUNNING_MODAL"}
 
     def _stop(self, context, result):
@@ -653,13 +654,13 @@ class CURIOMESH_OT_strip_ring(bpy.types.Operator):
                 self.stage = 2
                 self.out = float(np.hypot(event.mouse_x - self.start[0], event.mouse_y - self.start[1]))
                 self._show()
-                context.workspace.status_text_set(self.BAND_HINT)
+                context.workspace.status_text_set(tr(self.BAND_HINT))
             return {"RUNNING_MODAL"}
         if event.type == "MOUSEMOVE":
             far = float(np.hypot(event.mouse_x - self.start[0], event.mouse_y - self.start[1]))
             self.band = float(np.clip(RG.BAND + (far - self.out) * self.per_pixel / self.found[3], 1.0, 6.0))
             self._show()
-            context.workspace.status_text_set(f"Reach: {self.band:.1f} quad widths. " + self.BAND_HINT)
+            context.workspace.status_text_set(tr(f"Reach: {self.band:.1f} quad widths. " + self.BAND_HINT))
         elif event.type in {"LEFTMOUSE", "RET", "NUMPAD_ENTER"} and event.value == "PRESS":
             context.workspace.status_text_set(None)
             return self.execute(context)
@@ -732,7 +733,7 @@ class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
         overlay.tag_redraw()
         error = redraw_rows(context, ids, _across(context))
         if error:
-            self.report({"WARNING"}, error)
+            self.report({"WARNING"}, tr(error))
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -740,7 +741,7 @@ class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
         """From a script or the redo panel: the faces selected in Edit Mode."""
         ids = _edit_selection(context)
         if ids is None:
-            self.report({"WARNING"}, "Select the faces to redraw in Edit Mode on the result first")
+            self.report({"WARNING"}, tr("Select the faces to redraw in Edit Mode on the result first"))
             return {"CANCELLED"}
         return self._run(context, ids)
 
@@ -750,7 +751,7 @@ class CURIOMESH_OT_redraw_rows(bpy.types.Operator):
             return self._run(context, ids)
         fl["lasso"] = []
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set(self.HINT)
+        context.workspace.status_text_set(tr(self.HINT))
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):
@@ -794,7 +795,7 @@ class _Edit:
     def execute(self, context):
         error = edit(context, self.KIND, getattr(self, "amount", 1.0))
         if error:
-            self.report({"WARNING"}, error)
+            self.report({"WARNING"}, tr(error))
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -835,7 +836,7 @@ class CURIOMESH_OT_strip_slide(_Edit, bpy.types.Operator):
         return 1.0 if None in at or at[1].x >= at[0].x else -1.0
 
     def _status(self, context):
-        context.workspace.status_text_set(f"Slide: {self.amount:+.2f}  Move the mouse left/right  Click/Enter: done  Right click/Esc: cancel")
+        context.workspace.status_text_set(tr(f"Slide: {self.amount:+.2f}  Move the mouse left/right  Click/Enter: done  Right click/Esc: cancel"))
 
     def _show(self, points) -> None:
         self.mesh.vertices.foreach_set("co", np.asarray(points, dtype=np.float32).ravel())

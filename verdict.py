@@ -31,15 +31,14 @@ def verdict(use: str, faces: int, loss: float, asked: float | None, serious: int
     serious the serious bad faces, spots the places they sit in."""
     ratio = loss / asked if asked else 0.0
     rate = 1000.0 * serious / max(faces, 1)
-    where = f"{spots} spot{'s' if spots != 1 else ''}"
     if rate > CHECK_PER_1000:
-        return "BAD", f"{where} with bad faces left"
+        return "BAD", f"{spots} spots with bad faces left" if spots != 1 else "1 spot with bad faces left"
     if ratio > CHECK_CHANGE:
         return "BAD", "Changed far more than asked"
     if source and faces > source:
         return "CHECK", HEAVIER
     if serious:
-        return "CHECK", f"Check {where}"
+        return "CHECK", f"Check {spots} spots" if spots != 1 else "Check 1 spot"
     if ratio > GOOD_CHANGE:
         return "CHECK", "Changed a little more than asked"
     return "GOOD", f"Good for {use.lower()}" if use else "Good"

@@ -17,6 +17,7 @@ import bpy
 from . import overlay
 from .bridge import run_curiomesh
 from .operators import apply_result_to_settings, config_from_owner
+from .translations import tr
 
 
 class CURIOMESH_PG_batch_item(bpy.types.PropertyGroup):
@@ -147,7 +148,7 @@ class CURIOMESH_OT_batch_remesh(bpy.types.Operator):
     def _report_end(self, runner, path):
         ok = sum(1 for r in runner.rows if r["success"])
         level = {"INFO"} if ok == len(runner.rows) else {"WARNING"}
-        self.report(level, f"Batch: {ok}/{len(runner.rows)} succeeded" + (f", report {path}" if path else ""))
+        self.report(level, tr(f"Batch: {ok}/{len(runner.rows)} succeeded" + (f", report {path}" if path else "")))
 
     def execute(self, context):
         runner = BatchRunner(context)

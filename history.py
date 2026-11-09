@@ -23,6 +23,7 @@ from bpy.app.handlers import persistent
 
 from . import overlay, profiles
 from .triadq import history as H
+from .translations import tr
 
 LOW_GB = 1.5  # free memory under this: the oldest half of the steps is let go, and the panel says so
 ORG_KEYS = ("base", "origin", "report", "levels", "shown", "seg_piece", "passes", "note")
@@ -66,6 +67,7 @@ def snapshot(context=None) -> dict:
     return {
         "base": base,
         "out": None if base is None else base.get("out"),
+        "id": None if base is None else base.get("id"),  # the parts table is keyed by it: an undone part redo keeps its table
         "report": None if base is None else base.get("report"),
         "res": guided.state["res"],
         "org": {k: list(organize.org[k]) if k == "passes" else organize.org[k] for k in ORG_KEYS},
@@ -95,6 +97,8 @@ def restore(context, snap: dict, sliders: bool = False) -> bool:
     base = snap["base"]
     if base is not None:
         base["out"], base["report"] = snap["out"], snap["report"]
+        if snap.get("id") is not None:
+            base["id"] = snap["id"]
     guided.state["auto_base"] = base
     guided.state["res"] = snap["res"]
     org = snap["org"]
@@ -321,11 +325,11 @@ def draw(layout, context) -> None:
         row = col.row(align=True)
         row.active = entry.step <= step  # undone steps are grey until something new replaces them
         text = entry.name + (f": {entry.numbers}" if entry.numbers else "")
-        row.operator("curiomesh.history_jump", text=text, depress=i == at, icon="RADIOBUT_ON" if i == at else "BLANK1").index = i
+        row.operator("curiomesh.history_jump", text=tr(text), depress=i == at, icon="RADIOBUT_ON" if i == at else "BLANK1").index = i
     if ts is not None and len(steps.entries) > 12:
-        layout.prop(ts, "history_all", text=f"Show all {len(steps.entries)} steps", toggle=True)
+        layout.prop(ts, "history_all", text=tr(f"Show all {len(steps.entries)} steps"), toggle=True)
     if steps.let_go:
-        overlay.wrap_label(layout, f"{steps.let_go} oldest step{'s were' if steps.let_go != 1 else ' was'} let go to free memory", icon="INFO", width=36, limit=2)
+        overlay.wrap_label(layout, (f"{steps.let_go} oldest steps were let go to free memory" if steps.let_go != 1 else "The oldest step was let go to free memory"), icon="INFO", width=36, limit=2)
 
 
 class CURIOMESH_OT_history_jump(bpy.types.Operator):

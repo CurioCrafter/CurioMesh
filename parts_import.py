@@ -22,6 +22,7 @@ from . import partload, segments, tidytools
 from .triadq import checks, issues
 from .triadq import parts as P
 from .triadq import segment as S
+from .translations import tr
 
 NAME = "From Outside"
 METHOD = "OUTSIDE"
@@ -315,9 +316,9 @@ class CURIOMESH_OT_parts_import(tidytools.PartSwap, bpy.types.Operator):
         try:
             start(context, self.directory, self.look_first)
         except partload.PartError as exc:
-            self.report({"WARNING"}, f"{exc}. {exc.hint}")
+            self.report({"WARNING"}, tr(f"{exc}. {exc.hint}"))
             return {"CANCELLED"}
-        self.report({"INFO"}, "Checking the returned parts")
+        self.report({"INFO"}, tr("Checking the returned parts"))
         return {"FINISHED"}
 
 

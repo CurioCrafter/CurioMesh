@@ -22,6 +22,7 @@ import numpy as np
 from bpy_extras.io_utils import ExportHelper
 
 from .triadq import texsets
+from .translations import tr
 
 
 @dataclass(frozen=True)
@@ -159,7 +160,7 @@ class CURIOMESH_OT_export_game(bpy.types.Operator, ExportHelper):
             col = layout.column(align=True)
             col.scale_y = 0.8
             for line in engine.words.split(". "):
-                col.label(text=line.rstrip("."))
+                col.label(text=tr(line.rstrip(".")))
 
     def _setup(self) -> Engine:
         engine = ENGINES[self.engine]
@@ -229,7 +230,7 @@ class CURIOMESH_OT_export_game(bpy.types.Operator, ExportHelper):
         pieces = f" as {len(objects)} pieces under {engine.tris:,} triangles" if made else ""
         maps = f" and {len(written)} textures" if written else ""
         flipped = " (normal map flipped for DirectX)" if engine.directx and written else ""
-        self.report({"INFO"}, f"Wrote {os.path.basename(path)}{pieces}{maps}{flipped}")
+        self.report({"INFO"}, tr(f"Wrote {os.path.basename(path)}{pieces}{maps}{flipped}"))
         return {"FINISHED"}
 
 

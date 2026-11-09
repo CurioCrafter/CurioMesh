@@ -32,6 +32,7 @@ from . import guides
 from .triadq import checks, issues, loopscore, patterns, tasks
 from .triadq import organize as O
 from .triadq.chords import PictureJudge
+from .translations import tr
 
 STRENGTHS = (0.25, 0.5, 0.75, 1.0)  # worked out once; the slider shows the nearest one at or below it. 0.25: poles cleaned, 0.5: quads settled, 0.75 and 1: loops straightened half and fully
 GAP = 0.1  # seconds between looks at the worker thread
@@ -610,7 +611,7 @@ class CURIOMESH_OT_tidy_keep(bpy.types.Operator):
     def execute(self, context):
         history.before(context)
         if not keep_tidying(context, _settings(context)):
-            self.report({"WARNING"}, "Tidy Up needs a result from Start")
+            self.report({"WARNING"}, tr("Tidy Up needs a result from Start"))
             return {"CANCELLED"}
         return {"FINISHED"}
 

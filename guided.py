@@ -27,7 +27,7 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from . import guides, live, overlay, region, segments, symmetry, textures
+from . import guides, live, overlay, region, segments, sliced, symmetry, textures
 from . import loops as edgeloops
 from . import autofix_live, autoretopo, blockout, faceloops, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
@@ -37,6 +37,8 @@ from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
 from .triadq.types import FlatFaces, MeshData
 from .triadq.uvs import chart_codes
+from . import translations
+from .translations import tip, tr
 
 PREVIEW_NAME = "CurioMesh_GuidedPreview"
 SPARE_MESHES = (PREVIEW_NAME + "_Size", PREVIEW_NAME + "_Organize")  # preview meshes kept for a quick swap, with no users
@@ -1353,11 +1355,11 @@ class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
         size = float(np.linalg.norm(res["co"].max(axis=0) - res["co"].min(axis=0))) or 1.0
         gone, new = teach.changed(res["co"], res["faces"], co, faces, size)
         if not gone and not new:
-            self.report({"WARNING"}, "Nothing changed on the preview: fix an area in Edit Mode first")
+            self.report({"WARNING"}, tr("Nothing changed on the preview: fix an area in Edit Mode first"))
             return {"CANCELLED"}
         fix = teach.make_fix(res["co"], res["faces"], gone, co, faces, new, size)
         if isinstance(fix, str):
-            self.report({"WARNING"}, fix)
+            self.report({"WARNING"}, tr(fix))
             return {"CANCELLED"}
         ring = np.asarray(res["co"])[teach.outline(res["faces"], gone)]
         edge = float(np.mean(np.linalg.norm(np.roll(ring, -1, axis=0) - ring, axis=1)))
@@ -1368,7 +1370,7 @@ class CURIOMESH_OT_teach_remember(_PreviewOp, bpy.types.Operator):
         _adopt(context, source, co, faces, mat)
         _scan(state["res"])
         state["message"] = f"Remembered: {len(fix['before'])} faces became {len(fix['after'])}. It is kept on this mesh, and offered on others that look like it"
-        self.report({"INFO"}, state["message"])
+        self.report({"INFO"}, tr(state["message"]))
         return {"FINISHED"}
 
 
@@ -1408,7 +1410,7 @@ class CURIOMESH_OT_teach_apply(_PreviewOp, bpy.types.Operator):
         if not _camera_accepts(src, (co, faces), (new_co, new_faces), centre, half):
             state["found"] = state["found"][1:]
             state["message"] = "The camera says that fix would make the spot look worse: left alone"
-            self.report({"WARNING"}, state["message"])
+            self.report({"WARNING"}, tr(state["message"]))
             return {"CANCELLED"}
         mat = np.asarray(res["mat"])
         style = int(mat[match["faces"][0]]) if len(mat) else 0
@@ -1416,7 +1418,7 @@ class CURIOMESH_OT_teach_apply(_PreviewOp, bpy.types.Operator):
         _adopt(context, source, new_co, new_faces, mat)
         _scan(state["res"])
         state["message"] = f"Put in a fix you made before. {len(state['found'])} more place(s) look like it"
-        self.report({"INFO"}, state["message"])
+        self.report({"INFO"}, tr(state["message"]))
         return {"FINISHED"}
 
 
@@ -1443,7 +1445,7 @@ class CURIOMESH_OT_teach_import(bpy.types.Operator, ImportHelper):
         mine = _library()
         both = teach.merge(mine, teach.load(self.filepath))
         _keep_library(both)
-        self.report({"INFO"}, f"{len(both) - len(mine)} fix(es) added")
+        self.report({"INFO"}, tr(f"{len(both) - len(mine)} fix(es) added"))
         return {"FINISHED"}
 
 
@@ -2211,6 +2213,8 @@ def _poll():
         gs = getattr(context.scene, "curiomesh_guided", None)
         if gs is None or not gs.enabled:
             return None
+        if sliced.JOB is not None:  # an Apply is writing its UVs in slices: nothing here may change the result under it
+            return POLL_SECONDS
         active = context.object
         if active is not None and active.type == "MESH" and not overlay.is_preview(active) and active.name != state["source"] and active.mode == "OBJECT":
             state.update(source=active.name, lock=None, sig=None, auto_base=None)
@@ -2488,8 +2492,8 @@ class _SurfaceTool:
     def _status(self, context):
         gs = _gs(context)
         context.workspace.status_text_set(
-            f"Place Points [{gs.new_kind.title()}]  Click: add  Ctrl+Click: remove  Scroll: radius {gs.new_radius:.3g}  "
-            f"Shift+Scroll: strength {gs.new_strength:.1f}  1-4: type  Enter/Esc: done"
+            tr(f"Place Points [{gs.new_kind.title()}]  Click: add  Ctrl+Click: remove  Scroll: radius {gs.new_radius:.3g}  "
+            f"Shift+Scroll: strength {gs.new_strength:.1f}  1-4: type  Enter/Esc: done")
         )
 
     def _view_region(self, context, event):
@@ -2599,8 +2603,8 @@ class CURIOMESH_OT_guided_work(_SurfaceTool, bpy.types.Operator):
         kind, strength, fill, radius = (p.kind, p.strength, p.fill, p.radius) if p else (gs.new_kind, gs.new_strength, gs.strategy, gs.new_radius)
         head = f"Area {self.under + 1}" if p else "New area"
         context.workspace.status_text_set(
-            f"{head}: {kind.title()} {strength:.2f}, {fill.title()}, size {radius:.3g}  |  Click/Drag: add  Ctrl+Click: remove  "
-            "Scroll: size  Shift+Scroll: density  F: fill style  Enter/Esc: done"
+            tr(f"{head}: {kind.title()} {strength:.2f}, {fill.title()}, size {radius:.3g}  |  Click/Drag: add  Ctrl+Click: remove  "
+            "Scroll: size  Shift+Scroll: density  F: fill style  Enter/Esc: done")
         )
 
     def _area(self):
@@ -2726,7 +2730,7 @@ class CURIOMESH_OT_guided_add_point(bpy.types.Operator):
         world = Vector(self.location) if any(self.location) else context.scene.cursor.location
         ok, loc, normal = _closest(obj, obj.matrix_world.inverted() @ world)
         if not ok:
-            self.report({"ERROR"}, "No surface found")
+            self.report({"ERROR"}, tr("No surface found"))
             return {"CANCELLED"}
         radius = self.radius or gs.new_radius or PRESETS[gs.preset]["radius"] * _source_data(obj)["diag"]
         add_point(obj, loc, normal, self.kind, radius, gs.new_strength)
@@ -2811,7 +2815,7 @@ class CURIOMESH_OT_guided_suggest(bpy.types.Operator):
         for f in found:
             add_point(obj, f["co"], f["normal"], f["kind"], f["r"], gs.new_strength, auto=True)
         state["source"] = obj.name
-        self.report({"INFO"}, f"Placed {len(found)} point(s). Edit them in the list or with Place Points")
+        self.report({"INFO"}, tr(f"Placed {len(found)} point(s). Edit them in the list or with Place Points"))
         return {"FINISHED"}
 
 
@@ -2837,7 +2841,7 @@ class CURIOMESH_OT_guided_update(bpy.types.Operator):
         state["sig"] = _signature(context, obj)
         state["dirty"] = False
         if not ok:
-            self.report({"WARNING"}, state["message"])
+            self.report({"WARNING"}, tr(state["message"]))
         return {"FINISHED"} if ok else {"CANCELLED"}
 
 
@@ -2894,14 +2898,14 @@ class CURIOMESH_OT_guided_lock(_PreviewOp, bpy.types.Operator):
         sel = _preview_selection()
         res = state["res"]
         if len(sel) != len(res["faces"]) or not sel.any():
-            self.report({"WARNING"}, "Select some preview faces in Edit Mode first")
+            self.report({"WARNING"}, tr("Select some preview faces in Edit Mode first"))
             return {"CANCELLED"}
         _leave_preview(context)
         _set_lock(res, res["locked"] | sel, state["lock"]["free_all"] if state["lock"] else False)
         ok = run_update(context, force=True)
         state["sig"] = _signature(context, state_source())
         state["dirty"] = False
-        self.report({"INFO"} if ok else {"WARNING"}, f"{int(state['lock']['locked'].sum()):,} faces locked. {state['message']}")
+        self.report({"INFO"} if ok else {"WARNING"}, tr(f"{int(state['lock']['locked'].sum()):,} faces locked. {state['message']}"))
         return {"FINISHED"}
 
 
@@ -2933,7 +2937,7 @@ class CURIOMESH_OT_guided_redraw_strip(_PreviewOp, bpy.types.Operator):
         res = state["res"]
         gs = _gs(context)
         if len(sel) != len(res["faces"]) or not sel.any():
-            self.report({"WARNING"}, "Select the strip of preview faces in Edit Mode first")
+            self.report({"WARNING"}, tr("Select the strip of preview faces in Edit Mode first"))
             return {"CANCELLED"}
         _leave_preview(context)
         source = state_source()
@@ -2941,7 +2945,7 @@ class CURIOMESH_OT_guided_redraw_strip(_PreviewOp, bpy.types.Operator):
         edge = float(np.mean([np.linalg.norm(co[f[k]] - co[f[(k + 1) % len(f)]]) for i, f in enumerate(faces) if sel[i] for k in range(len(f))]))
         new, warns = _region_pass(co, faces, sel, [], state["L0"], gs, region._projector(_bvh(_source_data(source))), res["locked"], res.get("mat"), fixed_target=edge)
         if new is None:
-            self.report({"WARNING"}, warns[0] if warns else "Could not redraw that strip")
+            self.report({"WARNING"}, tr(warns[0] if warns else "Could not redraw that strip"))
             return {"CANCELLED"}
         _set_lock(new, ~new["new"], free_all=True)
         new["locked"] = state["lock"]["locked"]
@@ -2975,7 +2979,12 @@ class CURIOMESH_OT_guided_frame(bpy.types.Operator):
 
 
 def _bake_result(source, out, gs, new_uvs: bool) -> str:
-    """Bake on Apply. A failed bake leaves the result as it was: the quads are still good. Returns text for the report."""
+    return sliced.finish(_bake_result_steps(source, out, gs, new_uvs))
+
+
+def _bake_result_steps(source, out, gs, new_uvs: bool):
+    """Bake on Apply, as timer steps (`sliced`: the unwrap runs in short pieces). A failed bake leaves the result as it
+    was: the quads are still good. Returns text for the report."""
     src = _source_data(source)
     co = np.empty(len(out.data.vertices) * 3, dtype=np.float64)
     out.data.vertices.foreach_get("co", co)
@@ -2995,11 +3004,12 @@ def _bake_result(source, out, gs, new_uvs: bool) -> str:
             labels = piece if piece is not None and len(piece) == len(out.data.polygons) else None
             images = textures.bake_texture_sets(source, out, count=gs.bake_sets, labels=labels, resolution=int(gs.bake_size), cage=cage)
         else:
-            images = textures.bake_detail(source, out, with_color=color, resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
+            images = yield from textures.bake_detail_steps(source, out, with_color=color, resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
     except Exception as exc:  # the bake has its own rollback, and the quads are worth keeping
         return f". Bake failed: {exc}"
     sets = f" in {len(images) // 2} texture sets" if color and len(images) > 2 else ""
-    return f", {len(images)} textures baked at {gs.bake_size}{sets} (a Triangulate modifier keeps the bake's triangles on export)"
+    done = f", {len(images)} textures baked at {gs.bake_size}{sets} (a Triangulate modifier keeps the bake's triangles on export)"
+    return done + (" | Stopped: Smart Project made the bake UVs" if sliced.stopped() else "")
 
 
 def _write_instances(out, source, instances) -> int:
@@ -3030,9 +3040,14 @@ def _blockout_result() -> bool:
 
 
 def _write_result(context, source, res, gs, name: str):
-    """A new object from a result, with UVs, normals, shading and materials as your mesh has them. Returns (object, bake text)."""
+    return sliced.finish(_write_result_steps(context, source, res, gs, name))
+
+
+def _write_result_steps(context, source, res, gs, name: str):
+    """A new object from a result, with UVs, normals, shading and materials as your mesh has them, as timer steps
+    (`sliced`). Returns (object, bake text)."""
     mesh = _make_mesh(name, source, res)
-    uv_hooks.after_apply(mesh, source, res, gs)  # main-only: uv
+    yield from uv_hooks.after_apply_steps(mesh, source, res, gs)  # main-only: uv
     _shade_by_angle(mesh)
     if not _blockout_result():
         _transfer_normals(mesh, _source_data(source), res)
@@ -3048,7 +3063,7 @@ def _write_result(context, source, res, gs, name: str):
             copy.material = slot.material
     baked = ""
     if gs.bake_detail != "OFF":
-        baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
+        baked = yield from _bake_result_steps(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
     return out, baked
 
 
@@ -3099,6 +3114,7 @@ class _AskFirst:
         return []
 
     def invoke(self, context, event):
+        self._invoked = True  # a sliced Apply runs in timer slices from here, after the dialog too (sliced.SlicedOp)
         machine_info()
         lines = [] if state["no_ask"] or bpy.app.background else self._question(context)
         if not lines:
@@ -3156,7 +3172,7 @@ class CURIOMESH_OT_guided_make_lods(_AskFirst, bpy.types.Operator):
             if mesh is not None and mesh.users == 0:
                 bpy.data.meshes.remove(mesh)
         if old:
-            self.report({"INFO"}, f"Replacing {len(old)} old LOD object(s); Ctrl+Z brings them back")
+            self.report({"INFO"}, tr(f"Replacing {len(old)} old LOD object(s); Ctrl+Z brings them back"))
         state.update(region=None, lod_report="", lod=None)
         gs["bool_on"] = False
         gs.scope = "AUTO"
@@ -3169,7 +3185,7 @@ class CURIOMESH_OT_guided_make_lods(_AskFirst, bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
+class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
     bl_idname = "curiomesh.guided_apply"
     bl_label = "Apply"
     bl_description = "Write the preview as <name>_Retopo (or into your object, see Result). Undo restores"
@@ -3179,10 +3195,13 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
     def poll(cls, context):
         return state["res"] is not None and state_source() is not None
 
+    job_name = "Writing the result"
+
     def _question(self, context):
         return _ask_lines(context, applying=True)
 
-    def execute(self, context):
+    def steps(self, context):
+        """Apply: the result is made at once, its UV work then runs in timer slices from a button (sliced.SlicedOp)."""
         self._remember()
         gs = _gs(context)
         source = state_source()
@@ -3192,25 +3211,28 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
         finish_work(context)
         res = state["res"]
         if res is None:
-            self.report({"WARNING"}, "Nothing to apply")
+            self.report({"WARNING"}, tr("Nothing to apply"))
             return {"CANCELLED"}
         if gs.scope == "AUTO" and gs.blockout_separate and _blockout_result():
-            made = [_write_result(context, source, part, gs, f"{source.name}_Part")[0] for part in blockout.split_result(res)]
+            made = []
+            for part in blockout.split_result(res):
+                made.append((yield from _write_result_steps(context, source, part, gs, f"{source.name}_Part"))[0])
             gs.enabled = False  # removes the preview, stops the timer
             bpy.ops.object.select_all(action="DESELECT")
             for obj in made:
                 obj.select_set(True)
             context.view_layer.objects.active = made[0]
             state["applied"] = f"{len(res['faces']):,} faces written to {len(made):,} objects named {source.name}_Part"
-            self.report({"INFO"}, state["applied"])
+            self.report({"INFO"}, tr(state["applied"]))
             return {"FINISHED"}
         # Keep Copies as Instances: one mesh per repeated part. Not with a bake or kept UV seams, which work on one mesh.
         instances = res.get("instances") if gs.scope == "AUTO" and gs.auto_instances and gs.bake_detail == "OFF" and res.get("chart") is None and not gs.multires_on else None
         if gs.auto_instances and gs.scope == "AUTO" and instances is None:
-            self.report({"INFO"}, "Keep Copies as Instances was not used: this result has no exact copies, or it is baked, mirrored, tidied or repaired")
+            self.report({"INFO"}, tr("Keep Copies as Instances was not used: this result has no exact copies, or it is baked, mirrored, tidied or repaired"))
         written = instances["rest"] if instances else res
         mesh = _make_mesh(source.name + "_Retopo", source, written)
-        uv_hooks.after_apply(mesh, source, written, gs)  # main-only: uv
+        yield from uv_hooks.after_apply_steps(mesh, source, written, gs)  # main-only: uv
+        uv_stop = " | Stopped: the UVs are a plain copy from your mesh" if sliced.stopped() else ""
         _shade_by_angle(mesh)
         if not _blockout_result():
             _transfer_normals(mesh, _source_data(source), written)
@@ -3233,7 +3255,7 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             _mark_edges(mesh, multires.hard_edges(mesh), True, False)
             flat_faces = segments.segment_goals.faces_without_detail(res)
         if gs.bake_detail != "OFF":  # first, while level 0 is all there is: a bake reads the levels too
-            baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
+            baked = yield from _bake_result_steps(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
         flag = res.get("flag")
         if flag is not None and len(flag) == len(mesh.polygons) and flag.any():
             mesh.polygons.foreach_set("select", flag)  # the faces that could not be repaired, ready in Edit Mode
@@ -3260,7 +3282,8 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             count += sum(len(group["faces"]) for group in instances["groups"])
             baked = f", in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes"
         state["applied"] = f"{count:,} faces written to {out.name}{baked}{levels}"
-        self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, state["applied"])
+        state["applied"] += uv_stop
+        self.report({"WARNING"} if baked.startswith("Bake failed") or sliced.stopped() else {"INFO"}, tr(state["applied"]))
         return {"FINISHED"}
 
 
@@ -3354,7 +3377,7 @@ class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
         try:
             folder = jobpack.job_folder(self.directory, obj.name)
         except ValueError as exc:
-            self.report({"ERROR"}, str(exc))
+            self.report({"ERROR"}, tr(str(exc)))
             return {"CANCELLED"}
         target = auto_target(gs, len(src["faces"]))
         co, faces, mat, mirror, lines, paint, _note = _solve_inputs(gs, src, _guide_lines(context, gs, src), _painted(obj, gs, src))
@@ -3363,7 +3386,7 @@ class CURIOMESH_OT_guided_export_job(bpy.types.Operator):
             mirror=mirror, lines=lines, drop=None if paint is None else density_drop(paint, gs.density_strength), source=(len(src["faces"]), len(src["co"])),
         )
         state["message"] = f"Job written to {folder}. Copy the folder to the other computer and follow README.txt in it"
-        self.report({"INFO"}, state["message"])
+        self.report({"INFO"}, tr(state["message"]))
         return {"FINISHED"}
 
 
@@ -3391,7 +3414,7 @@ class CURIOMESH_OT_guided_import_result(bpy.types.Operator):
         try:
             res, report = jobpack.load_result(self.filepath, len(src["faces"]), len(src["co"]))
         except (ValueError, OSError, KeyError) as exc:
-            self.report({"ERROR"}, str(exc))
+            self.report({"ERROR"}, tr(str(exc)))
             return {"CANCELLED"}
         stop_work()
         state["source"] = obj.name
@@ -3416,7 +3439,9 @@ class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
     def execute(self, context):
         gs = _gs(context)
         work = state["work"]
-        if work is not None and isinstance(work["runner"], segments.PartJob) and state["auto_base"] is not None:
+        if sliced.JOB is not None:  # an Apply writing its UVs: it ends with what it has (sliced.SlicedOp)
+            sliced.JOB.stop()
+        elif work is not None and isinstance(work["runner"], segments.PartJob) and state["auto_base"] is not None:
             _show_base(context, state_source())
             state["message"] = "Stopped. The parts are as they were"
         elif work is not None and work["key"][1] == "BOOL" and state["auto_base"] is not None:
@@ -3448,7 +3473,7 @@ class CURIOMESH_OT_guided_add_shape(bpy.types.Operator):
         if self.kind == "SELECTED":
             picked = [o for o in context.selected_objects if o != source and _shape_poll(None, o)]
             if not picked:
-                self.report({"WARNING"}, "Select a box, lattice or closed mesh first (not the source mesh)")
+                self.report({"WARNING"}, tr("Select a box, lattice or closed mesh first (not the source mesh)"))
                 return {"CANCELLED"}
             for obj in picked:
                 item = gs.bool_shapes.add()
@@ -3515,7 +3540,7 @@ class CURIOMESH_OT_guided_add_guide(bpy.types.Operator):
         have = {g.obj for g in gs.guide_curves}
         picked = [o for o in context.selected_objects if _guide_poll(None, o) and o not in have]
         if not picked:
-            self.report({"WARNING"}, "Select a curve, a Grease Pencil drawing or an edge-only mesh first")
+            self.report({"WARNING"}, tr("Select a curve, a Grease Pencil drawing or an edge-only mesh first"))
             return {"CANCELLED"}
         for obj in picked:
             item = gs.guide_curves.add()
@@ -3604,7 +3629,7 @@ class CURIOMESH_OT_guided_draw_guide(_SurfaceTool, bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def _status(self, context):
-        context.workspace.status_text_set("Draw " + {"GUIDE": "Guide", "LOOP": "Edge Loop", "BEND": "Deformation Line"}[self.kind] + "  Hold left mouse and drag over the mesh: one curve per stroke  Right click/Enter/Esc: done")
+        context.workspace.status_text_set(tr("Draw " + {"GUIDE": "Guide", "LOOP": "Edge Loop", "BEND": "Deformation Line"}[self.kind] + "  Hold left mouse and drag over the mesh: one curve per stroke  Right click/Enter/Esc: done"))
 
     def _make_curve(self, context):
         points = self.stroke
@@ -3692,8 +3717,8 @@ class CURIOMESH_OT_guided_paint_density(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.less:
-            return "Weight Paint the Less Detail group: red areas get bigger quads, so the faces go elsewhere. Leave Weight Paint (Tab) and press Start. Turns on unified weight in the tool settings and sets the brush weight to 1"
-        return "Weight Paint the More Detail group: red areas keep more, smaller quads at every Quad Size. Leave Weight Paint (Tab) and press Start. Turns on unified weight in the tool settings and sets the brush weight to 1"
+            return tip("Weight Paint the Less Detail group: red areas get bigger quads, so the faces go elsewhere. Leave Weight Paint (Tab) and press Start. Turns on unified weight in the tool settings and sets the brush weight to 1")
+        return tip("Weight Paint the More Detail group: red areas keep more, smaller quads at every Quad Size. Leave Weight Paint (Tab) and press Start. Turns on unified weight in the tool settings and sets the brush weight to 1")
 
     @classmethod
     def poll(cls, context):
@@ -3760,8 +3785,8 @@ class CURIOMESH_OT_guided_add_marker(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.less:
-            return "Click your mesh to place a ball that asks for bigger quads inside it; you see their size before keeping it. Drag the ring to change how far it reaches"
-        return "Click your mesh to place a ball that asks for smaller quads inside it; you see their size before keeping it. Drag the ring to change how far it reaches"
+            return tip("Click your mesh to place a ball that asks for bigger quads inside it; you see their size before keeping it. Drag the ring to change how far it reaches")
+        return tip("Click your mesh to place a ball that asks for smaller quads inside it; you see their size before keeping it. Drag the ring to change how far it reaches")
 
     @classmethod
     def poll(cls, context):
@@ -3798,14 +3823,14 @@ class CURIOMESH_OT_guided_add_marker(bpy.types.Operator):
 
 class CURIOMESH_UL_guided_guides(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        layout.label(text=item.obj.name if item.obj is not None else "(removed)", icon={"GUIDE": "CURVE_DATA", "LOOP": "MESH_CIRCLE", "BEND": "MOD_SIMPLEDEFORM"}[item.kind] if item.obj is not None else "ERROR")
+        layout.label(text=tr(item.obj.name if item.obj is not None else "(removed)"), icon={"GUIDE": "CURVE_DATA", "LOOP": "MESH_CIRCLE", "BEND": "MOD_SIMPLEDEFORM"}[item.kind] if item.obj is not None else "ERROR")
 
 
 class CURIOMESH_UL_guided_shapes(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
         row.prop(item, "operation", text="")
-        row.label(text=item.obj.name if item.obj is not None else "(removed)", icon="MESH_CUBE" if item.obj is not None else "ERROR")
+        row.label(text=tr(item.obj.name if item.obj is not None else "(removed)"), icon="MESH_CUBE" if item.obj is not None else "ERROR")
 
 
 # --------------------------------------------------------------------------- progress
@@ -3817,7 +3842,10 @@ def _clock(seconds: float) -> str:
 
 
 def progress_info(kind: str | None = None):
-    """(fraction 0 to 1, words) for the job running now, or None. kind: "AUTO", "BOOL", or None for either."""
+    """(fraction 0 to 1, words) for the job running now, or None. kind: "AUTO", "BOOL", or None for either (or an Apply
+    writing its UVs in slices)."""
+    if sliced.JOB is not None:
+        return None if kind else (sliced.JOB.fraction, sliced.JOB.stage)
     work = state["work"]
     if work is None or not work["runner"].busy:
         return None
@@ -3844,10 +3872,10 @@ def fold(layout, data, prop: str, text: str):
     """A fold-out section: a native panel on Blender 4.1+, a disclosure toggle before. Returns the body, or None when closed."""
     if hasattr(layout, "panel_prop"):
         header, body = layout.panel_prop(data, prop)
-        header.label(text=text)
+        header.label(text=tr(text))
         return body
     is_open = getattr(data, prop)
-    layout.prop(data, prop, text=text, icon="DOWNARROW_HLT" if is_open else "RIGHTARROW", emboss=False)
+    layout.prop(data, prop, text=tr(text), icon="DOWNARROW_HLT" if is_open else "RIGHTARROW", emboss=False)
     return layout.column() if is_open else None
 
 
@@ -3863,14 +3891,15 @@ def turbo_words(line: str) -> str:
 def draw_progress(layout, fraction: float, text: str) -> None:
     """A real progress bar on Blender 4.0 and later, a text bar before that."""
     fraction = min(max(float(fraction), 0.0), 1.0)
+    text = tr(text)
     if hasattr(layout, "progress"):
-        short = len(text) <= 30  # a bar can't wrap: a longer stage goes in full on the lines under it, not cut to "Laying rows of q..."
-        layout.progress(factor=fraction, type="BAR", text=text if short else f"{fraction * 100:.0f}%")
+        short = translations.text_width(text) <= 30  # a bar can't wrap: a longer stage goes in full on the lines under it, not cut to "Laying rows of q..."
+        layout.progress(factor=fraction, type="BAR", text=tr(text if short else f"{fraction * 100:.0f}%"))
         if not short:
             overlay.wrap_label(layout, text, width=36, limit=3)
     else:
         filled = int(round(fraction * 20))
-        layout.label(text=f"[{'#' * filled}{'-' * (20 - filled)}] {fraction * 100:.0f}%")
+        layout.label(text=tr(f"[{'#' * filled}{'-' * (20 - filled)}] {fraction * 100:.0f}%"))
         overlay.wrap_label(layout, text, width=36, limit=2)
 
 
@@ -3906,7 +3935,7 @@ class CURIOMESH_OT_multires_detail(bpy.types.Operator):
         source = next(o for o in context.selected_objects if o is not cage and o.type == "MESH")
         tree = multires.source_tree(source, cage.matrix_world.inverted() @ source.matrix_world)
         words = multires.add_to_result(context, cage, tree, _gs(context).multires_levels)
-        self.report({"WARNING"} if "failed" in words else {"INFO"}, f"{cage.name}{words}, read from {source.name}")
+        self.report({"WARNING"} if "failed" in words else {"INFO"}, tr(f"{cage.name}{words}, read from {source.name}"))
         return {"FINISHED"}
 
 
@@ -3942,7 +3971,7 @@ class CURIOMESH_OT_guided_auto_all(bpy.types.Operator):
 def _tag(layout, line: tuple[str, bool], suffix: str = "") -> None:
     """A one-line cost tag under an option: nothing when the option is cheap."""
     if line[0]:
-        layout.label(text=line[0] + suffix, icon="ERROR" if line[1] else "TIME")
+        layout.label(text=tr(line[0] + suffix), icon="ERROR" if line[1] else "TIME")
 
 
 def _bake_tag(layout, gs) -> None:

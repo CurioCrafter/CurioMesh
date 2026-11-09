@@ -27,6 +27,7 @@ from .triadq import parts as P
 from .triadq import segment as S
 
 from .profiles import METHOD_ITEMS
+from .translations import tip, tr
 
 METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
 ORIGINAL = "ORIGINAL"  # a try that is your own faces, untouched
@@ -71,7 +72,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
+    seg.update(reviewing=False, review_mode="PARTS", seg_bad_was=None, tryall=None, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
 
 
 def ready() -> bool:
@@ -299,6 +300,8 @@ class PartJob:
         self.report = None
         self.committed = False
         self.new_tries: dict[int, dict] = {}
+        self.hold = False  # Look First: keep what it makes as tries only; the result on screen stays as it is
+        self.held: dict[int, int] = {}  # part -> index of the try it made, once held
         self.started = time.perf_counter()
         self._stopped = False
         self._search = self._run()
@@ -434,6 +437,21 @@ class PartJob:
         self.fraction = 1.0
 
 
+def _remember_try(record: dict, new: dict) -> int:
+    """Put a made result into the part's tries (replacing one made the same way). Returns its index."""
+    same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"] and t.get("detail") == new.get("detail")), None)
+    if same is None:
+        record["tries"].append(new)
+        same = len(record["tries"]) - 1
+    else:
+        record["tries"][same] = new
+    if MAX_TRIES and len(record["tries"]) > MAX_TRIES:
+        drop = next(i for i in range(len(record["tries"])) if i != same)
+        record["tries"].pop(drop)
+        same -= drop < same
+    return same
+
+
 def commit(runner: PartJob) -> None:
     """A part job finished: the new result becomes the one Apply writes, and the tries are remembered."""
     guided = _g()
@@ -443,25 +461,21 @@ def commit(runner: PartJob) -> None:
         guided.state["message"] = runner.status()
         return
     runner.committed = True
-    if base is None or base is not runner.base or runner.report is None:
+    if base is None or base is not runner.base or (runner.report is None and not getattr(runner, "hold", False)):
         guided.state["message"] = runner.status()
         return
     for p, new in runner.new_tries.items():
         record = seg["parts"][p]
-        same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"] and t.get("detail") == new.get("detail")), None)
-        if same is None:
-            record["tries"].append(new)
-            same = len(record["tries"]) - 1
-        else:
-            record["tries"][same] = new
-        if MAX_TRIES and len(record["tries"]) > MAX_TRIES:
-            drop = next(i for i in range(len(record["tries"])) if i != same)
-            record["tries"].pop(drop)
-            same -= drop < same
+        same = _remember_try(record, new)
+        if getattr(runner, "hold", False):  # Look First shows this try before it is kept: nothing else changes
+            runner.held[p] = same
+            continue
         record.update(cur=same, method=new["method"], after=new["after"], change=new["change"], topology=new.get("topology"))
         methods = getattr(runner.job, "methods", None)
         if methods is not None and record.get("whole"):
             methods[record.get("loose", p)] = new["method"]
+    if getattr(runner, "hold", False):
+        return
     base["out"] = dict(runner.output)
     base["report"] = runner.report
     base["id"] = time.perf_counter_ns()
@@ -474,7 +488,9 @@ def commit(runner: PartJob) -> None:
     guided.state["message"] = runner.status()
     from . import history
 
-    if runner.new_tries:  # a part was remade: one Ctrl+Z step back to the result before it
+    if getattr(runner, "quiet", False):  # Try Every Method records one step for the whole run
+        pass
+    elif runner.new_tries:  # a part was remade: one Ctrl+Z step back to the result before it
         history.record(bpy.context, getattr(runner, "step_name", "Redo Part"), f"{len(base['out']['faces']):,} faces", push=True)
     else:  # only the check after a swap: that swap's step keeps the checked result
         history.refresh(bpy.context)
@@ -608,7 +624,7 @@ def original_cost(pieces) -> int:
 def ask(operator, context, event, message: str):
     """An OK / Cancel box with this question (just the title on Blender before 4.1)."""
     try:
-        return context.window_manager.invoke_confirm(operator, event, title=operator.bl_label, message=message)
+        return context.window_manager.invoke_confirm(operator, event, title=tr(operator.bl_label), message=tr(message))
     except TypeError:
         return context.window_manager.invoke_confirm(operator, event)
 
@@ -622,7 +638,7 @@ class CURIOMESH_OT_keep_original_bad(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         found = bad_parts()
-        return f"Puts your own faces back on the {len(found)} part{'s' if len(found) != 1 else ''} with bad faces. Adds about {original_cost(found):,} faces; each part can be switched back from its card"
+        return tip(f"Puts your own faces back on the {len(found)} part{'s' if len(found) != 1 else ''} with bad faces. Adds about {original_cost(found):,} faces; each part can be switched back from its card")
 
     @classmethod
     def poll(cls, context):
@@ -636,9 +652,9 @@ class CURIOMESH_OT_keep_original_bad(bpy.types.Operator):
     def execute(self, context):
         changed = keep_original(context, bad_parts())
         if not changed:
-            self.report({"WARNING"}, "No part could be put back")
+            self.report({"WARNING"}, tr("No part could be put back"))
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Original faces kept on {changed} part{'s' if changed != 1 else ''}")
+        self.report({"INFO"}, tr(f"Original faces kept on {changed} part{'s' if changed != 1 else ''}"))
         return {"FINISHED"}
 
 
@@ -797,12 +813,12 @@ def _draw_legend() -> None:
         blf.size(0, int(12 * ui), 72)
     blf.color(0, 1.0, 1.0, 1.0, 1.0)
     blf.position(0, left, bottom + high + 6 * ui, 0)
-    blf.draw(0, "View change per part")
+    blf.draw(0, tr("View change per part"))
     blf.position(0, left, bottom - 16 * ui, 0)
-    blf.draw(0, "0%")
+    blf.draw(0, tr("0%"))
     text = f"{top:.0f}%+"
-    blf.position(0, left + wide - blf.dimensions(0, text)[0], bottom - 16 * ui, 0)
-    blf.draw(0, text)
+    blf.position(0, left + wide - blf.dimensions(0, tr(text))[0], bottom - 16 * ui, 0)
+    blf.draw(0, tr(text))
 
 
 def _draw_text() -> None:
@@ -822,7 +838,7 @@ def _draw_text() -> None:
             blf.size(0, size)
         except TypeError:  # before Blender 4.0 the size also takes a dpi
             blf.size(0, int(size), 72)
-        wide = max(blf.dimensions(0, line)[0] for line in lines)
+        wide = max(blf.dimensions(0, tr(line))[0] for line in lines)
         edge = bpy.context.region.width - overlay._sidebar_inset()  # the N-panel is drawn over the viewport's right side
         left = x + 22 if x + 22 + wide + pad < edge else max(x - 22 - wide - pad, pad)
         y = max(y, step * len(lines) + 2 * pad)  # keep the last line above the bottom edge
@@ -839,7 +855,7 @@ def _draw_text() -> None:
             muted = i == len(lines) - 1
             blf.color(0, *((0.62, 0.65, 0.75, 1.0) if muted else (1.0, 1.0, 1.0, 1.0) if i else (1.0, 0.86, 0.45, 1.0)))
             blf.position(0, left, y - step - step * i, 0)
-            blf.draw(0, line)
+            blf.draw(0, tr(line))
     except Exception as exc:
         overlay.LAST_DRAW_ERROR = repr(exc)
 
@@ -1007,11 +1023,11 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
             return
         r = seg["parts"][item.piece]
         row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
-        row.label(text=name_of(item.piece), icon="LOCKED" if r.get("locked") else "CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
+        row.label(text=tr(name_of(item.piece)), icon="LOCKED" if r.get("locked") else "CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
         row = row.split(factor=0.42, align=True)  # "92%" is short; the face count needs the room ("1,65...")
         # the number the list is sorted by: the look, or Tidiness for an Animation part (a 98% look ranked low read as a mistake)
-        row.label(text=f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
-        row.label(text=f"{r['after']:,} f")
+        row.label(text=tr(f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", "")))
+        row.label(text=tr(f"{r['after']:,} f"))
 
 
 # --------------------------------------------------------------------------- registration
@@ -1046,5 +1062,6 @@ def unregister() -> None:
         except Exception:
             pass
     seglive.unregister()
+    segment_goals.stop_try_all(quiet=True)
     reset()
     issue_panel.ui.update(res=None, cur=-1, diff=None, batch=None, batch_key=None)  # its GPU batches go with the draw handler
