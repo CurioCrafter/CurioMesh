@@ -206,7 +206,7 @@ class SeamFit(T.Trial):
         faces = FlatFaces.of(base.faces)
         key = uvkeep.result_key(base.co, faces.indptr, faces.flat)
         extra = int(got.get("extra", APPLIED_EXTRA.get(key, 0)))
-        stage = uvkeep.FitStage(sa, plan, base.co, faces.indptr, faces.flat, got.get("material"), s, extra_so_far=extra)
+        stage = uvkeep.FitStage(sa, plan, base.co, faces.indptr, faces.flat, got.get("material"), s, extra_so_far=extra, file=False)  # only an applied fit is filed
         passes, best = 0, None
         try:
             while True:
@@ -224,7 +224,7 @@ class SeamFit(T.Trial):
                 best, passes = (c, left), passes + 1
                 if not settings.get("keep_going") or left == 0:
                     break
-                stage = uvkeep.again(c, sa, plan, s)
+                stage = uvkeep.again(c, sa, plan, s, file=False)
         finally:
             stage.stop()
         if best is None:
@@ -483,8 +483,12 @@ def _same_pairs(a, b) -> bool:
 
 
 def _poll_new(run):
-    while not run.done:
-        yield run.step()
+    try:
+        while not run.done:
+            yield run.step()
+    finally:
+        if not run.done:  # dropped unfinished (a drag, Again, Esc, Cancel): its worker jobs stop too, so none piles up
+            run.stop()
     if run.error is not None:
         return None, f"New UVs could not be made ({run.error})."
     return run.result, ""
@@ -601,9 +605,13 @@ def _pack(base: UVBase, uv, k: int, budget: float, resume=None, passes: int = 0)
     r = resume or {}
     stage = uvpack.FillPage(w.tolist(), h.tolist(), [True] * n, np.maximum(area, 1e-12).tolist(), page, k, order=r.get("order"),
                             policy=int(r.get("policy", 0)), scale=float(r.get("scale", 0.0)), passes=passes, budget=budget)
-    while not stage.done:
-        stage.step()
-        yield
+    try:
+        while not stage.done:
+            stage.step()
+            yield
+    finally:
+        if not stage.done:  # dropped unfinished: the page search on the worker stops too
+            stage.stop()
     fill = stage.result
     if fill is None:
         return None, None
@@ -739,6 +747,16 @@ def _density(base: UVBase) -> float:
     return float(np.median(np.sqrt(a2[ok] / a3[ok]))) if ok.any() else base.texture_px
 
 
+def shows_texture(base: UVBase) -> np.ndarray:
+    """Per face: True when it takes at least one texel. A face under one texel shows no texture: its own island would
+    only take page, so Bake those spots leaves it (and Auto Fix does not count it)."""
+    if "shows" not in base.cache:
+        area = uvnew.face_areas(base.points, base.indptr, base.flat)
+        dens = _density(base)
+        base.cache["shows"] = area * dens * dens >= 1.0
+    return base.cache["shows"]
+
+
 def _pack_into(page, k, seed, tris, tri_chart, charts):
     """Generator: `uvpack.pack_into`, as a polled job when the faster callable is there. [(ok, dx, dy, quarter)] per chart."""
     fast = uvpack.FAST.get("pack_into")
@@ -778,7 +796,7 @@ class BakeSpotsUV(UVTrial):
         todo = np.setdiff1d(np.flatnonzero(straddle), done)
         area = uvnew.face_areas(base.points, base.indptr, base.flat)
         dens = _density(base)
-        todo = todo[area[todo] * dens * dens >= 1.0]  # a face under one texel shows no texture: its own island would only take page
+        todo = todo[shows_texture(base)[todo]]
         if not len(todo):
             return UVCand(None, refusal="No faces cross a seam where it shows: nothing to bake.")
         todo = todo[np.argsort(-area[todo], kind="stable")]  # most damage first: the biggest faces across a seam
@@ -872,7 +890,7 @@ class BakeSpots(T.Trial):
         if ub is None or BakeSpotsUV().check(ub):
             return []
         straddle = yield from straddlers(ub)
-        ids = np.flatnonzero(straddle & base.scope)
+        ids = np.flatnonzero(straddle & shows_texture(ub) & base.scope)
         if not len(ids):
             return []
         f = FlatFaces.of(base.faces)

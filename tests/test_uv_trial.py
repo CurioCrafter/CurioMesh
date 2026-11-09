@@ -130,6 +130,16 @@ def cube_mesh(n=4):
 
 
 class UVOnly(unittest.TestCase):
+    def test_a_dropped_run_stops(self):
+        """A drag, Again or Esc drops the preview's generator mid-run: the run stops, so no worker job is left going."""
+        p, ip, fl = cube_mesh(4)
+        run = uvnew.NewUVs(p, ip, fl, settings=uvnew.Settings(out_of_sight=False, hidden_pct=100.0), budget=UT.NEW_SLICE)
+        work = UT._poll_new(run)
+        for _ in range(3):
+            next(work)
+        work.close()
+        self.assertTrue(run._stop)
+
     def test_new_then_layout_keep_going(self):
         p, ip, fl = cube_mesh(4)
         base = UT.make_uv_base(p, ip, fl, texture_px=512)
@@ -178,6 +188,11 @@ class UVOnly(unittest.TestCase):
         self.assertFalse(others & set(lab[cand.faces].tolist()))  # the new islands are their own
         cand, _, _ = run_sliced(UT.measure(trial, base, cand))
         self.assertLess(cand.numbers["overlap_pct"], 0.01 + base.cache["numbers"]["overlap_pct"])
+        # Auto Fix's spot counts only faces that show a texel, as the bake does: on a 1-pixel page none does
+        tiny = UT.make_uv_base(alone.points, alone.indptr, alone.flat, uv=alone.layers[0][1], texture_px=1, source=src)
+        fb = T.make_base(alone.points, faces_of(alone.indptr, alone.flat))
+        self.assertTrue(UT.finish(UT.straddlers(tiny)).any())
+        self.assertEqual(UT.finish(UT.BakeSpots(tiny).spots(fb)), [])
 
 
 class KindsAsIslands(unittest.TestCase):

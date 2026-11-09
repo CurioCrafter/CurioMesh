@@ -105,7 +105,7 @@ def ensure_target_uvs_steps(obj, method: str = "SMART", new_layer: str = "", isl
     resolution = _resolution[0]
     try:
         points, indptr, flat, material, forced = mesh_arrays(mesh)
-        key = (obj.name, mesh.name, len(points), len(flat), resolution, float(points.sum()))
+        key = (obj.name, mesh.name, len(points), len(flat), resolution, float(points.sum()), forced.tobytes(), material.tobytes())  # sharp edges are cuts
         uv = _cache.get(key)
         if uv is None:
             settings = uvnew.Settings(texture_px=resolution)

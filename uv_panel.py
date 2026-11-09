@@ -147,7 +147,7 @@ def _fit_inputs():
     gs = _gs()
     sync()
     s = uvkeep.settings_of(gs)
-    key = (id(res), source.name, s.mode, s.allowance, s.split)
+    key = (id(res), len(res["faces"]), source.name, repr(s))  # every setting the fit reads (Texture size too: Auto calls this without a reset)
     if _FIT_CACHE["key"] == key:
         return _FIT_CACHE["value"]
     if not source.data.uv_layers:
@@ -428,13 +428,15 @@ def bake_spots(context, obj, cand) -> str:
     scene = context.scene
     uvbake.remember_images(scene, images, before=True)
     old = {im.name: np.asarray(im.pixels[:], np.float32) for im in images}
+    old_uv = uv_layers.read_uv(obj.data)  # put back when the bake fails: new islands over an unbaked texture show garbage
     uv_layers.write_uv(obj.data, cand.uv)
     obj.data.update()
     margin = uvbake.gap_px(images[0].size[0])
-    snap = textures._snapshot_bake_settings(scene)
+    snap = textures._snapshot_bake_settings(scene) + [(scene.cycles, "device", scene.cycles.device)]  # set to CPU below: your render device comes back
     selected = list(context.selected_objects)
     active = context.view_layer.objects.active
-    tris = uvtrial._fan(np.asarray(cand.extra.get("indptr")), cand.faces) if cand.extra.get("indptr") is not None else None
+    baked = cand.extra.get("baked", cand.faces)  # every face given a new island, by all Keep going passes, not just the last
+    tris = uvtrial._fan(np.asarray(cand.extra.get("indptr")), baked) if cand.extra.get("indptr") is not None else None
     try:
         for o in selected:
             o.select_set(False)
@@ -470,6 +472,9 @@ def bake_spots(context, obj, cand) -> str:
     except Exception as exc:
         for im in images:
             im.pixels.foreach_set(old[im.name])
+        if old_uv is not None:
+            uv_layers.write_uv(obj.data, old_uv)
+            obj.data.update()
         return f"Bake those spots could not bake: {exc}"
     finally:
         textures._restore_properties(snap)
@@ -846,8 +851,9 @@ class CURIOMESH_PT_pop_uv(bpy.types.Panel):
         col.prop(us, "time_per_pass")
         col = layout.column(align=True)
         col.prop(us, "fill_page")
-        if not us.fill_page:
-            col.prop(us, "pixel_density")
+        sub = col.row(align=True)  # always drawn (greyed while Fill the page is on): the rows below never jump
+        sub.active = not us.fill_page
+        sub.prop(us, "pixel_density")
         col.prop(us, "texture_size")
         col.prop(us, "clean_down_to")
         col.label(text=tr(f"Gap {uvnew.gap_texels(us.texture_size, us.clean_down_to)} px: clean down to {us.clean_down_to} px ({uvnew.mip_level(us.texture_size, us.clean_down_to)} levels)"))
