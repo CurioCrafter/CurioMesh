@@ -8,13 +8,13 @@ import unittest
 
 import numpy as np
 
-import uv_parity_common as common
+import uv_parity_common as common  # noqa: F401  (puts the add-on folder on the path)
 from uv_parity_common import needs_native
 
 from triadq import uvscore
 from triadq.uvscore import mesh
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 
 def plane(n, split=False, z=0.0, size=8.0):
@@ -44,6 +44,27 @@ def numbers(check):
 
 
 class Twin(unittest.TestCase):
+    def test_sliced_check_gives_the_same_numbers(self):
+        res, src = plane(12, False, z=0.01), plane(16, True)
+        want = uvscore.check(res, src, use_fast=False)
+        saved = uvscore.QUERIES_PER_STEP, uvscore.TRIS_PER_STEP
+        uvscore.QUERIES_PER_STEP, uvscore.TRIS_PER_STEP = 7, 5  # many slices
+        try:
+            gen, steps = uvscore.check_steps(res, src), 0
+            while True:
+                try:
+                    next(gen)
+                    steps += 1
+                except StopIteration as done:
+                    got = done.value
+                    break
+        finally:
+            uvscore.QUERIES_PER_STEP, uvscore.TRIS_PER_STEP = saved
+        self.assertGreater(steps, 20)
+        np.testing.assert_array_equal(got.numbers, want.numbers)
+        np.testing.assert_array_equal(got.straddle, want.straddle)
+        np.testing.assert_array_equal(got.flipped, want.flipped)
+
     def test_source_against_itself_is_clean(self):
         m = plane(8, True)
         out = numbers(uvscore.check(m, m, use_fast=False))

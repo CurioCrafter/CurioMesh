@@ -10,12 +10,12 @@ import unittest
 
 import numpy as np
 
-import uv_parity_common as common
+import uv_parity_common as common  # noqa: F401  (puts the add-on folder on the path)
 from uv_parity_common import needs_native
 
 from triadq import uvpack
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 BENCH = Path(__file__).resolve().parents[3] / "bench" / "uvplan"
 

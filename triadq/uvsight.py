@@ -108,7 +108,6 @@ def default_pixels(points: np.ndarray, indptr: np.ndarray, flat: np.ndarray) -> 
 
     if len(flat) == 0:
         return PIXELS_MIN
-    sizes = np.diff(indptr)
     nxt = np.arange(1, len(flat) + 1)
     nxt[indptr[1:] - 1] = indptr[:-1]
     lengths = np.linalg.norm(points[flat] - points[flat[nxt]], axis=1)
@@ -243,7 +242,8 @@ class Sight:
                     from .. import autoretopo  # the add-on's six-view pictures; read only, never edited
 
                     self.draw = autoretopo.pictures
-                drawn = yield from _turned_pictures(self.draw, self.points, self.polys, todo, pic.center, pic.half, pic.pixels)
+                polys = [self.flat[a:b].tolist() for a, b in zip(self.indptr[:-1].tolist(), self.indptr[1:].tolist())]  # polygons, not the (indptr, flat) pair
+                drawn = yield from _turned_pictures(self.draw, self.points, polys, todo, pic.center, pic.half, pic.pixels)
                 pic.face += drawn[0]
                 pic.depth += drawn[1]
                 self.renders += len(drawn[0])
