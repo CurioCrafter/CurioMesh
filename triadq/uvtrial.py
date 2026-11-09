@@ -206,7 +206,7 @@ class SeamFit(T.Trial):
         faces = FlatFaces.of(base.faces)
         key = uvkeep.result_key(base.co, faces.indptr, faces.flat)
         extra = int(got.get("extra", APPLIED_EXTRA.get(key, 0)))
-        stage = uvkeep.FitStage(sa, plan, base.co, faces.indptr, faces.flat, got.get("material"), s, extra_so_far=extra)
+        stage = uvkeep.FitStage(sa, plan, base.co, faces.indptr, faces.flat, got.get("material"), s, extra_so_far=extra, file=False)  # only an applied fit is filed
         passes, best = 0, None
         try:
             while True:
@@ -224,7 +224,7 @@ class SeamFit(T.Trial):
                 best, passes = (c, left), passes + 1
                 if not settings.get("keep_going") or left == 0:
                     break
-                stage = uvkeep.again(c, sa, plan, s)
+                stage = uvkeep.again(c, sa, plan, s, file=False)
         finally:
             stage.stop()
         if best is None:

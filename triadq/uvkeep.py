@@ -698,11 +698,14 @@ def remember(candidate: Candidate) -> None:
 class FitStage:
     """Snap, split leftovers and per-side transfer as one sliced stage. `step()` does about 4 ms of work; `done` turns
     True at the end and `candidate` holds the fit. `stop()` ends early (`candidate` None). Again: pass the previous
-    candidate's mesh as the result and its `extra_faces` as `extra_so_far`."""
+    candidate's mesh as the result and its `extra_faces` as `extra_so_far`. `file`: the finished fit is filed under its
+    input result's key (`remember`), so that result's Apply writes it. A Look First preview passes False: only a fit the
+    user applied is filed (`uvtrial.remember_applied`), so a cancelled, undone or unkept preview is never written."""
 
     def __init__(self, sa: Source, plan: Plan, points, indptr, flat, material, settings: Settings, extra_so_far: int = 0, only_transfer: bool = False,
-                 use_fast: bool = True, view_limit=None):
+                 use_fast: bool = True, view_limit=None, file: bool = True):
         self.sa, self.plan, self.settings = sa, plan, settings
+        self.file = file
         self.points = np.ascontiguousarray(points, np.float64).reshape(-1, 3)
         self.indptr = np.asarray(indptr, np.int64)
         self.flat = np.asarray(flat, np.int64)
@@ -1218,7 +1221,7 @@ class FitStage:
         c.key = candidate_hash(pts, ip, fl, mat, layers)
         c.result_key = result_key(self.points, self.indptr, self.flat)
         self.candidate, self.numbers = c, numbers
-        if not self.only_transfer:
+        if not self.only_transfer and self.file:
             remember(c)
 
 
@@ -1444,7 +1447,8 @@ def run(stage: FitStage):
     return stage.candidate
 
 
-def again(candidate: Candidate, sa: Source, plan: Plan, settings: Settings, use_fast: bool = True) -> FitStage:
+def again(candidate: Candidate, sa: Source, plan: Plan, settings: Settings, use_fast: bool = True, file: bool = True) -> FitStage:
     """Another pass from a finished fit: its mesh is the result, its extra faces already count against the allowance."""
 
-    return FitStage(sa, plan, candidate.points, candidate.indptr, candidate.flat, candidate.material, settings, extra_so_far=candidate.extra_faces, use_fast=use_fast)
+    return FitStage(sa, plan, candidate.points, candidate.indptr, candidate.flat, candidate.material, settings, extra_so_far=candidate.extra_faces, use_fast=use_fast,
+                    file=file)

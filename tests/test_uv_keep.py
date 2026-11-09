@@ -223,6 +223,24 @@ class AfterApply(unittest.TestCase):
         self.hooks.after_apply(late_mesh, self.source, self.result(), self.gs)  # fallback path: the Apply operator, same function
         self.assertEqual(self.hooks.LAST["hash"], hook_hash)
 
+    def test_an_unkept_seam_fit_preview_is_not_written(self):
+        """Seam Fit opened on the result, then cancelled (or its Apply undone): the result's Apply writes the plain
+        transfer, never the fit the user did not keep."""
+        from uv_hooks_fake import FakeMesh
+
+        UT, T = common.addon_module("triadq.uvtrial"), common.addon_module("triadq.trial")
+        self.hooks.kinds(None, self.source, self.src, self.gs)
+        res = self.result()
+        sa, plan = self.keep.plan_for(self.source, self.src, self.gs)
+        trial = UT.SeamFit(dict(source=sa, plan=plan, settings=self.keep.settings_of(self.gs), material=res["mat"]))
+        try:
+            cand = T.finish(trial.run(T.make_base(res["co"], res["faces"]), dict(trial.defaults, faces=1.0)))
+            self.assertFalse(cand.refusal, cand.refusal)
+            self.hooks.after_apply(FakeMesh(), self.source, self.result(), self.gs)
+            self.assertFalse(self.hooks.LAST["fitted"])
+        finally:
+            UT.APPLIED_EXTRA.clear()
+
     def test_without_a_fit_only_the_transfer_is_written(self):
         from uv_hooks_fake import FakeMesh
 
