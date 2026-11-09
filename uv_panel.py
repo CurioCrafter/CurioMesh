@@ -432,7 +432,7 @@ def bake_spots(context, obj, cand) -> str:
     uv_layers.write_uv(obj.data, cand.uv)
     obj.data.update()
     margin = uvbake.gap_px(images[0].size[0])
-    snap = textures._snapshot_bake_settings(scene)
+    snap = textures._snapshot_bake_settings(scene) + [(scene.cycles, "device", scene.cycles.device)]  # set to CPU below: your render device comes back
     selected = list(context.selected_objects)
     active = context.view_layer.objects.active
     baked = cand.extra.get("baked", cand.faces)  # every face given a new island, by all Keep going passes, not just the last
