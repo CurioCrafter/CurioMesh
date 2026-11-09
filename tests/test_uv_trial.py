@@ -47,6 +47,7 @@ class SeamFitTrial(unittest.TestCase):
     def tearDown(self):
         UT.FIT["inputs"] = None
         keep.CANDIDATES.clear()
+        keep.PINNED.clear()
         UT.APPLIED_EXTRA.clear()
 
     def test_preview_then_apply_writes_the_same_fit(self):
@@ -75,6 +76,19 @@ class SeamFitTrial(unittest.TestCase):
         pts, iptr, flat, _uv, mat = layers.geometry(mesh)
         got = keep.candidate_hash(pts, iptr, flat, mat, [(x.name, layers.read_uv(mesh, x.name)) for x in mesh.uv_layers])
         self.assertEqual(got, cand.fit.key)
+
+    def test_many_tries_never_evict_the_applied_fit(self):
+        from dataclasses import replace
+
+        p, ip, fl = grid(5)
+        base = T.make_base(p, faces_of(ip, fl))
+        trial = UT.SeamFit()
+        cand, _, _ = run_sliced(trial.run(base, dict(trial.defaults, faces=1.0)))
+        key = UT.remember_applied(cand)
+        for i in range(3 * keep.CACHED_CANDIDATES):  # Auto Fix tries filed after the Apply
+            keep.remember(replace(cand.fit, result_key=f"try{i}"))
+        self.assertIs(keep.CANDIDATES[key].key, cand.fit.key)
+        self.assertEqual(len(keep.CANDIDATES), keep.CACHED_CANDIDATES + 1)  # the tries stay bounded
 
     def test_auto_fix_spot_is_found_and_fixed(self):
         """Auto Fix's pattern: SeamFit made with its inputs, one spot, own number to 0 after the fit."""

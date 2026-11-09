@@ -318,7 +318,7 @@ def remember_applied(cand) -> str:
     if c is None:
         return ""
     key = uvkeep.result_key(c.points, c.indptr, c.flat)
-    uvkeep.remember(replace(c, result_key=key))
+    uvkeep.remember(replace(c, result_key=key), pin=True)
     APPLIED_EXTRA[key] = int(getattr(cand, "fit_extra", 0))
     return key
 
