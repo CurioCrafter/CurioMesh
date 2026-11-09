@@ -638,7 +638,7 @@ pub struct Tree {
     pub start_uv: Vec<f64>,
     pub build_stretch: f64,
     pub numbers: [f64; NUMBERS_LEN],
-    cache: Mutex<HashMap<u64, Arc<Level>, FxBuild>>,
+    cache: Mutex<HashMap<(u64, bool), Arc<Level>, FxBuild>>,
     smooth_cache: Mutex<Option<Arc<Smooth>>>,
 }
 
@@ -3041,12 +3041,20 @@ impl Tree {
     /// skipping (not stopping at) the others; a segment whose glue would leave a chart that is not a disk stays cut.
     /// Cached per x.
     pub fn level(&self, x_pct: f64) -> Arc<Level> {
-        let key = x_pct.to_bits();
+        self.level_hide(x_pct, true)
+    }
+
+    /// `level` with the borders slid out of sight (`hide`; the first call makes the moves, R7hide) or as the merges
+    /// left them (the first result is shown from these while the moves are made, R8late). Cached per (x, hide).
+    pub fn level_hide(&self, x_pct: f64, hide: bool) -> Arc<Level> {
+        let key = (x_pct.to_bits(), hide);
         if let Some(l) = self.cache.lock().unwrap().get(&key) {
             return l.clone();
         }
         let mut l = self.compute_level(x_pct);
-        crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        if hide {
+            crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        }
         let l = Arc::new(l);
         self.cache.lock().unwrap().insert(key, l.clone());
         l

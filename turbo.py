@@ -1184,22 +1184,36 @@ def uvchart_build(points, indptr, flat, part_label=None, forced=None, seen_edge_
                   bool(out_of_sight), float(hidden_l), float(build_stretch), name="CurioMeshUVCharts")
 
 
-def uvchart_level(tree, x: float) -> "UvJob | None":
-    """Charts at Stretch allowed x percent as a job: `result()` = (chart per face, cut per edge, numbers)."""
+def uvchart_level(tree, x: float, hide: bool = True) -> "UvJob | None":
+    """Charts at Stretch allowed x percent as a job: `result()` = (chart per face, cut per edge, numbers).
+    hide False: the charts before their borders slide out of sight."""
 
-    return uv_job("uvchart_level", tree, float(x), name="CurioMeshUVLevel")
+    return uv_job("uvchart_level", tree, float(x), bool(hide), name="CurioMeshUVLevel")
 
 
 def uvchart_uvs(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,
-                texture_px: float = 1024.0, only=None) -> "UvJob | None":
+                texture_px: float = 1024.0, only=None, hide: bool = True) -> "UvJob | None":
     """New UVs of level x as a job: `result()` = (UVs per corner (2C,), chart per face, stats rows, stretch per face).
     With `only` (chart ids of the level), just those charts are laid out (the others' UVs are NaN, no stats row)."""
 
     if only is not None:
         return uv_job("uvchart_uvs_only", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
-                      _uv_i64(only), name="CurioMeshUVNew")
+                      _uv_i64(only), bool(hide), name="CurioMeshUVNew")
     return uv_job("uvchart_uvs", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
-                  name="CurioMeshUVNew")
+                  bool(hide), name="CurioMeshUVNew")
+
+
+def uvhide_make(tree) -> "UvJob | None":
+    """The moves of the tree's borders out of sight as a job (kept per tree): `result()` = faces moved."""
+
+    return uv_job("uvhide_make", tree, name="CurioMeshUVHide")
+
+
+def uvhide_ready(tree) -> bool:
+    """The tree's moves are made: its levels with `hide` cost only their replay."""
+
+    module = native()
+    return module is not None and hasattr(module, "uvhide_ready") and bool(module.uvhide_ready(tree))
 
 
 def uvchart_may_lie(tree, corner_uv, chart) -> "UvJob | None":
