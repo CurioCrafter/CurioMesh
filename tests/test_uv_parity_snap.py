@@ -309,6 +309,30 @@ class Twin(unittest.TestCase):
             pass
         self.assertEqual(len(got["moved"]), 0)  # the move limit holds
 
+    def test_side_line_snap_asks_in_short_chunks_and_gives_the_same_moves(self):
+        P, IP, F = grid(40, 40, 40.0, 40.0)  # 1681 points: more than one lookup chunk
+        seen = []
+
+        def label(q):
+            q = np.asarray(q).reshape(-1, 3)
+            seen.append(len(q))
+            return ((q[:, 0] > 13.6).astype(np.int64) + (q[:, 1] > 21.3)).astype(np.int64)
+
+        runs = []
+        for chunk in (uvsnap.LOOKUP_CHUNK, 10 ** 9):
+            old, uvsnap.LOOKUP_CHUNK = uvsnap.LOOKUP_CHUNK, chunk
+            try:
+                got = {}
+                for _ in uvsnap.switch_snap_steps(P, IP, F, label, np.full(len(P), 0.5), None, got):
+                    pass
+            finally:
+                uvsnap.LOOKUP_CHUNK = old
+            runs.append(got)
+            if chunk == uvsnap.LOOKUP_CHUNK:
+                self.assertLessEqual(max(seen), uvsnap.LOOKUP_CHUNK)
+        self.assertGreater(len(runs[0]["moved"]), 0)
+        self.assertTrue(np.array_equal(runs[0]["points"], runs[1]["points"]) and np.array_equal(runs[0]["moved"], runs[1]["moved"]))
+
     def test_stage_slices_stay_short(self):
         P, IP, F = grid(24, 24, 8.0, 8.0)
         seams, xyz = seams_of([line(30, k=60)])

@@ -267,7 +267,11 @@ def bake_detail_steps(
     return images
 
 
-def bake_texture_sets(
+def bake_texture_sets(source_obj: bpy.types.Object, target_obj: bpy.types.Object, **kw) -> list[bpy.types.Image]:
+    return sliced.finish(bake_texture_sets_steps(source_obj, target_obj, **kw))
+
+
+def bake_texture_sets_steps(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
     *,
@@ -275,8 +279,10 @@ def bake_texture_sets(
     labels,
     resolution: int,
     cage: float,
-) -> list[bpy.types.Image]:
-    """Bake Normal + Color onto `count` sets of maps, each set its own material and its own 0-1 UV square.
+):
+    """`bake_texture_sets` as timer steps (`sliced`): each set's unwrap runs in short pieces, as in `bake_detail_steps`.
+
+    Bake Normal + Color onto `count` sets of maps, each set its own material and its own 0-1 UV square.
 
     Whole parts (`labels`, per face, or None) go together where they fit, in sets of about equal area. Each set is cut
     off into its own object, baked, and the sets are joined back into the target. Faces on either side of a set's border
@@ -289,7 +295,7 @@ def bake_texture_sets(
     mesh.polygons.foreach_get("center", centres)
     sets = texsets.texture_sets(np.zeros(n, np.int32) if labels is None else labels, area, centres.reshape(-1, 3), count)
     if sets.max() == 0:
-        return bake_detail(source_obj, target_obj, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
+        return (yield from bake_detail_steps(source_obj, target_obj, with_color=True, resolution=resolution, cage=cage, new_uvs=True))
     images, parts = [], []
     try:
         for k in range(int(sets.max()) + 1):
@@ -305,7 +311,7 @@ def bake_texture_sets(
             bmesh.ops.delete(bm, geom=[f for f in bm.faces if sets[f.index] != k], context="FACES")
             bm.to_mesh(part.data)
             bm.free()
-            images += bake_detail(source_obj, part, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
+            images += yield from bake_detail_steps(source_obj, part, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
         for part in parts:  # the joined mesh gets one, with the same triangles
             for modifier in [m for m in part.modifiers if m.name == "CurioMesh Bake Triangles"]:
                 part.modifiers.remove(modifier)
@@ -328,7 +334,7 @@ def bake_texture_sets(
             mesh.polygons.foreach_set("material_index", np.maximum(slots - 1, 0))
         _keep_triangles(target_obj)
         return images
-    except Exception:
+    except BaseException:  # also a closed generator: the set copies never stay behind
         for part in parts:
             if part.name in bpy.data.objects:
                 data = part.data
