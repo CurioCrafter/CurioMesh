@@ -35,6 +35,13 @@
 //!   stretch (area-weighted L2, Sander, Snyder, Gortler, Hoppe 2001). A union refused for its shape is still made when it
 //!   is so small that its gap ring outweighs its box and the union's box with its ring takes less page than its parts'
 //!   (smallest-area box by rotating calipers, Toussaint 1983; convex hull by Andrew's monotone chain, 1979). Ours.
+//! - Fewer, smoother charts (R6): a last merge round in which every chart, smallest first, joins a neighbour glued
+//!   along all it shares or hinged on its costliest shared segment (small compact charts free of the shape rule), and
+//!   an outline smoothing of the full tree (`Tree::smooth`): a patch moves to the chart it lies against when that lowers
+//!   the cut's outline weight, both charts stay disks, no cone closes and its fitted start crosses no border sides
+//!   (boundary smoothing of chart growing: Sander, Wood, Gortler, Snyder, Hoppe 2003, "Multi-chart geometry images";
+//!   Julius, Kraevoy, Sheffer 2005, "D-Charts"; our move, gain and guards). Every level replays the moves, so lower
+//!   levels' charts stay inside higher ones (the redo of a chart that lies over itself relies on it).
 //! - Keep going: one discrete cut move per pass on patch borders, accepted only when the score drops (idea of
 //!   discrete cut moves: Li, Kaufman, Kim, Sorkine-Hornung, Jacobson, Sheffer 2018, "OptCuts"; our moves and score).
 
@@ -98,6 +105,18 @@ pub const PIECE_ASPECT: f64 = 6.0;
 pub const TUBE_L2_MEDIAN: f64 = 1.08;
 pub const TUBE_L2_BAD: f64 = 1.3;
 pub const TUBE_BAD_SHARE: f64 = 0.002;
+
+/// In the last merge round (R6) a chart of at most this many faces joins a neighbour whatever the union's shape (its
+/// gap ring outweighs its box, so joining always saves page); larger charts keep the shape rule (`SHAPE_MAX`).
+/// Measured on 13 models (bench/uvplan/uv_defaults.md, R6chart).
+pub const FREE_FACES: usize = 64;
+
+/// Smoother outlines (R6, `Tree::smooth`): a patch moves to the neighbouring chart only when every vertex the move
+/// closes inside that chart has an angle defect (360 deg less its corner angles) within this many degrees.
+pub const SMOOTH_DEFECT_DEG: f64 = 10.0;
+/// ... and only when every face of the moved patch, fitted onto the chart's start layout, keeps its area within this
+/// factor of its surface area (the start layouts are isometric up to the chart's stretch).
+pub const SMOOTH_AREA: f64 = 1.5;
 
 /// Numbers in `Tree::numbers` (see `num`).
 pub const NUMBERS_LEN: usize = 22;
@@ -581,6 +600,9 @@ pub struct Merge {
 /// The charts of one level.
 pub struct Level {
     pub chart: Vec<u32>,
+    /// Start layout per corner when outline smoothing moved patches (`Tree::smooth`): each moved patch fitted rigidly
+    /// onto its new chart along the glue. Empty: the tree's `start_uv`.
+    pub start: Vec<f64>,
     pub cut: Vec<bool>,
     pub charts: usize,
     pub not_disk: usize,
@@ -616,6 +638,7 @@ pub struct Tree {
     pub build_stretch: f64,
     pub numbers: [f64; NUMBERS_LEN],
     cache: Mutex<HashMap<u64, Arc<Level>, FxBuild>>,
+    smooth_cache: Mutex<Option<Arc<Smooth>>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1018,6 +1041,7 @@ impl Tree {
             build_stretch: if input.build_stretch > 0.0 { input.build_stretch } else { BUILD_STRETCH },
             numbers,
             cache: Mutex::new(HashMap::default()),
+            smooth_cache: Mutex::new(None),
         };
         let tube_uv: HashMap<u32, [f64; 2], FxBuild> = tubes.into_iter().flat_map(|x| x.corner_uv).collect();
         let (merges, found, start_uv) = tree.merge_tree(&members, &tube_uv, stop);
@@ -1106,6 +1130,7 @@ impl Tree {
             vals: vec![BTreeSet::new(); np],
             bnd: vec![Vec::new(); np],
             refused: HashMap::default(),
+            failed: HashMap::default(),
             cap: f64::INFINITY,
             last_st: HashMap::default(),
             parked: Vec::new(),
@@ -1214,6 +1239,7 @@ impl Tree {
                 }
                 if !(ev.stretch <= 1.0 + self.build_stretch) {
                     dropped += 1;
+                    b.failed.insert((c.a, c.b), (c.va, c.vb, ev.glued.len()));
                     continue;
                 }
                 b.last_st.insert((c.a, c.b), ev.stretch);
@@ -1236,6 +1262,7 @@ impl Tree {
                 }
                 if b.lies_over(c.a, c.b, &ev) {
                     lay_over += 1;
+                    b.failed.insert((c.a, c.b), (c.va, c.vb, ev.glued.len()));
                     // Not tried again until the smaller chart changes: the bigger one growing elsewhere seldom frees it.
                     let small = if b.faces[c.a as usize].len() <= b.faces[c.b as usize].len() { c.a } else { c.b };
                     b.refused.insert((c.a, c.b), (small, b.ver[small as usize]));
@@ -1249,6 +1276,96 @@ impl Tree {
                 b.push_for(&mut heap, &mut seq, r);
             }
             if stop.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        // R6: a last round in which every chart, smallest first, tries to join a neighbour (the neighbour with the
+        // longest shared border first), glued along all it shares or else hinged on the costliest shared segment (the
+        // two unfold flat about it; the rest of the shared border stays cut). It runs after every other merge so the
+        // compact merge order above is not disturbed. A chart of at most `FREE_FACES` faces joins whatever its shape
+        // (its gap ring outweighs its box: joining always saves page); a larger one keeps the shape rule. Passes repeat
+        // until one joins nothing (a pair is tried again only when one of its charts changed).
+        let mut tried: HashMap<(u32, u32), (u32, u32), FxBuild> = HashMap::default();
+        while !stop.load(Ordering::Relaxed) {
+            let mut order: Vec<u32> = (0..np as u32).filter(|&p| b.cpar[p as usize] == p && b.chi[p as usize] == 1).collect();
+            order.sort_by_key(|&p| (b.faces[p as usize].len(), p));
+            let mut joined = 0usize;
+            for p in order {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if b.find(p) != p {
+                    continue;
+                }
+                let mut nb: Vec<(u32, f64)> = b.neighbours(p).into_iter().filter(|(o, _)| b.chi[*o as usize] == 1)
+                    .map(|(o, l)| (o, l.iter().map(|&s| self.segments[s as usize].length).sum::<f64>())).collect();
+                nb.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+                // Each neighbour's full glue is measured up front (on worker threads on a big mesh; a measure depends only
+                // on the two charts, so the joins are those of measuring one at a time), the hinge only when it is needed.
+                let cands: Vec<u32> = nb.iter().map(|x| x.0).filter(|&o| tried.get(&(p, o)) != Some(&(b.ver[p as usize], b.ver[o as usize]))).collect();
+                let lists: Vec<Vec<u32>> = cands.iter().map(|&o| b.between(o, p)).collect();
+                // (whether the pair's full union is known to fail, and how many segments it glued)
+                let known = |b: &Build, o: u32| {
+                    let (x, y) = (o.min(p), o.max(p));
+                    match b.failed.get(&(x, y)) {
+                        Some(&(vx, vy, n)) if (vx, vy) == (b.ver[x as usize], b.ver[y as usize]) => Some(n),
+                        _ => None,
+                    }
+                };
+                let failed: Vec<Option<usize>> = cands.iter().map(|&o| known(&b, o)).collect();
+                let skip: Vec<bool> = failed.iter().map(|x| x.is_some()).collect();
+                let full: Vec<(Option<Eval>, usize)> = {
+                    let me = &b;
+                    let one = |k: usize| if skip[k] { (None, 0) } else { me.measure_one(cands[k], p, &lists[k], stop) };
+                    if t.nf >= PARALLEL_FACES && cands.len() > 1 { (0..cands.len()).into_par_iter().map(one).collect() } else { (0..cands.len()).map(one).collect() }
+                };
+                for (k, (first, q)) in full.into_iter().enumerate() {
+                    let o = cands[k];
+                    tried.insert((p, o), (b.ver[p as usize], b.ver[o as usize]));
+                    b.quick += q;
+                    exact_evals += usize::from(!skip[k]);
+                    let mut next = first;
+                    let mut take = None;
+                    for hinge in [false, true] {
+                        if !hinge && skip[k] {
+                            if failed[k] <= Some(1) {
+                                break; // measured already in the rounds, glued along one segment: nothing to hinge
+                            }
+                            continue; // measured already in the rounds: over the build stretch or lying over itself
+                        }
+                        if hinge {
+                            let (ev, q) = b.measure_one(o, p, &lists[k][..1], stop);
+                            b.quick += q;
+                            exact_evals += 1;
+                            next = ev;
+                        }
+                        let Some(ev) = next.take() else { break };
+                        let one = ev.glued.len() <= 1;
+                        let free = b.faces[p as usize].len() <= FREE_FACES && irregularity(b.length[p as usize], b.area[p as usize]) <= SHAPE_MAX;
+                        let shaped = free || {
+                            let (_, plain, parts) = b.shape(o, p, &ev.glued);
+                            !(plain > SHAPE_MAX && plain > parts) || b.saves_page(o, p, &ev)
+                        };
+                        if shaped && ev.stretch <= 1.0 + self.build_stretch && !b.lies_over(o, p, &ev) {
+                            take = Some(ev);
+                            break;
+                        }
+                        if one {
+                            break;
+                        }
+                    }
+                    if let Some(ev) = take {
+                        top = top.max(ev.stretch);
+                        if ev.pole { pole_merges += 1 } else { grid_merges += 1 }
+                        let (stretch, cost, pole, glued) = (ev.stretch, ev.cost, ev.pole, ev.glued.clone());
+                        b.apply(o, p, ev);
+                        merges.push(Merge { segs: glued, stretch, cost, pole });
+                        joined += 1;
+                        break;
+                    }
+                }
+            }
+            if joined == 0 {
                 break;
             }
         }
@@ -1383,6 +1500,9 @@ struct Build<'t> {
     bnd: Vec<Vec<u32>>,
     /// Pairs refused because the union lay over itself: (smaller chart, its version then).
     refused: HashMap<(u32, u32), (u32, u32), FxBuild>,
+    /// Pairs whose whole-border union was measured over the build stretch or lying over itself, with both versions
+    /// then: the last round goes straight to the hinge for them.
+    failed: HashMap<(u32, u32), (u32, u32, usize), FxBuild>,
     /// The round's cap (as `stretch - 1`), the last measured stretch per pair, and the candidates waiting for a later
     /// round. A pair measured above the cap waits again when one of its charts grows, without a new measure: unions
     /// only stretch more as charts grow, and the round whose cap it fits measures it again.
@@ -1647,6 +1767,16 @@ impl Build<'_> {
             }
         }
         n
+    }
+
+    /// `measure` on this thread over the committed glue.
+    fn measure_one(&self, a: u32, b: u32, list: &[u32], stop: &AtomicBool) -> (Option<Eval>, usize) {
+        SCRATCH.with(|sc| {
+            let mut sc = sc.borrow_mut();
+            sc.fit(self.tree.topo.nv, self.tree.topo.nf, self.tree.topo.corners());
+            let mut dsu = Overlay::new(&self.dsu);
+            self.measure(&mut dsu, &mut sc, a, b, list, stop)
+        })
     }
 
     /// Measure the union of charts a and b glued along `list` (tentatively on `dsu`; undone before returning), and
@@ -2616,6 +2746,75 @@ fn tube_cuts(t: &Topo, points: &[f64], cost: &[f64], forced_line: &[bool], stop:
     out
 }
 
+/// Union-find over corners and over faces for `Tree::smooth`, reset by a stamp (an entry is valid where its stamp is
+/// the current one).
+struct SmoothScratch {
+    cpar: Vec<u32>,
+    cst: Vec<u32>,
+    fpar: Vec<u32>,
+    fst: Vec<u32>,
+    stamp: u32,
+}
+
+/// The outline smoothing of the full tree (`Tree::smooth`): the moves in order (patch, a patch of the chart it
+/// joined), and the start layout with the moved patches fitted onto their charts (empty: no move).
+pub struct Smooth {
+    pub moves: Vec<(u32, u32)>,
+    pub start: Vec<f64>,
+}
+
+/// Faces and (two-patch) segments per patch.
+struct SmoothCtx {
+    pfaces: Vec<Vec<u32>>,
+    psegs: Vec<Vec<u32>>,
+}
+
+impl SmoothCtx {
+    fn members(&self, root: &[u32]) -> Vec<Vec<u32>> {
+        let mut m: Vec<Vec<u32>> = vec![Vec::new(); root.len()];
+        for (p, &r) in root.iter().enumerate() {
+            m[r as usize].push(p as u32);
+        }
+        m
+    }
+}
+
+impl SmoothScratch {
+    fn new(corners: usize, faces: usize) -> Self {
+        SmoothScratch { cpar: vec![0; corners], cst: vec![0; corners], fpar: vec![0; faces], fst: vec![0; faces], stamp: 0 }
+    }
+    fn find(par: &mut [u32], st: &mut [u32], stamp: u32, mut x: u32) -> u32 {
+        if st[x as usize] != stamp {
+            st[x as usize] = stamp;
+            par[x as usize] = x;
+            return x;
+        }
+        while par[x as usize] != x {
+            let up = par[par[x as usize] as usize];
+            par[x as usize] = up;
+            x = up;
+        }
+        x
+    }
+    fn cfind(&mut self, x: u32) -> u32 {
+        Self::find(&mut self.cpar, &mut self.cst, self.stamp, x)
+    }
+    fn join(par: &mut [u32], st: &mut [u32], stamp: u32, a: u32, b: u32) -> bool {
+        let (ra, rb) = (Self::find(par, st, stamp, a), Self::find(par, st, stamp, b));
+        if ra == rb {
+            return false;
+        }
+        par[ra.max(rb) as usize] = ra.min(rb);
+        true
+    }
+    fn cjoin(&mut self, a: u32, b: u32) -> bool {
+        Self::join(&mut self.cpar, &mut self.cst, self.stamp, a, b)
+    }
+    fn fjoin(&mut self, a: u32, b: u32) -> bool {
+        Self::join(&mut self.fpar, &mut self.fst, self.stamp, a, b)
+    }
+}
+
 fn apply_rigid(r: ([f64; 2], [f64; 2]), x: f64, y: f64) -> (f64, f64) {
     let ([c, s], tr) = r;
     (c * x - s * y + tr[0], s * x + c * y + tr[1])
@@ -2639,10 +2838,73 @@ impl Tree {
         l
     }
 
+    /// The start layout to flatten a level's charts from (`Level::start`, else the tree's `start_uv`).
+    pub fn start_of<'a>(&'a self, l: &'a Level) -> &'a [f64] {
+        if l.start.is_empty() { &self.start_uv } else { &l.start }
+    }
+
     pub fn compute_level(&self, x_pct: f64) -> Level {
         let started = Instant::now();
         let t = &self.topo;
-        let thr = 1.0 + x_pct / 100.0;
+        let (mut root, mut glued, chi, used, segs_glued) = self.replay(1.0 + x_pct / 100.0);
+        let sm = self.smoothing();
+        let moved = !sm.moves.is_empty();
+        if moved {
+            let ctx = self.smooth_ctx();
+            let mut sc = SmoothScratch::new(t.corners(), t.nf);
+            let mut members = ctx.members(&root);
+            for &(p, q) in &sm.moves {
+                let (a, b) = (root[p as usize], root[q as usize]);
+                if a != b {
+                    let mut undo = Vec::new();
+                    self.move_patch(&ctx, &mut sc, p, b, &mut root, &mut glued, &mut members, &mut undo);
+                }
+            }
+        }
+        let cut: Vec<bool> = (0..t.ne()).map(|e| self.cut_base[e] && !glued[e]).collect();
+        let mut id: HashMap<u32, u32, FxBuild> = HashMap::default();
+        let (chart, not_disk) = if moved {
+            // A chart that gave a patch away can fall apart in pieces at a level below the full tree: one chart per piece.
+            let mut d = Dsu::new(t.nf);
+            for e in 0..t.ne() {
+                if !cut[e] {
+                    let [f0, f1] = t.faces_of(e);
+                    d.union(f0, f1);
+                }
+            }
+            let chart: Vec<u32> = (0..t.nf as u32).map(|f| {
+                let r = d.find(f);
+                let k = id.len() as u32;
+                *id.entry(r).or_insert(k)
+            }).collect();
+            let nd = chi_per(t, &cut, &chart, id.len()).iter().filter(|&&c| c != 1).count();
+            (chart, nd)
+        } else {
+            let chart: Vec<u32> = (0..t.nf).map(|f| {
+                let r = root[self.patch[f] as usize];
+                let k = id.len() as u32;
+                *id.entry(r).or_insert(k)
+            }).collect();
+            let nd = id.keys().filter(|&&r| chi[r as usize] != 1).count();
+            (chart, nd)
+        };
+        Level {
+            chart,
+            start: if moved { sm.start.clone() } else { Vec::new() },
+            cut,
+            charts: id.len(),
+            not_disk,
+            merges_used: used,
+            segments_glued: segs_glued,
+            above_build: x_pct / 100.0 > self.build_stretch,
+            ms: started.elapsed().as_secs_f64() * 1e3,
+        }
+    }
+
+    /// The recorded merges with stretch <= `thr`, in order: (chart root per patch, glued per edge, Euler
+    /// characteristic per root, merges used, segments glued).
+    fn replay(&self, thr: f64) -> (Vec<u32>, Vec<bool>, Vec<i64>, usize, usize) {
+        let t = &self.topo;
         let mut dsu = Undo::new(t.corners());
         for e in 0..t.ne() {
             if !self.cut_base[e] {
@@ -2678,24 +2940,331 @@ impl Tree {
                 }
             }
         }
-        let cut: Vec<bool> = (0..t.ne()).map(|e| self.cut_base[e] && !glued[e]).collect();
-        let mut id: HashMap<u32, u32, FxBuild> = HashMap::default();
-        let chart: Vec<u32> = (0..t.nf).map(|f| {
-            let r = pd.find(self.patch[f]);
-            let k = id.len() as u32;
-            *id.entry(r).or_insert(k)
-        }).collect();
-        let not_disk = id.keys().filter(|&&r| chi[r as usize] != 1).count();
-        Level {
-            chart,
-            cut,
-            charts: id.len(),
-            not_disk,
-            merges_used: used,
-            segments_glued: segs_glued,
-            above_build: x_pct / 100.0 > self.build_stretch,
-            ms: started.elapsed().as_secs_f64() * 1e3,
+        let root: Vec<u32> = (0..self.n_patches as u32).map(|p| pd.find(p)).collect();
+        (root, glued, chi, used, segs_glued)
+    }
+
+    /// The outline smoothing of the full tree (`smooth`), made once and kept.
+    fn smoothing(&self) -> Arc<Smooth> {
+        if let Some(s) = self.smooth_cache.lock().unwrap().as_ref() {
+            return s.clone();
         }
+        let (mut root, mut glued, chi, _, _) = self.replay(f64::INFINITY);
+        let s = Arc::new(self.smooth(&mut root, &mut glued, &chi));
+        *self.smooth_cache.lock().unwrap() = Some(s.clone());
+        s
+    }
+
+    fn smooth_ctx(&self) -> SmoothCtx {
+        let t = &self.topo;
+        let np = self.n_patches;
+        let mut pfaces: Vec<Vec<u32>> = vec![Vec::new(); np];
+        for f in 0..t.nf {
+            pfaces[self.patch[f] as usize].push(f as u32);
+        }
+        let mut psegs: Vec<Vec<u32>> = vec![Vec::new(); np];
+        for (s, sg) in self.segments.iter().enumerate() {
+            if sg.p != sg.q {
+                psegs[sg.p as usize].push(s as u32);
+                psegs[sg.q as usize].push(s as u32);
+            }
+        }
+        SmoothCtx { pfaces, psegs }
+    }
+
+    /// What a cut along segment s costs in the outline smoothing: its outline weight (`outline_w`). The cut cost
+    /// (seen pixels first) was measured as a gain too and changed nothing (bench/uvplan/uv_defaults.md, R6chart).
+    fn gain_w(&self, s: u32) -> f64 {
+        self.segments[s as usize].weight
+    }
+
+    fn seg_glued(&self, glued: &[bool], s: u32) -> bool {
+        glued[self.segments[s as usize].edges[0] as usize]
+    }
+
+    fn set_seg(&self, glued: &mut [bool], s: u32, on: bool, undo: &mut Vec<(u32, bool)>) {
+        if self.seg_glued(glued, s) != on {
+            undo.push((s, !on));
+            for &e in &self.segments[s as usize].edges {
+                glued[e as usize] = on;
+            }
+        }
+    }
+
+    /// Move patch p into chart b: its glued segments to its own chart are cut, and its segments to b glued, all of
+    /// them when b and p then make one disk, else only the heaviest (`weight`, then the lowest id). The changed
+    /// segments go to `undo` (with their old state). Returns (outline weight glued to b, is b with p one disk); the
+    /// corner wedges of b with p are then in `sc`.
+    #[allow(clippy::too_many_arguments)]
+    fn move_patch(&self, ctx: &SmoothCtx, sc: &mut SmoothScratch, p: u32, b: u32, root: &mut [u32], glued: &mut [bool], members: &mut [Vec<u32>], undo: &mut Vec<(u32, bool)>) -> (f64, bool) {
+        let to_b = self.shift_patch(ctx, p, b, root, glued, members, undo);
+        let all: f64 = to_b.iter().map(|&s| self.gain_w(s)).sum();
+        if self.is_disk(sc, &members[b as usize], &ctx.pfaces, root, glued, b) {
+            return (all, true);
+        }
+        let Some(&best) = to_b.iter().max_by(|&&x, &&y| self.gain_w(x).total_cmp(&self.gain_w(y)).then(y.cmp(&x))) else {
+            return (0.0, false);
+        };
+        for &s in &to_b {
+            self.set_seg(glued, s, s == best, undo);
+        }
+        (self.gain_w(best), self.is_disk(sc, &members[b as usize], &ctx.pfaces, root, glued, b))
+    }
+
+    /// The first half of `move_patch`: p's glue to its own chart cut, all its segments to b glued, p labelled b.
+    /// Returns its segments to b.
+    #[allow(clippy::too_many_arguments)]
+    fn shift_patch(&self, ctx: &SmoothCtx, p: u32, b: u32, root: &mut [u32], glued: &mut [bool], members: &mut [Vec<u32>], undo: &mut Vec<(u32, bool)>) -> Vec<u32> {
+        let a = root[p as usize];
+        let mut to_b: Vec<u32> = Vec::new();
+        for &s in &ctx.psegs[p as usize] {
+            let sg = &self.segments[s as usize];
+            let q = if sg.p == p { sg.q } else { sg.p };
+            let c = root[q as usize];
+            if c == a {
+                self.set_seg(glued, s, false, undo);
+            } else if c == b {
+                to_b.push(s);
+            }
+        }
+        root[p as usize] = b;
+        members[a as usize].retain(|&x| x != p);
+        members[b as usize].push(p);
+        for &s in &to_b {
+            self.set_seg(glued, s, true, undo);
+        }
+        to_b
+    }
+
+    /// Smoother chart outlines (R6) on the full tree: a patch that would glue more outline weight (`outline_w`: length,
+    /// less on a fold, more where it is seen) to a neighbouring chart than it has glued to its own chart moves to that
+    /// neighbour. Every move lowers the cut's total outline weight, so the sweeps end by themselves. Spikes, saw teeth
+    /// and the sticks of "lollipops" go to the chart they lie against (the boundary smoothing step of chart growing,
+    /// after Sander, Wood, Gortler, Snyder, Hoppe 2003, "Multi-chart geometry images", and Julius, Kraevoy, Sheffer
+    /// 2005, "D-Charts"; on our patch borders, with our gain and rules). A move is made only when both charts stay one
+    /// disk, every vertex it closes inside the new chart lies flat (`SMOOTH_DEFECT_DEG`), and the patch, fitted rigidly
+    /// onto the new chart's start layout along the glue, crosses none of its border sides (the one-to-one border
+    /// condition, as `lies_over`). Every level replays the moves on its own charts (`compute_level`), so a level's
+    /// charts lie inside the charts of every level above it.
+    fn smooth(&self, root: &mut [u32], glued: &mut [bool], chi: &[i64]) -> Smooth {
+        let t = &self.topo;
+        let np = self.n_patches;
+        let ctx = self.smooth_ctx();
+        let mut members = ctx.members(root);
+        let defect_max = SMOOTH_DEFECT_DEG.to_radians();
+        // Corner angles summed per vertex (3D).
+        let mut angle_sum = vec![0f64; t.nv];
+        for f in 0..t.nf {
+            let r = t.face_corners(f);
+            let n = r.len();
+            for (i, h) in r.clone().enumerate() {
+                let v = t.flat[h] as usize;
+                let (pv, nx) = (t.flat[r.start + (i + n - 1) % n] as usize, t.flat[r.start + (i + 1) % n] as usize);
+                let d = |w: usize| [self.points[3 * w] - self.points[3 * v], self.points[3 * w + 1] - self.points[3 * v + 1], self.points[3 * w + 2] - self.points[3 * v + 2]];
+                let (x, y) = (d(pv), d(nx));
+                let dot = x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+                let cr = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+                angle_sum[v] += (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt().atan2(dot);
+            }
+        }
+        let mut sc = SmoothScratch::new(t.corners(), t.nf);
+        let mut work: Vec<f64> = Vec::new();
+        let mut moves: Vec<(u32, u32)> = Vec::new();
+        loop {
+            let before = moves.len();
+            for p in 0..np as u32 {
+                let a = root[p as usize];
+                if chi[a as usize] != 1 {
+                    continue;
+                }
+                let mut wa = 0.0;
+                let mut wb: Vec<(u32, f64, u32)> = Vec::new(); // chart, weight, a patch of it across the heaviest segment
+                for &s in &ctx.psegs[p as usize] {
+                    let sg = &self.segments[s as usize];
+                    let q = if sg.p == p { sg.q } else { sg.p };
+                    let c = root[q as usize];
+                    if c == a {
+                        if self.seg_glued(glued, s) {
+                            wa += self.gain_w(s);
+                        }
+                    } else if let Some(x) = wb.iter_mut().find(|x| x.0 == c) {
+                        x.1 += self.gain_w(s);
+                    } else {
+                        wb.push((c, self.gain_w(s), q));
+                    }
+                }
+                let Some(&(b, w, q)) = wb.iter().max_by(|x, y| x.1.total_cmp(&y.1).then(y.0.cmp(&x.0))) else { continue };
+                if chi[b as usize] != 1 || !(w - wa > 1e-9 * (w + wa)) {
+                    continue;
+                }
+                let mut undo: Vec<(u32, bool)> = Vec::new();
+                // The patch glued along all it shares with b (no slit left between them); the cheap tests first.
+                self.shift_patch(&ctx, p, b, root, glued, &mut members, &mut undo);
+                let mut ok = true;
+                // A vertex the move closes inside b must lie flat (no cone): its angle defect stays within the limit.
+                ok = ok && undo.iter().all(|&(s, was)| {
+                    was || self.segments[s as usize].edges.iter().all(|&e| {
+                        [t.ea[e as usize], t.eb[e as usize]].iter().all(|&v| {
+                            let v = v as usize;
+                            let inside = !t.border_v[v]
+                                && t.vfaces(v).iter().all(|&f| root[self.patch[f as usize] as usize] == b)
+                                && t.vedges(v).iter().all(|&x| !self.cut_base[x as usize] || glued[x as usize]);
+                            !inside || (std::f64::consts::TAU - angle_sum[v]).abs() <= defect_max
+                        })
+                    })
+                });
+                ok = ok && (members[a as usize].is_empty() || self.is_disk(&mut sc, &members[a as usize], &ctx.pfaces, root, glued, a));
+                ok = ok && self.is_disk(&mut sc, &members[b as usize], &ctx.pfaces, root, glued, b);
+                let mut old: Vec<(usize, f64, f64)> = Vec::new();
+                if ok {
+                    // The patch fitted rigidly onto b's start layout along the glue; its border sides must cross none of b's.
+                    if work.is_empty() {
+                        work = self.start_uv.clone();
+                    }
+                    let mut pairs = Vec::new();
+                    for &s in &ctx.psegs[p as usize] {
+                        let sg = &self.segments[s as usize];
+                        let o = if sg.p == p { sg.q } else { sg.p };
+                        if root[o as usize] != b || !self.seg_glued(glued, s) {
+                            continue;
+                        }
+                        for &e in &sg.edges {
+                            let [h0, h1] = t.euse[e as usize];
+                            let (hp, hb) = if self.patch[t.cface[h0 as usize] as usize] == p { (h0, h1) } else { (h1, h0) };
+                            for v in [t.ea[e as usize], t.eb[e as usize]] {
+                                let (cp, cb) = (t.at(hp as usize, v), t.at(hb as usize, v));
+                                pairs.push(([work[2 * cp], work[2 * cp + 1]], [work[2 * cb], work[2 * cb + 1]]));
+                            }
+                        }
+                    }
+                    let rigid = align(&pairs);
+                    for &f in &ctx.pfaces[p as usize] {
+                        for h in t.face_corners(f as usize) {
+                            old.push((h, work[2 * h], work[2 * h + 1]));
+                            let (x, y) = apply_rigid(rigid, work[2 * h], work[2 * h + 1]);
+                            work[2 * h] = x;
+                            work[2 * h + 1] = y;
+                        }
+                    }
+                    // The patch's corners on the glue take b's positions, so the start is one layout; none of the
+                    // patch's triangles may turn over by that.
+                    let mut snap: HashMap<u32, [f64; 2], FxBuild> = HashMap::default();
+                    for &s in &ctx.psegs[p as usize] {
+                        let sg = &self.segments[s as usize];
+                        let o = if sg.p == p { sg.q } else { sg.p };
+                        if root[o as usize] != b || !self.seg_glued(glued, s) {
+                            continue;
+                        }
+                        for &e in &sg.edges {
+                            let [h0, h1] = t.euse[e as usize];
+                            let hb = if self.patch[t.cface[h0 as usize] as usize] == p { h1 } else { h0 };
+                            for v in [t.ea[e as usize], t.eb[e as usize]] {
+                                let cb = t.at(hb as usize, v);
+                                snap.insert(v, [work[2 * cb], work[2 * cb + 1]]);
+                            }
+                        }
+                    }
+                    for &f in &ctx.pfaces[p as usize] {
+                        for h in t.face_corners(f as usize) {
+                            if let Some(q) = snap.get(&t.flat[h]) {
+                                work[2 * h] = q[0];
+                                work[2 * h + 1] = q[1];
+                            }
+                        }
+                    }
+                    // Corners of p at a vertex shared with b through a corner only (no glued edge) keep the fit.
+                    // (every corner turns left: a convex face, so both diagonals of a quad stay unturned; and the snap
+                    // keeps each face's area within `SMOOTH_AREA` of its surface area)
+                    ok = ctx.pfaces[p as usize].iter().all(|&f| {
+                        let r = t.face_corners(f as usize);
+                        let n = r.len();
+                        let mut a2 = 0.0;
+                        for i in 0..n {
+                            let (m, c) = (r.start + i, r.start + (i + 1) % n);
+                            a2 += work[2 * m] * work[2 * c + 1] - work[2 * c] * work[2 * m + 1];
+                        }
+                        let ratio = 0.5 * a2 / face_area(&self.points, t, f as usize).max(1e-300);
+                        ratio <= SMOOTH_AREA && ratio * SMOOTH_AREA >= 1.0
+                            && (0..n).all(|i| {
+                                let (a, m, c) = (r.start + (i + n - 1) % n, r.start + i, r.start + (i + 1) % n);
+                                (work[2 * m] - work[2 * a]) * (work[2 * c + 1] - work[2 * a + 1]) - (work[2 * c] - work[2 * a]) * (work[2 * m + 1] - work[2 * a + 1]) > 0.0
+                            })
+                    });
+                    let mut sides: Vec<Side> = Vec::new();
+                    for &m in &members[b as usize] {
+                        for &f in &ctx.pfaces[m as usize] {
+                            for h in t.face_corners(f as usize) {
+                                let e = t.cedge[h] as usize;
+                                let [h0, h1] = t.euse[e];
+                                let o = if h as u32 == h0 { h1 } else { h0 };
+                                if o != NONE && !t.wall[e] && !(self.cut_base[e] && !glued[e]) && root[self.patch[t.cface[o as usize] as usize] as usize] == b {
+                                    continue;
+                                }
+                                let n = t.next(h);
+                                let v = [sc.cfind(h as u32), sc.cfind(n as u32)];
+                                sides.push(Side { p: [work[2 * h], work[2 * h + 1]], q: [work[2 * n], work[2 * n + 1]], v, class: if m == p { 2 } else { 0 } });
+                            }
+                        }
+                    }
+                    ok = ok && !sides_cross(&mut sides);
+                }
+                if ok {
+                    moves.push((p, q));
+                } else {
+                    for (h, x, y) in old {
+                        work[2 * h] = x;
+                        work[2 * h + 1] = y;
+                    }
+                    for &(s, was) in undo.iter().rev() {
+                        for &e in &self.segments[s as usize].edges {
+                            glued[e as usize] = was;
+                        }
+                    }
+                    root[p as usize] = a;
+                    members[b as usize].retain(|&x| x != p);
+                    members[a as usize].push(p);
+                }
+            }
+            if moves.len() == before {
+                break;
+            }
+        }
+        Smooth { moves, start: work }
+    }
+
+    /// Are the faces of these patches (all with root `r`) one disk under the glue (Euler characteristic over wedges,
+    /// one piece)? Leaves the wedges of these faces in `sc` (`cfind`).
+    #[allow(clippy::too_many_arguments)]
+    fn is_disk(&self, sc: &mut SmoothScratch, patches: &[u32], pfaces: &[Vec<u32>], root: &[u32], glued: &[bool], r: u32) -> bool {
+        let t = &self.topo;
+        sc.stamp += 1;
+        let (mut chi, mut comps) = (0i64, 0i64);
+        for &p in patches {
+            let n = pfaces[p as usize].len() as i64;
+            chi += n; // a face; its sides and corners cancel until corners join
+            comps += n;
+        }
+        for &p in patches {
+            for &f in &pfaces[p as usize] {
+                for h in t.face_corners(f as usize) {
+                    let e = t.cedge[h] as usize;
+                    let [h0, h1] = t.euse[e];
+                    if h as u32 != h0 || h1 == NONE || t.wall[e] || (self.cut_base[e] && !glued[e]) {
+                        continue;
+                    }
+                    let g = t.cface[h1 as usize];
+                    if root[self.patch[g as usize] as usize] != r {
+                        continue;
+                    }
+                    chi += 1; // two sides are one edge
+                    for v in [t.ea[e], t.eb[e]] {
+                        chi -= i64::from(sc.cjoin(t.at(h0 as usize, v) as u32, t.at(h1 as usize, v) as u32));
+                    }
+                    comps -= i64::from(sc.fjoin(f, g));
+                }
+            }
+        }
+        comps == 1 && chi == 1
     }
 
     // -----------------------------------------------------------------------------------------------------------
@@ -2763,7 +3332,7 @@ impl Tree {
     /// Start Keep going from a level: its charts flattened.
     pub fn start_cuts(&self, x_pct: f64, opts: &uvflat::FlatOpts, stop: &AtomicBool) -> Cuts {
         let level = self.level(x_pct);
-        let (uv, stats, face_str) = self.flatten_cut(&level.cut, &level.chart, None, Some(&self.start_uv), opts, stop);
+        let (uv, stats, face_str) = self.flatten_cut(&level.cut, &level.chart, None, Some(self.start_of(&level)), opts, stop);
         let t = &self.topo;
         let area: Vec<f64> = (0..t.nf).map(|f| face_area(&self.points, t, f)).collect();
         let mut cuts = Cuts { cut: level.cut.clone(), chart: level.chart.clone(), uv, face_str, chart_str: Vec::new(), chart_area: Vec::new(), area, opts: *opts, score: 0.0, passes: 0, moves: 0 };

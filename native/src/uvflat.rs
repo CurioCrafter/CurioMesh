@@ -185,6 +185,9 @@ impl Csr {
 /// middle (a vertex separator), the two sides are ordered first and the separator last; small parts keep BFS order.
 pub fn nd_order(a: &Csr) -> Vec<u32> {
     let n = a.n;
+    if n <= ND_LEAF {
+        return (0..n as u32).collect(); // one leaf: the loop below would keep the given order
+    }
     let mut perm = vec![0u32; n];
     let mut part = vec![0u32; n]; // stamp: which part a vertex belongs to right now
     let mut seen = vec![0u32; n];
@@ -340,10 +343,10 @@ pub fn factor_size(a: &Csr, perm: &[u32]) -> (usize, Vec<u32>, Vec<usize>, Vec<u
 }
 
 impl Ldlt {
-    /// Factor `a` (SPD) in the order `perm`. Err on a non-positive pivot or when stopped.
-    pub fn factor(a: &Csr, perm: Vec<u32>, stop: &AtomicBool) -> Result<Ldlt, String> {
+    /// Factor `a` (SPD) in the order `perm`; `size` = `factor_size(a, &perm)`. Err on a non-positive pivot or when stopped.
+    pub fn factor(a: &Csr, perm: Vec<u32>, size: (usize, Vec<u32>, Vec<usize>, Vec<usize>), stop: &AtomicBool) -> Result<Ldlt, String> {
         let n = a.n;
-        let (nnz, pinv, parent, lnz_count) = factor_size(a, &perm);
+        let (nnz, pinv, parent, lnz_count) = size;
         let mut lp = vec![0usize; n + 1];
         for k in 0..n {
             lp[k + 1] = lp[k] + lnz_count[k];
@@ -671,10 +674,11 @@ impl Lin {
         let a = Csr { n, ptr, idx, val };
         let limit = if max_bytes > 0.0 { max_bytes } else { FACTOR_MAX_BYTES };
         let perm = nd_order(&a);
-        let (nnz, ..) = factor_size(&a, &perm);
+        let size = factor_size(&a, &perm);
+        let nnz = size.0;
         let bytes = nnz as f64 * 12.0 + n as f64 * 64.0;
         let (solver, path, nnz_l) = if !force_iterative && bytes <= limit {
-            (Solver::Direct(Ldlt::factor(&a, perm, stop)?), Path::Direct, nnz)
+            (Solver::Direct(Ldlt::factor(&a, perm, size, stop)?), Path::Direct, nnz)
         } else {
             match Ic0::new(&a) {
                 Some(ic) => (Solver::Iter(a, Pre::Ic0(ic)), Path::Ic0, 0),
@@ -759,8 +763,11 @@ fn cross2(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 /// The polygon's corners in its own plane (Newell normal, first side along x), isometric for planar polygons.
-fn flat_polygon(chart: &Chart, poly: &[i64]) -> Vec<[f64; 2]> {
-    let pts: Vec<[f64; 3]> = poly.iter().map(|&v| chart.p(v as usize)).collect();
+/// Writes into `pts` (scratch) and `out` (cleared first), so `elements` allocates nothing per face.
+fn flat_polygon(chart: &Chart, poly: &[i64], pts: &mut Vec<[f64; 3]>, out: &mut Vec<[f64; 2]>) {
+    pts.clear();
+    pts.extend(poly.iter().map(|&v| chart.p(v as usize)));
+    out.clear();
     let k = pts.len();
     let mut nrm = [0f64; 3];
     let mut c = [0f64; 3];
@@ -776,14 +783,15 @@ fn flat_polygon(chart: &Chart, poly: &[i64]) -> Vec<[f64; 2]> {
     let ln = norm(nrm);
     let first = sub(pts[1], pts[0]);
     if ln < 1e-300 || norm(first) < 1e-300 {
-        return vec![[0.0, 0.0]; k];
+        out.resize(k, [0.0, 0.0]);
+        return;
     }
     let nrm = [nrm[0] / ln, nrm[1] / ln, nrm[2] / ln];
     let t = sub(first, [nrm[0] * dot(first, nrm), nrm[1] * dot(first, nrm), nrm[2] * dot(first, nrm)]);
     let lt = norm(t).max(1e-300);
     let e1 = [t[0] / lt, t[1] / lt, t[2] / lt];
     let e2 = cross(nrm, e1);
-    pts.iter().map(|&p| [dot(sub(p, c), e1), dot(sub(p, c), e2)]).collect()
+    out.extend(pts.iter().map(|&p| [dot(sub(p, c), e1), dot(sub(p, c), e2)]));
 }
 
 /// One ARAP term: `w |(u_b - u_a) - R e|²` inside element `elem`.
@@ -814,19 +822,32 @@ struct Elements {
 /// neighbours: `0.5 * mean(adjacent) / len` (ours). Quads give four test triangles (both diagonals), larger polygons
 /// a fan.
 fn elements(chart: &Chart) -> Elements {
-    let (mut terms, mut start, mut tris) = (Vec::new(), vec![0usize], Vec::new());
-    for f in 0..chart.faces.count() {
+    elements_with(chart, true)
+}
+
+/// `elements`; with `with_terms` false only the test triangles (what `stretch` needs).
+fn elements_with(chart: &Chart, with_terms: bool) -> Elements {
+    let nf = chart.faces.count();
+    let (mut terms, mut start, mut tris) = (Vec::with_capacity(4 * nf), Vec::with_capacity(nf + 1), Vec::with_capacity(4 * nf));
+    start.push(0usize);
+    let (mut pts, mut q, mut len) = (Vec::new(), Vec::new(), Vec::new());
+    for f in 0..nf {
         let poly = chart.faces.face(f);
         let k = poly.len();
         if k < 3 {
             start.push(terms.len());
             continue;
         }
-        let q = flat_polygon(chart, poly);
-        let len: Vec<f64> = (0..k).map(|i| {
+        flat_polygon(chart, poly, &mut pts, &mut q);
+        if !with_terms {
+            push_tris(&mut tris, poly, &q, f, k);
+            continue;
+        }
+        len.clear();
+        len.extend((0..k).map(|i| {
             let (a, b) = (q[i], q[(i + 1) % k]);
             ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
-        }).collect();
+        }));
         for i in 0..k {
             let j = (i + 1) % k;
             let w = if k == 3 {
@@ -843,18 +864,19 @@ fn elements(chart: &Chart) -> Elements {
             terms.push(Term { a: poly[i] as u32, b: poly[j] as u32, w, e: [q[j][0] - q[i][0], q[j][1] - q[i][1]] });
         }
         start.push(terms.len());
-        let corners: Vec<[usize; 3]> = if k == 3 {
-            vec![[0, 1, 2]]
-        } else if k == 4 {
-            vec![[0, 1, 2], [0, 2, 3], [0, 1, 3], [1, 2, 3]]
-        } else {
-            (1..k - 1).map(|i| [0, i, i + 1]).collect()
-        };
-        for c in corners {
-            tris.push(TestTri { v: [poly[c[0]] as u32, poly[c[1]] as u32, poly[c[2]] as u32], r: [q[c[0]], q[c[1]], q[c[2]]], face: f as u32 });
-        }
+        push_tris(&mut tris, poly, &q, f, k);
     }
     Elements { terms, start, tris }
+}
+
+/// A polygon's test triangles: a triangle itself, a quad both diagonals (4), larger polygons a fan.
+fn push_tris(tris: &mut Vec<TestTri>, poly: &[i64], q: &[[f64; 2]], f: usize, k: usize) {
+    let mut push = |c: [usize; 3]| tris.push(TestTri { v: [poly[c[0]] as u32, poly[c[1]] as u32, poly[c[2]] as u32], r: [q[c[0]], q[c[1]], q[c[2]]], face: f as u32 });
+    match k {
+        3 => push([0, 1, 2]),
+        4 => [[0, 1, 2], [0, 2, 3], [0, 1, 3], [1, 2, 3]].into_iter().for_each(&mut push),
+        _ => (1..k - 1).for_each(|i| push([0, i, i + 1])),
+    }
 }
 
 fn uv_at(uv: &[f64], v: u32) -> [f64; 2] {
@@ -886,7 +908,7 @@ pub fn count_flips(faces: &Faces, uv: &[f64]) -> usize {
 /// triangles' `max(σ1, 1/σ2)` (Sander, Snyder, Gortler, Hoppe 2001 singular values); returns (`STRETCH_QUANTILE`
 /// over faces, per face). 1 = isometric.
 pub fn stretch(chart: &Chart, uv: &[f64]) -> (f64, Vec<f64>) {
-    stretch_of(&elements(chart), chart.faces.count(), uv)
+    stretch_of(&elements_with(chart, false), chart.faces.count(), uv)
 }
 
 fn stretch_of(el: &Elements, nfaces: usize, uv: &[f64]) -> (f64, Vec<f64>) {
@@ -1250,6 +1272,7 @@ fn arap_run(
     };
     let build = |map: &[u32], m: usize| {
         let mut b = Builder::new(m);
+        b.t.reserve(4 * el.terms.len() + m + if soft > 0.0 { 9 * triples.len() } else { 0 });
         for t in &el.terms {
             if t.w > 0.0 {
                 b.edge(map[t.a as usize] as usize, map[t.b as usize] as usize, t.w);
@@ -1288,6 +1311,7 @@ fn arap_run(
     let mut report = ArapReport { steps: 0, energy: 0.0, path: lin_u.path, nnz_l, factor_ms, solve_ms: 0.0, stalled: 0, stopped: false };
     let mut last = f64::INFINITY;
     let mut new = vec![0f64; 2 * n];
+    let (mut rot, mut rhs, mut d): (Vec<[f64; 2]>, Vec<f64>, Vec<f64>) = (Vec::with_capacity(nel), vec![0f64; 2 * n], vec![0f64; 2 * n]);
     loop {
         // Local step: one rotation per element (2x2 Procrustes: the angle of Σ w du eᵀ's rotational part).
         let fit = |e: usize| {
@@ -1300,10 +1324,18 @@ fn arap_run(
                 m[2] += t.w * du[1] * t.e[0];
                 m[3] += t.w * du[1] * t.e[1];
             }
-            let th = (m[2] - m[1]).atan2(m[0] + m[3]);
-            [th.cos(), th.sin()]
+            // The angle's cosine and sine straight from the vector (no atan2/cos/sin); zero gives the identity.
+            let (x, y) = (m[0] + m[3], m[2] - m[1]);
+            let h = (x * x + y * y).sqrt();
+            if h == 0.0 { [1.0, 0.0] } else { [x / h, y / h] }
         };
-        let rot: Vec<[f64; 2]> = if nel >= PARALLEL_MIN { (0..nel).into_par_iter().map(fit).collect() } else { (0..nel).map(fit).collect() };
+        if nel >= PARALLEL_MIN {
+            rot.clear();
+            rot.par_extend((0..nel).into_par_iter().map(fit));
+        } else {
+            rot.clear();
+            rot.extend((0..nel).map(fit));
+        }
         let mut energy = 0.0;
         for e in 0..nel {
             let [c, s] = rot[e];
@@ -1327,7 +1359,7 @@ fn arap_run(
         let started = Instant::now();
         let mut info = SolveInfo::default();
         if shared {
-            let mut rhs = vec![0f64; 2 * n];
+            rhs.fill(0.0);
             for e in 0..nel {
                 let [c, s] = rot[e];
                 for t in &el.terms[el.start[e]..el.start[e + 1]] {
@@ -1384,7 +1416,9 @@ fn arap_run(
             report.stopped = true;
             break;
         }
-        let d: Vec<f64> = new.iter().zip(uv.iter()).map(|(a, b)| a - b).collect();
+        for i in 0..2 * n {
+            d[i] = new[i] - uv[i];
+        }
         let t = injective_step(&el.tris, uv, &d);
         for i in 0..2 * n {
             uv[i] += t * d[i];

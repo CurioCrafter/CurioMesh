@@ -23,6 +23,13 @@ on a convex outline of the strip (Tutte 1963, Floater 1997) and kept when the UV
 refused for its shape is still made when its gap ring outweighs its box and its box with the ring takes less page than
 its parts' (`_min_box`: rotating calipers, Toussaint 1983). Ours, as the kernel.
 
+Fewer, smoother charts (R6): a last merge round where every chart, smallest first, joins a neighbour glued along all
+it shares or hinged on its costliest shared segment (small compact charts free of the shape rule), and an outline
+smoothing of the full tree (`_smooth_full`): a patch moves to the chart it lies against when that lowers the cut's
+outline weight, both charts stay disks, no cone closes and its fitted start crosses no border (boundary smoothing of
+chart growing after Sander, Wood, Gortler, Snyder, Hoppe 2003 and Julius, Kraevoy, Sheffer 2005; our rules). Every level
+replays the moves (`_level`), so lower levels' charts stay inside higher ones. Ours, as the kernel.
+
 A union is refused when its layout would lie over itself (a flip-free disk layout is one-to-one exactly when its
 border does not cross itself: Floater 2003, "One-to-one piecewise linear mappings over triangulations"). The merge
 tree runs in rounds of rising stretch (`round_caps`), like the kernel.
@@ -64,6 +71,9 @@ PIECE_ASPECT = 6.0
 TUBE_L2_MEDIAN = 1.08
 TUBE_L2_BAD = 1.3
 TUBE_BAD_SHARE = 0.002
+FREE_FACES = 64
+SMOOTH_DEFECT_DEG = 10.0
+SMOOTH_AREA = 1.5
 NUMBERS_LEN = 22
 
 NUMBER_COLUMNS = ("patches", "irregular", "turning", "traces", "euler_cut_patches", "euler_cut_edges", "not_disk_patches", "segments",
@@ -499,6 +509,13 @@ class Segment:
         self.weight, self.length = weight, length
 
 
+def _members(root) -> list:
+    out: list = [[] for _ in range(len(root))]
+    for p, r in enumerate(root):
+        out[r].append(p)
+    return out
+
+
 class ChartTree:
     """Patches, segments and recorded merges of one quad mesh; `level(x)` gives the charts at Stretch allowed x."""
 
@@ -506,6 +523,7 @@ class ChartTree:
         self.merges: list = []  # (segment ids, stretch, cost, pole)
         self._numbers = np.zeros(NUMBERS_LEN)
         self._cache: dict = {}
+        self._smooth = None  # (moves, start layout) of the outline smoothing, made on the first level
 
     def numbers(self) -> np.ndarray:
         return self._numbers.copy()
@@ -525,7 +543,36 @@ class ChartTree:
     def _level(self, x: float):
         started = time.perf_counter()
         t = self.topo
-        thr = 1.0 + x / 100.0
+        root, glued, chi, used, segs_glued = self._replay(1.0 + x / 100.0)
+        moves, _ = self._smoothing()
+        if moves:
+            pfaces, psegs = self._smooth_ctx()
+            members = _members(root)
+            for p, q in moves:
+                if root[p] != root[q]:
+                    self._move_patch(pfaces, psegs, p, root[q], root, glued, members, [])
+        cut = np.asarray(self.cut_base, bool) & ~glued
+        if moves:  # a chart that gave a patch away can fall apart below the full tree: one chart per piece
+            d = _Dsu(t.nf)
+            for e in range(t.ne):
+                if not cut[e]:
+                    f0, f1 = t.faces_of(e)
+                    d.union(f0, f1)
+            ids: dict = {}
+            chart = np.array([ids.setdefault(d.find(f), len(ids)) for f in range(t.nf)], np.int64)
+            not_disk = sum(1 for c in _chi_per(t, cut.tolist(), chart.tolist(), len(ids)) if c != 1)
+        else:
+            ids = {}
+            chart = np.array([ids.setdefault(root[self.patch[f]], len(ids)) for f in range(t.nf)], np.int64)
+            not_disk = sum(1 for r in ids if chi[r] != 1)
+        numbers = np.array([len(ids), not_disk, used, segs_glued, float(x / 100.0 > self.build_stretch), (time.perf_counter() - started) * 1e3])
+        return chart, cut, numbers
+
+    def _replay(self, thr: float):
+        """The recorded merges with stretch <= thr, in order: (root per patch, glued per edge, chi per root, merges used,
+        segments glued) (kernel: `replay`)."""
+
+        t = self.topo
         dsu = _Undo(len(t.flat))
         for e in range(t.ne):
             if not self.cut_base[e]:
@@ -553,12 +600,222 @@ class ChartTree:
                     segs_glued += 1
                 else:
                     dsu.undo(mk)
-        cut = np.asarray(self.cut_base, bool) & ~glued
-        ids: dict = {}
-        chart = np.array([ids.setdefault(pd.find(self.patch[f]), len(ids)) for f in range(t.nf)], np.int64)
-        not_disk = sum(1 for r in ids if chi[r] != 1)
-        numbers = np.array([len(ids), not_disk, used, segs_glued, float(x / 100.0 > self.build_stretch), (time.perf_counter() - started) * 1e3])
-        return chart, cut, numbers
+        return [pd.find(p) for p in range(self.n_patches)], glued, chi, used, segs_glued
+
+    def _smoothing(self):
+        """(moves, start layout) of the outline smoothing of the full tree, made once (kernel: `smoothing`)."""
+
+        if self._smooth is None:
+            root, glued, chi, _, _ = self._replay(float("inf"))
+            self._smooth = self._smooth_full(root, glued, chi)
+        return self._smooth
+
+    def _smooth_ctx(self):
+        t = self.topo
+        pfaces: list = [[] for _ in range(self.n_patches)]
+        for f in range(t.nf):
+            pfaces[self.patch[f]].append(f)
+        psegs: list = [[] for _ in range(self.n_patches)]
+        for s, sg in enumerate(self.segments):
+            if sg.p != sg.q:
+                psegs[sg.p].append(s)
+                psegs[sg.q].append(s)
+        return pfaces, psegs
+
+    def _set_seg(self, glued, s: int, on: bool, undo: list) -> None:
+        edges = self.segments[s].edges
+        if bool(glued[edges[0]]) != on:
+            undo.append((s, not on))
+            glued[edges] = on
+
+    def _move_patch(self, pfaces, psegs, p: int, b: int, root, glued, members, undo):
+        """Move patch p into chart b (kernel: `move_patch`): (weight glued to b, is b with p one disk, wedge find)."""
+
+        a = root[p]
+        to_b = []
+        for s in psegs[p]:
+            sg = self.segments[s]
+            c = root[sg.q if sg.p == p else sg.p]
+            if c == a:
+                self._set_seg(glued, s, False, undo)
+            elif c == b:
+                to_b.append(s)
+        root[p] = b
+        members[a].remove(p)
+        members[b].append(p)
+        for s in to_b:
+            self._set_seg(glued, s, True, undo)
+        ok, wedge = self._is_disk(members[b], pfaces, root, glued, b)
+        if ok:
+            return _total(self.segments[s].weight for s in to_b), True, wedge
+        if not to_b:
+            return 0.0, False, wedge
+        best = max(to_b, key=lambda s: (self.segments[s].weight, -s))
+        for s in to_b:
+            self._set_seg(glued, s, s == best, undo)
+        ok, wedge = self._is_disk(members[b], pfaces, root, glued, b)
+        return self.segments[best].weight, ok, wedge
+
+    def _is_disk(self, patches, pfaces, root, glued, r: int):
+        """Are these patches' faces (root r) one disk under the glue? (bool, wedge find over their corners)."""
+
+        t = self.topo
+        cpar: dict = {}
+        fpar: dict = {}
+
+        def find(par, x):
+            while par.get(x, x) != x:
+                par[x] = par.get(par[x], par[x])
+                x = par[x]
+            return x
+
+        def join(par, a, b):
+            ra, rb = find(par, a), find(par, b)
+            if ra == rb:
+                return False
+            par[max(ra, rb)] = min(ra, rb)
+            return True
+
+        chi = comps = sum(len(pfaces[p]) for p in patches)
+        for p in patches:
+            for f in pfaces[p]:
+                for h in t.face_corners(f):
+                    e = t.cedge[h]
+                    h0, h1 = t.euse[e]
+                    if h != h0 or h1 < 0 or t.wall[e] or (self.cut_base[e] and not glued[e]):
+                        continue
+                    g = t.cface[h1]
+                    if root[self.patch[g]] != r:
+                        continue
+                    chi += 1
+                    for v in (t.ea[e], t.eb[e]):
+                        chi -= int(join(cpar, t.at(h0, v), t.at(h1, v)))
+                    comps -= int(join(fpar, f, g))
+        return comps == 1 and chi == 1, (lambda x: find(cpar, x))
+
+    def _smooth_full(self, root, glued, chi):
+        """Smoother chart outlines on the full tree (kernel: `smooth`): (moves, start layout)."""
+
+        t = self.topo
+        pts = np.asarray(self.points, float)
+        pfaces, psegs = self._smooth_ctx()
+        members = _members(root)
+        defect_max = math.radians(SMOOTH_DEFECT_DEG)
+        angle_sum = None  # corner angles summed per vertex, made when a move first needs them
+        start = np.asarray(self.start_uv, float).reshape(-1, 2).copy()
+        moves: list = []
+        while True:
+            before = len(moves)
+            for p in range(self.n_patches):
+                a = root[p]
+                if chi[a] != 1:
+                    continue
+                wa = 0.0
+                wb: list = []  # [chart, weight, a patch of it]
+                for s in psegs[p]:
+                    sg = self.segments[s]
+                    q = sg.q if sg.p == p else sg.p
+                    c = root[q]
+                    if c == a:
+                        if glued[sg.edges[0]]:
+                            wa += sg.weight
+                    else:
+                        for x in wb:
+                            if x[0] == c:
+                                x[1] += sg.weight
+                                break
+                        else:
+                            wb.append([c, sg.weight, q])
+                if not wb:
+                    continue
+                b, w, q = max(wb, key=lambda x: (x[1], -x[0]))
+                if chi[b] != 1 or not w - wa > 1e-9 * (w + wa):
+                    continue
+                undo: list = []
+                got, disk, wedge = self._move_patch(pfaces, psegs, p, b, root, glued, members, undo)
+                ok = disk and got == w and got - wa > 1e-9 * (got + wa)
+                if ok and angle_sum is None:
+                    ip = np.asarray(t.indptr)
+                    fl = np.asarray(t.flat)
+                    h = np.arange(len(fl))
+                    f = np.asarray(t.cface)
+                    nxt = np.where(h + 1 == ip[f + 1], ip[f], h + 1)
+                    prv = np.where(h == ip[f], ip[f + 1] - 1, h - 1)
+                    x, y = pts[fl[prv]] - pts[fl], pts[fl[nxt]] - pts[fl]
+                    ang = np.arctan2(np.linalg.norm(np.cross(x, y), axis=1), np.einsum("ij,ij->i", x, y))
+                    angle_sum = np.bincount(fl, weights=ang, minlength=t.nv).tolist()
+                if ok:
+                    for s, was in undo:
+                        if was:
+                            continue
+                        for e in self.segments[s].edges:
+                            for v in (t.ea[e], t.eb[e]):
+                                inside = (not t.border_v[v] and all(root[self.patch[f]] == b for f in t.vface[v])
+                                          and all(not self.cut_base[x] or glued[x] for x in t.vedge[v]))
+                                if inside and abs(2.0 * math.pi - angle_sum[v]) > defect_max:
+                                    ok = False
+                old = None
+                if ok:
+                    pairs, snap = [], {}
+                    for s in psegs[p]:
+                        sg = self.segments[s]
+                        o = sg.q if sg.p == p else sg.p
+                        if root[o] != b or not glued[sg.edges[0]]:
+                            continue
+                        for e in sg.edges:
+                            h0, h1 = t.euse[e]
+                            hp, hb = (h0, h1) if self.patch[t.cface[h0]] == p else (h1, h0)
+                            for v in (t.ea[e], t.eb[e]):
+                                cp, cb = t.at(hp, v), t.at(hb, v)
+                                pairs.append((start[cp].copy(), start[cb].copy()))
+                                snap[v] = start[cb].copy()
+                    rigid = _align(pairs)
+                    corners = np.array([h for f in pfaces[p] for h in t.face_corners(f)], np.int64)
+                    old = start[corners].copy()
+                    start[corners] = _rigid(rigid, start[corners])
+                    for h in corners:
+                        got_v = snap.get(t.flat[h])
+                        if got_v is not None:
+                            start[h] = got_v
+                    for f in pfaces[p]:
+                        r = list(t.face_corners(f))
+                        n = len(r)
+                        c = start[r]
+                        ratio = 0.5 * float(np.sum(c[:, 0] * np.roll(c[:, 1], -1) - np.roll(c[:, 0], -1) * c[:, 1])) / max(_face_area(self.points, t, f), 1e-300)
+                        turns = [(c[i, 0] - c[i - 1, 0]) * (c[(i + 1) % n, 1] - c[i - 1, 1]) - (c[(i + 1) % n, 0] - c[i - 1, 0]) * (c[i, 1] - c[i - 1, 1]) for i in range(n)]
+                        if not (ratio <= SMOOTH_AREA and ratio * SMOOTH_AREA >= 1.0 and all(x > 0.0 for x in turns)):
+                            ok = False
+                            break
+                    if ok:
+                        sp, sq, sv = [], [], []
+                        for m in members[b]:
+                            for f in pfaces[m]:
+                                for h in t.face_corners(f):
+                                    e = t.cedge[h]
+                                    h0, h1 = t.euse[e]
+                                    o = h1 if h == h0 else h0
+                                    if o >= 0 and not t.wall[e] and not (self.cut_base[e] and not glued[e]) and root[self.patch[t.cface[o]]] == b:
+                                        continue
+                                    nx = t.next(h)
+                                    sp.append(start[h])
+                                    sq.append(start[nx])
+                                    sv.append((wedge(h), wedge(nx)))
+                        ok = not _sides_cross(np.array(sp), np.array(sq), np.array(sv))
+                if ok and members[a]:
+                    ok = self._is_disk(members[a], pfaces, root, glued, a)[0]
+                if ok:
+                    moves.append((p, q))
+                else:
+                    if old is not None:
+                        start[corners] = old
+                    for s, was in reversed(undo):
+                        glued[self.segments[s].edges] = was
+                    root[p] = a
+                    members[b].remove(p)
+                    members[a].append(p)
+            if len(moves) == before:
+                break
+        return moves, (start if moves else None)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1045,6 +1302,43 @@ class Charts:
             yield 0.35
         exact_evals = dropped = grid_merges = pole_merges = lay_over = 0
         top = 1.0
+        def apply_ev(a, b, ev):
+            """Glue an evaluated union for good and take its layout; returns the surviving chart."""
+
+            nonlocal top, grid_merges, pole_merges
+            ar = area[a] + area[b]
+            wt = max(weight[a] + weight[b] - 2.0 * _total(tree.segments[s].weight for s in ev["glued"]), 0.0)
+            ln = max(length[a] + length[b] - 2.0 * _total(tree.segments[s].length for s in ev["glued"]), 0.0)
+            for s in ev["glued"]:
+                _glue(t, dsu, tree.segments[s].edges)
+                glued_seg[s] = True
+            dsu.commit()
+            ev["local"].scatter(ev["uv"], corner_uv)
+            for f, x in zip(ev["local"].faces, ev["per"]):
+                face_str[f] = x
+            ids_ = hull[a] + hull[b] + ev["local"].corner.tolist()
+            new_hull = _hull_of(ids_, corner_uv[ids_])
+            r, o = (a, b) if len(faces[a]) >= len(faces[b]) else (b, a)
+            hull[r], hull[o] = new_hull, []
+            cpar[o] = r
+            for f in faces[o]:
+                owner[f] = r
+            faces[r].extend(faces[o])
+            faces[o] = []
+            segs[r] = [s for s in segs[r] + segs[o] if not glued_seg[s]]
+            segs[o] = []
+            stretch[r], grid[r], chi[r] = ev["stretch"], not ev["pole"], 1
+            area[r], weight[r], length[r] = ar, wt, ln
+            ver[a] += 1
+            ver[b] += 1
+            top = max(top, ev["stretch"])
+            if ev["pole"]:
+                pole_merges += 1
+            else:
+                grid_merges += 1
+            tree.merges.append((ev["glued"], ev["stretch"], ev["cost"], ev["pole"]))
+            return r
+
         cached = None
         for ri, cap_now in enumerate(caps):
             cap[0] = cap_now
@@ -1098,38 +1392,49 @@ class Charts:
                     small = a if len(faces[a]) <= len(faces[b]) else b
                     refused[(a, b)] = (small, ver[small])
                     continue
-                ar = area[a] + area[b]
-                wt = max(weight[a] + weight[b] - 2.0 * _total(tree.segments[s].weight for s in ev["glued"]), 0.0)
-                ln = max(length[a] + length[b] - 2.0 * _total(tree.segments[s].length for s in ev["glued"]), 0.0)
-                for s in ev["glued"]:
-                    _glue(t, dsu, tree.segments[s].edges)
-                    glued_seg[s] = True
-                dsu.commit()
-                ev["local"].scatter(ev["uv"], corner_uv)
-                for f, x in zip(ev["local"].faces, ev["per"]):
-                    face_str[f] = x
-                ids_ = hull[a] + hull[b] + ev["local"].corner.tolist()
-                new_hull = _hull_of(ids_, corner_uv[ids_])
-                r, o = (a, b) if len(faces[a]) >= len(faces[b]) else (b, a)
-                hull[r], hull[o] = new_hull, []
-                cpar[o] = r
-                for f in faces[o]:
-                    owner[f] = r
-                faces[r].extend(faces[o])
-                faces[o] = []
-                segs[r] = [s for s in segs[r] + segs[o] if not glued_seg[s]]
-                segs[o] = []
-                stretch[r], grid[r], chi[r] = ev["stretch"], not ev["pole"], 1
-                area[r], weight[r], length[r] = ar, wt, ln
-                ver[a] += 1
-                ver[b] += 1
-                top = max(top, ev["stretch"])
-                if ev["pole"]:
-                    pole_merges += 1
-                else:
-                    grid_merges += 1
-                tree.merges.append((ev["glued"], ev["stretch"], ev["cost"], ev["pole"]))
-                push_for(r)
+                push_for(apply_ev(a, b, ev))
+        # R6: a last round in which every chart, smallest first, tries to join a neighbour, glued along all it shares or
+        # else hinged on the costliest shared segment; small compact charts join free of the shape rule (kernel: the
+        # last round in `merge_tree`). Passes repeat until one joins nothing.
+        tried: dict = {}
+        while not self._stop:
+            order = sorted((p for p in range(np_) if cpar[p] == p and chi[p] == 1), key=lambda p: (len(faces[p]), p))
+            joined = 0
+            for p in order:
+                if self._stop:
+                    break
+                if find(p) != p:
+                    continue
+                nb = [(o, _total(tree.segments[s].length for s in lst)) for o, lst in neighbours(p) if chi[o] == 1]
+                nb.sort(key=lambda x: (-x[1], x[0]))
+                for o, _ in nb:
+                    vers = (ver[p], ver[o])
+                    if tried.get((p, o)) == vers:
+                        continue
+                    tried[(p, o)] = vers
+                    lst = between(o, p)
+                    take = None
+                    for hinge in (False, True):
+                        exact_evals += 1
+                        ev = yield from evaluate(o, p, lst[:1] if hinge else lst)
+                        if ev is None:
+                            break
+                        free = len(faces[p]) <= FREE_FACES and _irregularity(length[p], area[p]) <= SHAPE_MAX
+                        shaped = free
+                        if not shaped:
+                            _, plain, parts = shape(o, p, ev["glued"])
+                            shaped = not (plain > SHAPE_MAX and plain > parts) or saves_page(o, p, ev)
+                        if shaped and ev["stretch"] <= 1.0 + tree.build_stretch and not _lies_over(ev["local"], ev["uv"], ev["before"]):
+                            take = ev
+                            break
+                        if len(ev["glued"]) <= 1:
+                            break
+                    if take is not None:
+                        apply_ev(o, p, take)
+                        joined += 1
+                        break
+            if not joined:
+                break
         n = tree._numbers
         n[8], n[9], n[10], n[11], n[12], n[16], n[17] = len(tree.merges), grid_merges, pole_merges, 0, exact_evals, dropped, top
         n[20] = lay_over
