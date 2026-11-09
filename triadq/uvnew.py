@@ -89,7 +89,7 @@ class Settings:
         self.density = None  # px per mesh unit; None = Fill the page
         self.quick_first = True  # big meshes: show a first layout before small charts are laid out again or joined to a neighbour, then the full one
         self.hidden_l = 0.0  # 0 = the cores' default L
-        self.nest_effort = 0  # Keep going level of the outline packing: each more tries one more placement order (see `NewUVs.keep_going`)
+        self.nest_effort = 0  # Keep going level of the outline packing: each more tries more angles, more charts turned by any angle and one more placement order (see `NewUVs.keep_going`)
         for key, value in kw.items():
             if not hasattr(self, key):
                 raise TypeError(f"unknown New UVs setting {key!r}")
@@ -566,17 +566,24 @@ class NewUVs:
 
         s = self.settings
         lu, lv, chart, nchart, width, height, area2, page, k, corner_chart = (ctx[key] for key in ("lu", "lv", "chart", "nchart", "width", "height", "area2", "page", "k", "corner_chart"))
+        self._free = ~np.asarray(ctx.get("on", np.zeros(nchart, bool)), bool)  # straight-row charts turn by quarters only
         nest = None
         if s.density is None and not self._stop:
             self._tick("nest", 0.92)
             nest = yield from self._nest(lu, lv, chart, nchart, width, height, area2, res.scale, page, k)
         if nest is not None:
             sc, ok, dx, dy, quarter = nest
+            cs, sn = uvpack.turn_of(quarter >> 2)  # the packer's angle step per chart (0: none), then its quarter turns
             out = np.empty_like(res.uv)
             for i in range(0, len(out), WRITE_CHUNK):
                 sl = slice(i, i + WRITE_CHUNK)
+                cc = corner_chart[sl]
                 x, y = lu[sl] * sc, lv[sl] * sc
-                q, cc = quarter[corner_chart[sl]], corner_chart[sl]
+                spun = np.flatnonzero(quarter[cc] >= 4)  # corners of the few charts turned by an angle
+                if len(spun):
+                    x0, y0, c_, s_ = x[spun], y[spun], cs[cc[spun]], sn[cc[spun]]
+                    x[spun], y[spun] = c_ * x0 - s_ * y0, s_ * x0 + c_ * y0  # the same arithmetic as the packer
+                q = quarter[cc] & 3
                 tx = np.select([q == 1, q == 2, q == 3], [-y, -x, y], x)  # (x, y) -> (-y, x) per quarter, as the packer turns
                 ty = np.select([q == 1, q == 2, q == 3], [x, -y, -x], y)
                 out[sl, 0] = (tx + dx[cc]) / page[0]
@@ -586,7 +593,8 @@ class NewUVs:
         res.nest_effort = int(s.nest_effort)
 
     def keep_going(self):
-        """Keep going for the layout: a run that continues the outline packing of this finished run with one more placement order
+        """Keep going for the layout: a run that continues the outline packing of this finished run with more effort (more angles,
+        more charts turned by any angle, one more placement order)
         and a finer search (the charts, the pictures and everything before the packing are reused, so a pass takes the packing's
         time only). Its result is never worse than this one's; `gained` says whether the scale grew. Call it on the new run
         until `gained` is False or `exhausted` is True: that is when a pass gains nothing, and it stops by itself. None when
@@ -599,9 +607,9 @@ class NewUVs:
 
     @property
     def exhausted(self) -> bool:
-        """True when Keep going has no more placement orders to try."""
+        """True when Keep going has no more effort to add (`uvpack.MAX_EFFORT`)."""
 
-        return self.settings.nest_effort >= len(uvpack.ORDER_MODES) - 1
+        return self.settings.nest_effort >= uvpack.MAX_EFFORT
 
     def _layout(self, res, chart, corner_uv, chart_rows, area, seen_face, x_now):
         """Generator: the corner UVs of charts laid out in the plane, on the page as boxes (stages 4 to 6 of the pipeline).
@@ -724,7 +732,7 @@ class NewUVs:
             yield
         res.uv = out
         res.timing["write_s"] = time.perf_counter() - t4
-        return dict(lu=lu, lv=lv, chart=chart, nchart=nchart, width=width, height=height, area2=a2 * (fit * factor) ** 2, page=page, k=k, corner_chart=corner_chart)
+        return dict(lu=lu, lv=lv, chart=chart, nchart=nchart, on=on, width=width, height=height, area2=a2 * (fit * factor) ** 2, page=page, k=k, corner_chart=corner_chart)
 
     def _redo_stretched(self, chart, corner_uv, rows, x, only_lying=False):
         """A small chart (at most `REDO_FACES` faces) whose layout stretches more than Stretch allowed somewhere, or more
@@ -955,7 +963,7 @@ class NewUVs:
         tri_chart = chart[fan_face].astype(np.int64)
         yield
         boxy = (area >= BOX_LIKE * width * height).astype(np.uint8)  # fills its box: reserved as a box
-        turn_ok = np.ones(nchart, np.uint8)
+        turn_ok = getattr(self, "_free", np.ones(nchart, bool)).astype(np.uint8)  # with FREE_TURNS: may also turn by any angle
         total = float(area.sum())
         if not total > 0:
             return None
@@ -982,7 +990,7 @@ class NewUVs:
         guess = (-b + np.sqrt(b * b - 4.0 * total * c)) / (2.0 * total)
         effort = int(self.settings.nest_effort)
         tol = NEST_TOL / (1 << effort)  # Keep going searches finer
-        k_call = k + uvpack.EFFORT_STEP * effort
+        k_call = k + uvpack.EFFORT_STEP * effort + uvpack.FREE_TURNS  # every chart turns by quarters, the free ones by any angle
         lo, hi = float(s0), None
         s_try = float(s0 * (1.0 + tol) if effort else max(guess, s0 * (1.0 + tol)))  # Keep going starts just above what is already packed
         best = None
