@@ -428,13 +428,15 @@ def bake_spots(context, obj, cand) -> str:
     scene = context.scene
     uvbake.remember_images(scene, images, before=True)
     old = {im.name: np.asarray(im.pixels[:], np.float32) for im in images}
+    old_uv = uv_layers.read_uv(obj.data)  # put back when the bake fails: new islands over an unbaked texture show garbage
     uv_layers.write_uv(obj.data, cand.uv)
     obj.data.update()
     margin = uvbake.gap_px(images[0].size[0])
     snap = textures._snapshot_bake_settings(scene)
     selected = list(context.selected_objects)
     active = context.view_layer.objects.active
-    tris = uvtrial._fan(np.asarray(cand.extra.get("indptr")), cand.faces) if cand.extra.get("indptr") is not None else None
+    baked = cand.extra.get("baked", cand.faces)  # every face given a new island, by all Keep going passes, not just the last
+    tris = uvtrial._fan(np.asarray(cand.extra.get("indptr")), baked) if cand.extra.get("indptr") is not None else None
     try:
         for o in selected:
             o.select_set(False)
@@ -470,6 +472,9 @@ def bake_spots(context, obj, cand) -> str:
     except Exception as exc:
         for im in images:
             im.pixels.foreach_set(old[im.name])
+        if old_uv is not None:
+            uv_layers.write_uv(obj.data, old_uv)
+            obj.data.update()
         return f"Bake those spots could not bake: {exc}"
     finally:
         textures._restore_properties(snap)
