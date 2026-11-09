@@ -49,7 +49,7 @@ class Fit(unittest.TestCase):
         after = straddlers(sa, fit.points, fit.indptr, fit.flat, fit.layers[0][1])
         self.assertGreater(before, 0)
         self.assertLessEqual(after, before / 2, (before, after))
-        self.assertGreater(fit.extra_faces + fit.numbers["moved"], 0)
+        self.assertGreater(fit.extra_faces + sum(fit.numbers.get(k, 0) for k in ("moved", "side_moved", "ball_moved", "ball_after_moved")), 0)  # cut or slid
         # Apply writes exactly the fitted candidate: the hash read back from the mesh equals the stage's
         from uv_hooks_fake import FakeMesh
 
@@ -77,6 +77,32 @@ def fake_seams(classes, n_islands=2, pairs=None):
     return {"n_islands": n_islands, "island": np.arange(n_islands), "chain_island": np.array(pairs, np.int64).ravel(),
             "chain_material": np.zeros(2 * n, np.int64), "chain_length": np.full(n, 1.0), "run_indptr": np.arange(n + 1),
             "gap_px": np.ones(n), "class": np.array(classes, np.int64)}
+
+
+class SeamCheckTwin(unittest.TestCase):
+    def test_sliced_check_matches_the_uv_check(self):
+        sa = two_island_source()
+        p, ip, fl = grid(5)
+        p = p + np.random.default_rng(3).normal(0.0, 0.01, p.shape) * [1, 1, 0]
+        s = uvkeep.Settings(mode="light")
+        plan = uvkeep.make_plan(sa, 25.0, s)
+        alone = uvkeep.run(uvkeep.FitStage(sa, plan, p, ip, fl, None, s, only_transfer=True, use_fast=False))
+        uv = alone.layers[0][1].copy()
+        uv[:4] = uv[:4][::-1]  # one face turned over
+        want = uvscore.check(uvscore.mesh(alone.points, alone.indptr, alone.flat, uv), uvscore.mesh(sa.points, sa.indptr, sa.flat, sa.layers[0][1], sa.material),
+                             texture_px=s.texture_px, use_fast=False)
+        check = uvkeep.SeamCheck(sa, sa.layers[0][1], s.texture_px)
+        check.CHUNK = 3  # many slices
+        gen = check.steps(alone.points, alone.indptr, alone.flat, uv)
+        while True:
+            try:
+                next(gen)
+            except StopIteration as done:
+                straddle, flipped = done.value
+                break
+        np.testing.assert_array_equal(straddle, want.straddle)
+        np.testing.assert_array_equal(flipped, want.flipped)
+        self.assertTrue(want.straddle.any() and want.flipped.any())
 
 
 class Halves(unittest.TestCase):

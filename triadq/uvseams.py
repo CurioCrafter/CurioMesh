@@ -1333,7 +1333,7 @@ def _chebyshev(g, h):
                     sol.append(_det3(a) / det)
                 x0, x1, t = sol
                 tol = 1e-12 * (1.0 + abs(t))
-                if all(g[l][0] * x0 + g[l][1] * x1 + h[l] >= t - tol for l in range(n)) and (best is None or t > best[1]):
+                if all(g[li][0] * x0 + g[li][1] * x1 + h[li] >= t - tol for li in range(n)) and (best is None or t > best[1]):
                     best = ((x0, x1), t)
     return best
 
@@ -1344,7 +1344,7 @@ def _nearest_within(g, h, want, x0):
     n = len(g)
 
     def meets(x):
-        return all(g[l][0] * x[0] + g[l][1] * x[1] + h[l] >= want[l] - 1e-12 * (1.0 + abs(want[l])) for l in range(n))
+        return all(g[li][0] * x[0] + g[li][1] * x[1] + h[li] >= want[li] - 1e-12 * (1.0 + abs(want[li])) for li in range(n))
 
     best = None
 
@@ -1355,16 +1355,16 @@ def _nearest_within(g, h, want, x0):
             best = (x, d)
 
     take(x0)
-    for l in range(n):
-        s = want[l] - (g[l][0] * x0[0] + g[l][1] * x0[1] + h[l])
-        take((x0[0] + s * g[l][0], x0[1] + s * g[l][1]))
-    for l in range(n):
-        for m in range(l + 1, n):
-            det = g[l][0] * g[m][1] - g[l][1] * g[m][0]
+    for li in range(n):
+        s = want[li] - (g[li][0] * x0[0] + g[li][1] * x0[1] + h[li])
+        take((x0[0] + s * g[li][0], x0[1] + s * g[li][1]))
+    for li in range(n):
+        for m in range(li + 1, n):
+            det = g[li][0] * g[m][1] - g[li][1] * g[m][0]
             if abs(det) < 1e-12:
                 continue
-            a, b = want[l] - h[l], want[m] - h[m]
-            take(((a * g[m][1] - b * g[l][1]) / det, (g[l][0] * b - g[m][0] * a) / det))
+            a, b = want[li] - h[li], want[m] - h[m]
+            take(((a * g[m][1] - b * g[li][1]) / det, (g[li][0] * b - g[m][0] * a) / det))
     return None if best is None else best[0]
 
 
@@ -1461,7 +1461,7 @@ def _untangle_steps(res_indptr, res_flat, uv, read, region, expected, join, text
                         g.append((g0 / norm, g1 / norm))
                         hh.append(h0 / norm)
                 x = (float(uv[2 * cs[0]]), float(uv[2 * cs[0] + 1]))
-                m0 = [g[l][0] * x[0] + g[l][1] * x[1] + hh[l] for l in range(len(g))]
+                m0 = [g[li][0] * x[0] + g[li][1] * x[1] + hh[li] for li in range(len(g))]
                 if not whole:
                     if not (0.0 < shortest < math.inf) or not g:
                         continue
@@ -1481,7 +1481,7 @@ def _untangle_steps(res_indptr, res_flat, uv, read, region, expected, join, text
                 if t <= max(worst, 0.0):
                     continue
                 goal = min(0.5 * t, UNTANGLE_CLEAR_PX / tex)
-                xn = _nearest_within(g, hh, [goal if l < len(m0) else 0.0 for l in range(len(g))], x)
+                xn = _nearest_within(g, hh, [goal if li < len(m0) else 0.0 for li in range(len(g))], x)
                 if xn is None:
                     continue
                 for h in cs:

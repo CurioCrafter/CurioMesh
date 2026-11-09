@@ -12,7 +12,7 @@ import numpy as np
 import uv_parity_common as common
 from uv_parity_common import needs_native
 
-from triadq import uvbake, uvchart, uvflat, uvnew, uvpack, uvscore, uvsight
+from triadq import uvbake, uvchart, uvflat, uvnew, uvpack, uvscore
 from test_uv_parity_chart import cube, grid
 
 

@@ -1482,7 +1482,7 @@ def _annulus_row(t: Topo, cut, patch, p: int, members, cost):
         return not cut[e] and f1 >= 0 and patch[f0] == p and patch[f1] == p
 
     best = None
-    for v in sorted(v for v, l in loops.items() if l == ids[0]):
+    for v in sorted(v for v, loop in loops.items() if loop == ids[0]):
         inward = [e for e in t.vedge[v] if inside(e)]
         if len(inward) != 1:
             continue

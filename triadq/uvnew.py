@@ -1149,7 +1149,7 @@ class NewUVs:
         charts of a lower Stretch allowed (half, quarter, ... when they lie inside it) and finally by its grid patches,
         whose exact layout cannot overlap. Returns (chart, corner UV, rows per chart, number of charts sent back)."""
 
-        indptr, nf = self.indptr, len(self.indptr) - 1
+        nf = len(self.indptr) - 1
         nchart = int(chart.max()) + 1
         chart, corner_uv = chart.copy(), corner_uv.copy()
         self._unresolved = set()

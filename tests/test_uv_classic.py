@@ -133,7 +133,7 @@ class Obj:
             active = None
 
             def get(self, name):
-                return next((l for l in self if l.name == name), None)
+                return next((x for x in self if x.name == name), None)
 
             def new(self, name):
                 self.append(Layer(name, np.zeros((len(flat), 2))))
@@ -153,9 +153,9 @@ class Transfer(unittest.TestCase):
     def setUp(self):
         self.saved = dict(uvseams.FAST), uvseams.transfer, uvseams.layer
         uvseams.FAST["transfer"] = object()  # "native core present"; the calls below run the NumPy twin
-        t, l = self.saved[1:]
+        t, lay = self.saved[1:]
         uvseams.transfer = lambda *a, **k: t(*a, use_fast=False, **k)
-        uvseams.layer = lambda *a, **k: l(*a, use_fast=False, **k)
+        uvseams.layer = lambda *a, **k: lay(*a, use_fast=False, **k)
 
     def tearDown(self):
         uvseams.FAST.clear()
@@ -179,7 +179,7 @@ class Transfer(unittest.TestCase):
         b = target.data.uv_layers.get("B").values.reshape(-1, 2)
         self.assertLess(float(np.abs(b - got * 0.5).max()) * 1024, 8.0)
 
-    def test_without_native_or_uvs_defers_to_old_code(self):
+    def test_without_uvs_defers_and_without_the_fast_kernel_transfers(self):
         points, indptr, flat, uv = two_islands()
         source = Obj(points, indptr, flat, {"A": uv.reshape(-1, 2)})
         target = Obj(points, indptr, flat, {})
@@ -191,7 +191,8 @@ class Transfer(unittest.TestCase):
         uvseams.FAST.clear()
         saved, uvclassic._ensure_fast = uvclassic._ensure_fast, lambda: None
         try:
-            self.assertIsNone(uvclassic.preserve_textures(source, target, config))  # no native core
+            self.assertEqual(uvclassic.preserve_textures(source, target, config), "TRANSFERRED")  # the NumPy twin
+            self.assertTrue(np.isfinite(target.data.uv_layers.get("A").values).all())
         finally:
             uvclassic._ensure_fast = saved
 
