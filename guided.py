@@ -3002,7 +3002,7 @@ def _bake_result_steps(source, out, gs, new_uvs: bool):
         if color and gs.bake_sets > 1:
             piece = segments.seg["piece"]
             labels = piece if piece is not None and len(piece) == len(out.data.polygons) else None
-            images = textures.bake_texture_sets(source, out, count=gs.bake_sets, labels=labels, resolution=int(gs.bake_size), cage=cage)
+            images = yield from textures.bake_texture_sets_steps(source, out, count=gs.bake_sets, labels=labels, resolution=int(gs.bake_size), cage=cage)
         else:
             images = yield from textures.bake_detail_steps(source, out, with_color=color, resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
     except Exception as exc:  # the bake has its own rollback, and the quads are worth keeping
