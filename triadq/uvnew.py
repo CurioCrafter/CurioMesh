@@ -742,12 +742,13 @@ class NewUVs:
         yield
         tface = np.repeat(np.arange(nf), np.maximum(np.diff(indptr) - 2, 0))
         yield
-        q3 = self.points[flat[tri]]
-        yield
-        a3 = 0.5 * np.linalg.norm(np.cross(q3[:, 1] - q3[:, 0], q3[:, 2] - q3[:, 0]), axis=1)
-        yield
-        a2 = 0.5 * np.abs(_tri_area2(corner_uv[tri]))
-        yield
+        q3, a3, a2 = np.empty((len(tri), 3, 3)), np.empty(len(tri)), np.empty(len(tri))
+        for i in range(0, len(tri), STRETCH_CHUNK):  # the triangles' 3D and UV areas a chunk per slice
+            sl = slice(i, i + STRETCH_CHUNK)
+            q = q3[sl] = self.points[flat[tri[sl]]]
+            a3[sl] = 0.5 * np.linalg.norm(np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]), axis=1)
+            a2[sl] = 0.5 * np.abs(_tri_area2(corner_uv[tri[sl]]))
+            yield
         tch0 = chart[tface]
         yield
         ratio = np.bincount(tch0, weights=a2, minlength=len(rows)) / np.maximum(np.bincount(tch0, weights=a3, minlength=len(rows)), 1e-30)
@@ -849,8 +850,11 @@ class NewUVs:
         B0 = np.where(same, B, nxt[B])  # the other face's corner at A's start vertex
         B1 = np.where(same, nxt[B], B)  # ... at A's end vertex
         yield
-        length = np.linalg.norm(pts[flat[nxt[A]]] - pts[flat[A]], axis=1)
-        yield
+        length = np.empty(len(A))
+        for i in range(0, len(A), WRITE_CHUNK):  # edge lengths a chunk per slice
+            sl = slice(i, i + WRITE_CHUNK)
+            length[sl] = np.linalg.norm(pts[flat[nxt[A[sl]]]] - pts[flat[A[sl]]], axis=1)
+            yield
         # both directions: small-side corners (a0, a1), other-side corners (b0, b1)
         sa0, sa1 = np.concatenate([A, B0]), np.concatenate([nxt[A], B1])
         sb0, sb1 = np.concatenate([B0, A]), np.concatenate([B1, nxt[A]])
@@ -965,7 +969,11 @@ class NewUVs:
         cut = yield from _cut_edges(indptr, flat, local, table=table)
         open_ = cut[ids] | (np.bincount(ids)[ids] == 1)
         yield
-        edge_len = np.linalg.norm(local[nxt] - local, axis=1)
+        edge_len = np.empty(len(flat))
+        for i in range(0, len(flat), WRITE_CHUNK):  # corner edge lengths a chunk per slice
+            sl = slice(i, i + WRITE_CHUNK)
+            edge_len[sl] = np.linalg.norm(local[nxt[sl]] - local[sl], axis=1)
+            yield
         outline = float((edge_len * open_).sum())
         g = uvpack.block(k) if k >= 0 else 1
         # owned texels ~ area s^2 + outline s (G / 2 + G for the blocks a border touches and the ring) + 4 G^2 per chart
@@ -1018,6 +1026,22 @@ class NewUVs:
         if rows is not None:
             faces = faces[rows[chart[faces]] != 2]
         yield
+        may = uvchart.FAST.get("may_lie") if self.tree is not None and not hasattr(self.tree, "topo") else None
+        if may is not None and len(faces) and len(faces) < len(chart):
+            sub = np.full(len(chart), -1, np.int64)  # only these faces' charts are checked
+            sub[faces] = chart[faces]
+            yield
+        else:
+            sub = chart
+        job = None if may is None or not len(faces) else may(self.tree, corner_uv.ravel(), sub)
+        if job is not None:  # the compiled kernel clears every chart that is one-to-one for sure (a simple border)
+            self._active = job
+            while not job.done():
+                yield WAIT
+            self._active = None
+            flags = np.asarray(job.result(), dtype=bool)
+            faces = faces[flags[chart[faces]]]
+            yield
         if not len(faces):
             return np.zeros(0, np.int64)
         ids, local = np.unique(chart[faces], return_inverse=True)
@@ -1056,23 +1080,49 @@ class NewUVs:
         while lower > 0:
             lower = lower * LEVEL_STEP if lower >= 1 else 0.0
             ladder.append(lower)
-        if not hasattr(tree, "topo"):  # the first few start now and run while the charts are checked
-            for r in range(min(LADDER_AHEAD, len(ladder))):
-                started.add(r)
-                jobs[r] = self._flatten_start(tree, ladder[r])
+        # Compiled kernel: the lower levels' charts are made while the charts are checked, then only those inside a chart
+        # that lies over itself are laid out (a level's other charts are never used here).
+        level_fast = uvchart.FAST.get("level") if not hasattr(tree, "topo") else None
+        levels = {}  # rung -> the job making that level's charts (the kernel keeps them, so the layout job reuses them)
+
+        def want_levels(upto):
+            if level_fast is not None:
+                for r in range(min(upto, len(ladder))):
+                    if r not in levels and r not in started:
+                        levels[r] = level_fast(tree, float(ladder[r]))
+
+        def start_rung(r, wait):
+            """Generator: start rung r's layout job once its level's charts are there (waits only when `wait`)."""
+            job = levels.get(r)
+            if job is not None and not job.done():
+                if not wait:
+                    return
+                while not job.done():
+                    yield WAIT
+            levels.pop(r, None)
+            started.add(r)
+            only = None
+            if job is not None:
+                lchart_r = np.asarray(job.result()[0], dtype=np.int64)
+                yield
+                only = np.unique(lchart_r[pend_faces])
+            jobs[r] = self._flatten_start(tree, ladder[r], only=only)
+
+        want_levels(LADDER_AHEAD)
         pending = yield from self._charts_lying(chart, np.arange(nf), corner_uv, rows_arr)  # On charts are exact grids
         pending = [int(c) for c in pending]
         back = len(pending)
+        pend_faces = np.flatnonzero(np.isin(chart, pending)) if pending else np.zeros(0, np.int64)  # charts born below lie inside these
         patch = np.asarray(tree.patches() if callable(getattr(tree, "patches", None)) else tree.patch, dtype=np.int64)
         order, start = grouped(chart, next_id)
         rung = 0
         while pending and rung < len(ladder):
             x = ladder[rung]
             if not hasattr(tree, "topo"):  # keep the next few levels running
+                want_levels(rung + LADDER_AHEAD)
                 for r in range(rung, min(rung + LADDER_AHEAD, len(ladder))):
                     if r not in started:
-                        started.add(r)
-                        jobs[r] = self._flatten_start(tree, ladder[r])
+                        yield from start_rung(r, wait=r == rung)
             job = jobs.pop(rung, None)
             rung += 1
             if job is not None:
@@ -1114,13 +1164,19 @@ class NewUVs:
             pending = still
             yield
             order, start = grouped(chart, next_id)
-        for job in jobs.values():  # levels that turned out not to be needed
+            if pending:  # the levels started from now on lay out only the charts inside what still lies over itself
+                pend_faces = np.concatenate([order[start[c] : start[c + 1]] for c in pending])
+        for job in list(jobs.values()) + list(levels.values()):  # levels that turned out not to be needed
             if job is not None:
                 job.stop()
+        until = time.perf_counter() + self.budget
         for c in pending:  # last resort: grid patches
             faces = order[start[c] : start[c + 1]]
             placed = []
-            for n_done, p in enumerate(np.unique(patch[faces])):
+            for p in np.unique(patch[faces]):
+                if time.perf_counter() > until:  # a grid layout per patch: a slice holds as many as fit its time
+                    yield
+                    until = time.perf_counter() + self.budget
                 pf = faces[patch[faces] == p]
                 pc, pl, pp, ppts = self._sub(pf)
                 grid = uvflat.grid_layout(ppts, pp, pl)
@@ -1128,8 +1184,6 @@ class NewUVs:
                     placed = None
                     break
                 placed.append((pf, pc, grid[0][pl]))
-                if n_done % 16 == 15:
-                    yield
             if placed is None:
                 self._unresolved.add(int(c))  # a patch that is not a clean grid: laid out again on its own (`_redo_stretched`)
                 continue
@@ -1168,13 +1222,16 @@ class NewUVs:
             yield
         self._active = None
 
-    def _flatten_start(self, tree, x):
-        """The compiled kernel's job that lays out every chart of level x, or None (no kernel, or a NumPy tree)."""
+    def _flatten_start(self, tree, x, only=None):
+        """The compiled kernel's job that lays out every chart of level x (or the charts `only` of it), or None (no
+        kernel, or a NumPy tree)."""
 
         fast = uvchart.FAST.get("uvs")
         if fast is None or hasattr(tree, "topo"):
             return None
-        return fast(tree, float(x), rows=ROWS_INDEX.get(self.settings.rows, 3), stretch_allowed=float(x) / 100.0, texture_px=float(self.settings.texture_px))
+        kw = dict(rows=ROWS_INDEX.get(self.settings.rows, 3), stretch_allowed=float(x) / 100.0, texture_px=float(self.settings.texture_px))
+        job = None if only is None else fast(tree, float(x), only=only, **kw)
+        return job if job is not None else fast(tree, float(x), **kw)
 
     def _flatten_finish(self, job):
         """Generator, returns what `_flatten` returns, from a finished `_flatten_start` job."""

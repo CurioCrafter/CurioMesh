@@ -2009,6 +2009,35 @@ fn uvchart_uvs<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stret
     Ok((uv.into_pyarray(py), chart.into_pyarray(py), stats.into_pyarray(py), ratio.into_pyarray(py)))
 }
 
+/// `uvchart_uvs` for the charts `only` of the level (ids as its chart per face numbers them; others get NaN UVs and
+/// no stats row): the redo of charts that lie over themselves needs the lower levels' charts inside them only.
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn uvchart_uvs_only<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64, only: PyReadonlyArray1<'_, i64>, stop: &StopFlag) -> PyResult<(F64Array<'py>, I64Array<'py>, F64Array<'py>, F64Array<'py>)> {
+    let opts = uvchart_opts(rows, stretch_allowed, steps, max_factor_bytes, texture_px);
+    let only = slice(&only, "only")?.to_vec();
+    let (uv, chart, stats, ratio) = py.detach(|| {
+        let l = tree.0.level(x);
+        let mut ids: Vec<u32> = only.iter().filter(|&&c| c >= 0 && (c as usize) < l.charts).map(|&c| c as u32).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let (uv, stats, ratio) = tree.0.flatten_cut(&l.cut, &l.chart, Some(&ids), Some(tree.0.start_of(&l)), &opts, &stop.0);
+        (uv, l.chart.iter().map(|&c| c as i64).collect::<Vec<_>>(), stats, ratio)
+    });
+    uvflat_stopped(stop)?;
+    Ok((uv.into_pyarray(py), chart.into_pyarray(py), stats.into_pyarray(py), ratio.into_pyarray(py)))
+}
+
+/// Per chart: may the layout `corner_uv` (2 per corner) of the charts `chart` (per face) lie over itself
+/// (`uvchart::Tree::may_lie_over`; False = one-to-one for sure).
+#[pyfunction]
+fn uvchart_may_lie<'py>(py: Python<'py>, tree: &UvChartTree, corner_uv: PyReadonlyArray1<'_, f64>, chart: PyReadonlyArray1<'_, i64>, stop: &StopFlag) -> PyResult<BoolArray<'py>> {
+    let (uv, chart) = (slice(&corner_uv, "corner_uv")?.to_vec(), slice(&chart, "chart")?.to_vec());
+    let flags = py.detach(|| tree.0.may_lie_over(&uv, &chart));
+    uvflat_stopped(stop)?;
+    Ok(flags.into_pyarray(py))
+}
+
 /// Keep going state for New UVs (`uvchart::Cuts`).
 #[pyclass(frozen)]
 struct UvChartCuts(std::sync::Mutex<uvchart::Cuts>);
@@ -2059,6 +2088,8 @@ fn register_uvchart(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvchart_build, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_level, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_uvs, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_uvs_only, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_may_lie, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_cuts, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_pass, m)?)?;
     m.add("UVCHART_NUMBERS_LEN", uvchart::NUMBERS_LEN)?;
