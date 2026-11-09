@@ -1191,11 +1191,21 @@ def uvchart_level(tree, x: float) -> "UvJob | None":
 
 
 def uvchart_uvs(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,
-                texture_px: float = 1024.0) -> "UvJob | None":
-    """New UVs of level x as a job: `result()` = (UVs per corner (2C,), chart per face, stats rows, stretch per face)."""
+                texture_px: float = 1024.0, only=None) -> "UvJob | None":
+    """New UVs of level x as a job: `result()` = (UVs per corner (2C,), chart per face, stats rows, stretch per face).
+    With `only` (chart ids of the level), just those charts are laid out (the others' UVs are NaN, no stats row)."""
 
+    if only is not None:
+        return uv_job("uvchart_uvs_only", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
+                      _uv_i64(only), name="CurioMeshUVNew")
     return uv_job("uvchart_uvs", tree, float(x), int(rows), float(stretch_allowed), int(steps), _uv_factor_bytes(max_factor_bytes), float(texture_px),
                   name="CurioMeshUVNew")
+
+
+def uvchart_may_lie(tree, corner_uv, chart) -> "UvJob | None":
+    """Per chart, may this layout lie over itself, as a job: `result()` = bool per chart (False = one-to-one for sure)."""
+
+    return uv_job("uvchart_may_lie", tree, _uv_f64(corner_uv), _uv_i64(chart), name="CurioMeshUVCheck")
 
 
 def uvchart_cuts(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,

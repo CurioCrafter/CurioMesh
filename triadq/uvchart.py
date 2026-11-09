@@ -540,7 +540,7 @@ class ChartTree:
         chart, cut, numbers = self._cache[x]
         return chart.copy(), cut.copy(), numbers.copy()
 
-    def _level(self, x: float):
+    def _level(self, x: float, hide: bool = True):
         started = time.perf_counter()
         t = self.topo
         root, glued, chi, used, segs_glued = self._replay(1.0 + x / 100.0)
@@ -565,7 +565,11 @@ class ChartTree:
             ids = {}
             chart = np.array([ids.setdefault(root[self.patch[f]], len(ids)) for f in range(t.nf)], np.int64)
             not_disk = sum(1 for r in ids if chi[r] != 1)
-        numbers = np.array([len(ids), not_disk, used, segs_glued, float(x / 100.0 > self.build_stretch), (time.perf_counter() - started) * 1e3])
+        from . import uvhide  # R7hide: borders slid out of sight (imports this module)
+
+        slid = uvhide.apply(self, chart, cut) if hide else None
+        chart, cut, n_charts, not_disk = slid if slid is not None else (chart, cut, len(ids), not_disk)
+        numbers = np.array([n_charts, not_disk, used, segs_glued, float(x / 100.0 > self.build_stretch), (time.perf_counter() - started) * 1e3])
         return chart, cut, numbers
 
     def _replay(self, thr: float):
@@ -1439,6 +1443,9 @@ class Charts:
         n[8], n[9], n[10], n[11], n[12], n[16], n[17] = len(tree.merges), grid_merges, pole_merges, 0, exact_evals, dropped, top
         n[20] = lay_over
         tree.start_uv = corner_uv
+        from . import uvhide  # R7hide: the borders' slides out of sight, made here in slices (imports this module)
+
+        tree._hide = yield from uvhide.moves(tree)
 
 
 def build(points, indptr, flat, **options) -> ChartTree:

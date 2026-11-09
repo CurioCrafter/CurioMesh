@@ -54,7 +54,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::close::STOPPED;
-use crate::topo::{edges, halves, Dsu, Faces, FxBuild, PARALLEL_MIN};
+use crate::topo::{edges, halves, Dsu, Faces, FxBuild};
 use crate::uvflat;
 
 /// Frozen cross-kernel input (K6): the part of every face. Passed in, never computed here, because `segment.rs` is
@@ -304,6 +304,7 @@ impl Topo {
 }
 
 /// Union-find with undo (union by size, no path compression), over corners: the wedges of a cut state.
+#[derive(Clone)]
 struct Undo {
     parent: Vec<u32>,
     size: Vec<u32>,
@@ -648,6 +649,7 @@ struct Key {
     b: f64,
 }
 
+#[derive(Clone)]
 struct Cand {
     key: Key,
     a: u32,
@@ -1186,12 +1188,108 @@ impl Tree {
                 b.segs[seg.q as usize].push(s as u32);
             }
         }
+        // Charts never join across the mesh's separate pieces (faces that share no edge), so the merges of each piece
+        // depend on that piece alone: on a big mesh of many pieces, groups of pieces run their merges on worker
+        // threads, each on its own copy of the build, and the merges and layouts are put together after. Every piece
+        // gets the merges, in the same order, that one run over the whole mesh gives it.
+        let groups = self.piece_groups(&b.faces);
+        let (merges, counts, corner_uv) = if groups.len() <= 1 {
+            let all: Vec<u32> = (0..np as u32).collect();
+            let (b, merges, counts) = self.run_merges(b, &all, stop);
+            (merges, counts, b.corner_uv)
+        } else {
+            // Each group runs on a build that holds its own patches only and hands back the layouts of its corners
+            // (the copy is made, and dropped, on the worker thread).
+            let me = &b;
+            let corners: Vec<Vec<usize>> = groups.iter().map(|g| g.iter().flat_map(|&p| me.faces[p as usize].iter().flat_map(|&f| t.face_corners(f as usize))).collect()).collect();
+            let runs: Vec<(Vec<f64>, Vec<Merge>, Counts)> = groups.par_iter().zip(corners.par_iter()).map(|(g, hs)| {
+                let (gb, m, c) = self.run_merges(me.subset(g), g, stop);
+                let uv: Vec<f64> = hs.iter().flat_map(|&h| [gb.corner_uv[2 * h], gb.corner_uv[2 * h + 1]]).collect();
+                (uv, m, c)
+            }).collect();
+            let mut corner_uv = b.corner_uv.clone();
+            let mut merges = Vec::new();
+            let mut counts = Counts::default();
+            for (hs, (uv, m, c)) in corners.iter().zip(runs) {
+                for (k, &h) in hs.iter().enumerate() {
+                    corner_uv[2 * h] = uv[2 * k];
+                    corner_uv[2 * h + 1] = uv[2 * k + 1];
+                }
+                merges.extend(m);
+                counts.add(&c);
+            }
+            (merges, counts, corner_uv)
+        };
+        let Counts { exact_evals, dropped, grid_merges, pole_merges, lay_over, top, quick } = counts;
+        let found = vec![
+            (num::GRID_PATCHES, grid_patches),
+            (num::MERGES, merges.len() as f64),
+            (num::GRID_MERGES, grid_merges as f64),
+            (num::POLE_MERGES, pole_merges as f64),
+            (num::QUICK_CALLS, quick as f64),
+            (num::EXACT_EVALS, exact_evals as f64),
+            (num::DROPPED, dropped as f64),
+            (num::TOP_STRETCH, top),
+            (num::LAY_OVER, lay_over as f64),
+        ];
+        (merges, found, corner_uv)
+    }
+
+    /// The patches in groups of whole mesh pieces (faces joined across edges) for `merge_tree` to run apart: one group
+    /// on a small mesh, one per piece up to a few per worker thread on a big one, the largest pieces placed first.
+    fn piece_groups(&self, members: &[Vec<u32>]) -> Vec<Vec<u32>> {
+        let t = &self.topo;
+        let np = self.n_patches;
+        let threads = rayon::current_num_threads();
+        if t.nf < PARALLEL_FACES || threads <= 1 {
+            return vec![(0..np as u32).collect()];
+        }
+        let mut d = Dsu::new(t.nf);
+        for e in 0..t.ne() {
+            let [h0, h1] = t.euse[e];
+            if h1 != NONE {
+                d.union(t.cface[h0 as usize], t.cface[h1 as usize]);
+            }
+        }
+        let mut piece_of: HashMap<u32, usize, FxBuild> = HashMap::default();
+        let mut pieces: Vec<(usize, Vec<u32>)> = Vec::new();
+        for p in 0..np {
+            let Some(&f) = members[p].first() else { continue };
+            let r = d.find(f);
+            let k = *piece_of.entry(r).or_insert_with(|| {
+                pieces.push((0, Vec::new()));
+                pieces.len() - 1
+            });
+            pieces[k].0 += members[p].len();
+            pieces[k].1.push(p as u32);
+        }
+        let want = (2 * threads).min(PIECE_GROUPS).min(pieces.len());
+        if want <= 1 {
+            return vec![(0..np as u32).collect()];
+        }
+        pieces.sort_by(|a, b| b.0.cmp(&a.0).then(a.1[0].cmp(&b.1[0])));
+        let mut groups: Vec<(usize, Vec<u32>)> = vec![(0, Vec::new()); want];
+        for (n, ps) in pieces {
+            let g = (0..want).min_by_key(|&g| (groups[g].0, g)).unwrap();
+            groups[g].0 += n;
+            groups[g].1.extend(ps);
+        }
+        groups.into_iter().map(|(_, mut ps)| {
+            ps.sort_unstable();
+            ps
+        }).collect()
+    }
+
+    /// The merge rounds and the last round (6.4, R6) over the charts of `patches` (whole pieces): the build, the
+    /// merges in merge order and what was counted.
+    fn run_merges<'t>(&'t self, mut b: Build<'t>, patches: &[u32], stop: &AtomicBool) -> (Build<'t>, Vec<Merge>, Counts) {
+        let t = &self.topo;
         let mut heap = Queue::default();
         let mut seq = 0u64;
         let (mut exact_evals, mut dropped, mut grid_merges, mut pole_merges, mut lay_over) = (0usize, 0usize, 0usize, 0usize, 0usize);
         let mut top = 1.0f64;
         let mut merges: Vec<Merge> = Vec::new();
-        for p in 0..np as u32 {
+        for &p in patches {
             b.push_for(&mut heap, &mut seq, p);
         }
         // Measured candidates by chart pair, with the versions they were measured at: a measure stays valid while both
@@ -1286,39 +1384,64 @@ impl Tree {
         // (its gap ring outweighs its box: joining always saves page); a larger one keeps the shape rule. Passes repeat
         // until one joins nothing (a pair is tried again only when one of its charts changed).
         let mut tried: HashMap<(u32, u32), (u32, u32), FxBuild> = HashMap::default();
+        let parallel = t.nf >= PARALLEL_FACES;
+        // Full glues measured ahead: (o, p) -> (versions of o and p then, the shared segments, the measure).
+        let mut ahead: HashMap<(u32, u32), (u32, u32, Vec<u32>, (Option<Eval>, usize)), FxBuild> = HashMap::default();
         while !stop.load(Ordering::Relaxed) {
-            let mut order: Vec<u32> = (0..np as u32).filter(|&p| b.cpar[p as usize] == p && b.chi[p as usize] == 1).collect();
+            let mut order: Vec<u32> = patches.iter().copied().filter(|&p| b.cpar[p as usize] == p && b.chi[p as usize] == 1).collect();
             order.sort_by_key(|&p| (b.faces[p as usize].len(), p));
             let mut joined = 0usize;
-            for p in order {
+            for (i, &p) in order.iter().enumerate() {
                 if stop.load(Ordering::Relaxed) {
                     break;
+                }
+                if parallel && i % LAST_AHEAD == 0 {
+                    // The full glues of the next `LAST_AHEAD` charts in the order, measured together on worker threads.
+                    // A measure depends only on its two charts, so one is used only while both are unchanged and the
+                    // joins are those of measuring one at a time.
+                    let mut jobs: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+                    for &q in &order[i..(i + LAST_AHEAD).min(order.len())] {
+                        if b.find(q) != q {
+                            continue;
+                        }
+                        let (cands, lists, failed) = b.last_cands(q, &tried);
+                        for ((o, list), f) in cands.into_iter().zip(lists).zip(failed) {
+                            if f.is_none() {
+                                jobs.push((o, q, list));
+                            }
+                        }
+                    }
+                    let me = &b;
+                    let out: Vec<(Option<Eval>, usize)> = jobs.par_iter().map(|(o, q, list)| me.measure_one(*o, *q, list, stop)).collect();
+                    ahead.clear();
+                    for ((o, q, list), r) in jobs.into_iter().zip(out) {
+                        ahead.insert((o, q), (b.ver[o as usize], b.ver[q as usize], list, r));
+                    }
                 }
                 if b.find(p) != p {
                     continue;
                 }
-                let mut nb: Vec<(u32, f64)> = b.neighbours(p).into_iter().filter(|(o, _)| b.chi[*o as usize] == 1)
-                    .map(|(o, l)| (o, l.iter().map(|&s| self.segments[s as usize].length).sum::<f64>())).collect();
-                nb.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
-                // Each neighbour's full glue is measured up front (on worker threads on a big mesh; a measure depends only
-                // on the two charts, so the joins are those of measuring one at a time), the hinge only when it is needed.
-                let cands: Vec<u32> = nb.iter().map(|x| x.0).filter(|&o| tried.get(&(p, o)) != Some(&(b.ver[p as usize], b.ver[o as usize]))).collect();
-                let lists: Vec<Vec<u32>> = cands.iter().map(|&o| b.between(o, p)).collect();
-                // (whether the pair's full union is known to fail, and how many segments it glued)
-                let known = |b: &Build, o: u32| {
-                    let (x, y) = (o.min(p), o.max(p));
-                    match b.failed.get(&(x, y)) {
-                        Some(&(vx, vy, n)) if (vx, vy) == (b.ver[x as usize], b.ver[y as usize]) => Some(n),
+                let (cands, lists, failed) = b.last_cands(p, &tried);
+                let skip: Vec<bool> = failed.iter().map(|x| x.is_some()).collect();
+                let mut full: Vec<Option<(Option<Eval>, usize)>> = cands.iter().enumerate().map(|(k, &o)| {
+                    if skip[k] {
+                        return Some((None, 0));
+                    }
+                    match ahead.remove(&(o, p)) {
+                        Some((vo, vp, list, r)) if (vo, vp) == (b.ver[o as usize], b.ver[p as usize]) && list == lists[k] => Some(r),
                         _ => None,
                     }
-                };
-                let failed: Vec<Option<usize>> = cands.iter().map(|&o| known(&b, o)).collect();
-                let skip: Vec<bool> = failed.iter().map(|x| x.is_some()).collect();
-                let full: Vec<(Option<Eval>, usize)> = {
+                }).collect();
+                let missing: Vec<usize> = (0..cands.len()).filter(|&k| full[k].is_none()).collect();
+                let got: Vec<(Option<Eval>, usize)> = {
                     let me = &b;
-                    let one = |k: usize| if skip[k] { (None, 0) } else { me.measure_one(cands[k], p, &lists[k], stop) };
-                    if t.nf >= PARALLEL_FACES && cands.len() > 1 { (0..cands.len()).into_par_iter().map(one).collect() } else { (0..cands.len()).map(one).collect() }
+                    let one = |k: &usize| me.measure_one(cands[*k], p, &lists[*k], stop);
+                    if parallel && missing.len() > 1 { missing.par_iter().map(one).collect() } else { missing.iter().map(one).collect() }
                 };
+                for (k, r) in missing.into_iter().zip(got) {
+                    full[k] = Some(r);
+                }
+                let full: Vec<(Option<Eval>, usize)> = full.into_iter().map(|x| x.unwrap()).collect();
                 for (k, (first, q)) in full.into_iter().enumerate() {
                     let o = cands[k];
                     tried.insert((p, o), (b.ver[p as usize], b.ver[o as usize]));
@@ -1369,18 +1492,8 @@ impl Tree {
                 break;
             }
         }
-        let found = vec![
-            (num::GRID_PATCHES, grid_patches),
-            (num::MERGES, merges.len() as f64),
-            (num::GRID_MERGES, grid_merges as f64),
-            (num::POLE_MERGES, pole_merges as f64),
-            (num::QUICK_CALLS, b.quick as f64),
-            (num::EXACT_EVALS, exact_evals as f64),
-            (num::DROPPED, dropped as f64),
-            (num::TOP_STRETCH, top),
-            (num::LAY_OVER, lay_over as f64),
-        ];
-        (merges, found, b.corner_uv)
+        let quick = b.quick;
+        (b, merges, Counts { exact_evals, dropped, grid_merges, pole_merges, lay_over, top, quick })
     }
 
 }
@@ -1547,6 +1660,13 @@ type Memo = HashMap<(u32, u32), (u32, u32, Eval), FxBuild>;
 
 /// Candidates measured ahead together on worker threads (`Build::prefetch`).
 const PREFETCH: usize = 24;
+/// Fewer candidates than this to measure ahead: only the one at the top is measured, on this thread (waking the
+/// worker threads for a handful of small band solves costs more than it saves).
+const PREFETCH_PARALLEL: usize = 8;
+/// Groups of mesh pieces the merge tree runs apart at most (each holds a copy of the build).
+const PIECE_GROUPS: usize = 16;
+/// Charts of the last merge round whose full glues are measured ahead together.
+const LAST_AHEAD: usize = 64;
 /// Meshes from this many faces measure ahead and lay out patches on worker threads (each measure is a small band
 /// solve, so the crate-wide `PARALLEL_MIN` for array-wide loops is far too high here).
 const PARALLEL_FACES: usize = 2048;
@@ -1580,12 +1700,81 @@ thread_local! {
     static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
 }
 
+/// What a run of merges counted (`Tree::run_merges`).
+#[derive(Default)]
+struct Counts {
+    exact_evals: usize,
+    dropped: usize,
+    grid_merges: usize,
+    pole_merges: usize,
+    lay_over: usize,
+    top: f64,
+    quick: usize,
+}
+
+impl Counts {
+    fn add(&mut self, o: &Counts) {
+        self.exact_evals += o.exact_evals;
+        self.dropped += o.dropped;
+        self.grid_merges += o.grid_merges;
+        self.pole_merges += o.pole_merges;
+        self.lay_over += o.lay_over;
+        self.top = self.top.max(o.top);
+        self.quick += o.quick;
+    }
+}
+
 /// Order key of a stretch value (>= 0, or +inf): its bits.
 fn bits(x: f64) -> u64 {
     if x.is_nan() { f64::INFINITY.to_bits() } else { x.max(0.0).to_bits() }
 }
 
-impl Build<'_> {
+impl<'t> Build<'t> {
+    /// A copy for `Tree::run_merges` over the patches `g` (whole pieces): the per-chart lists of other patches are
+    /// left empty (no merge reaches them).
+    fn subset(&self, g: &[u32]) -> Build<'t> {
+        let np = self.faces.len();
+        let (mut faces, mut segs, mut bnd, mut hull) = (vec![Vec::new(); np], vec![Vec::new(); np], vec![Vec::new(); np], vec![Vec::new(); np]);
+        let mut vals = vec![BTreeSet::new(); np];
+        for &p in g {
+            let p = p as usize;
+            faces[p] = self.faces[p].clone();
+            segs[p] = self.segs[p].clone();
+            bnd[p] = self.bnd[p].clone();
+            hull[p] = self.hull[p].clone();
+            vals[p] = self.vals[p].clone();
+        }
+        Build {
+            tree: self.tree,
+            dsu: self.dsu.clone(),
+            corner_uv: self.corner_uv.clone(),
+            face_str: self.face_str.clone(),
+            owner: self.owner.clone(),
+            cpar: self.cpar.clone(),
+            faces,
+            segs,
+            stretch: self.stretch.clone(),
+            grid: self.grid.clone(),
+            chi: self.chi.clone(),
+            ver: self.ver.clone(),
+            glued_seg: self.glued_seg.clone(),
+            quick: self.quick,
+            vals,
+            bnd,
+            refused: self.refused.clone(),
+            failed: self.failed.clone(),
+            cap: self.cap,
+            last_st: self.last_st.clone(),
+            parked: self.parked.clone(),
+            cloc: self.cloc.clone(),
+            eglue: self.eglue.clone(),
+            area: self.area.clone(),
+            weight: self.weight.clone(),
+            length: self.length.clone(),
+            hull,
+        }
+    }
+
     /// `quantile(STRETCH_QUANTILE)` over the union of charts a and b where the faces stamped now take `fresh`.
     fn union_quantile(&self, a: u32, b: u32, fresh: &[f64], fstamp: &[u32], stamp: u32) -> f64 {
         let n = self.faces[a as usize].len() + self.faces[b as usize].len();
@@ -1641,6 +1830,26 @@ impl Build<'_> {
         }
         out.sort_by_key(|x| x.0);
         out
+    }
+
+    /// The last round's candidates for chart p: its disk neighbours not tried at their current versions, the
+    /// longest shared border first; the segments each shares with p; and, when the pair's full union is known to
+    /// fail at these versions, how many segments it glued.
+    fn last_cands(&mut self, p: u32, tried: &HashMap<(u32, u32), (u32, u32), FxBuild>) -> (Vec<u32>, Vec<Vec<u32>>, Vec<Option<usize>>) {
+        let segs = &self.tree.segments;
+        let mut nb: Vec<(u32, f64)> = self.neighbours(p).into_iter().filter(|(o, _)| self.chi[*o as usize] == 1)
+            .map(|(o, l)| (o, l.iter().map(|&s| segs[s as usize].length).sum::<f64>())).collect();
+        nb.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+        let cands: Vec<u32> = nb.iter().map(|x| x.0).filter(|&o| tried.get(&(p, o)) != Some(&(self.ver[p as usize], self.ver[o as usize]))).collect();
+        let lists: Vec<Vec<u32>> = cands.iter().map(|&o| self.between(o, p)).collect();
+        let failed = cands.iter().map(|&o| {
+            let (x, y) = (o.min(p), o.max(p));
+            match self.failed.get(&(x, y)) {
+                Some(&(vx, vy, n)) if (vx, vy) == (self.ver[x as usize], self.ver[y as usize]) => Some(n),
+                _ => None,
+            }
+        }).collect();
+        (cands, lists, failed)
     }
 
     fn between(&mut self, a: u32, b: u32) -> Vec<u32> {
@@ -1747,6 +1956,9 @@ impl Build<'_> {
             back.push(c);
         }
         heap.open.extend(back);
+        if batch.len() < PREFETCH_PARALLEL {
+            batch.truncate(1);
+        }
         let lists: Vec<Vec<u32>> = batch.iter().map(|&(a, b, _, _)| self.between(a, b)).collect();
         let me = &*self;
         let one = |k: usize| {
@@ -2833,7 +3045,9 @@ impl Tree {
         if let Some(l) = self.cache.lock().unwrap().get(&key) {
             return l.clone();
         }
-        let l = Arc::new(self.compute_level(x_pct));
+        let mut l = self.compute_level(x_pct);
+        crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        let l = Arc::new(l);
         self.cache.lock().unwrap().insert(key, l.clone());
         l
     }
@@ -3050,7 +3264,6 @@ impl Tree {
         let t = &self.topo;
         let np = self.n_patches;
         let ctx = self.smooth_ctx();
-        let mut members = ctx.members(root);
         let defect_max = SMOOTH_DEFECT_DEG.to_radians();
         // Corner angles summed per vertex (3D).
         let mut angle_sum = vec![0f64; t.nv];
@@ -3067,12 +3280,53 @@ impl Tree {
                 angle_sum[v] += (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt().atan2(dot);
             }
         }
+        // Moves never cross between the mesh's separate pieces, so on a big mesh of many pieces groups of pieces are
+        // smoothed apart on worker threads (`piece_groups`); each piece gets the moves, in the same order, that one
+        // sweep over the whole mesh gives it (a piece that made no move in a sweep makes none after), and moves of
+        // different pieces commute when a level replays them.
+        let groups = self.piece_groups(&ctx.pfaces);
+        if groups.len() <= 1 {
+            let all: Vec<u32> = (0..np as u32).collect();
+            let (moves, work) = self.smooth_patches(&ctx, &angle_sum, &all, root, glued, chi, defect_max);
+            return Smooth { moves, start: work };
+        }
+        let outs: Vec<(Vec<(u32, u32)>, Vec<f64>)> = groups.par_iter().map(|g| {
+            let (mut r, mut gl) = (root.to_vec(), glued.to_vec());
+            self.smooth_patches(&ctx, &angle_sum, g, &mut r, &mut gl, chi, defect_max)
+        }).collect();
+        let mut moves = Vec::new();
+        let mut work: Vec<f64> = Vec::new();
+        for (g, (m, w)) in groups.iter().zip(outs) {
+            moves.extend(m);
+            if w.is_empty() {
+                continue;
+            }
+            if work.is_empty() {
+                work = self.start_uv.clone();
+            }
+            for &p in g {
+                for &f in &ctx.pfaces[p as usize] {
+                    for h in t.face_corners(f as usize) {
+                        work[2 * h] = w[2 * h];
+                        work[2 * h + 1] = w[2 * h + 1];
+                    }
+                }
+            }
+        }
+        Smooth { moves, start: work }
+    }
+
+    /// `smooth`'s sweeps over `patches` (whole pieces): the moves in order and the start layout (empty: none tried).
+    #[allow(clippy::too_many_arguments)]
+    fn smooth_patches(&self, ctx: &SmoothCtx, angle_sum: &[f64], patches: &[u32], root: &mut [u32], glued: &mut [bool], chi: &[i64], defect_max: f64) -> (Vec<(u32, u32)>, Vec<f64>) {
+        let t = &self.topo;
+        let mut members = ctx.members(root);
         let mut sc = SmoothScratch::new(t.corners(), t.nf);
         let mut work: Vec<f64> = Vec::new();
         let mut moves: Vec<(u32, u32)> = Vec::new();
         loop {
             let before = moves.len();
-            for p in 0..np as u32 {
+            for &p in patches {
                 let a = root[p as usize];
                 if chi[a as usize] != 1 {
                     continue;
@@ -3229,7 +3483,7 @@ impl Tree {
                 break;
             }
         }
-        Smooth { moves, start: work }
+        (moves, work)
     }
 
     /// Are the faces of these patches (all with root `r`) one disk under the glue (Euler characteristic over wedges,
@@ -3315,7 +3569,19 @@ impl Tree {
                 }
             }
         };
-        let results: Vec<_> = if t.nf >= PARALLEL_MIN && ids.len() > 1 { ids.par_iter().map(|&c| one(c)).collect() } else { ids.iter().map(|&c| one(c)).collect() };
+        // A whole level's charts are laid out apart on worker threads, the largest first (each is a whole solve, far
+        // more than the crate-wide `PARALLEL_MIN` loops are sized for); the results keep the order of `ids`. A few
+        // charts (`only`: the redo of charts that lie over themselves, Keep going) run on one thread: New UVs' own
+        // slices run meanwhile and must not wait for a core.
+        let results: Vec<_> = if t.nf >= PARALLEL_FACES && ids.len() > 1 && only.is_none() {
+            let mut by_size: Vec<usize> = (0..ids.len()).collect();
+            by_size.sort_by_key(|&k| (std::cmp::Reverse(members[ids[k] as usize].len()), k));
+            let mut got: Vec<(usize, _)> = by_size.par_iter().with_max_len(1).map(|&k| (k, one(ids[k]))).collect();
+            got.sort_unstable_by_key(|x| x.0);
+            got.into_iter().map(|x| x.1).collect()
+        } else {
+            ids.iter().map(|&c| one(c)).collect()
+        };
         let mut uv = vec![f64::NAN; 2 * t.corners()];
         let mut face_str = vec![f64::NAN; t.nf];
         let mut stats = Vec::with_capacity(results.len() * uvflat::STATS_LEN);
@@ -3327,6 +3593,103 @@ impl Tree {
             stats.extend_from_slice(&st);
         }
         (uv, stats, face_str)
+    }
+
+    /// Per chart (`chart` per face, ids 0..; faces of chart -1 are left out): may its layout `corner_uv` (2 per corner,
+    /// mesh order) lie over itself?
+    /// False only for a connected disk whose faces are all convex and wound one way and whose border crosses itself
+    /// nowhere: a locally one-to-one map of a disk whose border stays simple is one-to-one (Floater 2003, "One-to-one
+    /// piecewise linear mappings over triangulations"), so New UVs skips its exact triangle test (ours: the filter).
+    pub fn may_lie_over(&self, corner_uv: &[f64], chart: &[i64]) -> Vec<bool> {
+        let t = &self.topo;
+        let nc = chart.iter().map(|&c| c.max(0) as usize + 1).max().unwrap_or(0);
+        let mut flag = vec![false; nc];
+        if corner_uv.len() != 2 * t.corners() || chart.len() != t.nf {
+            return vec![true; nc];
+        }
+        let faces: Vec<usize> = (0..t.nf).filter(|&f| chart[f] >= 0).collect();
+        let uv = |h: usize| [corner_uv[2 * h], corner_uv[2 * h + 1]];
+        // Faces: convex and wound one way per chart (sign 1 or -1; 0 = not yet seen).
+        let mut sign = vec![0i8; nc];
+        for &f in &faces {
+            let c = chart[f] as usize;
+            let r = t.face_corners(f);
+            let (lo, k) = (r.start, r.len());
+            let (mut pos, mut neg) = (0usize, 0usize);
+            for i in 0..k {
+                let (a, b, d) = (uv(lo + i), uv(lo + (i + 1) % k), uv(lo + (i + 2) % k));
+                let z = (b[0] - a[0]) * (d[1] - b[1]) - (b[1] - a[1]) * (d[0] - b[0]);
+                if z > 0.0 { pos += 1 } else if z < 0.0 { neg += 1 }
+            }
+            let s = if pos == k { 1 } else if neg == k { -1 } else { 0 };
+            if s == 0 || (sign[c] != 0 && sign[c] != s) {
+                flag[c] = true;
+            }
+            sign[c] = s;
+        }
+        // Glued sides (both faces in the chart, the same UVs at both ends), wedges and pieces.
+        let same = |a: usize, b: usize| corner_uv[2 * a].to_bits() == corner_uv[2 * b].to_bits() && corner_uv[2 * a + 1].to_bits() == corner_uv[2 * b + 1].to_bits();
+        let mut glued = vec![false; t.corners()];
+        let mut wedge = Dsu::new(t.corners());
+        let mut piece = Dsu::new(t.nf);
+        for e in faces.iter().flat_map(|&f| t.face_corners(f)).map(|h| t.cedge[h] as usize) {
+            let [h0, h1] = t.euse[e];
+            if t.wall[e] || h1 == NONE {
+                continue;
+            }
+            let (h0, h1) = (h0 as usize, h1 as usize);
+            let (f0, f1) = (t.cface[h0], t.cface[h1]);
+            if chart[f0 as usize] != chart[f1 as usize] || chart[f0 as usize] < 0 || glued[h0] {
+                continue; // (an edge of two chart faces comes up twice)
+            }
+            let (a0, b0, a1, b1) = (t.at(h0, t.ea[e]), t.at(h0, t.eb[e]), t.at(h1, t.ea[e]), t.at(h1, t.eb[e]));
+            if same(a0, a1) && same(b0, b1) {
+                glued[h0] = true;
+                glued[h1] = true;
+                wedge.union(a0 as u32, a1 as u32);
+                wedge.union(b0 as u32, b1 as u32);
+                piece.union(f0, f1);
+            }
+        }
+        // Euler characteristic per chart over wedges, and one piece per chart.
+        let mut chi = vec![0i64; nc];
+        let mut first_piece = vec![u32::MAX; nc];
+        for &f in &faces {
+            let c = chart[f] as usize;
+            chi[c] += 1;
+            let p = piece.find(f as u32);
+            if first_piece[c] == u32::MAX {
+                first_piece[c] = p;
+            } else if first_piece[c] != p {
+                flag[c] = true;
+            }
+        }
+        let mut sides: Vec<Vec<Side>> = (0..nc).map(|_| Vec::new()).collect();
+        for h in faces.iter().flat_map(|&f| t.face_corners(f)) {
+            let c = chart[t.cface[h] as usize] as usize;
+            let w = wedge.find(h as u32);
+            if w == h as u32 {
+                chi[c] += 1; // one wedge
+            }
+            if glued[h] {
+                // a glued edge counts once, from its first corner
+                if t.euse[t.cedge[h] as usize][0] as usize == h {
+                    chi[c] -= 1;
+                }
+                continue;
+            }
+            chi[c] -= 1;
+            if !flag[c] {
+                let n = t.next(h);
+                sides[c].push(Side { p: uv(h), q: uv(n), v: [w, wedge.find(n as u32)], class: 2 });
+            }
+        }
+        for c in 0..nc {
+            if sign[c] != 0 && !flag[c] && (chi[c] != 1 || sides_cross(&mut sides[c])) {
+                flag[c] = true;
+            }
+        }
+        flag
     }
 
     /// Start Keep going from a level: its charts flattened.
@@ -3986,6 +4349,91 @@ pub mod tests {
         let l = tree.compute_level(10.0);
         assert_eq!((l.merges_used, l.segments_glued, l.charts), (1, 1, 2), "the cheap later merge is applied although an earlier one is skipped");
         assert_eq!(tree.compute_level(60.0).charts, 1);
+    }
+
+    /// A bumpy sheet of nx x ny quads, every `every`-th quad split in two triangles (poles), moved by `dx` in x.
+    fn speckled(nx: usize, ny: usize, every: usize, dx: f64) -> (Vec<f64>, Vec<i64>, Vec<i64>) {
+        let (mut pts, ip, fl) = grid(nx, ny, 0.1, |x, y| 0.3 * (2.0 * x).sin() * (1.5 * y).cos());
+        for v in 0..pts.len() / 3 {
+            pts[3 * v] += dx;
+        }
+        let (mut nip, mut nfl) = (vec![0i64], Vec::new());
+        for f in 0..ip.len() - 1 {
+            let q = &fl[ip[f] as usize..ip[f + 1] as usize];
+            if f % every == 0 {
+                nfl.extend_from_slice(&[q[0], q[1], q[2]]);
+                nip.push(nfl.len() as i64);
+                nfl.extend_from_slice(&[q[0], q[2], q[3]]);
+            } else {
+                nfl.extend_from_slice(q);
+            }
+            nip.push(nfl.len() as i64);
+        }
+        (pts, nip, nfl)
+    }
+
+    #[test]
+    fn pieces_run_apart_give_each_piece_its_own_merges() {
+        // R7: two far-apart bumpy sheets (one mesh above PARALLEL_FACES): the merge tree run in piece groups on two
+        // worker threads makes the same merges (in another order) and the same charts at every level as one run.
+        let (pts, ip, fl) = speckled(36, 30, 23, 0.0);
+        let (p2, ip2, fl2) = speckled(36, 30, 23, 100.0);
+        let nv = (pts.len() / 3) as i64;
+        let mut pts_b = pts.clone();
+        pts_b.extend_from_slice(&p2);
+        let mut ip_b = ip.clone();
+        let base = *ip.last().unwrap();
+        ip_b.extend(ip2[1..].iter().map(|&x| x + base));
+        let mut fl_b = fl.clone();
+        fl_b.extend(fl2.iter().map(|&v| v + nv));
+        let inp = input(&pts_b, &ip_b, &fl_b);
+        let pool = |n: usize| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
+        let two_members = |t: &Tree| {
+            let mut m = vec![Vec::new(); t.n_patches];
+            for (f, &p) in t.patch.iter().enumerate() {
+                m[p as usize].push(f as u32);
+            }
+            m
+        };
+        let one = pool(1).install(|| Tree::build(&inp, &never()).unwrap());
+        let two = pool(2).install(|| Tree::build(&inp, &never()).unwrap());
+        assert!(two.topo.nf >= PARALLEL_FACES && one.merges.len() > 10);
+        assert!(pool(2).install(|| two.piece_groups(&two_members(&two)).len()) == 2, "two pieces, two groups");
+        let key = |t: &Tree| {
+            let mut v: Vec<(Vec<u32>, u64)> = t.merges.iter().map(|m| (m.segs.clone(), m.stretch.to_bits())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(key(&one), key(&two));
+        // The outline smoothing (per piece group on two threads) and the whole-level layouts (parallel) match too.
+        let opts = uvflat::FlatOpts::default();
+        for x in [120.0, 10.0, 0.0] {
+            let (l1, l2) = (pool(1).install(|| one.level(x)), pool(2).install(|| two.level(x)));
+            assert_eq!(l1.chart, l2.chart);
+            assert_eq!(one.start_of(&l1).iter().map(|v| v.to_bits()).collect::<Vec<_>>(), two.start_of(&l2).iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+            let u1 = pool(1).install(|| one.flatten_cut(&l1.cut, &l1.chart, None, Some(one.start_of(&l1)), &opts, &never()).0);
+            let u2 = pool(2).install(|| two.flatten_cut(&l2.cut, &l2.chart, None, Some(two.start_of(&l2)), &opts, &never()).0);
+            assert_eq!(u1.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), u2.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn a_flat_disk_layout_is_one_to_one_and_a_folded_one_may_lie_over() {
+        // R7: `may_lie_over` clears a flat sheet laid out as itself, and flags it once one face is turned over.
+        let (pts, ip, fl) = grid(4, 4, 1.0, |_, _| 0.0);
+        let tree = Tree::build(&input(&pts, &ip, &fl), &never()).unwrap();
+        let mut uv: Vec<f64> = fl.iter().flat_map(|&v| [pts[3 * v as usize], pts[3 * v as usize + 1]]).collect();
+        let chart = vec![0i64; ip.len() - 1];
+        assert_eq!(tree.may_lie_over(&uv, &chart), vec![false]);
+        for h in 4 * 5..4 * 6 {
+            uv[2 * h] = -uv[2 * h];
+        }
+        assert_eq!(tree.may_lie_over(&uv, &chart), vec![true]);
+        // Faces of chart -1 are left out: the turned face with its neighbour is still caught, the first row alone is clear.
+        let nf = chart.len();
+        let only = |keep: &dyn Fn(usize) -> bool| (0..nf).map(|f| if keep(f) { 0 } else { -1 }).collect::<Vec<i64>>();
+        assert_eq!(tree.may_lie_over(&uv, &only(&|f| f == 4 || f == 5)), vec![true]);
+        assert_eq!(tree.may_lie_over(&uv, &only(&|f| f < 4)), vec![false]);
     }
 
     #[test]
