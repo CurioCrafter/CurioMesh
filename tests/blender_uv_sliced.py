@@ -28,7 +28,7 @@ import numpy as np
 ARGV = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
 ADDON = os.path.abspath(ARGV[ARGV.index("--addon") + 1]) if "--addon" in ARGV else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(ADDON))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "bench", "assets")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "bench", "assets")))
 import uvm  # noqa: E402
 
 src = uvm.load_model("concrete_road_barrier")  # factory settings first, then the add-on
@@ -71,10 +71,69 @@ def timed_finish(steps):
         SL.JOB = None
 
 
+SLOW = []  # steps over 80 ms: (class, ms, where it was, where it went, inner stage)
+
+
+def where(gen):
+    loc = []
+    while gen is not None and getattr(gen, "gi_frame", None) is not None:
+        loc.append(f"{gen.gi_frame.f_code.co_name}:{gen.gi_frame.f_lineno}")
+        gen = gen.gi_yieldfrom
+    return " > ".join(loc[-4:])
+
+
+def watch(cls, gen_attr):
+    orig = cls.step
+
+    def step(self, *a):
+        before = where(getattr(self, gen_attr, None))
+        t = time.perf_counter()
+        r = orig(self, *a)
+        dt = time.perf_counter() - t
+        if dt > 0.08:
+            inner = getattr(self, "_now", None) or getattr(self, "_active", None)
+            SLOW.append((cls.__name__, round(1000 * dt), before, where(getattr(self, gen_attr, None)), type(inner).__name__))
+        return r
+
+    cls.step = step
+
+
+watch(KEEP.FitStage, "_steps")  # SLOW lines: which step of which stage ran past 80 ms
+DUMP = os.environ.get("UVSLICED_DUMP")  # a file: the first transfer's inputs, for profiling outside Blender
+if DUMP:
+    _SEAMS = importlib.import_module(pkg.__name__ + ".triadq.uvseams")
+    _init = _SEAMS.Transfer.__init__
+
+    def _dump_init(self, *a, **k):
+        if not os.path.exists(DUMP):
+            np.savez(DUMP, *[np.asarray(x) for x in a[:7]], material=np.asarray(k.get("material") if k.get("material") is not None else []))
+        _init(self, *a, **k)
+
+    _SEAMS.Transfer.__init__ = _dump_init
+    _NEW = importlib.import_module(pkg.__name__ + ".triadq.uvnew")
+    _ninit = _NEW.NewUVs.__init__
+
+    def _dump_new(self, points, indptr, flat, material=None, forced=None, *a, **k):
+        out = DUMP.replace(".npz", "_new.npz")
+        if not os.path.exists(out):
+            np.savez(out, points=points, indptr=indptr, flat=flat, material=np.asarray([] if material is None else material), forced=np.asarray([] if forced is None else forced))
+        _ninit(self, points, indptr, flat, material, forced, *a, **k)
+
+    _NEW.NewUVs.__init__ = _dump_new
+watch(importlib.import_module(pkg.__name__ + ".triadq.uvnew").NewUVs, "_work")
+watch(importlib.import_module(pkg.__name__ + ".triadq.uvseams").Transfer, "_steps")
+watch(importlib.import_module(pkg.__name__ + ".triadq.uvsight").Sight, "_gen")
+watch(importlib.import_module(pkg.__name__ + ".triadq.uvflat").Flatten, "_work")
+watch(importlib.import_module(pkg.__name__ + ".triadq.uvchart").Charts, "_work")
+
+
 def report(label):
+    for row in sorted(SLOW, key=lambda r: -r[1])[:6]:
+        print(f"SLOW {label}: {row}", flush=True)
+    SLOW.clear()
     t = RUN["times"]
-    rest = max(t[1:]) if len(t) > 1 else 0.0
-    print(f"TIME {label}: {len(t)} slices, first {1000 * t[0]:.0f} ms, longest after it {1000 * rest:.1f} ms, total {sum(t):.1f} s", flush=True)
+    rest = max(t[1:-1]) if len(t) > 2 else 0.0
+    print(f"TIME {label}: {len(t)} slices, first {1000 * t[0]:.0f} ms, last {1000 * t[-1]:.0f} ms, longest UV slice between {1000 * rest:.1f} ms, total {sum(t):.1f} s", flush=True)
     return rest
 
 
@@ -92,11 +151,18 @@ def undo_redo(label, name):
     if not CAN_UNDO:
         print(f"INFO {label}: no undo stack in this Blender run", flush=True)
         return
-    after, step_after, entries = mesh_hash(bpy.data.objects[name].data), H.current(bpy.context.scene), len(H.steps.entries)
+    global SHAPE
+    m = bpy.data.objects[name].data
+    SHAPE = (len(m.vertices), len(m.polygons), [x.name for x in m.uv_layers], [float(np.abs(LAYERS.read_uv(m, x.name)).sum()) for x in m.uv_layers])
+    after, step_after, entries = mesh_hash(m), H.current(bpy.context.scene), len(H.steps.entries)
     bpy.ops.ed.undo()
     ok(name not in bpy.data.objects and H.current(bpy.context.scene) == STEP0, f"{label}: Ctrl+Z takes the result away (step {H.current(bpy.context.scene)})")
+    print(f"INFO {label} after undo: objects {sorted(bpy.data.objects.keys())}", flush=True)
     bpy.ops.ed.redo()
     back = bpy.data.objects.get(name)
+    print(f"INFO {label} after redo: objects {sorted(bpy.data.objects.keys())}", flush=True)
+    if back is not None and mesh_hash(back.data) != after:
+        print(f"INFO {label} after redo: {len(back.data.vertices)} verts, {len(back.data.polygons)} faces, layers {[x.name for x in back.data.uv_layers]} {[float(np.abs(LAYERS.read_uv(back.data, x.name)).sum()) for x in back.data.uv_layers]}, was {SHAPE}", flush=True)
     ok(back is not None and mesh_hash(back.data) == after, f"{label}: Ctrl+Shift+Z brings the same result and UVs back")
     ok(H.current(bpy.context.scene) == step_after and len(H.steps.entries) == entries, f"{label}: History step {H.current(bpy.context.scene)} == {step_after}")
 
@@ -161,6 +227,7 @@ def apply(label, stop_after=None):
     RUN["stop_after"] = stop_after
     names = set(bpy.data.objects.keys())
     r = bpy.ops.curiomesh.guided_apply()
+    bpy.ops.ed.undo_push(message="Apply")  # a script's operator call pushes no step of its own here (as in blender_uv_ui)
     made = [n for n in bpy.data.objects.keys() if n not in names]
     longest = report(label)
     ok(r == {"FINISHED"} and len(made) == 1, f"{label}: Apply {r}, wrote {made}: {guided.state['applied']}")
@@ -211,6 +278,7 @@ def remesh(label, stop_after=None):
     RUN["stop_after"] = stop_after
     names = set(bpy.data.objects.keys())
     r = bpy.ops.curiomesh.remesh(texture_mode="PROJECT", output_mode="NEW", target_faces=2000)
+    bpy.ops.ed.undo_push(message="Remesh")
     made = [n for n in bpy.data.objects.keys() if n not in names]
     longest = report(label)
     ok(r == {"FINISHED"} and len(made) == 1, f"{label}: {r}, wrote {made}, UVs {bpy.context.scene.curiomesh_settings.metrics_uv_status}")

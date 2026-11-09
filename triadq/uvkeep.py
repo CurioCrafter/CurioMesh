@@ -570,7 +570,7 @@ class SeamCheck:
     triangle grid) is built once and kept; every query runs a few hundred points a slice. Only what the fit reads is
     measured: no drift, stretch or overlap."""
 
-    CHUNK = 256  # queries per slice (about 5-20 ms on a 60k-face source)
+    CHUNK = 32  # queries per slice (256 took 0.3-0.4 s on the 61k-face barrier with big result faces)
 
     def __init__(self, sa: Source, src_uv, texture_px: float):
         self.sa, self.tex = sa, float(texture_px) if texture_px and texture_px > 0 else uvscore.TEXTURE_PX
@@ -1417,8 +1417,7 @@ def _layer_steps(sa: Source, luv, P, ip, fl, look: dict, texture_px: float, use_
             yield
         u, e, fold = job.result()
     else:
-        u, e, fold = uvseams.layer(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, False, sa.points)
-        yield
+        u, e, fold = yield from uvseams.layer_steps(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, sa.points)
     got.update(uv=u, expected=e, fold=fold)
 
 

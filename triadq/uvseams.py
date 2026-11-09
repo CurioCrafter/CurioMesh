@@ -331,11 +331,13 @@ def _extract_steps(points, indptr, flat, corner_uv, material, repeat, texture_px
     tex = float(texture_px) if texture_px > 0 else TEXTURE_PX_DEFAULT
     tol = max(float(uv_tol_px), 0.0) / tex
     weld, n_welded = _weld(P)
+    yield
     wflat = weld[flat]
     nxt = _next_corners(indptr)
     cface = _face_of_corner(indptr)
     ea, eb, estart, occ = _edges(wflat, nxt)
     ne_all = len(ea)
+    yield
 
     def uv_at(h, w):
         return uv[h] if wflat[h] == w else uv[nxt[h]]
@@ -828,6 +830,8 @@ class _Source:
                 for v in flat[s:e].tolist():
                     r = max(r, _dist(Pl[v], c))
                 self.radius.append(r)
+                if f % 1024 == 1023:
+                    yield
         weld = seams["weld"]
         wflat = weld[flat]
         # faces at each welded vertex, in face order (the winding vote's ball grows through them)
@@ -838,9 +842,12 @@ class _Source:
         nxt = _next_corners(indptr)
         cface = _face_of_corner(indptr)
         ea, eb, estart, occ = _edges(wflat, nxt)
+        yield
         cls_of = {}
         cls = seams["class"]
         for k in range(len(seams["edge_a"])):
+            if k % 4096 == 4095:
+                yield
             a, b = int(seams["edge_a"][k]), int(seams["edge_b"][k])
             cls_of[(min(a, b), max(a, b))] = int(cls[seams["edge_chain"][k]])
         self.across = np.full(len(flat), -1, np.int64)
@@ -918,7 +925,19 @@ class _Source:
 
 
 def _walk(src: _Source, rf, rt, rw, c, reach):
-    """The source faces a result face reads from: from the reference face `rf` (hit at triangle `rt`, weights `rw`)
+    steps = _walk_steps(src, rf, rt, rw, c, reach)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as end:
+            return end.value
+
+
+WALK_CHUNK = 256  # faces walked between two yields: a huge result face reads thousands, and a timer slice stays short
+
+
+def _walk_steps(src: _Source, rf, rt, rw, c, reach):
+    """`_walk` as a generator (yields every WALK_CHUNK faces). The source faces a result face reads from: from the reference face `rf` (hit at triangle `rt`, weights `rw`)
     across free and Shift edges only, within `reach` of the face centre `c`, passing the walk's UV check (with a layer).
     Breadth-first, each with whether a Shift chain was crossed on the way."""
 
@@ -939,8 +958,12 @@ def _walk(src: _Source, rf, rt, rw, c, reach):
     seen = {rf}
     queue = deque([0])
     indptr = src.indptr
+    walked = 0
     while queue:
         f, shifted = order[queue.popleft()]
+        walked += 1
+        if walked % WALK_CHUNK == 0:
+            yield
         for h in range(int(indptr[f]), int(indptr[f + 1])):
             g = int(src.across[h])
             if g < 0 or src.crossing[h] == 2 or g in seen or _dist(src.centre[g], c) > reach:
@@ -1066,6 +1089,16 @@ def _fan_orient(src, Pr, face, rf, fallback) -> float:
 
 
 def _read_face(src: _Source, region, Pr, face):
+    steps = _read_face_steps(src, region, Pr, face)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as end:
+            return end.value
+
+
+def _read_face_steps(src: _Source, region, Pr, face):
+    """`_read_face` as a generator: yields inside the walk and between corners, so one huge face is many short steps."""
     n = len(face)
     corners = [tuple(Pr[v]) for v in face]
     c0 = c1 = c2 = 0.0
@@ -1122,6 +1155,8 @@ def _read_face(src: _Source, region, Pr, face):
         while at < len(near):
             f = near[at]
             at += 1
+            if at % WALK_CHUNK == 0:
+                yield
             for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
                 g = int(src.across[h])
                 if g >= 0 and g not in seen and _dist(src.centre[g], c) <= reach:
@@ -1135,11 +1170,13 @@ def _read_face(src: _Source, region, Pr, face):
             if d2 < src.on_faces([rf], c)[0]:
                 rf, rd, rt, rw = cands[which], math.sqrt(d2), t2, w2
                 reg = int(region[rf])
-    order = _walk(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
+    order = yield from _walk_steps(src, rf, rt, rw, c, WALK_REACH * diameter + rd)
     reached = [f for f, _ in order]
     out = dict(ids=[], w=[], shift=[], slid=[], ref_ids=[int(x) for x in src.tri[rt]], ref_w=list(rw), ref_face=rf,
                orient=_fan_orient(src, Pr, face, rf, -1.0 if _dot(nr, src.normal[rf]) < 0.0 else 1.0), region=reg)
-    for i, (q, (d2, t, w, which)) in enumerate(zip(corners, src.on_each([reached] * n, corners))):
+    for i, q in enumerate(corners):
+        yield
+        d2, t, w, which = src.on_each([reached], [q])[0]  # one corner at a time: the same rows as all at once
         tri = src.tri[t]
         slid = math.sqrt(d2) > hits[i][1] + SLIDE_EDGE * edge
         if slid:
@@ -1202,7 +1239,7 @@ def _lookup_steps(seams, src_points, src_indptr, src_flat, res_points, res_indpt
         s, e = int(ri[f]), int(ri[f + 1])
         if len(si) <= 1 or e - s < 3:
             continue
-        r = _read_face(src, region, Pr, rf[s:e].tolist())
+        r = yield from _read_face_steps(src, region, Pr, rf[s:e].tolist())
         look["ids"][3 * s:3 * e] = r["ids"]
         look["w"][3 * s:3 * e] = r["w"]
         look["shift"][s:e] = r["shift"]
@@ -1927,11 +1964,23 @@ def layer(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look
             job._thread.join()
             uv, expected, fold = job.result()
             return uv, expected, fold
+    steps = layer_steps(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look, texture_px, fix_folds, src_points)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as end:
+            return end.value
+
+
+def layer_steps(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look: dict, texture_px: float = TEXTURE_PX_DEFAULT,
+                fix_folds: bool = True, src_points=()):
+    """The NumPy path of `layer` as a generator: yields between the fold fix's steps."""
+
     uv, expected = evaluate(look, src_indptr, src_flat, layer_uv, res_indptr)
     report = dict(before=0, after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False, untangled=0, reread=0)
+    yield
     if fix_folds:
-        for _ in _fold_fix_steps(res_points, res_indptr, res_flat, uv, look["region"], expected, look["join"], texture_px, report):
-            pass
+        yield from _fold_fix_steps(res_points, res_indptr, res_flat, uv, look["region"], expected, look["join"], texture_px, report)
         if report["after"] > 0:
             report["reread"] = reread_folded(src_points, src_flat, layer_uv, look, res_points, res_indptr, res_flat, uv, expected)
             report["after"] -= report["reread"]
