@@ -207,6 +207,10 @@ BANNED_CODE = (
     (r"addons\[__name__\]", "preferences keyed by __name__ (use __package__)"),
     (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
     (r"__pycache__|\.pyc\b", "bytecode"),
+    (r"except ImportError", "import fallbacks (relative imports only)"),
+    (r"keyconfigs|keymap_items\.new", "keymaps"),
+    (r"preferences\.view\.\w+\s*=(?!=)", "changes to the user's preferences"),
+    (r"[\"']wm\.url_open[\"'](?![^\n]*\(opens browser\))", "a browser link on a button that does not say (opens browser)"),
 )
 BANNED_TEXT = ("bench/", "GPU bake", "extensions.blender.org build", "Clean Rows", "Pro tab", "CC-BY", "Pack Bot", "Security Bot", "Sprite", "flowtool", "Turbo", "native core", "SoftWrap", "Quad Remesher", "RetopoFlow", "Hard Ops", "HardOps", "BoxCutter", "ZRemesher")
 LISTING_NOTICES = """# Third-party notices
@@ -439,6 +443,21 @@ def draw_builds(sources: dict[str, str]) -> list[str]:
     return found
 
 
+def uv_guard(path: Path) -> list[str]:
+    """`scripts/check_no_uv.py` on the unpacked zip: the GitHub-only UV features must not be in it."""
+    import importlib.util
+    import tempfile
+
+    spec = importlib.util.spec_from_file_location("check_no_uv", Path(__file__).with_name("check_no_uv.py"))
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(path) as archive:
+        archive.extractall(tmp)
+        found = guard.check(tmp)
+    print("UV guard: FAIL (%d)" % len(found) if found else "UV guard: ok")
+    return [f"UV guard: {p}" for p in found]
+
+
 def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
     """What extensions.blender.org's review asks of the zip: only Python and CC0 assets, none of the banned code patterns."""
     problems = []
@@ -479,6 +498,7 @@ def check_listing(path: Path, entries: list[str], manifest: dict) -> None:
     for line in manifest.get("copyright", []):
         if not re.fullmatch(r"\d{4}(-\d{4})? \S.*", line) or re.search(r"native|\.rs\b|\bRust\b", line):
             problems.append(f"manifest copyright: 'Year Name' for included code only: {line!r}")
+    problems += uv_guard(path)
     if problems:
         raise ValueError(f"{path}: not ready for extensions.blender.org:\n" + "\n".join(problems))
 

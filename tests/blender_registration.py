@@ -39,6 +39,16 @@ def is_registered(cls: type) -> bool:
     return bool(getattr(cls, "is_registered", False)) or hasattr(bpy.types, getattr(cls, "bl_idname", "") or cls.__name__)
 
 
+def handlers_left(module: str) -> list[str]:
+    """Handler functions of the add-on still in Blender's handler lists."""
+    out = []
+    for name in dir(bpy.app.handlers):
+        handlers = getattr(bpy.app.handlers, name)
+        if isinstance(handlers, list):
+            out += [f"{name}:{h.__name__}" for h in handlers if getattr(h, "__module__", "").startswith(module)]
+    return out
+
+
 def main() -> int:
     args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     module = args[0] if args else next(m.__name__ for m in addon_utils.modules() if m.__name__.endswith("curiomesh"))
@@ -65,12 +75,17 @@ def main() -> int:
     left = [c.__name__ for c in classes if getattr(c, "is_registered", False)]
     if bpy.app.timers.is_registered(overlay._watch):
         left.append("overlay._watch timer")
+    left += handlers_left(module)
     print(f"UNREG left={left}")
-    # Disable then enable in one session: the preview flag must not survive, or Start would skip starting its timer.
-    addon_utils.enable(module, default_set=True, handle_error=None)
-    stale = bpy.context.scene.curiomesh_guided.enabled or "enabled" in (bpy.context.scene.get("curiomesh_guided") or {})
-    print(f"REENABLE stale_preview_flag={stale}")
-    addon_utils.disable(module, default_set=True)
+    # Disable then enable in one session, twice: the preview flag must not survive, or Start would skip starting its
+    # timer, and every disable leaves no class or handler behind.
+    stale = False
+    for _round in range(2):
+        addon_utils.enable(module, default_set=True, handle_error=None)
+        stale |= bpy.context.scene.curiomesh_guided.enabled or "enabled" in (bpy.context.scene.get("curiomesh_guided") or {})
+        addon_utils.disable(module, default_set=True)
+        left += [c.__name__ for c in classes if getattr(c, "is_registered", False)] + handlers_left(module)
+    print(f"REENABLE stale_preview_flag={stale} left={left}")
     ok = not missing and not orphan_children and not left and not stale
     print("REGISTRATION PASS" if ok else "REGISTRATION FAIL")
     return 0 if ok else 1
