@@ -19,8 +19,16 @@ CurioMesh contains Python code only and no compiled or third-party code.
   three layout styles: Fewest Faces, Balanced and Even Rows.
 - **Uses:** Low Poly, Game Asset, Animation, Subdivision, Scan Cleanup, Sculpt Base and Hard Surface.
 - **Adjust:** the Quad Size, Rows and Organize sliders, and Tidy Up with its Loop Quality and Loop Flow meters.
-- **Fix:** the Issue Finder (faces turned inward, folded over, crossing or sunk), Redo this spot, Keep original here,
-  and Fix Selection in Edit Mode.
+- **Fix:** the Issue Finder (faces turned inward, folded over, crossing or sunk), Fix Bad Spots, Redo this spot, Keep
+  original here, and Fix Selection in Edit Mode.
+- **Tools:** small tidy tools (relax, loops, poles, clean-up, hard edges) that show their change on the mesh first, with
+  Apply, Cancel and Before/After; each can run **Again** on its own result or **Keep going** while it still helps.
+  **Auto Fix** after Start runs the same tools on the spots they are made for, within Most Detail Loss.
+- **History:** every Apply of a tool, slider and pass is a step you can jump back to, and Ctrl+Z / Ctrl+Shift+Z undo
+  and redo them.
+- **Help:** a "?" on each step explains it in plain words. The panels are translated into Spanish, Portuguese
+  (Brazil), Japanese and Simplified Chinese and follow Blender's interface language (Preferences > Interface >
+  Translation); CurioMesh never changes that setting itself.
 - **Hard Surface:** Clean Panels, Even Cylinders, and hard edges marked on Apply.
 - **Shape the flow:** edge loops, deformation lines, guide curves, Detail Markers, Mirror and Symmetrize, and the Flow
   Editor (experimental, off by default).
@@ -80,11 +88,13 @@ CurioMesh contains Python code only and no compiled or third-party code.
 - Segments you edit by hand (merge, split, paint, rename, lock, a Use, Bigger/Smaller Quads on a part) are saved on your object, as a face attribute
   `curiomesh_segment` and a custom property `curiomesh_segments`, so the next run and a saved .blend keep them. Finding
   segments alone writes nothing on your object. Delete both to forget them.
-- The viewport HUD is off by default: turn it on with **HUD On in New Scenes** in the preferences (or the HUD button on
-  the Advanced tab). Its timer runs only while the HUD, the heatmap or Live is on.
+- The dashboard in the 3D view is off until you press **Show Dashboard**. Its timer runs only while the dashboard, the
+  heatmap or Live is on.
+- History and Auto Fix follow Blender's undo: they keep `undo_post`, `redo_post` and `load_post` handlers that only
+  pick the matching stored result; they are removed when CurioMesh is disabled.
 - Ideas credited: fitting each source point to its nearest vertex, shading read from the nearest source points, and
   the finite test cases come from ideas by cav3dw3ll3r (https://github.com/cav3dw3ll3r).
-- **Report a Problem** (Advanced tab, Issue Reports) opens GitHub's new-issue form in your web browser, with your
+- **Report a Problem (opens browser)** (Help Make It Better, and Advanced tab > Issue Reports) opens GitHub's new-issue form in your web browser, with your
   Blender and CurioMesh versions filled in (nothing else about your computer). Filing it needs a GitHub account. The
   add-on itself never connects to the internet.
 - Bundled data: `triadq/patterns.json` holds statistics measured on CC0 and public-domain meshes (see
