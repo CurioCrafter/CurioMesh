@@ -720,6 +720,7 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
     nf = len(ip) - 1
     pass_no = 0
     last_mixed = None
+    P_before, moved_before = P, moved_all  # set again every pass; read only from pass 2
     moved_once = set()  # a vertex moved onto a side line stays there: it touches both sides, so every pass ends
     while passes is None or pass_no < passes:
         pass_no += 1
