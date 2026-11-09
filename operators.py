@@ -6,7 +6,8 @@ from __future__ import annotations
 import bpy
 
 from .atlasq import analyze_object
-from .bridge import RemeshConfig, RemeshResult, run_curiomesh
+from . import sliced
+from .bridge import RemeshConfig, RemeshResult, run_curiomesh_steps
 from .metrics import mesh_diagnostics
 
 
@@ -157,7 +158,7 @@ def apply_result_to_settings(settings: bpy.types.PropertyGroup, result: RemeshRe
     settings.metrics_message = str(result.message)
 
 
-class CURIOMESH_OT_remesh(bpy.types.Operator):
+class CURIOMESH_OT_remesh(sliced.SlicedOp, bpy.types.Operator):
     bl_idname = "curiomesh.remesh"
     bl_label = "Remesh to Quads"
     bl_description = "Turn the active mesh into clean quads at the target face count. Undo restores the original"
@@ -201,7 +202,10 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
     keep_debug_objects: bpy.props.BoolProperty(name="Keep Debug Objects", description="Keep the in-between meshes made on the way, for finding a problem. Leave off normally", default=False)
     debug_logs: bpy.props.BoolProperty(name="Debug Console Logs", description="Print step-by-step details to the system console", default=False)
 
-    def execute(self, context: bpy.types.Context):
+    job_name = "Remeshing"
+
+    def steps(self, context: bpy.types.Context):
+        """The remesh, then its UV transfer in timer slices when started from a button (sliced.SlicedOp)."""
         obj = context.object
         if obj is None or obj.type != "MESH":
             self.report({"ERROR"}, "Select a mesh object first.")
@@ -210,7 +214,7 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
             self.report({"ERROR"}, "This mesh has no faces to remesh.")
             return {"CANCELLED"}
 
-        result = run_curiomesh(obj, config_from_owner(self))
+        result = yield from run_curiomesh_steps(obj, config_from_owner(self))
         settings = context.scene.curiomesh_settings
         apply_result_to_settings(settings, result)
 
@@ -218,9 +222,10 @@ class CURIOMESH_OT_remesh(bpy.types.Operator):
             self.report({"ERROR"}, result.message or "CurioMesh remesh failed.")
             return {"CANCELLED"}
 
+        stopped = sliced.stopped()
         self.report(
-            {"INFO"},
-            result.message,
+            {"WARNING"} if stopped else {"INFO"},
+            result.message + (" Stopped: the UVs were carried over by Blender's quicker transfer." if stopped else ""),
         )
         return {"FINISHED"}
 

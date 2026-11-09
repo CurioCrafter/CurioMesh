@@ -82,6 +82,20 @@ def ensure_target_uvs(obj, method: str = "SMART", new_layer: str = "", island_ma
     """The `CURIO` dispatch of `textures.ensure_target_uvs`. True when it handled the call (UVs made, or nothing to do);
     False hands the call back to Smart Project, with a message in `LAST["message"]`."""
 
+    steps = ensure_target_uvs_steps(obj, method, new_layer, island_margin)
+    while True:
+        try:
+            if next(steps) == uvnew.WAIT:
+                time.sleep(0.0005)
+        except StopIteration as end:
+            return end.value
+
+
+def ensure_target_uvs_steps(obj, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02, stopped=lambda: False, tick=lambda fraction: None):
+    """`ensure_target_uvs` as a generator for a timer: the unwrap yields between short steps (`uvnew.WAIT` while the
+    faster core works); `tick(fraction)` gets the progress. `stopped()` True ends it early with False, so Smart Project
+    makes the layer."""
+
     if not (method == "CURIO" or (method == "SMART" and MODE == "CURIO")):
         return False
     if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
@@ -95,8 +109,18 @@ def ensure_target_uvs(obj, method: str = "SMART", new_layer: str = "", island_ma
         uv = _cache.get(key)
         if uv is None:
             settings = uvnew.Settings(texture_px=resolution)
-            run = uvnew.NewUVs(points, indptr, flat, material if material.max(initial=0) > 0 else None, forced, settings, budget=1e9)
-            result = run.run()
+            run = uvnew.NewUVs(points, indptr, flat, material if material.max(initial=0) > 0 else None, forced, settings)
+            run._whole = True  # as run(): no first layout for a preview
+            while not run.done:
+                if stopped():
+                    LAST.clear()
+                    LAST["message"] = "New UVs were stopped. Smart Project was used."
+                    return False
+                tick(run.step())
+                yield uvnew.WAIT if run.waiting else None
+            if run.error is not None:
+                raise run.error
+            result = run.result
             uv = result.uv
             if not np.isfinite(uv).all():
                 raise ValueError("the layout has points that are not numbers")

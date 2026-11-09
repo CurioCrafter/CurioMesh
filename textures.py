@@ -9,6 +9,7 @@ import bmesh
 import bpy
 import numpy as np
 
+from . import sliced
 from .triadq import texsets
 from .triadq import uvbake  # main-only: uv
 from .triadq.uvs import is_see_through, uv_overlap
@@ -20,7 +21,13 @@ MOST_OVERLAP = 0.01  # share of texels a UV map may reuse and still hold a bake
 
 def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02) -> None:
     """Unwrap a mesh with no UVs. With new_layer, always unwrap, into a new layer that becomes the active one."""
-    if uvbake.ensure_target_uvs(obj, method, new_layer, island_margin): return  # main-only: uv
+    sliced.finish(ensure_target_uvs_steps(obj, method, new_layer, island_margin))
+
+
+def ensure_target_uvs_steps(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02):
+    """`ensure_target_uvs` as timer steps (`sliced`): a long unwrap yields between short pieces; Stop falls back to Smart Project."""
+    yield from ()
+    if (yield from uvbake.ensure_target_uvs_steps(obj, method, new_layer, island_margin, sliced.stopped, lambda f: sliced.tick("Making the bake UVs", f))): return  # main-only: uv
     if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
         return
     if new_layer:
@@ -197,7 +204,11 @@ def _keep_see_through(mesh: bpy.types.Mesh, old: np.ndarray, glass: dict, uv_lay
     mesh.uv_layers[uv_layer].data.foreach_set("uv", ours)
 
 
-def bake_detail(
+def bake_detail(source_obj: bpy.types.Object, target_obj: bpy.types.Object, **kw) -> list[bpy.types.Image]:
+    return sliced.finish(bake_detail_steps(source_obj, target_obj, **kw))
+
+
+def bake_detail_steps(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
     *,
@@ -205,8 +216,10 @@ def bake_detail(
     resolution: int,
     cage: float,
     new_uvs: bool = False,
-) -> list[bpy.types.Image]:
-    """Bake the source's detail onto the target. The source and its materials are only read.
+):
+    """`bake_detail` as timer steps (`sliced`): the unwrap runs in short pieces, the bake itself is Blender's.
+
+    Bake the source's detail onto the target. The source and its materials are only read.
 
     With color, the target ends up with one new material holding both maps, and see-through materials stay as they are:
     a bake has no way to hold glass. Without color, it keeps its own materials, as private copies, with the normal map
@@ -217,7 +230,7 @@ def bake_detail(
     margin = uvbake.gap_px(resolution)  # main-only: uv
     if new_uvs or not _uv_layer_can_hold_bake(mesh):
         while True:
-            ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
+            yield from ensure_target_uvs_steps(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
             if margin <= 2 or _uv_fill(mesh) >= MIN_UV_FILL:
                 break
             # Thousands of small islands: the gaps between them would eat the texture, and every face gets a few texels.
