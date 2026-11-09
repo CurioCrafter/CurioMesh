@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import bpy
 import numpy as np
 
+from .translations import clip, tip, tr
+
 PREVIEW_NAME = "CurioMesh_Preview"  # the name a new preview object gets; it is found by its tag, never by its name
 REGION_PREVIEW_NAME = "CurioMesh_RegionPreview"
 PREVIEW_TAG = "curiomesh_preview"  # on objects (and spare meshes) the add-on made itself: which tool made them
@@ -46,7 +48,7 @@ def remove_saved_previews() -> None:
         source = bpy.data.objects.get(str(obj.get("curiomesh_hid", ""))) if obj.get(PREVIEW_TAG) == REGION else None
         mesh = obj.data
         bpy.data.objects.remove(obj, do_unlink=True)
-        if mesh is not None and mesh.users == 0:
+        if isinstance(mesh, bpy.types.Mesh) and mesh.users == 0:
             bpy.data.meshes.remove(mesh)
         if source is not None:
             try:
@@ -89,7 +91,6 @@ PREF_DEFAULTS = {
     "advanced_mode": False,
     "flow_editor": False,
     "allow_helpers": False,
-    "hud_default": False,
     "hud_corner": "BOTTOM_LEFT",
     "hud_offset_x": 70,
     "hud_offset_y": 40,
@@ -279,24 +280,30 @@ def pref_swatch(layout, name: str, text: str = "") -> None:
     """A colour swatch bound to a preference (plain label when the preferences are not a live struct)."""
     prefs = get_prefs()
     if isinstance(prefs, bpy.types.AddonPreferences):
-        layout.prop(prefs, name, text=text)
+        layout.prop(prefs, name, text=tr(text))
     elif text:
-        layout.label(text=text)
+        layout.label(text=tr(text))
 
 
 def wrap_label(layout, text: str, icon: str = "NONE", width: int = 38, limit: int = 4) -> None:
-    """Word-wrapped label lines (Blender labels never wrap on their own)."""
-    import textwrap
+    """Word-wrapped label lines (Blender labels never wrap on their own), in the user's language.
+    A translation longer than the English gets as many more lines as it needs, so nothing is cut off."""
+    from . import translations as T
 
-    lines = textwrap.wrap(str(text), width=width) or [""]
+    shown = T.tr(str(text))
+    if text and shown != text:
+        limit = max(limit, -(-limit * T.text_width(shown) // max(T.text_width(str(text)), 1)))
+    lines = T.wrap(shown, width) or [""]
     for i, line in enumerate(lines[:limit]):
-        layout.label(text=line if i < limit - 1 or len(lines) <= limit else line[: width - 3] + "...", icon=icon if i == 0 else "BLANK1")
+        layout.label(text=line if i < limit - 1 or len(lines) <= limit else T.clip(line, width - 3) + "...", icon=icon if i == 0 else "BLANK1", translate=False)
 
 
 def tag_redraw() -> None:
     wm = bpy.context.window_manager
     if wm is None:
         return
+    if not bpy.app.timers.is_registered(_hud_tick):
+        ensure_ticker()
     for window in wm.windows:
         for area in window.screen.areas:
             if area.type == "VIEW_3D":
@@ -322,7 +329,7 @@ def next_step_hint(obj, stats: MeshStats | None, settings) -> str:
         return "Press Auto or Remesh for clean quads"
     if stats.tris:
         if settings is not None and not settings.require_quads:
-            return f"{stats.tris} triangles left - turn on Pure Quads"
+            return f"{stats.tris} triangles left - turn on All Quads"
         return f"{stats.tris} triangles left - try Hero quality or PairClosure"
     if stats.ngons:
         return f"{stats.ngons} n-gons left - raise Cleanup"
@@ -500,6 +507,7 @@ def _fill(shader, pts, color, mode="TRI_FAN"):
 def _text(x, y, size, color, text):
     import blf
 
+    text = tr(text)
     blf.size(0, size)
     blf.color(0, *color)
     blf.position(0, x, y, 0)
@@ -554,6 +562,78 @@ def _sidebar_inset() -> float:
     return 0.0
 
 
+HUD_FULL_H, HUD_JOB_EXTRA, HUD_STRIP_H = 168, 36, 30  # box heights before scaling: full, extra while a job runs, collapsed strip
+HUD_TICK_SECONDS = 0.25
+
+
+def clock(seconds) -> str:
+    minutes, secs = divmod(int(round(max(0.0, seconds))), 60)
+    return f"{minutes}:{secs:02d}"
+
+
+def job_info():
+    """The job running now as plain data for the dashboard, or None. Reads guided.progress_info and the job's own counters."""
+    import math
+    import time
+
+    try:
+        from . import guided  # late: guided imports this module
+
+        info = guided.progress_info()
+        if info is None:
+            return None
+        frac, words = info
+        runner = guided.state["work"]["runner"]
+    except Exception:
+        return None
+    done, total = getattr(runner, "progress", None) or (0, 0)
+    started = getattr(runner, "started", None)
+    left_of = getattr(runner, "seconds_left", None)
+    try:
+        left = left_of() if left_of else None
+    except Exception:
+        left = None
+    now = time.perf_counter()
+    return {
+        "frac": min(1.0, max(0.0, float(frac))),
+        "stage": str(getattr(runner, "stage", "") or words),
+        "done": int(done),
+        "total": int(total),
+        "elapsed": now - started if started else None,
+        "left": left,
+        "alive_tick": math.modf(now * 1.5)[0],  # 0 to 1, repeating: the draw turns it into the pulse
+    }
+
+
+def job_text(job: dict) -> str:
+    """'42%  piece 3 of 8  1:12 elapsed  about 2:00 left' (parts left out when not known)."""
+    parts = [f"{job['frac'] * 100:.0f}%"]
+    if job["total"]:
+        parts.append(f"piece {min(job['done'] + 1, job['total'])} of {job['total']}")
+    if job["elapsed"] is not None:
+        parts.append(f"{clock(job['elapsed'])} elapsed")
+    if job["left"] is not None:
+        parts.append(f"about {clock(job['left'])} left")
+    return "  ".join(parts)
+
+
+def _hud_tick():
+    """Redraw while a job runs so the box never looks frozen. Does nothing else; stops by itself when the job ends."""
+    settings = _settings()
+    live = settings is not None and settings.hud_enabled and job_info() is not None
+    tag_redraw()
+    return HUD_TICK_SECONDS if live else None
+
+
+def ensure_ticker() -> None:
+    """Start the redraw ticker if the dashboard is on and a job runs. Safe to call often (guided and the panel may call it)."""
+    if bpy.app.timers.is_registered(_hud_tick):
+        return
+    settings = _settings()
+    if settings is not None and settings.hud_enabled and job_info() is not None:
+        bpy.app.timers.register(_hud_tick, first_interval=HUD_TICK_SECONDS)
+
+
 def hud_object(context):
     """(object the HUD reports on, whether it is a result waiting for Apply)."""
     from . import guided  # late: guided imports this module
@@ -574,7 +654,7 @@ def hud_model(context) -> dict:
     """Everything the HUD shows, as plain data (no drawing). Reads the cached stats only."""
     settings = _settings()
     obj, showing_result = hud_object(context)
-    model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": "", "original": False}
+    model = {"name": "", "ratio": None, "faces": 0, "target": 0, "tris": 0, "poles": 0, "info": "", "batch": "", "original": False, "job": job_info()}
     if settings is not None:
         model["target"] = int(settings.target_faces)
         model["batch"] = settings.batch_status
@@ -601,6 +681,9 @@ def hud_model(context) -> dict:
         auto = getattr(getattr(context.scene, "curiomesh_guided", None), "scope", "") == "AUTO"
         model["target"] = 0  # Classic Remesh's Target Faces is not what this result aimed for
         model["hint"] = "Check the parts, then press Apply" if auto else "Press Apply when it looks right"
+        from . import ladder
+
+        model["hint"] = ladder.slider_words() or model["hint"]  # while Quad Size or Rows moves: what it changed
     else:
         model["hint"] = next_step_hint(obj, stats, settings)
     # A mesh CurioMesh has not touched yet is the starting point, not a failure: no red, no NEEDS WORK
@@ -612,7 +695,7 @@ def _text_right(xr, y, size, color, text):
     import blf
 
     blf.size(0, size)
-    width = blf.dimensions(0, text)[0]
+    width = blf.dimensions(0, tr(text))[0]
     return _text(xr - width, y, size, color, text)
 
 
@@ -620,16 +703,21 @@ def _draw_hud() -> None:
     try:
         import gpu
 
+        context = bpy.context
         settings = _settings()
         if settings is None or not settings.hud_enabled:
             return
-        context = bpy.context
         prefs = get_prefs()
         model = hud_model(context)
+        job = model["job"]
+        collapsed = bool(settings.hud_collapsed)
         ui = _ui_scale()
         s = ui * float(prefs.hud_scale)
         accent = (0.45, 0.55, 1.0) if model["original"] else accent_for_ratio(model["ratio"])
-        w, h = 330 * s, 168 * s
+        if job is not None:
+            accent = (0.35, 0.7, 1.0)
+        w = 330 * s
+        h = (HUD_STRIP_H if collapsed else HUD_FULL_H + (HUD_JOB_EXTRA if job is not None else 0)) * s
         pad = 14 * s
         corner = prefs.hud_corner
         safe_top = (36 + (140 if corner == "TOP_RIGHT" else 0)) * ui if corner.startswith("TOP") else 0.0
@@ -654,25 +742,43 @@ def _draw_hud() -> None:
 
         left = x + pad + 6 * s
         right = x + w - pad
-        top = y + h - pad
+        top = y + h - (pad if not collapsed else 15 * s)
+        mid = top - 6 * s
+        bx = right
         _text(left, top - 10 * s, 11 * s, (*accent, 1.0), "CURIOMESH")
-        _text(left + 95 * s, top - 10 * s, 11 * s, muted, model["name"][:18] or "no mesh")
-        _text_right(right, top - 10 * s, 10 * s, (*accent, 1.0), "ORIGINAL" if model["original"] else quality_word(model["ratio"]))
+        if job is not None:  # the alive dot: it pulses, so a slow step never looks frozen
+            pulse = 0.35 + 0.65 * abs(2.0 * job["alive_tick"] - 1.0)
+            dot = 4 * s
+            shader.bind()
+            _fill(shader, _rounded_rect(bx - dot * 1.5, mid - dot, dot * 2, dot * 2, dot, 4), (0.4, 0.95, 0.6, pulse))
+        if collapsed:
+            tail = f"{job['frac'] * 100:.0f}%  {job['stage']}" if job is not None else (f"{model['ratio'] * 100:.0f}% quads" if model["ratio"] is not None else "")
+            room = max(8, int((bx - 2 * s * 4 - left - 82 * s) / (5.4 * s)))
+            _text(left + 82 * s, top - 10 * s, 10 * s, muted, clip((model["name"][:10] + "  " if model["name"] else "") + tr(tail), room))
+            gpu.state.blend_set("NONE")
+            return
+        _text(left + 95 * s, top - 10 * s, 11 * s, muted, model["name"][:8] or "no mesh")
 
         ratio = model["ratio"]
-        big = f"{ratio * 100:.1f}%" if ratio is not None else "--"
+        if job is not None:
+            big = f"{job['frac'] * 100:.0f}%"
+            bar_ratio, bar_colour, big_word = job["frac"], (0.35, 0.7, 1.0), "done"
+        else:
+            big = f"{ratio * 100:.1f}%" if ratio is not None else "--"
+            bar_ratio, bar_colour, big_word = ratio, accent, "quads"
         bw = _text(left, top - 52 * s, 32 * s, (1, 1, 1, 1), big)
-        _text(left + bw + 8 * s, top - 52 * s, 11 * s, muted, "quads")
+        _text(left + bw + 8 * s, top - 52 * s, 11 * s, muted, big_word)
+        _text_right(right, top - 52 * s, 10 * s, (*accent, 1.0), "WORKING" if job is not None else "ORIGINAL" if model["original"] else quality_word(model["ratio"]))
 
         bar_x, bar_y, bar_w, bar_h = left, top - 66 * s, w - 2 * pad - 6 * s, 7 * s
         shader.bind()
         _fill(shader, _rounded_rect(bar_x, bar_y, bar_w, bar_h, 3.5 * s, 3), (0.2, 0.22, 0.28, 1.0))
-        if ratio:
-            fill_w = max(bar_h, bar_w * min(1.0, ratio))
-            _fill(shader, _rounded_rect(bar_x, bar_y, fill_w, bar_h, 3.5 * s, 3), (*accent, 1.0))
-        # Goal tick at 95 % quads.
-        tick_x = bar_x + bar_w * 0.95
-        _fill(shader, [(tick_x, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y + bar_h + 2 * s), (tick_x, bar_y + bar_h + 2 * s)], (0.85, 0.87, 0.95, 0.9))
+        if bar_ratio:
+            fill_w = max(bar_h, bar_w * min(1.0, bar_ratio))
+            _fill(shader, _rounded_rect(bar_x, bar_y, fill_w, bar_h, 3.5 * s, 3), (*bar_colour[:3], 1.0))
+        if job is None:  # goal tick at 95 % quads
+            tick_x = bar_x + bar_w * 0.95
+            _fill(shader, [(tick_x, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y - 2 * s), (tick_x + 1.5 * s, bar_y + bar_h + 2 * s), (tick_x, bar_y + bar_h + 2 * s)], (0.85, 0.87, 0.95, 0.9))
 
         col_w = (w - 2 * pad - 6 * s) / 3
         cells = (
@@ -684,11 +790,16 @@ def _draw_hud() -> None:
             _text(cx, top - 90 * s, 10 * s, label, cell_label)
             _text(cx, top - 106 * s, 14 * s, color, value)
 
-        if model["batch"]:
-            _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), model["batch"][:46])
-        elif model["info"]:
-            _text(left, top - 124 * s, 10 * s, label, model["info"][:46])
-        _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + model["hint"][:44])
+        if job is not None:
+            _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), clip(tr(job_text(job)), 56))
+            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + clip(tr(job["stage"]), 44))
+            _text(left, top - 164 * s, 10 * s, label, f"Quads so far: {ratio * 100:.1f}%" if ratio is not None else "Quads so far: --")
+        else:
+            if model["batch"]:
+                _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), clip(tr(model["batch"]), 46))
+            elif model["info"]:
+                _text(left, top - 124 * s, 10 * s, label, clip(tr(model["info"]), 46))
+            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + clip(tr(model["hint"]), 44))
         gpu.state.blend_set("NONE")
     except Exception:
         draw_failed("overlay._draw_hud")
@@ -711,11 +822,29 @@ class CURIOMESH_OT_toggle_heatmap(bpy.types.Operator):
         if settings.heatmap_enabled and obj is not None and obj.type == "MESH":
             stats = get_stats(obj)
             if stats is not None and stats.faces > HEATMAP_MAX_FACES:
-                self.report({"WARNING"}, f"Heatmap skipped: over {HEATMAP_MAX_FACES:,} faces.")
+                self.report({"WARNING"}, tr(f"Heatmap skipped: over {HEATMAP_MAX_FACES:,} faces."))
         return {"FINISHED"}
 
 
-CLASSES = (CURIOMESH_OT_toggle_heatmap,)
+class CURIOMESH_OT_hud_toggle(bpy.types.Operator):
+    bl_idname = "curiomesh.hud_toggle"
+    bl_label = "Show Dashboard"
+    bl_description = "Show or hide the dashboard in the 3D view. It stays off until you turn it on"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def description(cls, context, properties):
+        on = getattr(getattr(context.scene, "curiomesh_settings", None), "hud_enabled", False)
+        return tip("Hide the dashboard from the 3D view" if on else "Show the dashboard (quad quality and job progress) in the 3D view")
+
+    def execute(self, context):
+        settings = context.scene.curiomesh_settings
+        settings.hud_enabled = not settings.hud_enabled
+        tag_redraw()
+        return {"FINISHED"}
+
+
+CLASSES = (CURIOMESH_OT_toggle_heatmap, CURIOMESH_OT_hud_toggle)
 WATCH_SECONDS = 0.5
 
 
@@ -771,7 +900,7 @@ def unregister() -> None:
             bpy.types.SpaceView3D.draw_handler_remove(_draw_handles.pop(), "WINDOW")
         except Exception:
             pass
-    for timer in (_watch, _build_pending):
+    for timer in (_watch, _build_pending, _hud_tick):
         if bpy.app.timers.is_registered(timer):
             bpy.app.timers.unregister(timer)
     _built.clear()

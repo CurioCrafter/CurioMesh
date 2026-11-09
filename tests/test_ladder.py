@@ -64,6 +64,12 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(L.switched([5], 0.49), [])
         self.assertEqual(L.switched([5], 0.5), [0])
 
+    def test_within_drops_rungs_heavier_than_source(self):
+        rungs = [(1, 3000, 1.0), (2, 2400, 2.0), (3, 1200, 4.0)]
+        self.assertEqual(L.within(rungs, 2500), [2, 3])
+        self.assertEqual(L.within(rungs, 1000), [1, 2, 3])  # none light enough: keep all, the verdict says so
+        self.assertEqual(L.within(rungs, 5000), [1, 2, 3])
+
 
 if __name__ == "__main__":
     unittest.main()

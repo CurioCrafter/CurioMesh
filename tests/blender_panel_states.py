@@ -166,6 +166,35 @@ def snapshot(panel, label, out):
     return main_total
 
 
+def check_no_jump(panel, guided):
+    """Status messages and Auto Fix progress come and go: the rows of the main panel, Adjust and Fix, and the place of
+    the Fix Bad Spots button and the Quad Size slider, must stay the same, or the buttons jump under the mouse."""
+    from types import SimpleNamespace
+
+    from curiomesh import autofix_live, ladder
+
+    classes = (panel.CURIOMESH_PT_guided, panel.CURIOMESH_PT_guided_adjust, panel.CURIOMESH_PT_guided_parts)
+
+    def shape():
+        logs = [draw(cls, "nojump") for cls in classes]
+        fix = [[i for i, (_d, k, w) in enumerate(log) if k == "operator" and w.startswith("curiomesh.seg_review")] for log in logs]
+        quad = [i for i, (_d, k, w) in enumerate(logs[1]) if k == "prop" and w.startswith("quad_size")]
+        return [len(log) for log in logs], fix, quad
+
+    idle = shape()
+    saved = (guided.state["message"], ladder.status, autofix_live.fx["job"])
+    try:
+        guided.state["message"] = "Checking Part 2"
+        ladder.status = lambda: "Working out more sizes: 3 ready, 5 to go (Even rows, 40%)"
+        busy = shape()
+        autofix_live.fx["job"] = SimpleNamespace(busy=True, status="Auto Fix, round 1: relaxing, 3 of 9 spots", fraction=0.3)
+        working = shape()
+    finally:
+        guided.state["message"], ladder.status, autofix_live.fx["job"] = saved
+    assert idle == busy == working, f"panel rows move while it works: idle {idle}, message {busy}, Auto Fix {working}"
+    assert idle[1][0] or idle[1][2], "Fix Bad Spots is not drawn where it should be"
+
+
 def main():
     module = load_addon()
     from curiomesh import guided, issue_panel, overlay, panel, segments
@@ -228,6 +257,7 @@ def main():
     panel.CURIOMESH_PT_guided_parts.bl_options = set()  # Fix opened
     snapshot(panel, "fixing", out)
     draw(panel.CURIOMESH_PT_guided, "fixing/main")
+    check_no_jump(panel, guided)
     if len(sys.argv) > sys.argv.index("--") + 1 if "--" in sys.argv else False:
         target = Path(sys.argv[sys.argv.index("--") + 1])
         target.write_text("\n".join(out) + "\n", encoding="utf-8")

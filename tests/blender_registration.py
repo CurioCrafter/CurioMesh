@@ -53,6 +53,14 @@ def main() -> int:
             missing.append(must)
     guided, overlay = sys.modules[module + ".guided"], sys.modules[module + ".overlay"]
     guided._enabled_set(bpy.context.scene.curiomesh_guided, True)  # Guided Preview on (its flag only), as if Start had run
+    try:  # a second register() (scripts, reloads) must start clean, not raise "already registered"
+        sys.modules[module].register()
+        sys.modules[module].register()
+        again = []
+    except Exception as exc:
+        again = [f"{type(exc).__name__}: {exc}"]
+    print(f"REG twice={again}")
+    missing += again
     addon_utils.disable(module, default_set=True)
     left = [c.__name__ for c in classes if getattr(c, "is_registered", False)]
     if bpy.app.timers.is_registered(overlay._watch):

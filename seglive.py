@@ -28,6 +28,8 @@ from . import overlay, parallel
 from . import segments as view
 from .triadq import segment as S
 
+from .translations import tr
+
 SIZE_GROUP = "CM_SegmentSize"
 PREVIEW_WAIT = 0.03  # quiet before a preview: a drag sends many changes a second
 PREVIEW_MOST = 0.1  # a drag that never pauses still gets a preview this often
@@ -301,7 +303,7 @@ def draw(layout, source) -> None:
     count = view.seg.get("live_count") if view.seg.get("live") is not None else len(view.seg["parts"])
     busy = live["preview"].asked is not None or live["keep"].asked is not None
     text = f"{count:,} parts" + (f"  ({live['ms']:.0f} ms)" if live["ms"] is not None and view.seg.get("live") is not None else "") + ("  ..." if busy else "")
-    col.label(text=text, icon="MESH_GRID")
+    col.label(text=tr(text), icon="MESH_GRID")
     col.prop(st, "detail", slider=True)
     col.prop(st, "largest", slider=True)
     col.prop(st, "smallest", slider=True)

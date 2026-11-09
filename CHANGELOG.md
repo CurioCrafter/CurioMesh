@@ -1,5 +1,277 @@
 # Changelog
 
+## 0.9.9 - unreleased
+
+Merged into main: `v0981-tidytools` (Look First, History and the Tidy Tools sets), `v0981-faceloops2` (Face Loops,
+Ring Round This, Redraw in Rows) and `v0981-sitefixes` (the fixes below, ported from the Blender-site build). Symmetrize
+and the experiment branches are not in this release.
+
+### Fixes from the Blender-site review
+- Previews are found by the add-on's own mark, never by name, so an object of yours called like a preview is never
+  touched; no preview or spare preview mesh is saved in the .blend, and none survive opening a file.
+- Segment edits (Make a Part, Undo Edit, Redo, Multires Detail) are undoable; Make LOD Set replaces its old LODs in one
+  undoable step.
+- Remove Shape, Remove Guide and Redraw delete only what the add-on made; saving segments never removes an attribute
+  of yours with the same name.
+- Even Rows no longer keeps a finished job in memory or waits forever on its helper Blender; the Flow Editor timer ends
+  when idle; Guided's load handler and Guided Preview survive registering twice and disable / enable.
+- Decimate reads Blender's current context; the Use Several Cores note shows only once a helper delivered; Scan and
+  Diagnostics show the numbers they measure; tooltips for Paint and Remember This Fix say what they change; messages
+  use the panel's style names; five unused fold-out settings removed.
+- Tidy Tools: one `lines` field on a tool's proposal for the pink Kept lines (was `kept` in two shapes and `lines`).
+
+### QA bugs
+- **register() twice** no longer raises "already registered": the second call unregisters first and starts clean.
+- **Selected Faces Only** is switched off in 0.9.8 and hidden in the panel (its seam is not stitched yet); Start now
+  ignores a leftover setting instead of storing a selection that did nothing.
+- **Base Quads on a mesh of many loose pieces**: when the result is far above Base Quads, the preview line says the
+  loose pieces each keep a few quads of their own.
+- **Reduce To / LOD set** that cannot reach its size on a mesh of many loose pieces now says so in the result box and the
+  LOD report.
+
+### Tooltips
+- Plainer tooltips for the Method, PairClosure, Scan Type, Voxel Repair, Keep UV Seams, Bake Margin, Debug Objects,
+  Heatmap, Live, Style and Multires settings, the Quality Preset and Detail Marker buttons, and the region volume list
+  and Paint mode. Wording only; no names or settings changed.
+
+### Never more faces than the source
+- The Quad Size steps skip any size with more faces than your mesh when a lighter one exists, and a heavier size on
+  screen is swapped for the lighter one as soon as it is ready. When none is lighter, the verdict says "This mesh is
+  already light: the result has more faces than the original. Keep the original or lower Detail."
+
+### Tidy Up
+- **Fewer poles**: Tidy Up now walks pole pairs (a corner with three edges next to one with five) along their rows
+  until they meet a pole they cancel with, collapses quads with a three on both ends of a diagonal, and spins edges that
+  take poles away. Each change is checked after a short relax of the corners it touches (no folded, turned or caved-in
+  quad, no corner moved far, and the camera's view trade), and a walk that finds nothing is undone. Cleaning runs three
+  times with a short settle in between, because evened-out quads let more patches redraw as grids. Pins on hard edges,
+  borders, the mirror seam, guide curves and drawn loops hold as before; Most Detail Loss still caps it.
+- **Switches under the slider**: Fewer Poles, Straighter Rows, Even Sizes (on by default) and Square Corners (off: pulls
+  each quad toward a rectangle instead of plain evening out) pick which steps run; **Selection Only** tidies only the
+  faces of the result selected in Edit Mode and leaves everything else, and the edge of the selection, where it is.
+  Changing a switch works the strengths out again from the result as it was.
+- Measured at Tidy Up 1, 0.9.8 -> 0.9.9 (Keep Detail 6%): bust poles 722 -> 525, Tidiness 56 -> 65, Loop Quality
+  32 -> 33, Issue Finder 170 -> 154, view changed 7.8% -> 8.4% (6.2% before Tidy Up), faces 2,410 -> 2,266.
+  Lion head poles 2,194 -> 1,871, Tidiness 55 -> 59, view 7.2% -> 7.6%, faces 7,246 -> 6,953; road barrier poles
+  255 -> 194, Tidiness 44 -> 54, Loop Quality 15 -> 17, view 8.0% -> 8.2%. Inward, folded and crossing faces not up.
+  Working out the strengths takes about twice as long (bust 7 -> 18 s).
+- Tried and left out: moving poles off flat spots toward curved ones with energy-neutral spins (on the bust it moved 4
+  of about 38 flat-spot poles and changed nothing else), and longer walks that may raise the energy part way (a few
+  more poles for far fewer faces and 2-3x the time). Under about 500 poles on the bust the rest mark where the quad size
+  changes, and only a different layout of sizes removes them.
+
+### Hard surface follow-up
+- **Even Cylinders no longer pads flat discs.** The compressor's regression with the Hard Surface rebuilds on came from
+  Even Cylinders alone (run one at a time on the compressor, Clean Panels alone was level with both off): its "at
+  least 16 sides" floor fired on four thin round covers (0.007 thick, 0.22 across), taking them from 19 to 104 faces
+  for no visible change and 38 slivers each round their thin rims. A round part thinner than a fifth of its radius is
+  now sized by the camera alone.
+- **Clean Panels cuts L- and U-shaped panels into rectangles.** A notched flat panel is split by straight cuts from its
+  inner corners along its own edges until every piece is convex, and each piece becomes one clean grid, as by hand.
+  An L-shaped plate is now 14 quads at the fewest (3 per side) instead of 28, a U-shaped one 22 instead of 40.
+
+### Run tools again
+- **Tidy Up is no longer one pass.** **Again** (next to the slider) tidies the result on screen once more, starting from
+  where the last pass left it, at the same strength; drag the slider to pick this pass's strength. **Keep Tidying**
+  runs pass after pass, showing each with the meter, while a pass still gives fewer poles or more Tidiness or Loop
+  Quality without making any of them worse, and stops by itself when one gains nothing (**Stop** ends it any time).
+  **Undo Pass** steps back one pass at a time. The meter counts from the result before the first pass, and so does
+  Most Detail Loss: all passes together stay within it. Changing a Tidy Up switch redoes only the pass on screen.
+  Measured on the marble bust (Keep Detail 6%, 2,731 faces, Tidiness 39, Loop Quality 15, 1,100 poles, view 6.4%):
+  Tidy Up 1 gave 67 / 31 / 499 poles / 7.9%; Tidy Again three times 69 / 33 / 462 / 8.2%; Keep Tidying two more
+  passes, 70 / 33 / 458 / 8.2%, then stopped by itself. Each later pass took 5 to 8 s.
+- **Fewer Poles keeps going while it pays**: its pole walks and grid redraws run round after round until a round takes
+  nothing away (they stopped after 6 and 2 rounds), and its clean-and-settle cycles go on past the first 3 while each
+  still takes poles away.
+- **Redo Rough Spots** runs more rounds while each one still cuts the bad faces (it stopped after 2).
+- **Time Limits** (Normal, Longer, No Limit) under Cleanup sets how long Start may spend on repairs, Redraw Messy Quads
+  and Redo Rough Spots. When a step stops at its limit, the result line says so and that Longer or No Limit keeps
+  going. No Limit also runs Redraw Messy Quads on models of more than 40 loose pieces.
+- **Bigger / Smaller Quads on a part have no end**: each press is one more step (they stopped at about 0.4x and 2.5x of
+  the part's first size). The Redo Detail slider can be typed past its ends. Quads stop getting smaller at an eighth
+  of the part's first size (64 times its faces), so a long run of presses can't run Blender out of memory.
+- **Every try of a part is kept** (the oldest was thrown away after 6).
+- **Hard maxes became slider ends you can type past**: Most Detail Loss (20%, now up to 100%), point and Detail
+  Marker Strength, Loops, Surface Fit Passes, Iterations, Texture Sets, Primitive Sides, Holding Edges distance,
+  Attempts, Grow and Suggestions. Hard Edge Angle goes to 180 degrees in both places (it was 150 in one, 170 in the
+  other).
+
+### Tidy Tools
+- **You can always go back.** Ctrl+Z and Ctrl+Shift+Z now also take back and bring back what CurioMesh keeps outside
+  Blender: each Tidy Up slider move, switch, Again, Keep Tidying pass and Undo Pass, each Quad Size and Rows move, a
+  new result, and each tool you keep is one step. A **History** list under the result shows every step with its
+  numbers; click one to go back to it (Ctrl+Z takes the jump back again). Steps keep references, not copies; only
+  when the computer runs short of memory are the oldest let go, and History says how many.
+- **Look First**, the preview every Tidy Tool shares: the change is drawn on the mesh before anything is kept (teal
+  new edges over the old wire, a purple-to-yellow tint for how far corners move, arrows, poles that go or come, a red
+  X where something was held back), with one ring near the middle of the view to drag for strength and a card with
+  up to three numbers, Apply (Enter), Cancel (Esc or right-click) and After / Before (B). Dragging shows a blend at
+  once and the exact result when the mouse rests; big areas get a quick preview first. The result is not touched
+  until Apply, which is one Undo step. Most Detail Loss holds a tool back ("held at 0.45").
+- **Tools** section between Adjust and Fix: Work on (Selection, Part, Whole Result), five groups that show only once
+  they have a tool, and a Last line with Again and Undo. While a tool is open the Adjust sliders wait.
+- Smooth Corners is the small example tool that proves the system (shown with Blender's Developer Extras on).
+- **Relax tools**, the first real tools in the Relax group, each with the Look First preview, Again, Keep Going (F9)
+  and one Undo step per Apply:
+  - **Source Relax** evens out the spacing of the corners by sliding them on your original mesh, so nothing shrinks.
+    The first-time button "Even out the roughest patch" opens it on the roughest part, framed in the view.
+  - **Keep Lines Relax** does the same while hard edges, the outline, UV seams, part borders and guides stay put;
+    corners on them only slide along them. One chip per kind on the card turns it off.
+  - **Square Up** turns slanted quads toward square corners and keeps each quad's size and place in its rows.
+  - **Relax Toward Detail** moves corners so quads get smaller where your mesh bends and bigger where it is flat, with
+    the same faces. Its ring goes from Flat to Detail; the preview tints quads blue where they grew, orange where they
+    shrank.
+- **Even the Band** (Loops & Strips): click a strip, and it and the strips beside it, out to the next pole or border,
+  get the same width. Points slide only along the lines that run across the strips, so no quad turns; the first and
+  last strip ease in so the band's edge does not kink. The card shows the width spread before and after.
+- **Cancel Pole Pair** (Poles): click a pole (dots show every pole with its edge count), then one of the numbered poles
+  of the other kind near it; edges are spun inside their quads to walk the two together until both have four edges,
+  with the same face count. Each spin is relaxed and checked like Tidy Up's; if no walk works, nothing changes and the
+  card says to try the next one. Esc goes back a click. Reach, Steps and Tries in the redo panel go as high as you like
+  (higher can take longer). Not on mirrored results yet.
+- **Open Up Poles** (Poles): the edges round every pole in the area turn toward even angles and equal lengths, held on
+  your original mesh, and the rings round them ease the change out. It keeps going round by round while the poles
+  still open up, so Again only finds more when something changed. The card shows the narrowest angle at the poles
+  before and after.
+- Tools that need a click first (a strip, a pole) wait for it with the ask in the header and on the card; the thing
+  under the mouse lights white and the picked one orange. Again opens the tool for a new click.
+- **Preview Tidy** (Cleanup): a report of the problems found in the area, one line each, only those found: corners
+  with two edges, doublets, triangle pairs that make quads, slivers and faces facing in. Each line has its count, how
+  much its fix would change the look, **Show** (the spots get a dashed ring and the view steps from one to the next)
+  and **Fix These** (its ghost shows; Enter keeps it). Each kept line is its own Ctrl+Z step and the list refreshes
+  and stays open for the next; Esc closes it. Nothing changes the outline, and no faces are joined across a
+  material or UV border.
+- **Seal the Middle** (Cleanup): puts every corner near the mirror plane onto it and merges the doubled ones, then
+  says what it did ("14 seam vertices put on the plane, 3 merged, 0 gaps left"). The plane shows as a pink grid with
+  arrows for the moves, and gaps or faces still crossing it get a red X. Works on a mirrored result, or on one whose
+  plane CurioMesh can find. One Ctrl+Z takes it back.
+- Look First can now draw dashed Found rings, pink Kept lines and a list of lines on the card, and a tool can stay
+  open after Enter. A mirrored result's tools now project onto the whole original, not one half of it, and blockout
+  results no longer stop a tool from opening.
+- **True Up Edges** (Hard Surface): finds the hard edges of the result and lays each on the crease of your original
+  mesh, straight ones on one line and curved ones smooth, evenly spaced, with the quads beside them following. Only
+  edges that end up nearer their crease are changed; the card shows how far off the creases they were and are.
+- **Press Panels Flat** (Hard Surface): finds the flat panels of your original mesh under the result and lays each
+  exactly flat; corners shared by two or three panels go to the point on all of them, so panel borders become clean
+  lines. The kept hard edges and panel borders are drawn in pink in the preview.
+- **Smaller and Bigger Quads, Redo This Spot, Keep Original Here and Put Reduced Back** now open Look First: the
+  part's new faces are drawn teal over the old ones with "this part 412 -> 655 faces", the face count, poles and the
+  look change on the card, and Enter keeps it (Keep Original no longer asks first: the card shows the cost). Each is
+  one Ctrl+Z step and one History entry, and so is every part try you switch to and every part redone in the
+  background when it finishes. Again on the Last line makes the part one step smaller (or bigger) again from the
+  result as it is now, with no end. A size not worked out yet is still redone in the background, without a preview.
+- **Detail Markers** (Ball + and Ball -) are placed by clicking your mesh instead of at the 3D cursor. Inside the
+  ball's ring a sample grid of quads at the size it asks for lies on the surface and follows the small ring (strength,
+  new: each ball has its own) and the big ring's edge (reach) live, with "quads here about 2.0x smaller, about +340
+  faces" on the card. Enter adds the ball; Esc adds nothing. F9 and scripts still put it at the 3D cursor.
+- **Hard Edges**: the eye button next to Hard Edge Angle (and Hard Edges in the Tools section's Hard Surface group)
+  shows in pink which edges Apply will mark sharp or hold, while you drag the angle. Enter keeps the angle; nothing on
+  the result moves. One Ctrl+Z step; Again opens it on the angle you kept.
+- **Fine-tune Tweak sliders, Mirror and Symmetrize** are each a History step that the search they start fills in, so
+  one Ctrl+Z goes back to the setting and the result before it together, and undoing no longer starts the search
+  again. A Detail Marker you add is a step the same way.
+- **Quad Size and Rows**: while the slider moves and for 1.5 s after, the HUD's bottom line says "faces 6,210 ->
+  4,880".
+- Part records in History are copied (a swap changes them in place), so Ctrl+Z also puts back which try each part card
+  shows.
+- Opening a tool on a big result no longer stalls Blender: the holds, edges and mean edge are read without a Python
+  step per face, your original's lookup and its camera pictures are worked out once per original instead of once per
+  tool, and Relax Toward Detail reads your original's bends a chunk at a time.
+- Dragging the ring back to where it started shows the exact result again; Enter used to wait forever there.
+- Smooth Corners puts back the corners of any face it would turn over. Start on a mesh with no faces says so.
+### Face loops
+- **Loop Flow shows face loops**: each strip of quads (walk across a quad to the one on its opposite side, and on) is
+  drawn as a line in its own colour through the quads it crosses, instead of the edge loops. A strip stops where it
+  meets a pole, so it shows one run of rows; poles are still dots.
+- **Face Loops** in Adjust, under Tidy Up. **Pick a Strip**: point at the result and the strip under the mouse lights
+  up; click to select it. The line under the buttons gives its faces, whether it closes, how much it turns and how
+  even its width is. While picking, drag the selected strip to move it sideways, or drag a pole dot to move the pole
+  along the surface; the quads round it follow. The header says what each drag does.
+- Tools for the selected strip, each one Ctrl+Z step: **Fix This** (picks the fix itself: straightens a wiggly strip,
+  else evens out an uneven one, or takes away a short dead end), **Slide** (move the mouse, click), **Straighten**,
+  **Even Width**, **Add Strip** (splits the whole strip down the middle; every face stays a quad) and **Remove Strip**
+  (joins its two sides; refused where a face next to it would stop being a quad, or where the strip winds back over
+  itself). Only the strip and up to three quads each side move, along the lines the quads already run on; folds over
+  60 degrees, borders and the mirror seam stay put, the result stays on your mesh, and a mirrored result gets the same
+  change on the other side.
+- **Face Loops share the History**: every Face Loops edit (strip tools, drags, Fix Every Strip, Ring Round This,
+  Redraw in Rows) is a step in the History list and on the same Ctrl+Z as Tidy Up and Look First, with the selected
+  strip coming back with it. There is no separate Face Loops undo counter any more.
+- **Fix Every Strip**: straightens every wiggly strip of the result and evens out the uneven ones in one step. Places
+  where the surface bends stay, and it keeps only as much of the change as costs at most 1 point of the camera check;
+  on the marble bust after Tidy Up, Loop Quality 29 -> 33 for 0.8 points.
+- **Ring Round This** builds the rings itself now, without the Flow Editor: click an eye, a mouth or a hole (its rim
+  is read off your mesh) or drag from its middle out to its edge, then move out to set how far the new faces reach
+  (drawn as two ovals) and click. The opening is filled with a small grid of quads, 2 to 4 closed rings go round it,
+  and one band joins them to the faces round it with matching edge counts: all quads, and the band's few poles (6 at
+  most) sit where the old border turns. Faces past the reach are never touched, so an eye no longer takes the nose.
+- **Redraw in Rows**: drag round an area of the result (or click a part, or select faces in Edit Mode on the result
+  first) and its quads are laid out again as long straight rows at the same size, tied to the faces round it with the
+  same edge count, all quads. The rows run along the surface's bends, the area's long side and any Flow Editor lines
+  over it; quads stay finer where they were finer. On the marble bust's face, poles inside the area 37% -> 8% of its
+  vertices and a quad's strip runs 20 quads between poles (was 2). It can leave a few folded faces where a lasso cuts
+  across the side of the head; the note under the buttons counts them, and Ctrl+Z undoes it. One step, one Undo; other
+  tools call `curiomesh.redraw_rows` or `faceloops.redraw_rows(context, face ids)`.
+
+### Auto Fix
+- **Auto Fix** (Tidiness row, on by default; Quick turns it off): after the search, each tidy tool finds the spots it
+  is made for and fixes them, in rounds that repeat while a round still makes something better. A fix is kept only
+  when its spots get better, no bad face is added, Tidiness, Loop Quality and poles are no worse, and the look stays
+  within Most Detail Loss (or Auto's own Detail test when that is off). Spots in the parts that changed the look most
+  are dropped first, then the strength is halved, until it fits or nothing is left to try.
+- Every kept pass is one step in History ("Auto Fix: Square Up") and one Ctrl+Z; **Undo Auto Fix** jumps back to
+  "Before Auto Fix" in one step. **Stop** (or Esc, or Ctrl+Z) keeps what it fixed so far.
+- Its run time is a new **Time Limits** entry (3 min on Normal, scaled by Longer and No Limit). When it runs out the
+  readout says so and offers **Keep going**, which carries on from the next pass.
+- The readout gives one line (spots, fixes, Tidiness, look change) with Show and Undo Auto Fix, and folds per-kind
+  lines underneath: what was fixed and what was left as it was, and why. Show frames each spot in turn.
+- A popover with seven ticks (Leftovers, Mirror seam, Poles, Messy patches, Hard edges, Rows, Quad shape) picks which
+  kinds it fixes.
+- **Fix every spot like this**: a small button beside each tool that finds its own spots (Tools popovers) runs that
+  tool on every spot in Work On, shown first in Look First, with Keep going.
+- Tools that find their own spots: Preview Tidy (faces facing in, two-edge corners, doublets, triangle pairs,
+  slivers), Seal the Middle, Cancel Pole Pair, Remove Dead End (new), Redraw in Rows on messy patches, True Up Edges,
+  Press Panels Flat, Hard Edges (picks the angle where the marks best match the creases of your original),
+  Straighten, Even Width, Even the Band, Open Up Poles, Square Up, Relax Toward Detail, Source Relax and Keep Lines
+  Relax.
+- No made-up limits: Fix Every Strip no longer stops after 3 rounds, at 0.75 of a change or at 1 point of the camera
+  check; it uses Keep going and Most Detail Loss like every tool. Preview Tidy's sliver steps and Cancel Pole Pair's
+  tries and reach are settings ("Higher can take longer").
+- Fitting the look on a mesh of many parts ends quickly: each step that drops the spots of the parts that changed
+  most must lower the look change, or the dropping ends, and it runs again only the spots still kept. On the crane
+  Remove Dead End's 1,975 spots took over 12 minutes without ending; it now ends in about 4 minutes and keeps 51.
+- Measured after Start (Auto Fix with every group on, Normal time limit with Keep going each time it ran out):
+
+  | Model | Tidiness | Loop Quality | Poles | Bad faces | Look change | Passes kept | Time |
+  |---|---|---|---|---|---|---|---|
+  | Marble bust | 38.8 -> 39.0 | 15.3 -> 15.6 | 1,100 -> 1,100 | 0 -> 0 | -0.02% | 6 of 12 | 35 s |
+  | Lion head | 36.8 -> 41.4 | 14.7 -> 16.9 | 3,330 -> 3,067 | 0 -> 0 | +0.17% | 43 of 79 | 695 s |
+  | Road barrier | 34.1 -> 40.2 | 6.4 -> 10.1 | 348 -> 309 | 0 -> 0 | +0.24% | 5 of 34 | 52 s |
+  | Overhead crane (26k faces) | 46.7 -> 47.2 | 30.2 -> 29.2 | 10,397 -> 10,219 | 0 -> 0 | +0.80% | 36 of 41 | 1,475 s |
+
+### Agent tools (GitHub build only)
+- **One command layer for agents.** Every panel action is a command with a plain-words help line, an argument
+  schema and a coded error (17 codes, such as `BUSY`, `REFUSED`, `NOT_FOUND`, each with a hint). `commands.list`
+  gives them all; a wrong name answers with the closest names, a wrong value with the allowed values or range.
+- Three ways in: a folder **mailbox** that a live Blender reads while **Agent** is on (Computer section), the
+  headless runner `cm_do.py` (a list of commands, or `--serve` a folder), and an MCP server (`curiomesh_mcp.py`,
+  standard library only) that starts its own headless Blender or talks to an open one.
+- Commands cover a whole run (Use, Auto, job status and wait, sizes, Tidy Up and Keep going, Apply, LOD, bake,
+  export, History jump, undo and redo, every panel setting), the Tidy Tools, Face Loops, the Flow Editor, Auto Fix,
+  the issue list and the parts table. Each command calls the same code as its button. A kept edit is one History
+  step and one Ctrl+Z; a pass that would make things worse or go past Most Detail Loss answers `REFUSED` and
+  changes nothing.
+- **Send to Agent** and **Bring Back** (part card): marked parts go to a folder as OBJ files with their border,
+  source and neighbours and a `parts.json`; parts made outside come back checked (border points unmoved, no new
+  holes, shape kept, camera check within Most Detail Loss), are shown in Look First, and are kept as one
+  "From Outside" History step. A part that fails is refused with the reason; the others still come in.
+  **Save for a Report** zips the marked parts with the settings and a `report.md`.
+- No made-up limits in the agent paths: Keep going stops when a pass gains nothing or its time budget (a setting)
+  runs out, and says which. The fix skill no longer stops after 4 rounds, nor the retopo skill after three retries.
+- Docs: `docs/AGENTS.md`, `docs/PARTS_EXCHANGE.md` and the `curiomesh-agent` skill.
+- Fix (all builds): Ctrl+Z back to "New result" showed the mesh from before the parts were found, not the one
+  on screen. That step now keeps the result with its parts.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface
@@ -606,7 +878,7 @@
   the mesh or a copy.
 - **Border Ring.** Jagged region borders get a ring of quads along the seam and
   an untangling pass. Bent or caved-in seam quads dropped from about 5% to 0.5%
-  on a whale region and from about 31% to 2.8% on a noisy scan;
+  on a large organic scan and from about 31% to 2.8% on a noisy scan;
   region remeshing is about 5x faster.
 - **Fill Loop** fills a closed hole with an all-quad patch that follows the
   surrounding curve. **Fit to Surface** relaxes and snaps vertices onto the

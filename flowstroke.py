@@ -18,11 +18,13 @@ a constraint. Plain NumPy.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 
 from . import guides
 from .triadq import parts as P
-from .triadq import patch
+from .triadq import patch, rowfill
 from .triadq import segment as S
 
 KINDS = ("FLOW", "RING", "EDGE")
@@ -278,7 +280,7 @@ def areas(co, faces, strokes, centres=None, adjacency=None) -> list[tuple[np.nda
     for s in strokes:
         line = np.asarray(s["points"], dtype=np.float64)
         width = edge_near(co, faces, line, centres)
-        mask = guides._to_line(centres, line) < REACH[s["kind"]] * width
+        mask = guides._to_line(centres, line) < s.get("reach", REACH[s["kind"]]) * width
         if s["kind"] == "RING":
             mask |= _inside_ring(centres, line)
         masks.append(mask)
@@ -326,9 +328,10 @@ def piece(co, faces, ids, project=None):
     return points, [tuple(order[v] for v in t) for t in tris]
 
 
-def redo_steps(co, faces, ids, strokes, project=None, target: int | None = None):
+def redo_steps(co, faces, ids, strokes, project=None, target: int | None = None, mesher=None, bridge=None):
     """Generator, in the field mesher's slices: the faces `ids` of a result remade to follow `strokes` on the same
-    seams. Returns (points, faces). Raises ValueError where the field mesher can't."""
+    seams. Returns (points, faces). Raises ValueError where the field mesher can't. `mesher`: what lays the quads,
+    called like `fieldmesh.field_quads`; `bridge`: what ties them to the seams, called like `segment._bridge`."""
     seams = S.seam_loops(co, faces, ids)
     points, tris = piece(co, faces, ids, project)
     target = len(ids) if target is None else target
@@ -338,13 +341,13 @@ def redo_steps(co, faces, ids, strokes, project=None, target: int | None = None)
     marks = (lambda pts, t: on_lines(pts, t, lines)) if lines else None
     settle = (lambda c, f, pinned: lay_edges(c, f, pinned, edges, project)) if edges and project is not None else None
     try:
-        return (yield from S.field_with_rings_steps(points, tris, rings, seams, target, project, marks, settle))
+        return (yield from S.field_with_rings_steps(points, tris, rings, seams, target, project, marks, settle, mesher=mesher, bridge=bridge))
     except ValueError:
         if not rings:
             raise
     lines = lines + rings  # a loop that can't be a true one still steers the rows
     marks = lambda pts, t: on_lines(pts, t, lines)  # noqa: E731
-    return (yield from S.field_on_seams_steps(points, tris, seams, target, project, marks, settle))
+    return (yield from S.field_on_seams_steps(points, tris, seams, target, project, marks, settle, mesher, bridge))
 
 
 def splice(co, faces, mat, builds: list[tuple[np.ndarray, tuple]]):
@@ -360,4 +363,43 @@ def splice(co, faces, mat, builds: list[tuple[np.ndarray, tuple]]):
     return co2, faces2, mat2, piece2 > 0
 
 
-__all__ = ["KINDS", "areas", "ellipse", "fit_ring", "recognise", "record", "redo_steps", "splice", "template", "tidy"]
+def _mesh_border(faces, count: int) -> np.ndarray:
+    """Per point: on an open edge of the mesh."""
+    uses: dict = {}
+    for f in faces:
+        for k in range(len(f)):
+            e = (min(f[k - 1], f[k]), max(f[k - 1], f[k]))
+            uses[e] = uses.get(e, 0) + 1
+    out = np.zeros(count, dtype=bool)
+    out[[v for e, n in uses.items() if n == 1 for v in e]] = True
+    return out
+
+
+def rows_steps(co, faces, mat, ids, strokes=(), project=None, across=None):
+    """Generator: Redraw in Rows: the faces `ids` of a result (tidied, see `rowfill.tidy_area`) remade as rows of quads at their
+    own size (`rowfill.grid_quads`), tied to the faces round them (`rowfill.band`) after their border is eased along
+    itself (`rowfill.ease_seam`), steered by `strokes` and `across` (the view's sideways direction). Returns (co, faces, mat, new face mask, the old faces redone,
+    folded new faces).
+    Raises ValueError where it can't."""
+    marked = np.zeros(len(faces), dtype=bool)
+    marked[np.asarray(ids, dtype=np.int64)] = True
+    area = np.flatnonzero(rowfill.tidy_area(faces, marked))
+    if len(area) < 8:
+        raise ValueError("the area is too small: rows need at least a few quads each way")
+    eased = rowfill.ease_seam(co, faces, area, project)
+    yield
+    made = yield from redo_steps(eased, faces, area, list(strokes), project, mesher=functools.partial(rowfill.grid_quads, across=across), bridge=rowfill.band)
+    co2, faces2, mat2, new = splice(eased, faces, mat, [(area, made)])
+    free = np.zeros(len(co2), dtype=bool)
+    free[np.unique([v for f, n in zip(faces2, new) if n for v in f])] = True
+    free[np.unique([v for f, n in zip(faces2, new) if not n for v in f])] = False  # the seam stays: the faces round keep their shape
+    yield
+    co2 = rowfill.untangle(co2, faces2, free, project)
+    yield
+    seam = np.zeros(len(co2), dtype=bool)  # still folded: the seam's points may move too, never so a face round turns bad
+    seam[np.unique([v for f, n in zip(faces2, new) if n for v in f])] = True
+    co2 = rowfill.untangle(co2, faces2, seam & ~_mesh_border(faces2, len(co2)), project)
+    return co2, faces2, mat2, new, area, int((rowfill.folded(co2, faces2) & new).sum())
+
+
+__all__ = ["KINDS", "areas", "ellipse", "fit_ring", "recognise", "record", "redo_steps", "rows_steps", "splice", "template", "tidy"]

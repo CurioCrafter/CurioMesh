@@ -11,6 +11,7 @@ GOOD_CHANGE = 1.2  # view change up to this many times the Detail asked is still
 CHECK_CHANGE = 2.0  # past this it is a real problem
 CHECK_PER_1000 = 5.0  # serious bad faces per 1,000 faces: below is "check", above is a real problem
 TIDY_BANDS = ((30.0, "rough"), (50.0, "machine-made"), (70.0, "like a quick hand retopo"), (90.0, "clean"))
+HEAVIER = "This mesh is already light: the result has more faces than the original. Keep the original or lower Detail."
 TIDY_TOP = "hand-made rows"
 
 
@@ -25,18 +26,19 @@ def serious_count(totals: dict | None) -> int:
     return int(sum(int((totals or {}).get(k, 0)) for k in SERIOUS))
 
 
-def verdict(use: str, faces: int, loss: float, asked: float | None, serious: int, spots: int) -> tuple[str, str]:
+def verdict(use: str, faces: int, loss: float, asked: float | None, serious: int, spots: int, source: int | None = None) -> tuple[str, str]:
     """(level, title): level is GOOD, CHECK or BAD. asked is the Detail asked for (None when a face count was asked);
     serious the serious bad faces, spots the places they sit in."""
     ratio = loss / asked if asked else 0.0
     rate = 1000.0 * serious / max(faces, 1)
-    where = f"{spots} spot{'s' if spots != 1 else ''}"
     if rate > CHECK_PER_1000:
-        return "BAD", f"{where} with bad faces left"
+        return "BAD", f"{spots} spots with bad faces left" if spots != 1 else "1 spot with bad faces left"
     if ratio > CHECK_CHANGE:
         return "BAD", "Changed far more than asked"
+    if source and faces > source:
+        return "CHECK", HEAVIER
     if serious:
-        return "CHECK", f"Check {where}"
+        return "CHECK", f"Check {spots} spots" if spots != 1 else "Check 1 spot"
     if ratio > GOOD_CHANGE:
         return "CHECK", "Changed a little more than asked"
     return "GOOD", f"Good for {use.lower()}" if use else "Good"

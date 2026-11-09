@@ -33,6 +33,8 @@ from .triadq import patch, tasks
 from .triadq import segment as S
 from .triadq.flatquad import flat_quad_remesh_steps
 from .triadq.types import MeshData
+from . import translations
+from .translations import tip, tr
 
 ATTRIBUTE = "curiomesh_segment"
 SAVED = "curiomesh_segments"
@@ -179,6 +181,9 @@ def install(base: dict, src_labels: np.ndarray, out: dict, saved=None) -> None:
     view.refresh_list()
     _g().state["res"] = out
     _g().state["draw_key"] = None
+    from . import history
+
+    history.refresh(bpy.context)  # the step on screen keeps the result with its parts, so Ctrl+Z comes back to this mesh
     overlay.tag_redraw()
 
 
@@ -736,7 +741,9 @@ class GoalJob(view.PartJob):
             if "edge" not in record:
                 area_of = area_of if area_of is not None else S.face_frames(co, faces)[1]
                 record["edge"] = float(np.sqrt(area_of[ids].sum() / max(len(ids), 1)))
-            edge = record["edge"] * 2.5 ** (1.0 - 2.0 * record["goal_detail"]) * (LOW_POLY_EDGE if record["goal"] == "LOWPOLY" else 1.0)
+            # Detail has no end, but quads never get smaller than an eighth of the part's own (64x its faces), so a
+            # long run of Smaller Quads can't build billions of faces and run out of memory; raise it if a part needs finer
+            edge = record["edge"] * max(2.5 ** (1.0 - 2.0 * record["goal_detail"]), 0.125) * (LOW_POLY_EDGE if record["goal"] == "LOWPOLY" else 1.0)
             made = yield from self._build(record["goal"], record, ids, edge, topology, project)
             if self._stopped:
                 return
@@ -788,6 +795,11 @@ class GoalJob(view.PartJob):
                 "build": (made[0], made[1], np.asarray([int(m) if str(m).lstrip("-").isdigit() else 0 for m in made[2]], dtype=np.int32)),
             }
         self.progress = (len(self.pieces), len(self.pieces))
+        if self.hold:  # Look First draws the new faces itself and the check follows when they are kept
+            if self.note and not self.warnings:
+                self.warnings = [self.note]
+            self.fraction = 1.0
+            return
         self.stage = "Looking at the whole object"
         self.fraction = 0.85
         if self.new_tries:
@@ -802,12 +814,19 @@ class GoalJob(view.PartJob):
         self.fraction = 1.0
 
 
-def start_goal(context, pieces) -> bool:
+def start_goal(context, pieces, name: str = "Redo Part", hold: bool = False) -> bool:
+    """hold: only make the tries (Look First shows them before they are kept); the result and Ctrl+Z are untouched."""
+    from . import history
+
     guided = _g()
     if guided.state["auto_base"] is None or not pieces:
         return False
+    if not hold:
+        history.before(context)  # the result before the redo is the step Ctrl+Z goes back to
     guided.stop_work()
     runner = GoalJob(pieces)
+    runner.hold = hold
+    runner.step_name = name  # the History entry when it finishes
     guided.state["work"] = {"key": guided.state["auto_base"].get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     guided.state["message"] = runner.status()
     if not bpy.app.timers.is_registered(guided._auto_slice):
@@ -999,6 +1018,15 @@ def halve(segment: int) -> str:
     return split(segment, side, side[mapping])
 
 
+def rename_part(piece: int, name: str) -> bool:
+    """Give a part a name of its own. False (nothing changed) for an empty name."""
+    if not name.strip():
+        return False
+    view.seg["parts"][piece]["name"] = name.strip()
+    save()
+    return True
+
+
 def set_locked(pieces, on: bool) -> None:
     for p in pieces:
         view.seg["parts"][p]["locked"] = on
@@ -1052,7 +1080,7 @@ class _SegmentOp:
 
     def _done(self, problem: str):
         if problem:
-            self.report({"WARNING"}, problem)
+            self.report({"WARNING"}, tr(problem))
             _g().state["message"] = problem
             return {"CANCELLED"}
         return {"FINISHED"}
@@ -1132,9 +1160,7 @@ class CURIOMESH_OT_seg_rename(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
-        if self.name.strip():
-            view.seg["parts"][next(iter(view.seg["sel"]))]["name"] = self.name.strip()
-            save()
+        rename_part(next(iter(view.seg["sel"])), self.name)
         return {"FINISHED"}
 
 
@@ -1207,7 +1233,7 @@ class CURIOMESH_OT_seg_split(bpy.types.Operator):
         self.stroke, self.object, self.target, self.handle = [], None, None, None
         self.handle = bpy.types.SpaceView3D.draw_handler_add(_draw_stroke, (self,), "WINDOW", "POST_PIXEL")
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set("Split: press on the segment and draw across it, release to cut. Esc cancels")
+        context.workspace.status_text_set(tr("Split: press on the segment and draw across it, release to cut. Esc cancels"))
         return {"RUNNING_MODAL"}
 
     def _end(self, context):
@@ -1249,7 +1275,7 @@ class CURIOMESH_OT_seg_split(bpy.types.Operator):
             if len(self.stroke) >= 2:
                 problem = split(self.target, S.side_of_line(_screen(context, region_, matrix, src_centres), self.stroke), S.side_of_line(_screen(context, region_, matrix, res_centres), self.stroke))
             if problem:
-                self.report({"WARNING"}, problem)
+                self.report({"WARNING"}, tr(problem))
             self._end(context)
             return {"FINISHED"} if not problem else {"CANCELLED"}
         return {"PASS_THROUGH"}
@@ -1261,7 +1287,7 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
     bl_description = "Paint a new part on the mesh with the left mouse button. [ and ] change the brush; Enter ends, Esc cancels"
     bl_options = {"INTERNAL", "UNDO"}
 
-    mode: bpy.props.EnumProperty(items=[
+    mode: bpy.props.EnumProperty(description="New paints a new part. Grow and Shrink move the border of the selected part", items=[
         ("NEW", "New", "Paint a new segment"),
         ("GROW", "Grow", "Brush over the border of the selected segment to move it outwards. Ctrl paints the other way"),
         ("SHRINK", "Shrink", "Brush over the selected segment to give its faces to the neighbours beside them. Ctrl paints the other way"),
@@ -1270,10 +1296,10 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.mode == "GROW":
-            return "Grow the selected segment: brush over its border to move it outwards. Ctrl shrinks. [ ] brush size, Enter or right-click ends, Esc cancels"
+            return tip("Grow the selected segment: brush over its border to move it outwards. Ctrl shrinks. [ ] brush size, Enter or right-click ends, Esc cancels")
         if properties.mode == "SHRINK":
-            return "Shrink the selected segment: brush over it to give its faces to the neighbours. Ctrl grows. [ ] brush size, Enter or right-click ends, Esc cancels"
-        return cls.bl_description
+            return tip("Shrink the selected segment: brush over it to give its faces to the neighbours. Ctrl grows. [ ] brush size, Enter or right-click ends, Esc cancels")
+        return tip(cls.bl_description)
 
     @classmethod
     def poll(cls, context):
@@ -1283,7 +1309,7 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
         self.target = None
         if self.mode != "NEW":
             if len(view.seg["sel"]) != 1:
-                self.report({"WARNING"}, "Select one segment first")
+                self.report({"WARNING"}, tr("Select one segment first"))
                 return {"CANCELLED"}
             self.target = next(iter(view.seg["sel"]))
             self.src_old = view.seg["src"]
@@ -1299,7 +1325,7 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
         self.shrinking = self.mode == "SHRINK"
         context.window_manager.modal_handler_add(self)
         what = {"NEW": "Paint a segment", "GROW": "Grow the segment (Ctrl: shrink)", "SHRINK": "Shrink the segment (Ctrl: grow)"}[self.mode]
-        context.workspace.status_text_set(f"{what}: left mouse paints   [ ] brush size   Enter or right-click ends   Esc cancels")
+        context.workspace.status_text_set(tr(f"{what}: left mouse paints   [ ] brush size   Enter or right-click ends   Esc cancels"))
         return {"RUNNING_MODAL"}
 
     def _dab(self, context, region_, event):
@@ -1359,7 +1385,7 @@ class CURIOMESH_OT_seg_paint(bpy.types.Operator):
                     target = next(iter(view.seg["sel"]), self.target)  # grown first: the numbers may have moved
                     problem = shrink(target, self.src_take, self.res_take)
             if problem:
-                self.report({"WARNING"}, problem)
+                self.report({"WARNING"}, tr(problem))
             return {"FINISHED"}
         if event.type in {"LEFT_BRACKET", "RIGHT_BRACKET"} and event.value == "PRESS":
             self.size *= 0.8 if event.type == "LEFT_BRACKET" else 1.25
@@ -1407,28 +1433,36 @@ class CURIOMESH_OT_seg_goal(bpy.types.Operator):
 
     def execute(self, context):
         gs = context.scene.curiomesh_guided
-        todo = []
-        changed = False
-        detail = round(gs.seg_goal_detail, 3)
-        for p in sorted(view.seg["sel"]):
-            record = view.seg["parts"][p]
-            wanted = {"goal": gs.seg_goal, "goal_detail": gs.seg_goal_detail, "choice": gs.seg_method}
-            changed |= any(record.get(k) != v for k, v in wanted.items())
-            record.update(wanted)
-            tried = next((i for i, t in enumerate(record["tries"]) if t["method"] == gs.seg_goal and t.get("detail") == detail and t.get("choice") == _choice_of(gs.seg_goal, gs.seg_method)), None)
-            if tried is None:
-                todo.append(p)
-            elif record["cur"] != tried:
-                view.use_try(context, p, tried)
-        if changed:  # only a real change is written on your object
-            save()
-        # A whole loose piece at the search's own size can keep what the search measured and only change method.
-        keeps_size = abs(gs.seg_goal_detail - 0.5) < 1e-3 and gs.seg_goal == "REDUCE" and all(view.seg["parts"][p].get("whole") for p in todo)
-        if todo and keeps_size and gs.seg_method != "AUTO":
-            view.start_redo(context, todo, gs.seg_method)
-        elif todo:
-            start_goal(context, todo)
+        redo_parts(context, sorted(view.seg["sel"]), gs.seg_goal, gs.seg_goal_detail, gs.seg_method)
         return {"FINISHED"}
+
+
+def redo_parts(context, pieces, goal: str, goal_detail: float, method: str) -> tuple[list, list]:
+    """Redo for a Use, Detail and Method (what the Redo button does). A part that already has a try
+    made this way just switches to it. Returns (parts switched to a try now, parts a background redo was started for)."""
+    todo, switched = [], []
+    changed = False
+    detail = round(goal_detail, 3)
+    for p in pieces:
+        record = view.seg["parts"][p]
+        wanted = {"goal": goal, "goal_detail": goal_detail, "choice": method}
+        changed |= any(record.get(k) != v for k, v in wanted.items())
+        record.update(wanted)
+        tried = next((i for i, t in enumerate(record["tries"]) if t["method"] == goal and t.get("detail") == detail and t.get("choice") == _choice_of(goal, method)), None)
+        if tried is None:
+            todo.append(p)
+        elif record["cur"] != tried:
+            view.use_try(context, p, tried)
+            switched.append(p)
+    if changed:  # only a real change is written on your object
+        save()
+    # A whole loose piece at the search's own size can keep what the search measured and only change method.
+    keeps_size = abs(goal_detail - 0.5) < 1e-3 and goal == "REDUCE" and all(view.seg["parts"][p].get("whole") for p in todo)
+    if todo and keeps_size and method != "AUTO":
+        view.start_redo(context, todo, method)
+    elif todo:
+        start_goal(context, todo)
+    return switched, todo
 
 
 def _choice_of(goal: str, method: str):
@@ -1493,7 +1527,7 @@ def draw_edit(layout) -> None:
     row.operator("curiomesh.seg_halve", icon="MOD_EDGESPLIT")
     selected = view.seg["sel"]
     on = bool(selected) and all(view.seg["parts"][p].get("locked") for p in selected if p < len(view.seg["parts"]))
-    row.operator("curiomesh.seg_lock", text="Locked" if on else "Lock", icon="LOCKED" if on else "UNLOCKED", depress=on)
+    row.operator("curiomesh.seg_lock", text=tr("Locked" if on else "Lock"), icon="LOCKED" if on else "UNLOCKED", depress=on)
     row = col.row(align=True)
     row.operator("curiomesh.seg_paint", text="Grow", icon="ADD").mode = "GROW"
     row.operator("curiomesh.seg_paint", text="Shrink", icon="REMOVE").mode = "SHRINK"
@@ -1503,12 +1537,103 @@ def draw_edit(layout) -> None:
     col.operator("curiomesh.seg_undo", icon="LOOP_BACK")
 
 
+def _fold(layout, key: str, text: str):
+    """A fold-out section, closed until opened (Blender 4.1+ keeps the state itself). Returns its body."""
+    try:
+        header, body = layout.panel(f"cm_seg_{key}", default_closed=True)
+    except Exception:  # a layout that cannot fold: show the section open
+        layout.label(text=tr(text))
+        return layout.column()
+    header.label(text=tr(text))
+    return body
+
+
+def try_name(t: dict) -> str:
+    """A try in words: its Use, and its method when the Use has one."""
+    name = view.method_name(t["method"])
+    choice = t.get("choice")
+    return f"{name} ({view.method_name(choice)})" if choice and choice != "AUTO" else name
+
+
+def tried_order(record: dict) -> list[int]:
+    """Indexes of a part's tries to list: tidiest first (tries without a score last), duplicates left out."""
+    shown = [i for i, t in enumerate(record["tries"]) if t.get("same_as") is None]
+    return sorted(shown, key=lambda i: -(record["tries"][i].get("topology") if record["tries"][i].get("topology") is not None else -1.0))
+
+
+def draw_tried(layout, record: dict) -> None:
+    """Every try of a part with its numbers, tidiest first. Click one to show it on the mesh."""
+    tries = record["tries"]
+    if len(tries) < 2:
+        return
+    order = tried_order(record)
+    layout.label(text="Tried (click to show it):")
+    col = layout.column(align=True)
+    best = next((i for i in order if tries[i].get("topology") is not None), None)
+    for i in order:
+        t = tries[i]
+        change = "look not measured" if t["change"] is None else view.alike(t["change"]).replace(" the same", " alike")
+        score = "" if t.get("topology") is None else f", tidy {t['topology']:.0f}"
+        col.operator("curiomesh.seg_try", text=tr(f"{try_name(t)}: {t['after']:,} faces, {change}{score}"), icon="SOLO_ON" if i == best else "BLANK1", depress=i == record["cur"]).index = i
+    same = [try_name(t) for t in tries if t.get("same_as") is not None]
+    if same:
+        sub = layout.row()
+        sub.active = False
+        sub.label(text=tr(f"Same as another: {', '.join(same)}"))
+    was = record.get("was")
+    if was is not None and was < len(tries):
+        row = layout.row()  # always drawn once there is a "how it was": greyed out when already back, so nothing below jumps
+        row.enabled = was != record["cur"]
+        row.operator("curiomesh.seg_try", text="Back to How It Was", icon="LOOP_BACK").index = was
+
+
+def draw_try_all(layout) -> None:
+    s = view.seg.get("tryall")
+    if s is None:
+        layout.operator("curiomesh.seg_try_all", text="Try Every Method", icon="SORTTIME")
+    else:
+        layout.label(text=tr(f"Way {min(s['done'], s['total'])} of {s['total']}: {s['label']}"), icon="TIME")
+    draw_work_slot(layout, s)
+
+
+def draw_work_slot(layout, tryall=None) -> None:
+    """Always exactly three rows under Redo / Try Every Method: progress, what it is doing and Stop while working,
+    the last Try Every Method note (or blank rows) when idle. The tried list and buttons below never jump."""
+    import textwrap
+
+    busy = _g().progress_info()
+    if busy is not None:
+        fraction = min(max(float(busy[0]), 0.0), 1.0)
+        if hasattr(layout, "progress"):
+            layout.progress(factor=fraction, type="BAR", text=tr(f"{fraction * 100:.0f}%"))
+        else:
+            layout.label(text=tr(f"{fraction * 100:.0f}%"))
+        layout.label(text=textwrap.shorten(tr(str(busy[1])), 40, placeholder="..."))
+    else:
+        lines = translations.wrap(tr(str(view.seg.get("tryall_note") or "")) if tryall is None else "", 40)[:2]
+        for i in range(2):
+            sub = layout.row()
+            sub.active = False
+            sub.label(text=tr(lines[i] if i < len(lines) else ""))
+    if tryall is not None:
+        layout.operator("curiomesh.seg_try_all", text="Stop", icon="CANCEL").stop = True
+    elif busy is not None:
+        layout.operator("curiomesh.guided_stop_work", icon="CANCEL")
+    else:
+        layout.label(text="")
+
+
 def draw_selected(layout, gs) -> None:
-    """The selected part, here and in the panel that opens at the click: numbers, what to change, the tries, and on to the next."""
+    """The selected part, here and in the sidebar card: numbers, what to change, the tries, and on to the next."""
     guided = _g()
+    spots_mode = bool(view.seg.get("reviewing")) and view.seg.get("review_mode") == "SPOTS"
     row = layout.row(align=True)
-    row.operator("curiomesh.seg_walk", text="Previous", icon="TRIA_LEFT").step = -1
-    row.operator("curiomesh.seg_walk", text="Next", icon="TRIA_RIGHT").step = 1
+    if spots_mode:
+        row.operator("curiomesh.issue_step", text="Previous", icon="TRIA_LEFT").step = -1
+        row.operator("curiomesh.issue_step", text="Next", icon="TRIA_RIGHT").step = 1
+    else:
+        row.operator("curiomesh.seg_walk", text="Previous", icon="TRIA_LEFT").step = -1
+        row.operator("curiomesh.seg_walk", text="Next", icon="TRIA_RIGHT").step = 1
     row.operator("curiomesh.seg_frame", text="", icon="VIEWZOOM")
     selected = sorted(view.seg["sel"])
     if not selected:
@@ -1517,50 +1642,89 @@ def draw_selected(layout, gs) -> None:
     box = layout.box()
     if len(selected) == 1:
         for i, line in enumerate(view.info_lines(selected[0])):
-            box.label(text=line, icon="OBJECT_DATA" if i == 0 else "BLANK1")
+            box.label(text=tr(line), icon="OBJECT_DATA" if i == 0 else "BLANK1")
         words = guided.state["auto_base"]["job"].explain_piece(selected[0])
         if words:
             overlay.wrap_label(box, words, icon="INFO", width=32, limit=6)
     else:
         parts = [view.seg["parts"][p] for p in selected]
         known = [r["change"] for r in parts if r["change"] is not None]
-        box.label(text=f"{len(selected)} parts, {sum(r['after'] for r in parts):,} faces now", icon="OBJECT_DATA")
+        box.label(text=tr(f"{len(selected)} parts, {sum(r['after'] for r in parts):,} faces now"), icon="OBJECT_DATA")
         if known:
-            box.label(text=f"Least alike looks {view.alike(max(known))}", icon="BLANK1")
+            box.label(text=tr(f"Least alike looks {view.alike(max(known))}"), icon="BLANK1")
     if view.mirrored():
         overlay.wrap_label(box, "Redo is off on this result (Mirror, Even Rows, a very large piece or an imported job)", icon="INFO", width=32, limit=3)
         return
-    col = box.column(align=True)
-    col.prop(gs, "seg_goal", text="Use")
-    method = col.row(align=True)
-    method.enabled = gs.seg_goal in {"REDUCE", "LOWPOLY"}
-    method.prop(gs, "seg_method", text="Method")
-    col.prop(gs, "seg_goal_detail", text="Detail", slider=True)
-    if gs.multires_on:
-        on = all(view.seg["parts"][p].get("multires", True) for p in view.seg["sel"])
-        col.operator("curiomesh.seg_multires", text="Multires Detail: follows your mesh" if on else "Multires Detail: off here", icon="MOD_MULTIRES", depress=on)
-    row = box.row(align=True)
-    row.scale_y = 1.3
-    row.operator("curiomesh.seg_goal", text=f"Redo {len(selected)}" if len(selected) > 1 else "Redo", icon="FILE_REFRESH")
     row = box.row(align=True)
     row.operator("curiomesh.part_size", text="Bigger Quads", icon="REMOVE").bigger = True
     row.operator("curiomesh.part_size", text="Smaller Quads", icon="ADD").bigger = False
-    if guided.progress_info() is not None:
-        guided.draw_progress(box, *guided.progress_info())
-        box.operator("curiomesh.guided_stop_work", icon="CANCEL")
+    row = box.row(align=True)
+    row.scale_y = 1.3
+    row.operator("curiomesh.seg_goal", text=tr(f"Redo {len(selected)}" if len(selected) > 1 else "Redo"), icon="FILE_REFRESH")
     if len(selected) == 1:
-        record = view.seg["parts"][selected[0]]
-        if len(record["tries"]) > 1:
-            box.label(text="Tried (click to go back):")
-            col = box.column(align=True)
-            for i, t in enumerate(record["tries"]):
-                change = "?" if t["change"] is None else view.alike(t["change"]).replace(" the same", " alike")
-                score = "" if t.get("topology") is None else f", tidy {t['topology']:.0f}"
-                col.operator("curiomesh.seg_try", text=f"{view.method_name(t['method'])}: {t['after']:,} faces, {change}{score}", depress=i == record["cur"]).index = i
+        draw_try_all(box)
+    else:
+        draw_work_slot(box)
+    if len(selected) == 1:
+        draw_tried(box, view.seg["parts"][selected[0]])
+    body = _fold(layout, "more", "More redo options")
+    if body is not None:
+        col = body.column(align=True)
+        col.prop(gs, "seg_goal", text="Use")
+        method = col.row(align=True)
+        method.enabled = gs.seg_goal in {"REDUCE", "LOWPOLY"}
+        method.prop(gs, "seg_method", text="Method")
+        col.prop(gs, "seg_goal_detail", text="Detail", slider=True)
+        if gs.multires_on:
+            on = all(view.seg["parts"][p].get("multires", True) for p in view.seg["sel"])
+            col.operator("curiomesh.seg_multires", text=tr("Multires Detail: follows your mesh" if on else "Multires Detail: off here"), icon="MOD_MULTIRES", depress=on)
+    body = _fold(layout, "edit", "Edit this part")
+    if body is not None:
+        draw_edit(body)
+    body = _fold(layout, "original", "Keep original")
+    if body is not None:
+        body.operator("curiomesh.issue_keep_original", text="Keep Original Here", icon="LOOP_BACK").marked = True
+        body.operator("curiomesh.issue_put_back", text="Put Reduced Back", icon="LOOP_FORWARDS").part = -1
+
+
+def draw_card(layout, context) -> None:
+    """The pinned card of Review Parts and Fix Bad Spots: stays open while you click around the mesh."""
+    gs = context.scene.curiomesh_guided
+    reviewing = bool(view.seg.get("reviewing"))
+    mode = view.seg.get("review_mode", "PARTS")
+    row = layout.row()
+    row.scale_y = 1.2
+    op = row.operator("curiomesh.seg_review", text=tr("Done (Esc)" if reviewing else "Fix Bad Spots"), icon="CHECKMARK" if reviewing else "RESTRICT_SELECT_OFF", depress=reviewing)
+    op.mode = mode if reviewing else "SPOTS"
+    if reviewing and mode == "SPOTS":
+        view.issue_panel.marked_card(layout)
+    draw_selected(layout, gs)
+
+
+class CURIOMESH_PT_seg_card(bpy.types.Panel):
+    """The pinned sidebar card that replaces the popup (which closed as soon as the mouse moved). The panel module
+    registers it with the other sidebar panels, so it follows the sidebar tab and comes after its parent."""
+
+    bl_label = "Review Parts"
+    bl_idname = "CURIOMESH_PT_seg_card"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CurioMesh"
+    bl_parent_id = "CURIOMESH_PT_guided"
+
+    @classmethod
+    def poll(cls, context):
+        return view.ready() and (bool(view.seg.get("reviewing")) or bool(view.seg["sel"]))
+
+    def draw(self, context):
+        draw_card(self.layout, context)
+
+
+PANELS = (CURIOMESH_PT_seg_card,)  # for panel.MAIN_PANELS, next to the Fix panel
 
 
 class CURIOMESH_PT_seg_review(bpy.types.Panel):
-    """Opens at the click. Registered in the header region, which Blender does not draw panels in by itself."""
+    """The popover of the "..." button. Registered in the header region, which Blender does not draw panels in by itself."""
 
     bl_label = "Segment"
     bl_idname = "CURIOMESH_PT_seg_review"
@@ -1600,36 +1764,276 @@ def walk(context, step: int) -> None:
     overlay.tag_redraw()
 
 
+# --------------------------------------------------------------------------- Try Every Method
+
+TRY_GOALS = ("LOWPOLY", "ANIMATION", "SUBD", "TRIS", "KEEP")  # after Reduce with every method; each is one way
+SAME_BY = 1e-6  # two tries with these faces and numbers are the same result
+
+
+def _has_try(record: dict, goal: str, detail: float, method: str) -> bool:
+    detail, choice = round(detail, 3), _choice_of(goal, method)
+    for t in record["tries"]:
+        if t["method"] == goal and t.get("detail") == detail and t.get("choice") == choice:
+            return True
+        if goal == "REDUCE" and t["method"] == method and t.get("detail") is None and abs(detail - 0.5) < 1e-3:  # the search's own size
+            return True
+    return False
+
+
+def try_queue(record: dict) -> list[tuple[str, str]]:
+    """(Use, method) pairs still to try on a part: Reduce with every method there is, then the other Uses."""
+    ways = [("REDUCE", item[0]) for item in view.METHOD_ITEMS] + [(goal, "AUTO") for goal in TRY_GOALS]
+    return [(g, m) for g, m in ways if not _has_try(record, g, record["goal_detail"], m)]
+
+
+def _way_name(goal: str, method: str) -> str:
+    return GOAL_NAMES.get(goal, goal) + (f", {view.method_name(method)}" if goal == "REDUCE" else "")
+
+
+def _launch(context, p: int, goal: str, method: str) -> bool:
+    """Start one background job for one way. Its result is kept as a try; the history step comes once at the end."""
+    record = view.seg["parts"][p]
+    record.update(goal=goal, choice=method)
+    keeps_size = goal == "REDUCE" and method != "AUTO" and record.get("whole") and abs(record["goal_detail"] - 0.5) < 1e-3
+    started = view.start_redo(context, [p], method) if keeps_size else start_goal(context, [p], "Try Every Method")
+    if started:
+        _g().state["work"]["runner"].quiet = True
+    return started
+
+
+def _same_as(record: dict, i: int):
+    """Index of an earlier try with the same faces and numbers as try `i` (a method that fell back to Auto), or None."""
+    t = record["tries"][i]
+    for j, e in enumerate(record["tries"][:i]):
+        if e.get("same_as") is not None or e["after"] != t["after"] or (e["change"] is None) != (t["change"] is None):
+            continue
+        if t["change"] is not None and abs(e["change"] - t["change"]) > SAME_BY:
+            continue
+        if e.get("topology") is not None and t.get("topology") is not None and abs(e["topology"] - t["topology"]) > SAME_BY:
+            continue
+        return j
+    return None
+
+
+def _collect(s: dict, runner) -> None:
+    """What a finished way left behind: a new try with its tidy score, or a note why not."""
+    record = view.seg["parts"][s["part"]]
+    if runner.new_tries and not runner._stopped:
+        i = record["cur"]
+        t = record["tries"][i]
+        if t.get("topology") is None and t.get("build") is not None:
+            try:
+                t["topology"] = S.topology_score(t["build"][0], t["build"][1])
+            except Exception:
+                t["topology"] = None
+        record["topology"] = t.get("topology")
+        dup = _same_as(record, i)
+        if dup is None:
+            s["made"] += 1
+        else:
+            t["same_as"] = dup
+            s["same"] += 1
+    elif runner.warnings and not runner._stopped:
+        s["skipped"] += 1
+
+
+def _finish(s: dict) -> None:
+    """Back to how the part was, so nothing changes until you pick a try, and the whole run is one Ctrl+Z step."""
+    from . import history
+
+    seg = view.seg
+    seg["tryall"] = None
+    record = seg["parts"][s["part"]]
+    record.update(goal=s["saved"][0], goal_detail=s["saved"][1], choice=s["saved"][2])
+    save()
+    stopped = " (stopped)" if s["stop"] else ""
+    if not s["made"] and not s["same"]:
+        seg["tryall_note"] = "No way gave a different result" + stopped
+        overlay.tag_redraw()
+        return
+    seg["tryall_note"] = f"{s['made']} new, {s['same']} the same as another" + (f", {s['skipped']} kept the old faces" if s["skipped"] else "") + stopped
+    context = bpy.context
+    if s["start"] != record["cur"] and s["start"] < len(record["tries"]) and view.use_tries(context, {s["part"]: s["start"]}, "Try Every Method"):
+        pass
+    else:
+        history.record(context, "Try Every Method", seg["tryall_note"], push=True)
+    overlay.tag_redraw()
+
+
+def _tick():
+    s = view.seg.get("tryall")
+    if s is None:
+        return None
+    guided = _g()
+    if guided.state["auto_base"] is not s["base"] or not view.ready() or s["part"] >= len(view.seg["parts"]):
+        view.seg["tryall"] = None  # the result was replaced: these tries belong to the old one
+        return None
+    runner = s["runner"]
+    if runner is not None:
+        if guided.progress_info() is not None or not (runner.committed or runner._stopped):
+            overlay.tag_redraw()
+            return 0.15
+        _collect(s, runner)
+        s["runner"] = None
+        if runner._stopped:
+            s["stop"] = True
+    context = bpy.context
+    while not s["stop"] and s["queue"]:
+        goal, method = s["queue"].pop(0)
+        s["done"] += 1
+        s["label"] = _way_name(goal, method)
+        if _launch(context, s["part"], goal, method):
+            s["runner"] = _g().state["work"]["runner"]
+            overlay.tag_redraw()
+            return 0.15
+    _finish(s)
+    return None
+
+
+def stop_try_all(quiet: bool = False) -> None:
+    """Stop at the way now running (it is dropped), keep the ways done, and finish. quiet: just forget it (unregister)."""
+    s = view.seg.get("tryall")
+    if s is None:
+        return
+    s["stop"] = True
+    if quiet:
+        view.seg["tryall"] = None
+        if bpy.app.timers.is_registered(_tick):
+            bpy.app.timers.unregister(_tick)
+        return
+    runner = s["runner"]
+    if runner is not None and runner.busy:
+        try:
+            bpy.ops.curiomesh.guided_stop_work()
+        except Exception:
+            _g().stop_work()
+
+
+def start_try_all(context) -> int:
+    """Queue every way not tried yet on the selected part. Returns how many ways will run (0: all were tried)."""
+    from . import history
+
+    guided = _g()
+    p = next(iter(view.seg["sel"]))
+    record = view.seg["parts"][p]
+    queue = try_queue(record)
+    if not queue:
+        view.seg["tryall_note"] = "Every method has been tried"
+        return 0
+    history.before(context)  # the result as it is now is the step Ctrl+Z comes back to
+    record["was"] = record["cur"]
+    view.seg["tryall_note"] = ""
+    view.seg["tryall"] = {
+        "part": p, "queue": queue, "total": len(queue), "done": 0, "label": "getting ready", "base": guided.state["auto_base"], "runner": None,
+        "stop": False, "start": record["cur"], "saved": (record["goal"], record["goal_detail"], record.get("choice", "AUTO")), "made": 0, "same": 0, "skipped": 0,
+    }
+    if not bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.register(_tick, first_interval=0.0)
+    return len(queue)
+
+
+class CURIOMESH_OT_seg_try_all(bpy.types.Operator):
+    bl_idname = "curiomesh.seg_try_all"
+    bl_label = "Try Every Method"
+    bl_description = "Remakes this part every way there is, one after the other in the background, and lists each with its numbers. Nothing changes until you click one. Ctrl+Z goes back to before. Press it again to try only the ways not tried yet"
+    bl_options = {"INTERNAL"}
+
+    stop: bpy.props.BoolProperty(name="Stop", description="Stop trying ways; the ones done are kept", default=False, options={"SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context):
+        if view.seg.get("tryall") is not None:
+            return True
+        return view.ready() and not view.mirrored() and len(view.seg["sel"]) == 1 and _g().progress_info() is None
+
+    def execute(self, context):
+        if self.stop:
+            stop_try_all()
+            return {"FINISHED"}
+        if view.seg.get("tryall") is not None:
+            return {"CANCELLED"}
+        count = start_try_all(context)
+        if not count:
+            self.report({"INFO"}, tr("Every method has been tried on this part"))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 HOVER_GAP = 1.0 / 30.0  # seconds between looks under the mouse, stretched when a look takes long
+
+
+STATUS_PARTS = "Review Segments   Click: select   Shift+Click: add   Left, Right: worst first   M: merge   K: split in two   L: lock   G, S: grow, shrink   Ctrl+Z: undo edit   Esc: done   (options: CurioMesh panel)"
+STATUS_SPOTS = "Fix Bad Spots   Click: mark or unmark a part   Shift+Click: add   Left, Right: next spot, worst first   Space: mark the current spot   A: mark all bad   C: clear   R: redo marked   O: keep original on marked   Ctrl+Z: undo   Esc: done"
+
+
+def _set_mode(context, mode: str) -> None:
+    """Switch between Review Parts and Fix Bad Spots while the modal runs. Bad faces are shown for Fix Bad Spots."""
+    seg = view.seg
+    gs = context.scene.curiomesh_guided
+    seg["review_mode"] = mode
+    if mode == "SPOTS":
+        if seg.get("seg_bad_was") is None:
+            seg["seg_bad_was"] = bool(gs.seg_bad)
+            gs.seg_bad = True
+        if view.issue_panel.spots() and view.issue_panel.ui["cur"] < 0:
+            view.issue_panel.step(context, 1)  # the worst spot, framed
+    else:
+        _restore_bad(gs)
+    context.workspace.status_text_set(tr(STATUS_SPOTS if mode == "SPOTS" else STATUS_PARTS))
+    seg["batch_key"] = None
+    overlay.tag_redraw()
+
+
+def _restore_bad(gs) -> None:
+    was = view.seg.get("seg_bad_was")
+    if was is not None:
+        view.seg["seg_bad_was"] = None
+        gs.seg_bad = was
 
 
 class CURIOMESH_OT_seg_review(bpy.types.Operator):
     bl_idname = "curiomesh.seg_review"
     bl_label = "Review Parts"
-    bl_description = "Walks the parts in the viewport: hover to see one, click for its options, arrow keys go worst first. Esc leaves and keeps everything"
+    bl_description = "Walks the parts in the viewport: hover to see one, click to pick it, arrow keys go worst first. Its options are in the CurioMesh panel. Esc leaves and keeps everything"
     bl_options = {"INTERNAL"}
+
+    mode: bpy.props.EnumProperty(
+        name="Mode", description="Review Parts picks one part at a time. Fix Bad Spots walks the bad spots and lets you mark several parts to remake together",
+        items=[("PARTS", "Review Parts", "Hover, click and walk the parts"), ("SPOTS", "Fix Bad Spots", "Walk the bad spots, worst first, and mark parts to fix")], default="PARTS", options={"SKIP_SAVE"},
+    )
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.mode == "SPOTS":
+            return tip("Walks the bad spots, worst first. Click parts to mark them, then redo them or keep your original faces there. Each fix is shown first: Enter keeps it, Esc changes nothing. Ctrl+Z undoes it")
+        return tip(cls.bl_description)
 
     @classmethod
     def poll(cls, context):
         return view.ready() and context.area is not None and context.area.type == "VIEW_3D"
 
     def invoke(self, context, event):
-        if view.seg.get("reviewing"):  # the same button leaves
-            view.seg["reviewing"] = False
+        if view.seg.get("reviewing"):
+            if view.seg.get("review_mode") == self.mode:  # the same button leaves
+                self._end(context)
+                return {"FINISHED"}
+            _set_mode(context, self.mode)  # the other button switches the mode of the modal that is running
             return {"FINISHED"}
         view.seg["reviewing"] = True
         self.next_look, self.gap = 0.0, HOVER_GAP
         if context.space_data is not None and hasattr(context.space_data, "show_region_ui"):
             context.space_data.show_region_ui = True
         context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set("Review Segments   Click: select   Shift+Click: add   Left, Right: worst first   M: merge   K: split in two   L: lock   G, S: grow, shrink   Ctrl+Z: undo edit   Esc: done")
-        overlay.tag_redraw()
+        _set_mode(context, self.mode)
         return {"RUNNING_MODAL"}
 
     def _end(self, context):
         view.seg["reviewing"] = False
         view.seg["hover"] = None
+        view.seg["review_mode"] = "PARTS"
+        _restore_bad(context.scene.curiomesh_guided)
         context.workspace.status_text_set(None)
+        view.seg["batch_key"] = None
         overlay.tag_redraw()
 
     def cancel(self, context):
@@ -1648,6 +2052,27 @@ class CURIOMESH_OT_seg_review(bpy.types.Operator):
             view.seg["hover"] = part
         overlay.tag_redraw()
 
+    def _spots_key(self, context, event) -> bool:
+        """The keys of Fix Bad Spots. True when the key was used."""
+        if event.value != "PRESS" or event.ctrl or event.alt or event.oskey or event.shift:
+            return False
+        ip = view.issue_panel
+        if event.type == "SPACE":
+            ip.mark("CURRENT")
+        elif event.type == "A":
+            ip.mark("ALL")
+        elif event.type == "C":
+            ip.mark("CLEAR")
+        elif event.type in {"R", "O"}:
+            if not view.seg["sel"]:
+                ip.mark("CURRENT")  # nothing marked yet: the spot you are on
+            op = bpy.ops.curiomesh.issue_redo if event.type == "R" else bpy.ops.curiomesh.issue_keep_original
+            if view.seg["sel"] and op.poll():
+                op("INVOKE_DEFAULT", marked=True)
+        else:
+            return False
+        return True
+
     def modal(self, context, event):
         if not view.seg.get("reviewing") or _g().state["auto_base"] is None:
             self._end(context)
@@ -1657,14 +2082,21 @@ class CURIOMESH_OT_seg_review(bpy.types.Operator):
             return {"FINISHED"}
         if not view.ready():  # a redo is putting its result in: look again in a moment
             return {"PASS_THROUGH"}
+        spots = view.seg.get("review_mode") == "SPOTS"
         if event.type in {"RIGHT_ARROW", "LEFT_ARROW"} and event.value == "PRESS":
-            walk(context, 1 if event.type == "RIGHT_ARROW" else -1)
+            step = 1 if event.type == "RIGHT_ARROW" else -1
+            if spots and view.issue_panel.spots():
+                view.issue_panel.step(context, step)
+            else:
+                walk(context, step)
             return {"RUNNING_MODAL"}
         if event.type == "Z" and event.value == "PRESS" and (event.ctrl or event.oskey) and not event.shift:
             if bpy.ops.curiomesh.seg_undo.poll():
                 bpy.ops.curiomesh.seg_undo()
                 return {"RUNNING_MODAL"}
             return {"PASS_THROUGH"}
+        if spots and self._spots_key(context, event):
+            return {"RUNNING_MODAL"}
         tool = {"M": "merge", "K": "halve", "L": "lock", "G": "GROW", "S": "SHRINK"}.get(event.type) if event.value == "PRESS" and not (event.ctrl or event.alt or event.oskey) else None
         if tool is not None:
             if tool in {"GROW", "SHRINK"}:
@@ -1693,13 +2125,11 @@ class CURIOMESH_OT_seg_review(bpy.types.Operator):
             if part is None:
                 if not event.shift:
                     view.select([])
+            elif spots:  # click marks or unmarks, Shift+Click only adds: several parts can be marked
+                view.select(set(view.seg["sel"]) | {part} if event.shift else [part], extend=not event.shift)
+                view.issue_panel.focus_part(part)
             else:
-                view.select([part], extend=event.shift)
-                if not event.shift:
-                    try:
-                        bpy.ops.wm.call_panel(name=CURIOMESH_PT_seg_review.bl_idname, keep_open=False)
-                    except RuntimeError:  # no window to open it in: the sidebar shows the same
-                        pass
+                view.select([part], extend=event.shift)  # its options are in the pinned CurioMesh panel: a popup closed as soon as the mouse moved
             return {"RUNNING_MODAL"}
         return {"PASS_THROUGH"}
 
@@ -1779,6 +2209,7 @@ CLASSES = (
     CURIOMESH_OT_seg_goal,
     CURIOMESH_OT_seg_walk,
     CURIOMESH_OT_seg_review,
+    CURIOMESH_OT_seg_try_all,
     CURIOMESH_PT_seg_review,
     CURIOMESH_OT_seg_multires,
 )

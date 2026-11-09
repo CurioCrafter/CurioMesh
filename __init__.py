@@ -6,7 +6,7 @@
 bl_info = {
     "name": "CurioMesh",
     "author": "CurioCrafter",
-    "version": (0, 9, 8),
+    "version": (0, 9, 9),
     "blender": (3, 6, 0),
     "location": "3D View > N-panel > CurioMesh",
     "category": "Mesh",
@@ -22,8 +22,10 @@ from .operators import (
     CURIOMESH_OT_compute_metrics,
     CURIOMESH_OT_remesh,
 )
-from . import batch, fix_select, game_export, guided, hardware, live, overlay, panel, region
+from . import batch, fix_select, game_export, guided, hardware, help, history, live, overlay, panel, region, tidytools
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
+from . import translations
+from .translations import tr
 
 D = overlay.PREF_DEFAULTS
 
@@ -52,7 +54,7 @@ def _color(name: str, label: str, description: str):
 # (property, label) of the optional panels.
 SUBPANEL_TOGGLES = (
     ("show_scan", "Scan"),
-    ("show_atlas", "Smart Solver"),
+    ("show_atlas", "Atlas-Q Solver"),
     ("show_shape", "Features to Keep"),
     ("show_pipeline", "Cleanup & Output"),
     ("show_pairclosure", "PairClosure"),
@@ -81,7 +83,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     )
     show_scan: bpy.props.BoolProperty(name="Scan", description="Show the panel that checks your mesh for holes and sharp edges and suggests a method", default=True)
     show_atlas: bpy.props.BoolProperty(
-        name="Smart Solver", description="Show the extra options of the Smart method", default=True
+        name="Atlas-Q Solver", description="Show the extra options of the Atlas-Q method", default=True
     )
     show_shape: bpy.props.BoolProperty(name="Features to Keep", description="Show the features-to-keep panel", default=True)
     show_pipeline: bpy.props.BoolProperty(
@@ -101,6 +103,11 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         description="Shows the CurioMesh Advanced tab: every setting and the classic tools. You never need it for a good result",
         default=D["advanced_mode"],
     )
+    tools_tried: bpy.props.BoolProperty(
+        name="Tools Tried",
+        description="Off until you keep a change with a Tidy Tool or hide the first-time button. While off, Tools shows its first-time button",
+        default=False,
+    )
     flow_editor: bpy.props.BoolProperty(
         name="Flow Editor (Experimental)",
         description="Experimental: shows Draw on the mesh under Shape the flow. Draw rings, flow lines and edges on a finished result and the quads around each stroke are redone",
@@ -111,13 +118,6 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         name="Background Blender Processes",
         description="Lets CurioMesh start background copies of this Blender (never any other program) for Use Several Cores and for Even Rows, which runs QuadriFlow on whole pieces there so this Blender stays usable and Stop works. They end with the job. Off: everything runs inside this Blender and Even Rows is not available",
         default=D["allow_helpers"],
-    )
-
-    hud_default: bpy.props.BoolProperty(
-        name="HUD On in New Scenes",
-        description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet. Off by default: press HUD in the panel to show it",
-        default=D["hud_default"],
-        update=overlay.ensure_watch,
     )
     hud_corner: bpy.props.EnumProperty(
         name="Corner",
@@ -199,6 +199,13 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         layout.use_property_decorate = False
 
         box = layout.box()
+        box.label(text="Language", icon="WORLD")
+        note = box.column(align=True)
+        note.scale_y = 0.8
+        note.label(text="CurioMesh follows Blender's interface language:")
+        note.label(text="Preferences > Interface > Translation.")
+
+        box = layout.box()
         box.label(text="Panels", icon="WINDOW")
         col = box.column()
         col.prop(self, "panel_tab")
@@ -210,7 +217,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         shown.label(text="Show these panels")
         flow = shown.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
         for name, label in SUBPANEL_TOGGLES:
-            flow.prop(self, name, text=label, toggle=True)
+            flow.prop(self, name, text=tr(label), toggle=True)
 
         box = layout.box()
         box.label(text="Background Processes", icon="MOD_ARRAY")
@@ -224,7 +231,6 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         box = layout.box()
         box.label(text="Dashboard (HUD)", icon="OVERLAY")
         col = box.column()
-        col.prop(self, "hud_default")
         col.prop(self, "hud_corner")
         offsets = col.row(align=True)
         offsets.use_property_split = False
@@ -315,23 +321,41 @@ classes = (
 )
 
 
+_registered = False
+
+
 def register():
+    global _registered
+    if _registered:
+        unregister()  # a second register() (scripts, reloads) starts clean instead of raising "already registered"
+    _registered = True
+    translations.register()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_settings = bpy.props.PointerProperty(type=CURIOMESH_PG_settings)
     overlay.register()
     region.register()
     guided.register()
+    history.register()
+    tidytools.register()
     fix_select.register()
     game_export.register()
+    help.register()
     panel.register()
     apply_category()
 
 
 def unregister():
+    global _registered
+    if not _registered:
+        return
+    _registered = False
     panel.unregister()
+    help.unregister()
     game_export.unregister()
     fix_select.unregister()
+    tidytools.unregister()
+    history.unregister()
     guided.unregister()
     region.unregister()
     live.unregister()
@@ -340,4 +364,5 @@ def unregister():
         del bpy.types.Scene.curiomesh_settings
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    translations.unregister()
 

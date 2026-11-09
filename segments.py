@@ -27,12 +27,13 @@ from .triadq import parts as P
 from .triadq import segment as S
 
 from .profiles import METHOD_ITEMS
+from .translations import tip, tr
 
 METHOD_NAMES = {item[0]: item[1] for item in METHOD_ITEMS}
 ORIGINAL = "ORIGINAL"  # a try that is your own faces, untouched
-METHOD_NAMES.update(ORIGINAL="Original", KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision")
+METHOD_NAMES.update(ORIGINAL="Original", KEEP="Keep as Is", REDUCE="Reduce", LOWPOLY="Low Poly", ANIMATION="Animation", SUBD="Subdivision", OUTSIDE="From Outside")
 KIND_ITEMS = [(k, P.KIND_WORDS[k], "") for k in P.KINDS]
-MAX_TRIES = 6  # results kept per part
+MAX_TRIES = 0  # results kept per part; 0 keeps every one, so nothing you made is thrown away
 LIST_ROWS = 300  # parts shown in the worst-first list
 SAMPLES = 200  # vertices of each source piece used to say which piece a result part came from
 
@@ -71,7 +72,7 @@ def _g():
 
 
 def reset() -> None:
-    seg.update(reviewing=False, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
+    seg.update(reviewing=False, review_mode="PARTS", seg_bad_was=None, tryall=None, outline=None, outline_key=None, high_key=None, high=None, base=None, piece=None, parts=[], sel=set(), hover=None, ref={}, whole=None, batch=None, batch_key=None, bad=None, bad_key=None, tris=None, lines=None, lines_key=None, src=None, surface=False, tree=None, tree_job=None, painted=None, live=None, live_count=None, res_src=None, history=[])
 
 
 def ready() -> bool:
@@ -176,6 +177,11 @@ def ensure() -> None:
     """Make the table for the result on screen, when it is a new one."""
     base = _g().state["auto_base"]
     if base is None:
+        if seg["parts"]:
+            reset()
+            refresh_list()
+        return
+    if base["job"] is None:  # an imported result has no job to make the table from: no parts, nothing to redo
         if seg["parts"]:
             reset()
             refresh_list()
@@ -293,6 +299,8 @@ class PartJob:
         self.report = None
         self.committed = False
         self.new_tries: dict[int, dict] = {}
+        self.hold = False  # Look First: keep what it makes as tries only; the result on screen stays as it is
+        self.held: dict[int, int] = {}  # part -> index of the try it made, once held
         self.started = time.perf_counter()
         self._stopped = False
         self._search = self._run()
@@ -413,6 +421,21 @@ class PartJob:
         self.fraction = 1.0
 
 
+def _remember_try(record: dict, new: dict) -> int:
+    """Put a made result into the part's tries (replacing one made the same way). Returns its index."""
+    same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"] and t.get("detail") == new.get("detail")), None)
+    if same is None:
+        record["tries"].append(new)
+        same = len(record["tries"]) - 1
+    else:
+        record["tries"][same] = new
+    if MAX_TRIES and len(record["tries"]) > MAX_TRIES:
+        drop = next(i for i in range(len(record["tries"])) if i != same)
+        record["tries"].pop(drop)
+        same -= drop < same
+    return same
+
+
 def commit(runner: PartJob) -> None:
     """A part job finished: the new result becomes the one Apply writes, and the tries are remembered."""
     guided = _g()
@@ -422,25 +445,21 @@ def commit(runner: PartJob) -> None:
         guided.state["message"] = runner.status()
         return
     runner.committed = True
-    if base is None or base is not runner.base or runner.report is None:
+    if base is None or base is not runner.base or (runner.report is None and not getattr(runner, "hold", False)):
         guided.state["message"] = runner.status()
         return
     for p, new in runner.new_tries.items():
         record = seg["parts"][p]
-        same = next((i for i, t in enumerate(record["tries"]) if t["method"] == new["method"] and t.get("detail") == new.get("detail")), None)
-        if same is None:
-            record["tries"].append(new)
-            same = len(record["tries"]) - 1
-        else:
-            record["tries"][same] = new
-        if len(record["tries"]) > MAX_TRIES:
-            drop = next(i for i in range(len(record["tries"])) if i != same)
-            record["tries"].pop(drop)
-            same -= drop < same
+        same = _remember_try(record, new)
+        if getattr(runner, "hold", False):  # Look First shows this try before it is kept: nothing else changes
+            runner.held[p] = same
+            continue
         record.update(cur=same, method=new["method"], after=new["after"], change=new["change"], topology=new.get("topology"))
         methods = getattr(runner.job, "methods", None)
         if methods is not None and record.get("whole"):
             methods[record.get("loose", p)] = new["method"]
+    if getattr(runner, "hold", False):
+        return
     base["out"] = dict(runner.output)
     base["report"] = runner.report
     base["id"] = time.perf_counter_ns()
@@ -451,12 +470,23 @@ def commit(runner: PartJob) -> None:
     seg["batch_key"] = None
     refresh_list()
     guided.state["message"] = runner.status()
+    from . import history
+
+    if getattr(runner, "quiet", False):  # Try Every Method records one step for the whole run
+        pass
+    elif runner.new_tries:  # a part was remade: one Ctrl+Z step back to the result before it
+        history.record(bpy.context, getattr(runner, "step_name", "Redo Part"), f"{len(base['out']['faces']):,} faces", push=True)
+    else:  # only the check after a swap: that swap's step keeps the checked result
+        history.refresh(bpy.context)
 
 
 def start_redo(context, pieces, method: str) -> bool:
+    from . import history
+
     guided = _g()
     if guided.state["auto_base"] is None or not pieces:
         return False
+    history.before(context)  # the result before the redo is the step Ctrl+Z goes back to
     guided.stop_work()
     runner = PartJob(pieces, method)
     guided.state["work"] = {"key": guided.state["auto_base"].get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
@@ -471,28 +501,47 @@ def use_try(context, piece: int, index: int) -> bool:
     return use_tries(context, {piece: index})
 
 
-def use_tries(context, wanted: dict) -> bool:
-    """`use_try` for several parts at once ({piece: try index}): one splice, one preview, one check."""
-    guided = _g()
-    base = guided.state["auto_base"]
-    if base is None:
-        return False
-    wanted = {p: i for p, i in wanted.items() if 0 <= i < len(seg["parts"][p]["tries"]) and i != seg["parts"][p]["cur"]}
-    if not wanted:
-        return False
+def _wanted(wanted: dict) -> dict:
+    return {p: i for p, i in wanted.items() if 0 <= p < len(seg["parts"]) and 0 <= i < len(seg["parts"][p]["tries"]) and i != seg["parts"][p]["cur"]}
+
+
+def preview_tries(wanted: dict):
+    """(co, faces, mat, face_piece) of the result with these tries swapped in ({piece: try index}), or None. Nothing
+    changes: Look First draws it, and `use_tries` makes the same splice when it is kept."""
+    base = _g().state["auto_base"]
+    wanted = _wanted(wanted)
+    if base is None or not wanted:
+        return None
     out = base["out"]
     builds = {}
+    for piece, index in wanted.items():
+        record = seg["parts"][piece]
+        if record["tries"][record["cur"]]["build"] is None:  # kept so switching back is one splice
+            record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
+        builds[piece] = record["tries"][index]["build"]
+    return splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], builds)
+
+
+def use_tries(context, wanted: dict, name: str = "Use This Result") -> bool:
+    """`use_try` for several parts at once ({piece: try index}): one splice, one preview, one check. One Ctrl+Z step
+    and one History entry called `name`."""
+    from . import history
+
+    guided = _g()
+    base = guided.state["auto_base"]
+    wanted = _wanted(wanted)
+    made = preview_tries(wanted)
+    if base is None or made is None:
+        return False
+    history.before(context)
     methods = getattr(base["job"], "methods", None)
     for piece, index in wanted.items():
         record = seg["parts"][piece]
-        if record["tries"][record["cur"]]["build"] is None:
-            record["tries"][record["cur"]]["build"] = P.cut(out["co"], out["faces"], out["mat"], seg["piece"], piece)
         chosen = record["tries"][index]
-        builds[piece] = chosen["build"]
         record.update(cur=index, method=chosen["method"], after=chosen["after"], change=chosen["change"], topology=chosen.get("topology"))
         if methods is not None and chosen["method"] != ORIGINAL:
             methods[piece] = chosen["method"]
-    co, faces, mat, face_piece = splice(out["co"], list(out["faces"]), out["mat"], seg["piece"], builds)
+    co, faces, mat, face_piece = made
     count = len(faces)
     new = {"co": co, "faces": faces, "new": np.ones(count, bool), "locked": np.zeros(count, bool), "mat": mat, "parts": face_piece, "piece": face_piece}
     guided.stop_work()
@@ -507,6 +556,7 @@ def use_tries(context, wanted: dict) -> bool:
     guided.state["work"] = {"key": base.get("key", ("", "AUTO")), "runner": runner, "cent": None, "seen": 0, "areas": []}
     if not bpy.app.timers.is_registered(guided._auto_slice):
         bpy.app.timers.register(guided._auto_slice, first_interval=0.0)
+    history.record(context, name, f"{count:,} faces", push=True)
     overlay.tag_redraw()
     return True
 
@@ -524,11 +574,17 @@ def bad_parts() -> list[int]:
     return found
 
 
-def keep_original(context, pieces) -> int:
+def keep_original(context, pieces, name: str = "Keep Original") -> int:
     """Put your own faces back on these parts, as one more try each (so the reduced result stays one click away). Returns how many changed."""
+    wanted = original_tries(pieces)
+    return len(wanted) if wanted and use_tries(context, wanted, name) else 0
+
+
+def original_tries(pieces) -> dict:
+    """{piece: index of its try that is your own faces}, adding that try where there is none yet."""
     base = _g().state["auto_base"]
     if base is None or base["job"] is None or mirrored():
-        return 0
+        return {}
     job, wanted = base["job"], {}
     for p in pieces:
         record = seg["parts"][p]
@@ -540,7 +596,7 @@ def keep_original(context, pieces) -> int:
             record["tries"].append({"method": ORIGINAL, "after": len(faces), "change": 0.0, "build": (points, faces, mats)})
             index = len(record["tries"]) - 1
         wanted[p] = index
-    return len(wanted) if use_tries(context, wanted) else 0
+    return wanted
 
 
 def original_cost(pieces) -> int:
@@ -552,7 +608,7 @@ def original_cost(pieces) -> int:
 def ask(operator, context, event, message: str):
     """An OK / Cancel box with this question (just the title on Blender before 4.1)."""
     try:
-        return context.window_manager.invoke_confirm(operator, event, title=operator.bl_label, message=message)
+        return context.window_manager.invoke_confirm(operator, event, title=tr(operator.bl_label), message=tr(message))
     except TypeError:
         return context.window_manager.invoke_confirm(operator, event)
 
@@ -566,7 +622,7 @@ class CURIOMESH_OT_keep_original_bad(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         found = bad_parts()
-        return f"Puts your own faces back on the {len(found)} part{'s' if len(found) != 1 else ''} with bad faces. Adds about {original_cost(found):,} faces; each part can be switched back from its card"
+        return tip(f"Puts your own faces back on the {len(found)} part{'s' if len(found) != 1 else ''} with bad faces. Adds about {original_cost(found):,} faces; each part can be switched back from its card")
 
     @classmethod
     def poll(cls, context):
@@ -580,9 +636,9 @@ class CURIOMESH_OT_keep_original_bad(bpy.types.Operator):
     def execute(self, context):
         changed = keep_original(context, bad_parts())
         if not changed:
-            self.report({"WARNING"}, "No part could be put back")
+            self.report({"WARNING"}, tr("No part could be put back"))
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Original faces kept on {changed} part{'s' if changed != 1 else ''}")
+        self.report({"INFO"}, tr(f"Original faces kept on {changed} part{'s' if changed != 1 else ''}"))
         return {"FINISHED"}
 
 
@@ -758,12 +814,12 @@ def _draw_legend() -> None:
     blf.size(0, 12.0 * ui)
     blf.color(0, 1.0, 1.0, 1.0, 1.0)
     blf.position(0, left, bottom + high + 6 * ui, 0)
-    blf.draw(0, "View change per part")
+    blf.draw(0, tr("View change per part"))
     blf.position(0, left, bottom - 16 * ui, 0)
-    blf.draw(0, "0%")
+    blf.draw(0, tr("0%"))
     text = f"{top:.0f}%+"
-    blf.position(0, left + wide - blf.dimensions(0, text)[0], bottom - 16 * ui, 0)
-    blf.draw(0, text)
+    blf.position(0, left + wide - blf.dimensions(0, tr(text))[0], bottom - 16 * ui, 0)
+    blf.draw(0, tr(text))
 
 
 def _draw_text() -> None:
@@ -965,11 +1021,11 @@ class CURIOMESH_UL_segparts(bpy.types.UIList):
             return
         r = seg["parts"][item.piece]
         row = layout.split(factor=0.5, align=True)  # the name needs room: "Segment 12" was cut to "Seg..."
-        row.label(text=name_of(item.piece), icon="LOCKED" if r.get("locked") else "CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
+        row.label(text=tr(name_of(item.piece)), icon="LOCKED" if r.get("locked") else "CHECKBOX_HLT" if item.piece in seg["sel"] else "CHECKBOX_DEHLT")
         row = row.split(factor=0.42, align=True)  # "92%" is short; the face count needs the room ("1,65...")
         # the number the list is sorted by: the look, or Tidiness for an Animation part (a 98% look ranked low read as a mistake)
-        row.label(text=f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", ""))
-        row.label(text=f"{r['after']:,} f")
+        row.label(text=tr(f"T {r['topology']:.0f}" if by_topology(r) else "?" if r["change"] is None else alike(r["change"]).replace(" the same", "")))
+        row.label(text=tr(f"{r['after']:,} f"))
 
 
 # --------------------------------------------------------------------------- registration
@@ -1004,5 +1060,6 @@ def unregister() -> None:
         except Exception:
             pass
     seglive.unregister()
+    segment_goals.stop_try_all(quiet=True)
     reset()
     issue_panel.ui.update(res=None, cur=-1, diff=None, batch=None, batch_key=None)  # its GPU batches go with the draw handler

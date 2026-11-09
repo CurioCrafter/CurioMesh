@@ -21,6 +21,7 @@ from mathutils.bvhtree import BVHTree
 
 from . import overlay
 from .triadq import patch
+from .translations import tr
 
 PREVIEW_NAME = overlay.REGION_PREVIEW_NAME
 LIVE_REGION_FACE_CAP = 6_000
@@ -548,13 +549,13 @@ def _volume_poll(self, obj) -> bool:
 
 
 class CURIOMESH_PG_region_volume(bpy.types.PropertyGroup):
-    obj: bpy.props.PointerProperty(name="Volume", type=bpy.types.Object, poll=_volume_poll)
-    operation: bpy.props.EnumProperty(name="Operation", items=OPERATION_ITEMS, default="UNION")
+    obj: bpy.props.PointerProperty(name="Volume", description="The box, lattice or closed mesh that marks part of the region to redo", type=bpy.types.Object, poll=_volume_poll)
+    operation: bpy.props.EnumProperty(name="Operation", description="How this volume joins the ones above it. Add puts its faces in, Remove takes them out, Overlap keeps only the faces inside both", items=OPERATION_ITEMS, default="UNION")
 
 
 FIELD_ITEMS = (
     ("SMOOTH", "Smooth", "Quads follow a smoothed flow pinned to sharp edges and borders (fast, default)"),
-    ("CURVATURE", "Follow Curvature", "Quads also line up with the main bending directions of the surface; about 1.5x slower"),
+    ("CURVATURE", "Along Curvature", "Quads also line up with the main bending directions of the surface; about 1.5x slower"),
 )
 SEAM_LAYER_ITEMS = (
     ("AUTO", "Auto", "Add a ring of quads along jagged borders so quads next to the seam stay well shaped"),
@@ -630,10 +631,10 @@ class CURIOMESH_OT_region_preview(bpy.types.Operator):
     def execute(self, context):
         obj = _active_mesh(context) or bpy.data.objects.get(state["source"])
         if obj is None:
-            self.report({"ERROR"}, "Select a mesh")
+            self.report({"ERROR"}, tr("Select a mesh"))
             return {"CANCELLED"}
         ok = run_preview(context, obj)
-        self.report({"INFO"} if ok else {"WARNING"}, state["message"][:200])
+        self.report({"INFO"} if ok else {"WARNING"}, tr(state["message"][:200]))
         return {"FINISHED"} if ok else {"CANCELLED"}
 
 
@@ -648,7 +649,7 @@ class CURIOMESH_OT_region_apply(bpy.types.Operator):
         source = bpy.data.objects.get(state["source"]) if _preview_object() else None
         source = source or _active_mesh(context)
         if source is None:
-            self.report({"ERROR"}, "Select a mesh")
+            self.report({"ERROR"}, tr("Select a mesh"))
             return {"CANCELLED"}
         was_edit = source.mode == "EDIT"
         if was_edit:
@@ -675,10 +676,10 @@ class CURIOMESH_OT_region_apply(bpy.types.Operator):
         if was_edit and target is source:
             bpy.ops.object.mode_set(mode="EDIT")
         if not created:
-            self.report({"WARNING"}, cache["message"] or "Nothing to apply")
+            self.report({"WARNING"}, tr(cache["message"] or "Nothing to apply"))
             return {"CANCELLED"}
         overlay.invalidate()
-        self.report({"INFO"}, f"Region applied: {created:,} faces. {cache['message']}"[:200])
+        self.report({"INFO"}, tr(f"Region applied: {created:,} faces. {cache['message']}"[:200]))
         return {"FINISHED"}
 
 
@@ -744,7 +745,7 @@ class CURIOMESH_OT_region_add_cage(bpy.types.Operator):
         settings.source = "VOLUMES"
         if obj is not None:
             state["source"] = obj.name
-        self.report({"INFO"}, f"Added {cage.name}; move or scale it, then press Preview")
+        self.report({"INFO"}, tr(f"Added {cage.name}; move or scale it, then press Preview"))
         return {"FINISHED"}
 
 
@@ -803,13 +804,13 @@ class CURIOMESH_OT_fit_to_surface(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
-    iterations: bpy.props.IntProperty(name="Iterations", description="How many times the points are smoothed and settled back on the surface. More follows it closer, slower", default=5, min=1, max=100)
+    iterations: bpy.props.IntProperty(name="Iterations", description="How many times the points are smoothed and settled back on the surface. More follows it closer, slower", default=5, min=1, soft_max=100, max=100000)
     strength: bpy.props.FloatProperty(name="Strength", description="How far each point moves toward its smoothed spot on every pass: 0 not at all, 1 all the way", default=0.5, min=0.0, max=1.0)
 
     def execute(self, context):
         obj = _active_mesh(context)
         if obj is None:
-            self.report({"ERROR"}, "Select a mesh")
+            self.report({"ERROR"}, tr("Select a mesh"))
             return {"CANCELLED"}
         settings = context.scene.curiomesh_region
         depsgraph = context.evaluated_depsgraph_get()
@@ -844,7 +845,7 @@ class CURIOMESH_OT_fit_to_surface(bpy.types.Operator):
         if edit:
             bpy.ops.object.mode_set(mode="EDIT")
         moved = int(np.count_nonzero(~pinned))
-        self.report({"INFO"}, f"Fitted {moved:,} vertices onto {target.name}")
+        self.report({"INFO"}, tr(f"Fitted {moved:,} vertices onto {target.name}"))
         return {"FINISHED"}
 
 
@@ -900,7 +901,7 @@ class CURIOMESH_OT_fill_loop(bpy.types.Operator):
         bm.verts.index_update()
         loops = _hole_loops(bm)
         if not loops:
-            self.report({"ERROR"}, "Select a closed loop of open (hole) edges")
+            self.report({"ERROR"}, tr("Select a closed loop of open (hole) edges"))
             return {"CANCELLED"}
         co = np.asarray([v.co[:] for v in bm.verts], dtype=np.float64)
         scale = _world_scale(obj)
@@ -938,10 +939,10 @@ class CURIOMESH_OT_fill_loop(bpy.types.Operator):
         bm.normal_update()
         bmesh.update_edit_mesh(obj.data)
         if not made:
-            self.report({"ERROR"}, skipped[0] if skipped else "Nothing filled")
+            self.report({"ERROR"}, tr(skipped[0] if skipped else "Nothing filled"))
             return {"CANCELLED"}
         note = f" ({len(skipped)} loop(s) skipped: {skipped[0]})" if skipped else ""
-        self.report({"INFO"}, f"Filled {len(loops) - len(skipped)} loop(s) with {made:,} quads{note}"[:200])
+        self.report({"INFO"}, tr(f"Filled {len(loops) - len(skipped)} loop(s) with {made:,} quads{note}"[:200]))
         return {"FINISHED"}
 
 
@@ -986,7 +987,7 @@ def _draw_pick_part(layout, settings, obj, has_mesh, compact):
             box.alert = True
             box.label(text="No faces selected yet", icon="ERROR")
         else:
-            box.label(text=f"{count:,} faces selected", icon="CHECKMARK")
+            box.label(text=tr(f"{count:,} faces selected"), icon="CHECKMARK")
     elif settings.source == "FACE_SET":
         col = box.column(align=True)
         col.prop(settings, "face_set_id")
@@ -1061,7 +1062,7 @@ class CURIOMESH_PT_regions(bpy.types.Panel):
         preview_row.enabled = ready
         preview_row.scale_y = 1.2 if previewing else 1.9
         preview_row.operator(
-            "curiomesh.region_preview", text="Refresh Preview" if previewing else "Preview", icon="HIDE_OFF"
+            "curiomesh.region_preview", text=tr("Refresh Preview" if previewing else "Preview"), icon="HIDE_OFF"
         )
         row = layout.row(align=True)
         row.scale_y = 1.9 if previewing else 1.2

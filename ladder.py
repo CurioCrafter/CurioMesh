@@ -22,9 +22,10 @@ from itertools import chain
 import bpy
 import numpy as np
 
-from . import autoretopo, organize, overlay, parallel, segments
+from . import autofix_live, autoretopo, history, organize, overlay, parallel, segments, tidylive, tidytools
 from .triadq import ladder as L
 from .triadq import parts as P
+from .translations import tip, tr
 
 MOST_FACES = 400_000  # faces of your mesh: past this each rung is a long search, so there is no ladder
 ROWS_MOST = 100_000  # Even Rows rungs only up to here: one took over three minutes on a 17,000 face bust
@@ -34,6 +35,7 @@ REST = 1.0  # seconds Blender is left alone after each finished size, before the
 IDLE = 2.0  # after each tick Blender is left alone this many times as long as the tick took, so the sizes take a third of it at most
 THROTTLE = 0.1  # while you drag a slider the preview changes at most this often
 SETTLE = 0.4  # seconds after the last move: then the segments of the result are found (and a blend is looked at)
+FLASH = 1.5  # seconds the HUD keeps "faces a -> b" after Quad Size or Rows rests
 QUIET = 1.0  # the ladder's own work waits this long after a slider moved, so dragging never competes with it
 MOST_MESHES = 40  # preview meshes kept, one per size or blend shown
 GOAL_STEP = 0.15  # Bigger or Smaller Quads on a segment: this much of its Detail slider
@@ -67,7 +69,8 @@ def cancel() -> None:
     organize.cancel()
     if lad["job"] is not None:
         lad["job"].stop()
-    drop_spares(_g().SPARE_MESHES[0])
+    for kind in _g().SPARE_MESHES:  # organize.cancel above already let go of its own
+        drop_spares(kind)
     lad.update(key=None, base=None, rungs={}, plan=[], job=None, doing=None, shown=None, failed=[], meshes={}, want=None, blend=None, settings=None, source_check=None)
     drag.update(pending=False, settled=True)
 
@@ -82,10 +85,10 @@ def stop_more() -> None:
     overlay.tag_redraw()
 
 
-def drop_spares(prefix: str) -> None:
-    """Remove the spare preview meshes of kind `prefix` (made by `_make_mesh`) that nothing shows, also ones a file saved
+def drop_spares(kind: str) -> None:
+    """Remove the spare preview meshes of `kind` (made by `_make_mesh`) that nothing shows, also ones a file saved
     with a fake user. Meshes without the add-on's mark are never touched."""
-    for mesh in [m for m in bpy.data.meshes if m.get(overlay.PREVIEW_TAG) == prefix]:
+    for mesh in [m for m in bpy.data.meshes if m.get(overlay.PREVIEW_TAG) == kind]:
         mesh.use_fake_user = False
         if mesh.users == 0:
             bpy.data.meshes.remove(mesh)
@@ -146,6 +149,8 @@ def work(seconds: float) -> None:
         if lad["key"] is not None:
             cancel()
         return
+    if autofix_live.busy():  # Auto Fix is changing the result on screen: other sizes wait, they are worked out after it
+        return
     ends = time.perf_counter() + seconds
     while time.perf_counter() < ends:
         job = lad["job"]
@@ -175,6 +180,10 @@ def work(seconds: float) -> None:
             rung = lad["doing"]
             _mesh_for((rung, rung, ()), compose(rung, rung, ()))  # made now, while nobody drags, so showing it is a swap
             overlay.tag_redraw()
+            shown = lad["shown"]
+            if len((_g().state["res"] or {"faces": ()})["faces"]) > (job.report.get("before") or 10**9) and shown[0] != rung:  # on screen is heavier than your mesh: take the lighter size
+                if preview(bpy.context):
+                    settle(bpy.context)
         else:
             lad["failed"].append(lad["doing"])
         lad["job"] = lad["doing"] = None
@@ -185,8 +194,8 @@ def _tick():
         cancel()
         return None
     work_ = _g().state["work"]
-    if (work_ is not None and work_["runner"].busy) or time.perf_counter() - drag["moved"] < QUIET:
-        return WAIT  # yours first, and nothing while a slider moves
+    if (work_ is not None and work_["runner"].busy) or time.perf_counter() - drag["moved"] < QUIET or tidylive.busy():
+        return WAIT  # yours first, and nothing while a slider moves or a tool preview is open
     finished = len(lad["rungs"]) + len(lad["failed"])
     started = time.perf_counter()
     work(SLICE)
@@ -203,7 +212,8 @@ def _tick():
 def ready(style: str) -> list[float]:
     """Details of the finished rungs of this style worth showing (none another one beats on faces and change)."""
     mine = [(d, j.report["faces"], j.report["loss"]) for (s, d), j in lad["rungs"].items() if s == style]
-    return sorted(L.useful(mine))
+    source = min((j.report.get("before") or 10**9 for j in lad["rungs"].values()), default=10**9)  # never heavier than your mesh
+    return sorted(L.useful([r for r in mine if r[0] in L.within(mine, source)]))
 
 
 def _pick(style: str, wanted: float):
@@ -288,6 +298,9 @@ def _make_mesh(name, out, source):
     mesh.polygons.add(len(faces))
     mesh.polygons.foreach_set("loop_start", (np.cumsum(sizes) - sizes).astype(np.int32))
     mesh.update(calc_edges=True)
+    # flat, as the first preview (from_pydata) is: raw arrays come out smooth from Blender 4.1 on, and every kept size,
+    # Tidy Up pass and tool would suddenly shade the hard edges round
+    mesh.polygons.foreach_set("use_smooth", np.zeros(len(faces), dtype=bool))
     for m in source.data.materials:
         mesh.materials.append(m)
     if out.get("mat") is not None and len(out["mat"]) == len(faces):
@@ -381,6 +394,9 @@ def settle(context) -> None:
 def _finish(context) -> None:
     guided = _g()
     a, _b, moved = lad["shown"]
+    words = f"{len(guided.state['res']['faces']):,} faces, {STYLE_WORDS.get(a[0], a[0])}" if guided.state["res"] is not None else ""
+    for kind in ("size", "rows"):
+        history.settled(kind, words)  # the slider's step now holds the result it asked for
     if segments.seg.get("tree") is not None:
         segments.seg["tree_job"] = lad["rungs"][a]  # every rung is of the same mesh: the segment tree holds
     if moved or not segments.mirrored():  # finding the segments makes the parts table
@@ -441,13 +457,33 @@ def more() -> bool:
     bpy.app.timers.register(_tick, first_interval=WAIT)
     overlay.tag_redraw()
     return True
+def on_size(self, context) -> None:
+    history.note(context, "size", "Quad Size")  # Blender pushes the undo step when the slider lets go
+    on_slider(self, context)
+
+
+def on_rows(self, context) -> None:
+    history.note(context, "rows", "Rows")
+    on_slider(self, context)
 
 
 def on_slider(self, context) -> None:
-    drag.update(pending=True, moved=time.perf_counter())
+    now = time.perf_counter()
+    if now - drag["moved"] > FLASH:  # a new drag: the HUD compares with what it started from
+        res = _g().state["res"]
+        drag["from_faces"] = len(res["faces"]) if res is not None else 0
+    drag.update(pending=True, moved=now)
     pump(context)
     if not bpy.app.timers.is_registered(_drag_tick):
         bpy.app.timers.register(_drag_tick, first_interval=THROTTLE / 2)
+
+
+def slider_words() -> str:
+    """The HUD's line while Quad Size or Rows moves and for FLASH seconds after: "faces 6,210 -> 4,880"."""
+    res = _g().state["res"]
+    if res is None or not drag.get("from_faces") or time.perf_counter() - drag["moved"] > FLASH:
+        return ""
+    return f"faces {drag['from_faces']:,} -> {len(res['faces']):,}"
 
 
 def status() -> str:
@@ -483,7 +519,7 @@ def draw(layout, gs) -> None:
     if picked is not None:
         a, b, moved = picked
         words = STYLE_WORDS.get(a[0], a[0]) if not moved else f"{STYLE_WORDS.get(a[0], a[0])}, {len(moved)} piece{'s' if len(moved) != 1 else ''} {STYLE_WORDS.get(b[0], b[0])}"
-        box.label(text=f"Showing: {words}, Detail {a[1]:g}%", icon="MESH_GRID")
+        box.label(text=tr(f"Showing: {words}, Detail {a[1]:g}%"), icon="MESH_GRID")
     note = status()
     if note:
         overlay.wrap_label(box, note, icon="TIME", width=36, limit=2)
@@ -504,12 +540,13 @@ def _rung_of(record):
     return b if record.get("loose") in moved else a
 
 
-def part_sizes(context, pieces, bigger: bool) -> tuple[int, list[str]]:
-    """Bigger or smaller quads on these parts only. Returns (parts changed or started, why others could not)."""
+def size_plan(pieces, bigger: bool) -> tuple[dict, list, list[str]]:
+    """({part: (try index, rung)} that a ready size can swap in at once, [parts that need a redo in the background],
+    [why others could not]). Nothing changes yet, except that a ready size is kept in the part's tries."""
     seg, wanted, todo, why = segments.seg, {}, [], []
     base = _g().state["auto_base"]
     if base is not None and getattr(base["job"], "mirror", None) is not None:  # no piece per face, and one side alone would break the mirror
-        return 0, ["Bigger and Smaller Quads don't work on a mirrored result"]
+        return {}, [], ["Bigger and Smaller Quads don't work on a mirrored result"]
     for p in pieces:
         record = seg["parts"][p]
         loose = record.get("loose", p)
@@ -534,23 +571,73 @@ def part_sizes(context, pieces, bigger: bool) -> tuple[int, list[str]]:
                 change = 100.0 * level.loss / job.seen[k] if level is not None and job.seen[k] > 0 else None
                 record["tries"].append({"method": record["method"], "detail": None, "rung": rung, "after": len(build[1]), "change": change, "topology": None, "build": build})
                 index = len(record["tries"]) - 1
-            record["rung"] = rung
-            wanted[p] = index
+            wanted[p] = (index, rung)
         elif not segments.mirrored():
-            record.update(goal="REDUCE", goal_detail=min(max(record["goal_detail"] + (-GOAL_STEP if bigger else GOAL_STEP), 0.0), 1.0))
             todo.append(p)
-    changed = 0
-    if wanted and segments.use_tries(context, wanted):
-        changed += len(wanted)
+    return wanted, todo, why
+
+
+def build_sizes(context, todo: list, bigger: bool, name: str = ""):
+    """Look First for a size that is not worked out yet: build the redo as tries in the background and change nothing
+    on screen. Returns the job (watch `busy`, then `finish_build`), or None when it could not start."""
+    seg = segments.seg
+    saved = {p: seg["parts"][p]["goal_detail"] for p in todo}
+    for p in todo:
+        record = seg["parts"][p]
+        record["goal_detail"] += -GOAL_STEP if bigger else GOAL_STEP
+    if not segments.segment_goals.start_goal(context, todo, name or "Redo", hold=True):
+        for p in todo:
+            seg["parts"][p]["goal_detail"] = saved[p]
+        return None
+    runner = _g().state["work"]["runner"]
+    runner.direction = -1 if bigger else 1
+    runner.saved_detail = saved
+    return runner
+
+
+def finish_build(runner) -> dict:
+    """The redo of `build_sizes` is over (or stopped): the parts keep their old numbers and the tries it made are
+    returned as {part: (try index, None)}, which `apply_sizes` keeps."""
+    seg = segments.seg
+    for p, detail in runner.saved_detail.items():
+        seg["parts"][p]["goal_detail"] = detail
+    if runner._stopped:
+        return {}
+    if not runner.committed:
+        segments.commit(runner)
+    return {p: (i, None) for p, i in runner.held.items()}
+
+
+def apply_sizes(context, wanted: dict, todo: list, bigger: bool, name: str = "") -> int:
+    """Make a `size_plan`: one Ctrl+Z step for the swapped parts, and one when the background redo finishes."""
+    seg, changed = segments.seg, 0
+    name = name or ("Bigger Quads" if bigger else "Smaller Quads")
+    if wanted:
+        rungs = {p: seg["parts"][p].get("rung") for p in wanted}
+        for p, (index, rung) in wanted.items():
+            if rung is None:  # a try built for Look First: its size becomes the part's size
+                seg["parts"][p]["goal_detail"] = seg["parts"][p]["tries"][index]["detail"]
+            else:
+                seg["parts"][p]["rung"] = rung
+        if any(rung is None for _i, rung in wanted.values()):
+            segments.segment_goals.save()
+        if segments.use_tries(context, {p: index for p, (index, _rung) in wanted.items()}, name):
+            changed += len(wanted)
+        else:
+            for p, rung in rungs.items():
+                seg["parts"][p]["rung"] = rung
     if todo:
+        for p in todo:
+            record = seg["parts"][p]
+            record.update(goal="REDUCE", goal_detail=record["goal_detail"] + (-GOAL_STEP if bigger else GOAL_STEP))  # no end: each press is one more step
         segments.segment_goals.save()
-        if segments.segment_goals.start_goal(context, todo):
+        if segments.segment_goals.start_goal(context, todo, name):
             _g().state["work"]["runner"].direction = -1 if bigger else 1  # it keeps only fewer (or more) faces
             changed += len(todo)
-    return changed, why
+    return changed
 
 
-class CURIOMESH_OT_part_size(bpy.types.Operator):
+class CURIOMESH_OT_part_size(tidytools.PartSwap, bpy.types.Operator):
     bl_idname = "curiomesh.part_size"
     bl_label = "Quad Size of Selected"
     bl_description = "Bigger or smaller quads on the selected parts only; the rest stays as it is"
@@ -561,18 +648,23 @@ class CURIOMESH_OT_part_size(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.bigger:
-            return "Bigger quads on the selected parts only: fewer faces there, the rest stays as it is"
-        return "Smaller quads on the selected parts only: more faces and more detail there, the rest stays as it is"
+            return tip("Shows the picked parts redone with bigger quads, then Enter keeps them. Fewer faces there; the rest stays as it is")
+        return tip("Shows the picked parts redone with smaller quads, then Enter keeps them. More faces and more detail there; the rest stays as it is")
 
     @classmethod
     def poll(cls, context):
         return segments.ready() and bool(segments.seg["sel"]) and _g().progress_info() is None
 
-    def execute(self, context):
-        changed, why = part_sizes(context, sorted(segments.seg["sel"]), self.bigger)
-        if why:
-            self.report({"WARNING"}, why[0])
-        return {"FINISHED"} if changed else {"CANCELLED"}
+    def plan(self, context) -> dict:
+        wanted, todo, why = size_plan(sorted(segments.seg["sel"]), self.bigger)
+        name = "Bigger Quads" if self.bigger else "Smaller Quads"
+        return {"name": name, "tries": {p: i for p, (i, _r) in wanted.items()}, "sizes": wanted, "todo": todo, "bigger": bool(self.bigger), "why": why[0] if why else ""}
+
+    def keep(self, context, plan: dict) -> bool:
+        return apply_sizes(context, plan["sizes"], plan["todo"], self.bigger, plan["name"]) > 0
+
+    def again(self, plan: dict):
+        return "curiomesh.part_size", {"bigger": bool(self.bigger)}  # Again: one more step from the result as it is now
 
 
 CLASSES = (CURIOMESH_OT_part_size,)

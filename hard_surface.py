@@ -6,7 +6,7 @@ and the controls (one small draw function, to be placed wherever the panel wants
 
 Clean Panels and Even Cylinders add rebuilt versions of a part to the search (`triadq.hardsurf`); the camera picks them
 only where they hold the view. They are off by default and on with the Hard Surface use: measured on six free
-hard-surface models they helped the crane and hurt the compressor (see the changelog). Hard Edges finishes the written mesh: Mark Sharp + Crease
+hard-surface models they helped the crane and, since 0.9.9, no longer hurt the compressor (see the changelog). Hard Edges finishes the written mesh: Mark Sharp + Crease
 flags every hard edge (a game engine shades it hard, a Subdivision Surface keeps it sharp, no extra faces), Holding
 Edges adds a loop on both sides of every hard edge at a small distance (Blender's own bevel, two segments with a square
 profile, so the shape does not move), which is how a modeller makes a mesh ready for subdivision.
@@ -100,7 +100,9 @@ def draw(layout, gs) -> None:
     row.prop(gs, "hs_cylinders", toggle=True, icon="MESH_CYLINDER")
     col.prop(gs, "hs_edges", text="Hard Edges")
     if gs.hs_edges != "NONE":
-        col.prop(gs, "hs_angle")
+        row = col.row(align=True)
+        row.prop(gs, "hs_angle")
+        row.operator("curiomesh.tool_hard_edges", text="", icon="HIDE_OFF")  # Look First: see them in pink before Apply
     if gs.hs_edges == "HOLD":
         row = col.row(align=True)
         row.prop(gs, "hs_hold_unit", text="")
@@ -114,8 +116,8 @@ def prop(name: str):
         "hs_panels": lambda: bpy.props.BoolProperty(name="Clean Panels", description=tip, default=False),
         "hs_cylinders": lambda: bpy.props.BoolProperty(name="Even Cylinders", description=tip, default=False),
         "hs_edges": lambda: bpy.props.EnumProperty(name="Hard Edges", description=tip, items=EDGE_ITEMS, default="NONE"),
-        "hs_angle": lambda: bpy.props.FloatProperty(name="Hard Edge Angle", description=tip, default=40.0, min=5.0, max=150.0, precision=0),
+        "hs_angle": lambda: bpy.props.FloatProperty(name="Hard Edge Angle", description=tip, default=40.0, min=5.0, max=180.0, precision=0),
         "hs_hold_unit": lambda: bpy.props.EnumProperty(name="Distance In", description=tip, items=HOLD_UNITS, default="PERCENT"),
         "hs_hold_percent": lambda: bpy.props.FloatProperty(name="Distance", description=tip, default=10.0, min=1.0, max=45.0, subtype="PERCENTAGE", precision=0),
-        "hs_hold_mm": lambda: bpy.props.FloatProperty(name="Distance", description=tip, default=2.0, min=0.01, max=1000.0, precision=2),
+        "hs_hold_mm": lambda: bpy.props.FloatProperty(name="Distance", description=tip, default=2.0, min=0.01, soft_max=1000.0, max=1e6, precision=2),
     }[name]()

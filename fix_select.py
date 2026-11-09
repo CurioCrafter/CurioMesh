@@ -16,6 +16,7 @@ from mathutils.bvhtree import BVHTree
 
 from . import overlay
 from .triadq import checks, repair, tasks
+from .translations import tip, tr
 
 KIND_WORDS = {"inward": "inward", "sunk": "sunk", "crossing": "crossing", "folded_over": "folded over", "bent": "bent", "flat": "flat", "duplicate": "duplicate", "overlap": "overlapping", "touching": "touching parts"}
 
@@ -188,6 +189,61 @@ FIX_ALL = ("CLEAN", "FLIP", "UNTANGLE", "RELAX", "PATCH")  # Patch last: it rema
 # --------------------------------------------------------------------------- operators and panel
 
 
+def finish(context, obj, bm, area, source, before: str, had=None) -> str:
+    """Select the bad faces that are left, remember and return the "Before ... Now ..." line."""
+    area = [f for f in area if f.is_valid]
+    if had is not None:
+        area += [f for f in bm.faces if f not in had]  # faces a patch made
+    found, bad = measure(area, source) if area else (None, np.zeros(0, bool))
+    _select_bad(bm, area, bad)
+    bmesh.update_edit_mesh(obj.data)
+    now = describe(found, bad) if found is not None else "no faces left"
+    context.scene.curiomesh_fix.last = f"Before: {before}. Now: {now}."
+    return context.scene.curiomesh_fix.last
+
+
+def find_bad(context, obj, grow: int) -> str:
+    """Find Bad Faces on `obj` (in Edit Mode): only the bad faces of the area stay selected. Returns the report line."""
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    source = _source(context, obj)
+    area = _area(bm, grow)
+    found, bad = measure(area, source)
+    _select_bad(bm, area, bad)
+    bmesh.update_edit_mesh(obj.data)
+    context.scene.curiomesh_fix.last = f"In {len(area):,} faces: {describe(found, bad)}."
+    return context.scene.curiomesh_fix.last
+
+
+def run_fix(context, obj, how: str, grow: int) -> tuple[str, str]:
+    """Fix the bad faces of the area on `obj` (in Edit Mode) this way. Returns (report line, warning): a warning means
+    the fix could not run and nothing changed."""
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    source = _source(context, obj)
+    area = _area(bm, grow)
+    had = set(bm.faces)
+    found, bad = measure(area, source)
+    before = describe(found, bad)
+    if not bad.any():
+        return finish(context, obj, bm, area, source, before), ""
+    for key in FIX_ALL if how == "ALL" else (how,):
+        area = [f for f in area if f.is_valid]
+        found, bad = measure(area, source)
+        if not bad.any():
+            break
+        saved = [v.co.copy() for f in area for v in f.verts]
+        note = FIXES[key][0](bm, area, found, bad, source)
+        if note and how != "ALL":
+            return "", f"{FIXES[key][1]} {note}"
+        if key in {"UNTANGLE", "RELAX"} and all(f.is_valid for f in area):  # moves only: undo the move if it made it worse
+            _f, worse = measure(area, source)
+            if worse.sum() > bad.sum():
+                for v, co in zip((v for f in area for v in f.verts), saved):
+                    v.co = co
+    return finish(context, obj, bm, area, source, before, had), ""
+
+
 class _FixOp:
     bl_options = {"REGISTER", "UNDO"}
 
@@ -199,24 +255,6 @@ class _FixOp:
         with tasks.busy_cursor():  # one operator call: the checks and fixes run in one go
             return self._run(context)
 
-    def _begin(self, context):
-        obj = context.edit_object
-        bm = bmesh.from_edit_mesh(obj.data)
-        bm.faces.ensure_lookup_table()
-        return obj, bm, _source(context, obj)
-
-    def _end(self, context, obj, bm, area, source, before: str, had=None):
-        area = [f for f in area if f.is_valid]
-        if had is not None:
-            area += [f for f in bm.faces if f not in had]  # faces a patch made
-        found, bad = measure(area, source) if area else (None, np.zeros(0, bool))
-        _select_bad(bm, area, bad)
-        bmesh.update_edit_mesh(obj.data)
-        now = describe(found, bad) if found is not None else "no faces left"
-        context.scene.curiomesh_fix.last = f"Before: {before}. Now: {now}."
-        self.report({"INFO"}, context.scene.curiomesh_fix.last)
-        return {"FINISHED"}
-
 
 class CURIOMESH_OT_fix_find(_FixOp, bpy.types.Operator):
     bl_idname = "curiomesh.fix_find"
@@ -224,13 +262,7 @@ class CURIOMESH_OT_fix_find(_FixOp, bpy.types.Operator):
     bl_description = "Check the selected faces (and the rings around them) and leave only the bad ones selected. Nothing selected: the whole mesh"
 
     def _run(self, context):
-        obj, bm, source = self._begin(context)
-        area = _area(bm, context.scene.curiomesh_fix.grow)
-        found, bad = measure(area, source)
-        _select_bad(bm, area, bad)
-        bmesh.update_edit_mesh(obj.data)
-        context.scene.curiomesh_fix.last = f"In {len(area):,} faces: {describe(found, bad)}."
-        self.report({"INFO"}, context.scene.curiomesh_fix.last)
+        self.report({"INFO"}, tr(find_bad(context, context.edit_object, context.scene.curiomesh_fix.grow)))
         return {"FINISHED"}
 
 
@@ -250,37 +282,20 @@ class CURIOMESH_OT_fix_run(_FixOp, bpy.types.Operator):
 
     @classmethod
     def description(cls, context, props):
-        return FIXES[props.how][2] if props.how in FIXES else "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad"
+        return tip(FIXES[props.how][2] if props.how in FIXES else "Clean Up, Flip Inward, Untangle and Relax in turn (a move that leaves more bad faces is undone), then Patch what is still bad")
 
     def _run(self, context):
-        obj, bm, source = self._begin(context)
-        area = _area(bm, context.scene.curiomesh_fix.grow)
-        had = set(bm.faces)
-        found, bad = measure(area, source)
-        before = describe(found, bad)
-        if not bad.any():
-            return self._end(context, obj, bm, area, source, before)
-        for key in FIX_ALL if self.how == "ALL" else (self.how,):
-            area = [f for f in area if f.is_valid]
-            found, bad = measure(area, source)
-            if not bad.any():
-                break
-            saved = [v.co.copy() for f in area for v in f.verts]
-            note = FIXES[key][0](bm, area, found, bad, source)
-            if note and self.how != "ALL":
-                self.report({"WARNING"}, f"{FIXES[key][1]} {note}")
-                return {"CANCELLED"}
-            if key in {"UNTANGLE", "RELAX"} and all(f.is_valid for f in area):  # moves only: undo the move if it made it worse
-                _f, worse = measure(area, source)
-                if worse.sum() > bad.sum():
-                    for v, co in zip((v for f in area for v in f.verts), saved):
-                        v.co = co
-        return self._end(context, obj, bm, area, source, before, had)
+        text, warning = run_fix(context, context.edit_object, self.how, context.scene.curiomesh_fix.grow)
+        if warning:
+            self.report({"WARNING"}, tr(warning))
+            return {"CANCELLED"}
+        self.report({"INFO"}, tr(text))
+        return {"FINISHED"}
 
 
 class CURIOMESH_PG_fix(bpy.types.PropertyGroup):
     source: bpy.props.PointerProperty(name="Source", type=bpy.types.Object, description="Your original mesh: says which way is out and gives the surface moved corners go back on", poll=lambda self, obj: obj.type == "MESH")
-    grow: bpy.props.IntProperty(name="Grow", default=1, min=0, max=20, description="Rings of faces around a rough selection that are checked too")
+    grow: bpy.props.IntProperty(name="Grow", default=1, min=0, soft_max=20, max=10000, description="Rings of faces around a rough selection that are checked too")
     last: bpy.props.StringProperty()
 
 
@@ -303,9 +318,9 @@ class CURIOMESH_PT_fix(bpy.types.Panel):
         row.operator("curiomesh.fix_run", text="Fix All", icon="CHECKMARK").how = "ALL"
         col = layout.column(align=True)
         for key, (_fn, label, _tip, icon) in FIXES.items():
-            col.operator("curiomesh.fix_run", text=label, icon=icon).how = key
+            col.operator("curiomesh.fix_run", text=tr(label), icon=icon).how = key
         if fs.last:
-            layout.label(text=fs.last, icon="INFO")
+            layout.label(text=tr(fs.last), icon="INFO")
 
 
 CLASSES = (CURIOMESH_PG_fix, CURIOMESH_OT_fix_find, CURIOMESH_OT_fix_run, CURIOMESH_PT_fix)

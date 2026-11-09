@@ -48,6 +48,14 @@ def useful(rungs) -> list:
     return [k for k, f, c in rungs if not any((f2 <= f and c2 <= c) and (f2 < f or c2 < c) for _k2, f2, c2 in rungs)]
 
 
+def within(rungs, source: int) -> list:
+    """Keys from (key, faces, change) each that do not have more faces than the source mesh. When every rung is heavier
+    than the source, all keys stay (the lightest is the best that can be had; the verdict says so)."""
+    rungs = list(rungs)
+    light = [k for k, f, _c in rungs if f <= source]
+    return light or [k for k, _f, _c in rungs]
+
+
 def size_detail(base: float, size: float) -> float:
     """Quad Size 0..1 as a Detail: 0 the smallest quads, 0.5 the size you searched with, 1 the biggest."""
     size = min(max(size, 0.0), 1.0)

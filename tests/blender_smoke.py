@@ -1075,17 +1075,14 @@ def run_ui_prefs_case(module):
     if any(abs(a - b) > 1e-5 for a, b in zip(region.SEAM_COLOR, overlay.pref_color(overlay.get_prefs(), "region_seam_color"))):
         raise AssertionError("ui prefs: region seam colour default mismatch")
 
-    # A scene that never used the HUD button follows the preference; one that did keeps its choice. Nothing else is written.
+    # The dashboard starts off and only the user turns it on.
     if "hud_enabled" in settings.keys():
         del settings["hud_enabled"]
-    prefs.hud_default = False
     if settings.hud_enabled:
-        raise AssertionError("ui prefs: hud_default False did not switch the HUD off")
+        raise AssertionError("ui prefs: the dashboard does not start off")
     settings.hud_enabled = True
-    prefs.hud_default = False
     if not settings.hud_enabled:
         raise AssertionError("ui prefs: the scene's own HUD choice was not kept")
-    prefs.hud_default = False
 
     # Every panel draws, in several states, with no unknown icon / property / operator.
     states = []

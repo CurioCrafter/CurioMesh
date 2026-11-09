@@ -28,6 +28,7 @@ from __future__ import annotations
 import numpy as np
 
 from .chords import ChordReducer
+from .fewerpoles import PoleCleaner
 from .types import MeshData
 
 SHARP_DEG = 35.0  # a vertex on an edge folding more than this is a hard edge and stays where it is
@@ -43,6 +44,9 @@ FOLD_COS = float(np.cos(np.radians(40.0)))  # a quad folding more than this alon
 MOST_MOVE = 0.25  # of a vertex's mean edge length, per step
 MOST_DRIFT = 0.5  # of a vertex's mean edge length, in all: settling evens quads out where they are, it doesn't move them away
 STRAIGHT_STEPS = 40  # steps of the loop straightening that follows the settle (its own drift budget, as above)
+CYCLES = 3  # rounds of pole cleaning in `fewer_pole_steps` that always run; more follow while a round still takes poles away
+CYCLE_STEPS = 20  # settle steps between two rounds
+MIN_GAIN = 0.5  # points of Tidiness or Loop Quality a pass must add for Keep Tidying to go on (or one pole fewer)
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -64,31 +68,59 @@ def _edges(faces):
     return out
 
 
+def half_edges(faces):
+    """(face of each corner, corner, next corner) over every face, as arrays in face order, with no per-face Python,
+    so a big result opens a tool without a stall."""
+    from itertools import chain
+
+    sizes = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
+    if not len(faces) or not sizes.sum():
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty, empty
+    a = np.fromiter(chain.from_iterable(faces), dtype=np.int64, count=int(sizes.sum()))
+    fid = np.repeat(np.arange(len(faces), dtype=np.int64), sizes)
+    starts = np.cumsum(sizes) - sizes
+    nxt = np.arange(1, len(a) + 1)
+    nxt[starts[sizes > 0] + sizes[sizes > 0] - 1] = starts[sizes > 0]  # each face's last corner goes round to its first
+    return fid, a, a[nxt]
+
+
 def _normals(co: np.ndarray, quads: np.ndarray) -> np.ndarray:
     p = co[quads]
     return _unit(np.cross(p[:, 2] - p[:, 0], p[:, 3] - p[:, 1]))
 
 
-def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None) -> np.ndarray:
-    """Vertices that must not move: on a border (unless on the mirror plane), on a hard edge, or on a face that isn't a quad."""
+def pinned(co, faces, sharp_deg: float = SHARP_DEG, plane=None, half=None) -> np.ndarray:
+    """Vertices that must not move: on a border (unless on the mirror plane), on a hard edge, or on a face that isn't a quad.
+    `half`: `half_edges(faces)` when the caller has it already."""
     co = np.asarray(co, dtype=np.float64)
     out = np.zeros(len(co), dtype=bool)
-    for f in faces:
-        if len(f) != 4:
-            out[list(f)] = True
-    normal = {}
-    for i, f in enumerate(faces):
-        p = co[list(f)]
-        n = np.cross(p[2] - p[0], p[-1] - p[1]) if len(f) >= 4 else np.cross(p[1] - p[0], p[2] - p[0])
-        normal[i] = n / max(float(np.linalg.norm(n)), 1e-30)
+    fid, a, b = half_edges(faces) if half is None else half
+    if not len(a):
+        return out
+    sizes = np.bincount(fid, minlength=len(faces))
+    out[a[sizes[fid] != 4]] = True
+    # one normal per face from its diagonals (for a triangle this is its plain normal), with no per-face Python
+    starts = np.cumsum(sizes) - sizes
+    ok = sizes >= 3
+    normal = np.zeros((len(faces), 3))
+    s0 = starts[ok]
+    normal[ok] = np.cross(co[a[s0 + 2]] - co[a[s0]], co[a[s0 + sizes[ok] - 1]] - co[a[s0 + 1]])
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
     on_plane = np.zeros(len(co), dtype=bool) if plane is None else on_mirror(co, *plane)
     limit = np.cos(np.radians(sharp_deg))
-    for (a, b), users in _edges(faces).items():
-        if len(users) != 2:
-            if not (on_plane[a] and on_plane[b]):
-                out[a] = out[b] = True
-        elif float(normal[users[0]] @ normal[users[1]]) < limit:
-            out[a] = out[b] = True
+    lo, hi = np.minimum(a, b), np.maximum(a, b)
+    order = np.lexsort((fid, hi, lo))
+    lo, hi, fid = lo[order], hi[order], fid[order]
+    start = np.flatnonzero(np.r_[True, (lo[1:] != lo[:-1]) | (hi[1:] != hi[:-1])])
+    users = np.diff(np.r_[start, len(lo)])
+    el, eh = lo[start], hi[start]
+    border = (users != 2) & ~(on_plane[el] & on_plane[eh])
+    two = np.flatnonzero(users == 2)
+    sharp = two[(normal[fid[start[two]]] * normal[fid[start[two] + 1]]).sum(axis=1) < limit]
+    for ids in (np.flatnonzero(border), sharp):
+        out[el[ids]] = True
+        out[eh[ids]] = True
     return out
 
 
@@ -314,9 +346,10 @@ def settle_steps(co, faces, project=None, stay=None, plane=None, strength: float
     return out
 
 
-def clean_pole_steps(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: bool = True):
-    """Generator: fewer poles: messy patches around poles redrawn as plain grids (`ChordReducer.redraw_all_steps`), then edges spun to
-    walk the poles left together (`turn_pole_steps`). `keys` per face: faces with different keys (another material or part)
+def clean_pole_steps(co, faces, keys, stay=None, judge=None, depth: int = 2, redraw: bool = True, pairs: bool = True):
+    """Generator: fewer poles: messy patches around poles redrawn as plain grids (`ChordReducer.redraw_all_steps`), then
+    edges spun to walk the poles left together (`turn_pole_steps`), then with `pairs` pole pairs walked until they cancel
+    (`fewerpoles.PoleCleaner`). `keys` per face: faces with different keys (another material or part)
     are never mixed, and every new face takes the key of the patch it replaced. `stay`: vertices that don't move.
     Returns (co, faces, keys, stay) of the cleaned mesh, with unused vertices dropped.
     Yields between the poles tried."""
@@ -327,9 +360,11 @@ def clean_pole_steps(co, faces, keys, stay=None, judge=None, depth: int = 2, red
         reducer.locked[v] = True  # not `freeze`: that stops the whole connected part
     if redraw:  # without the judge: its check of a new grid skips the fold test, and the redrawn grids came out bent
         reducer.judge = None
-        yield from reducer.redraw_all_steps(rounds=2)
+        yield from reducer.redraw_all_steps(rounds=len(reducer.users))  # until a round takes nothing away; it stops itself sooner
         reducer.judge = judge
     yield from reducer.turn_pole_steps(depth=depth)
+    if pairs:
+        yield from PoleCleaner(reducer).run_steps()
     alive = [i for i, f in enumerate(reducer.faces) if f is not None]
     used = np.unique(np.fromiter((v for i in alive for v in reducer.faces[i]), dtype=np.int64))
     remap = np.full(len(reducer.points), -1, dtype=np.int64)
@@ -337,6 +372,25 @@ def clean_pole_steps(co, faces, keys, stay=None, judge=None, depth: int = 2, red
     points = np.asarray(reducer.points, dtype=np.float64)[used]
     held = np.concatenate((stay, np.zeros(len(reducer.points) - len(stay), dtype=bool)))[used]
     return points, [tuple(int(remap[v]) for v in reducer.faces[i]) for i in alive], [reducer.materials[i] for i in alive], held
+
+
+def fewer_pole_steps(co, faces, keys, stay=None, judge=None, project=None, plane=None, cycles: int = CYCLES, redraw: bool = True, stopped=None):
+    """Generator: `clean_pole_steps` again and again with a short settle in between: once the quads are even, more
+    patches fit a grid and more pole pairs can walk. At least `cycles` rounds, then on while a round still takes poles
+    away. Same arguments and result as `clean_pole_steps`; `project` and `plane` as in `settle_steps`. `stopped()` True
+    ends it after the round running."""
+    co = np.asarray(co, dtype=np.float64)
+    stay = np.zeros(len(co), dtype=bool) if stay is None else np.asarray(stay, dtype=bool)
+    before, k = poles(co, faces), 0
+    while True:
+        co, faces, keys, stay = yield from clean_pole_steps(co, faces, keys, stay, judge, redraw=redraw)
+        k += 1
+        now = poles(co, faces)
+        if (k >= cycles and now >= before) or (stopped is not None and stopped()):
+            return co, faces, keys, stay
+        before = now
+        stay = stay | pinned(co, faces, plane=plane)
+        co = (yield from settle_steps(co, faces, project, stay, plane, method="smooth", steps=CYCLE_STEPS))[-1][1]
 
 
 def poles(co, faces) -> int:
@@ -370,12 +424,26 @@ def meter(before: dict, after: dict) -> str:
     return f"Tidiness {before['tidy']:.0f} -> {after['tidy']:.0f}{view}, poles {before['poles']:,} -> {after['poles']:,}{faces}{loops}"
 
 
-def pick(levels: dict, wanted: float, cap: float | None = None):
+def pick(levels: dict, wanted: float, cap: float | None = None, base: float | None = None):
     """The ready strength to show for the slider at `wanted`: the nearest at or below it whose view change stays within
-    `cap` points of strength 0 (None: no cap). Strength 0 is always ready."""
-    base = levels.get(0.0, {}).get("view")
+    `cap` points of `base` (default: strength 0's; with Tidy Again, the result before the first pass). None: no cap.
+    Strength 0 is always ready."""
+    if base is None:
+        base = levels.get(0.0, {}).get("view")
     fine = [s for s, row in levels.items() if s <= wanted + 1e-9 and (cap is None or base is None or row.get("view") is None or row["view"] <= base + cap + 1e-9)]
     return max(fine, default=0.0)
 
 
-__all__ = ["clean_pole_steps", "half_of", "meter", "pick", "pinned", "poles", "settle_steps"]
+def gained(before: dict, after: dict, least: float = MIN_GAIN) -> bool:
+    """Whether a pass made the mesh tidier: fewer poles, or Tidiness or Loop Quality up by `least` points, and none of the
+    three worse. Keep Tidying stops when no strength of a pass does this."""
+    ups = [before["poles"] - after["poles"], after["tidy"] - before["tidy"]]
+    margins = [1, least]
+    a, b = (before.get("loops") or {}).get("quality"), (after.get("loops") or {}).get("quality")
+    if a is not None and b is not None:
+        ups.append(b - a)
+        margins.append(least)
+    return any(u >= m for u, m in zip(ups, margins)) and all(u > -m for u, m in zip(ups, margins))
+
+
+__all__ = ["clean_pole_steps", "fewer_pole_steps", "gained", "half_of", "meter", "pick", "pinned", "poles", "settle_steps"]

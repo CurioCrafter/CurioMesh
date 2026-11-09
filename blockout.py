@@ -6,7 +6,7 @@
 Blockout fits a box, a cylinder, an ellipsoid and a small convex hull to every part (`triadq.primitives`) and keeps
 the one the camera finds closest from the part's own six views. A part no single solid fits is cut at its creases by
 the segment finder (`triadq.segment`) and each segment gets its own solid. Hulls does the same with reduced convex
-hulls only. A part that still looks wrong keeps a reduced copy of itself, so no part comes out wrecked.
+hulls only. A part that still looks wrong keeps a reduced copy of itself, so no part comes out crushed.
 
 Runs in slices from the panel's timer like `autoretopo.AutoJob`, and gives the same `output` and `report`, so the
 preview, Apply, Undo, Bake Detail and Make LOD Set treat it like any other Use.

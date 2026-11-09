@@ -997,11 +997,12 @@ def sheet_importance(points, tris, focus=None) -> np.ndarray:
     return importance
 
 
-def even_embedding(points, tris, border, circle, importance=None, rounds: int = SHEET_EVEN_ROUNDS) -> np.ndarray:
+def even_embedding(points, tris, border, circle, importance=None, rounds: int = SHEET_EVEN_ROUNDS, graded: bool = False) -> np.ndarray:
     """A flat map of a disk where equal areas stay about equal, so a grid laid on it comes out even on the surface.
 
     A plain Tutte map squeezes the far end of a dome into the middle. Edge weights are lowered where the map stretches
-    (Yoshizawa, Belyaev and Seidel 2004), keeping them symmetric and positive, so the map stays one-to-one. The least stretched map found wins.
+    (Yoshizawa, Belyaev and Seidel 2004), keeping them symmetric and positive, so the map stays one-to-one. The least stretched map found wins;
+    `graded`: stretch is judged against `importance`, so the map that spreads out most evenly against it wins.
     """
 
     edges = _unique_edges(tris)
@@ -1020,6 +1021,9 @@ def even_embedding(points, tris, border, circle, importance=None, rounds: int = 
         dt = (q[:, 0] * (s[:, 2] - s[:, 1])[:, None] + q[:, 1] * (s[:, 0] - s[:, 2])[:, None] + q[:, 2] * (s[:, 1] - s[:, 0])[:, None]) / double
         gamma = 0.5 * ((ds * ds).sum(axis=1) + (dt * dt).sum(axis=1))
         stretch = float(np.sqrt((area3 * gamma).sum() / area3.sum()))
+        if graded:  # how unevenly the map spreads against what's wanted: 1 when it follows `importance` exactly
+            judged = gamma * importance[tris].mean(axis=1) ** 2
+            stretch = float(np.sqrt((area3 * judged * judged).sum() / area3.sum())) / max(float((area3 * judged).sum() / area3.sum()), 1e-30)
         if stretch < best_stretch:
             best, best_stretch = uv, stretch
         corner = np.repeat(area3, 3)
@@ -1231,7 +1235,7 @@ def fill_part_steps(co, faces, ids, goal: str, edge: float, project=None, topolo
     return points, final, warnings
 
 
-def _bridge(points, field_loop, seam_ids, next_id):
+def _bridge(points, field_loop, seam_ids, next_id, faces=()):
     """All quads between a loop of the field's mesh and a seam, both running the part's way round. One triangle if their counts differ by an odd number. Returns (faces, new vertices as pairs to average)."""
 
     start = int(np.argmin(np.linalg.norm(points[seam_ids] - points[field_loop[0]], axis=1)))
@@ -1321,12 +1325,16 @@ def _fill_holes(co, faces, holes):
     return co, faces
 
 
-def field_on_seams_steps(points, polys, seams, target: float, project=None, lines=None, settle=None):
-    """Generator: rows from the field mesher, joined to the seams: its last row comes off and one row of quads ties
-    what's left to the seam's own vertices. Returns (points, faces). Raises ValueError where it can't. A slice per
-    sweep of the field mesher and per step after it."""
+def field_on_seams_steps(points, polys, seams, target: float, project=None, lines=None, settle=None, mesher=None, bridge=None):
+    """Generator: rows from the field mesher (or `mesher`, called like `fieldmesh.field_quads`), joined to the seams (by
+    `_bridge`, or `bridge`): its last row comes off and one row of quads ties what's left to the seam's own vertices.
+    Returns (points, faces). Raises ValueError where it can't. A slice per sweep of the field mesher and per step after it."""
 
-    co, faces = yield from fieldmesh.field_quad_steps(np.asarray(points, dtype=np.float64), polys, max(target, fieldmesh.SMALLEST_TARGET), turn=FIELD_TURN, lines=lines)
+    args = (np.asarray(points, dtype=np.float64), polys, max(target, fieldmesh.SMALLEST_TARGET))
+    if mesher is None:
+        co, faces = yield from fieldmesh.field_quad_steps(*args, turn=FIELD_TURN, lines=lines)
+    else:
+        co, faces = mesher(*args, turn=FIELD_TURN, lines=lines)
     yield
     co = np.asarray(co, dtype=np.float64)
     faces = _drop_crowded(faces)
@@ -1348,7 +1356,7 @@ def field_on_seams_steps(points, polys, seams, target: float, project=None, line
         for ids, seam in zip(seam_at, seams):
             k = min(left, key=lambda i: float(_nearest_on_cloud(co[loops[i]], np.asarray(seam, dtype=np.float64))[1].mean()))
             left.remove(k)
-            made, middles = _bridge(known, loops[k], ids, offset + len(new_points))
+            made, middles = (bridge or _bridge)(known, loops[k], ids, offset + len(new_points), faces)
             pieces += made
             new_points += [0.5 * (known[x] + known[y]) for x, y in middles]
         co = np.vstack([known] + ([np.asarray(new_points)] if new_points else []))
@@ -1499,7 +1507,7 @@ def _cap_disk(seam, points, normals, step: float):
     return _fill_holes(co, faces, loops)
 
 
-def field_with_rings_steps(points, polys, rings, seams, target: float, project=None, lines=None, settle=None, rows: int = RING_ROWS):
+def field_with_rings_steps(points, polys, rings, seams, target: float, project=None, lines=None, settle=None, rows: int = RING_ROWS, mesher=None, bridge=None):
     """Generator: rows from the field mesher with each closed line as a true edge loop: Loop Select follows it all the
     way round.
 
@@ -1509,7 +1517,7 @@ def field_with_rings_steps(points, polys, rings, seams, target: float, project=N
     """
 
     if not rings:
-        return (yield from field_on_seams_steps(points, polys, seams, target, project, lines, settle))
+        return (yield from field_on_seams_steps(points, polys, seams, target, project, lines, settle, mesher, bridge))
     points = np.asarray(points, dtype=np.float64)
     tris = fieldmesh.triangulate(polys)[0]
     area = float(fieldmesh._normals_areas(points, tris)[1].sum())
@@ -1540,7 +1548,7 @@ def field_with_rings_steps(points, polys, rings, seams, target: float, project=N
         side_seams = [s for s in seams if side_of(np.asarray(s, dtype=np.float64)[0]) == k] + [row if forward else row[::-1]]
         share = float(fine_area[inside].sum()) / total
         try:
-            made = yield from field_with_rings_steps(here, [tuple(t) for t in here_tris.tolist()], side_rings, side_seams, share * left, project, lines, settle, rows)
+            made = yield from field_with_rings_steps(here, [tuple(t) for t in here_tris.tolist()], side_rings, side_seams, share * left, project, lines, settle, rows, mesher, bridge)
         except ValueError:
             if side_rings or len(side_seams) != 1:
                 raise
