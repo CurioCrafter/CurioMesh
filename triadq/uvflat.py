@@ -35,9 +35,9 @@ STRETCH_QUANTILE = 0.99
 FACTOR_MAX_BYTES = 2.0e9
 ND_LEAF = 64
 STATS_LEN = 17
-# Twin only: systems with at most this many unpinned unknowns are solved directly (dense, like the kernel's direct
+# Twin only: systems with at most this many rows (pinned included) are solved directly (dense, like the kernel's direct
 # factor) instead of by CG; a merge band has ~20. Well under a millisecond per solve at this size.
-DIRECT_MAX = 128
+DIRECT_MAX = 64  # dense solve only this small: above about 100 rows NumPy's threaded solve can take 10+ ms on a busy PC (one slice)
 
 ROWS = {"off": 0, "soft": 1, "on": 2, "auto": 3}
 STARTS = {"given": 0, "pull": 1, "free": 2}
@@ -374,7 +374,7 @@ class _System:
         self.m, self.pinned = m, pinned
         self.diag = np.bincount(self.r[self.r == self.c], weights=self.v[self.r == self.c], minlength=m)
         self.dense = None
-        if m - int(pinned.sum()) <= DIRECT_MAX:
+        if m <= DIRECT_MAX:  # the dense matrix holds every row, pinned ones too
             self.dense = np.zeros((m, m))
             np.add.at(self.dense, (self.r, self.c), self.v)
 
