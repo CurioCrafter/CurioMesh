@@ -704,6 +704,17 @@ def _meeting_points_steps(P, mesh, faces, vlabel, part, nearest, out: dict, leve
 SWITCH_SNAP_AGAIN = True  # a vertex may slide again in a later pass; passes stop when one mends no more faces than the last
 
 
+def _keeps_edges(pos, mesh, v, to) -> bool:
+    """False when moving `v` to `to` would bring it within SWITCH_REUSE of an edge's length onto a neighbour: two corners
+    sliding to the same switch point from both ends of their edge would close it, and a face with a zero-length edge
+    has a triangle with no area, whose winding (and the texture's way round on it) is rounding noise."""
+
+    for n in mesh.nbr[v]:
+        if _norm(_sub(to, pos[n])) < SWITCH_REUSE * _norm(_sub(pos[v], pos[n])):
+            return False
+    return True
+
+
 def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict, passes: int | None = None, steps: int = 16):
     """Generator (zero faces, SPEC 4.5's idea on the side lines): moves result vertices onto the line where the nearest
     source side changes, so a face whose corners lie on two sides gets one side every corner touches. Per face to mend
@@ -790,7 +801,7 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
             if v in done or (v in moved_once and not SWITCH_SNAP_AGAIN):
                 continue
             t = tuple(to[k].tolist())
-            if _move_ok(pos, mesh, v, t):
+            if _keeps_edges(pos, mesh, v, t) and _move_ok(pos, mesh, v, t):
                 pos[v] = t
                 done.add(v)
             if c % 256 == 255:
@@ -802,6 +813,83 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
         moved_all += sorted(done)
     out["points"] = P.ravel()
     out["moved"] = np.array(sorted(set(moved_all)), np.int64)
+
+
+def ball_snap_steps(points, indptr, flat, only, trees: RegionTrees, label, d0, max_move, out: dict, mesh=None):
+    """Generator (zero faces; the side-line snap's idea with the UV Check's own owner balls, SPEC 9.1): for every face to
+    mend (`only`) whose corners hold no side in common, the side among its corners' nearest ones that the fewest
+    corners lack is chosen (then the shortest moves), and each corner that lacks it moves to the closest point of that
+    side's source polygons (`trees.nearest`): onto the line where its own side meets that one, in any direction, not
+    only along an edge. A corner holds a side when it lies within its nearest distance `d0` plus the ball's reach
+    (`trees.eps`). A move is kept when it is within `max_move` (per vertex), leaves no edge at the vertex nearly closed
+    and flips or folds no face around it (the snap's guard); smallest moves first, a vertex moves once. `label` is the
+    nearest side per vertex; `mesh` the result's `_Mesh` when the caller has it. Fills out["points"] (flat) and
+    out["moved"] (vertex ids). Our own rule."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3).copy()
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    lab, d0 = np.asarray(label, np.int64), np.asarray(d0, np.float64)
+    limit = np.asarray(max_move, np.float64).ravel()
+    out["points"], out["moved"] = P.ravel(), np.zeros(0, np.int64)
+    faces = np.flatnonzero(np.asarray(only, bool)) if only is not None else np.arange(len(ip) - 1)
+    pairs = set()  # (vertex, side) to measure
+    want = {}
+    for f in faces.tolist():
+        fv = fl[ip[f]:ip[f + 1]].tolist()
+        sides = sorted({int(lab[v]) for v in fv})
+        if len(sides) < 2:
+            continue
+        want[f] = (fv, sides)
+        for v in fv:
+            for r in sides:
+                pairs.add((v, r))
+    yield
+    if not want:
+        return
+    dist, at = {}, {}
+    by_r = {}
+    for v, r in pairs:
+        by_r.setdefault(r, []).append(v)
+    for r, vs in by_r.items():
+        got = trees.nearest(r, P[vs])
+        if got is None:
+            continue
+        for v, q, dd in zip(vs, got[0], got[2].tolist()):
+            dist[(v, r)] = dd
+            at[(v, r)] = q
+        yield
+    props = []  # (move, vertex, target)
+    for f, (fv, sides) in want.items():
+        best = None
+        for r in sides:
+            need = [v for v in fv if dist.get((v, r), np.inf) > d0[v] + trees.eps]
+            if any((v, r) not in at for v in need):
+                continue
+            moves = [float(np.linalg.norm(at[(v, r)] - P[v])) for v in need]
+            if not need or any(m > limit[v] for m, v in zip(moves, need)):
+                continue
+            key = (len(need), max(moves))
+            if best is None or key < best[0]:
+                best = (key, [(m, v, at[(v, r)]) for m, v in zip(moves, need)])
+        if best is not None:
+            props += best[1]
+    yield
+    if mesh is None:
+        mesh = _Mesh(P, ip, fl, lazy=True)
+        yield from mesh.build(P, ip, fl)
+    pos = [tuple(p) for p in P.tolist()]
+    done = set()
+    for c, (m, v, q) in enumerate(sorted(props, key=lambda x: (x[0], x[1]))):
+        if v in done:
+            continue
+        t = tuple(np.asarray(q, np.float64).tolist())
+        if _keeps_edges(pos, mesh, v, t) and _move_ok(pos, mesh, v, t):
+            pos[v] = t
+            done.add(v)
+        if c % 256 == 255:
+            yield
+    out["points"] = np.array(pos, np.float64).ravel()
+    out["moved"] = np.array(sorted(done), np.int64)
 
 
 SPLIT_ORDER = "damage"  # the twin's budget order for chain cuts: "damage" (SPEC 4.7) or "per_face" (damage per face spent)

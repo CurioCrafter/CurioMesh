@@ -2002,7 +2002,7 @@ fn uvchart_uvs<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stret
     let opts = uvchart_opts(rows, stretch_allowed, steps, max_factor_bytes, texture_px);
     let (uv, chart, stats, ratio) = py.detach(|| {
         let l = tree.0.level(x);
-        let (uv, stats, ratio) = tree.0.flatten_cut(&l.cut, &l.chart, None, Some(&tree.0.start_uv), &opts, &stop.0);
+        let (uv, stats, ratio) = tree.0.flatten_cut(&l.cut, &l.chart, None, Some(tree.0.start_of(&l)), &opts, &stop.0);
         (uv, l.chart.iter().map(|&c| c as i64).collect::<Vec<_>>(), stats, ratio)
     });
     uvflat_stopped(stop)?;
