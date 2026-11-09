@@ -40,7 +40,7 @@ STRETCH_CHUNK = 8000  # triangles measured per slice in the stretch check
 CELLS_PER_TRI = 8  # grid cells per triangle (on average) in the overlap test's spatial hash
 CHECK_PAIRS = 200  # triangle pairs tested in one go (a slice)
 WRITE_CHUNK = 20000  # corners written per slice
-LADDER_AHEAD = 3  # lower Stretch allowed levels the compiled kernel lays out at the same time when charts must be redone
+LADDER_AHEAD = 8  # lower Stretch allowed levels the compiled kernel lays out at the same time when charts must be redone
 QUICK_FACES = 6000  # a mesh with this many faces or more gets a first layout before the repairs (Settings.quick_first)
 TRI_CHUNK = 4000  # triangles turned into grid entries per slice
 FACE_CHUNK = 6000  # faces whose triangles are built and measured in one slice
@@ -265,26 +265,45 @@ def cut_edges(indptr, flat, uv, tol: float = 1e-6) -> np.ndarray:
     return _drive(_cut_edges(indptr, flat, uv, tol))
 
 
-_OCT = [np.array(d, float).reshape(2, 1) for d in ((1, 0), (0, 1), (1, 1), (1, -1))]
+OCTAGON_FROM = 256  # R9first: charts with more corners than this drop the points inside their extreme octagon first (cheaper than the hull loop)
+_OCT2 = np.array(((1, 0), (0, 1), (1, 1), (1, -1)), float).T  # the octagon's four directions, one per column
+
+
+def _octagon(p: np.ndarray) -> np.ndarray:
+    """Akl-Toussaint: drop the points inside the octagon of the extreme points (they are not on the hull)."""
+
+    proj = p @ _OCT2
+    ext = np.unique(np.concatenate((np.argmin(proj, axis=0), np.argmax(proj, axis=0))))
+    o = p[ext]
+    o = o[np.argsort(np.arctan2(o[:, 1] - o[:, 1].mean(), o[:, 0] - o[:, 0].mean()))]
+    edge = np.roll(o, -1, axis=0) - o
+    inside = ((edge[:, 0:1] * (p[:, 1][None] - o[:, 1:2]) - edge[:, 1:2] * (p[:, 0][None] - o[:, 0:1])) > 0).all(axis=0)
+    if len(o) >= 3 and inside.any():
+        return np.concatenate([p[~inside], o])
+    return p
 
 
 def _hull(p: np.ndarray) -> np.ndarray:
     """Convex hull of 2D points (Andrew's monotone chain), counter-clockwise, no repeated end point."""
 
-    if len(p) > 512:  # Akl-Toussaint: points inside the octagon of the extreme points are not on the hull
-        ext = np.unique(np.concatenate([np.argmin(p @ d, axis=0) for d in _OCT] + [np.argmax(p @ d, axis=0) for d in _OCT]))
-        o = p[ext]
-        o = o[np.argsort(np.arctan2(o[:, 1] - o[:, 1].mean(), o[:, 0] - o[:, 0].mean()))]
-        edge = np.roll(o, -1, axis=0) - o
-        inside = np.ones(len(p), bool)
-        for a_, e_ in zip(o, edge):
-            inside &= (e_[0] * (p[:, 1] - a_[1]) - e_[1] * (p[:, 0] - a_[0])) > 0
-        if len(o) >= 3 and inside.any():
-            p = np.concatenate([p[~inside], o])
+    if len(p) > 512:
+        p = _octagon(p)
     pts = np.unique(np.round(p, 12), axis=0)
     if len(pts) <= 2:
         return pts
     pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))].tolist()
+    return np.array(_chain(pts))
+
+
+def min_area_angle(p: np.ndarray) -> float:
+    """Angle (radians) that turns `p` into its smallest axis-aligned box: rotating calipers over the hull's edges."""
+
+    h = _hull(p)
+    return _calipers(h) if len(h) >= 3 else 0.0
+
+
+def _chain(pts: list) -> list:
+    """Andrew's monotone chain over x-then-y sorted, distinct points (lists): the hull counter-clockwise from the first."""
 
     def half(seq):
         out = []
@@ -295,22 +314,50 @@ def _hull(p: np.ndarray) -> np.ndarray:
         return out
 
     lower, upper = half(pts), half(pts[::-1])
-    return np.array(lower[:-1] + upper[:-1])
+    return lower[:-1] + upper[:-1]
 
 
-def min_area_angle(p: np.ndarray) -> float:
-    """Angle (radians) that turns `p` into its smallest axis-aligned box: rotating calipers over the hull's edges."""
+def _calipers(h: np.ndarray) -> float:
+    """`min_area_angle` on a hull (counter-clockwise, at least 3 points)."""
 
-    h = _hull(p)
-    if len(h) < 3:
-        return 0.0
-    d = np.roll(h, -1, axis=0) - h
+    d = np.concatenate((h[1:], h[:1])) - h
     ang = np.arctan2(d[:, 1], d[:, 0])
     c, s = np.cos(-ang), np.sin(-ang)
     x = h[None, :, 0] * c[:, None] - h[None, :, 1] * s[:, None]
     y = h[None, :, 0] * s[:, None] + h[None, :, 1] * c[:, None]
     area = (x.max(axis=1) - x.min(axis=1)) * (y.max(axis=1) - y.min(axis=1))
     return float(-ang[int(np.argmin(area))])
+
+
+def min_area_angles(uv: np.ndarray, order: np.ndarray, bounds: np.ndarray, which, budget: float = 0.004):
+    """Generator, returns `min_area_angle` of each group in `which` (group c is `uv[order[bounds[c]:bounds[c + 1]]]`;
+    0.0 for fewer than 3 distinct points). R9first: the same hulls and angles without the per-chart `np.unique` and
+    array round trips (most charts are small, so those fixed costs were most of the orient stage). Yields every
+    `budget` seconds."""
+
+    out = np.zeros(len(which))
+    until = time.perf_counter() + budget
+    for i, c in enumerate(which):
+        if time.perf_counter() > until:
+            yield
+            until = time.perf_counter() + budget
+        a, b = bounds[c], bounds[c + 1]
+        if b - a <= 2:
+            continue
+        q = uv[order[a:b]]
+        if b - a > OCTAGON_FROM:  # the octagon filter of `_hull` (Akl-Toussaint): the same hull from fewer points
+            q = _octagon(q)
+        q = np.round(q, 12)
+        q = q[np.lexsort((q[:, 1], q[:, 0]))]
+        keep = np.ones(len(q), bool)
+        keep[1:] = (q[1:, 0] != q[:-1, 0]) | (q[1:, 1] != q[:-1, 1])
+        q = q[keep]
+        if len(q) <= 2:
+            continue
+        h = _chain(q.tolist())
+        if len(h) >= 3:
+            out[i] = _calipers(np.array(h))
+    return out
 
 
 def rows_angle(uv: np.ndarray, col: np.ndarray, row: np.ndarray, indptr, flat) -> float | None:
@@ -717,6 +764,7 @@ class NewUVs:
         yield
         fbounds = np.searchsorted(chart[face_order], np.arange(nchart + 1))
         angle = np.zeros(nchart)
+        boxed = []
         until = time.perf_counter() + self.budget
         for c in range(nchart):
             if time.perf_counter() > until:
@@ -731,7 +779,9 @@ class NewUVs:
                         angle[c] = got[4]
                         continue
                 res.on_chart[face_order[fbounds[c] : fbounds[c + 1]]] = False  # no clean labels: not counted as a straight-rows chart
-            angle[c] = min_area_angle(corner_uv[cc]) if len(cc) > 2 else 0.0
+            boxed.append(c)
+        if boxed:  # the other charts: their smallest box by rotating calipers, all at once
+            angle[boxed] = yield from min_area_angles(corner_uv, order, bounds, boxed, self.budget)
         res.col, res.row = col, row
         yield
         ca, sa = np.cos(angle)[corner_chart], np.sin(angle)[corner_chart]
@@ -1201,6 +1251,7 @@ class NewUVs:
         pend_faces = np.flatnonzero(np.isin(chart, pending)) if pending else np.zeros(0, np.int64)  # charts born below lie inside these
         patch = np.asarray(tree.patches() if callable(getattr(tree, "patches", None)) else tree.patch, dtype=np.int64)
         order, start = grouped(chart, next_id)
+        faces_of = {c: order[start[c] : start[c + 1]] for c in pending}  # R9first: the faces of each pending chart, kept up to date (no regrouping per rung)
         rung = 0
         while pending and rung < len(ladder):
             x = ladder[rung]
@@ -1228,7 +1279,7 @@ class NewUVs:
                 if time.perf_counter() > until:
                     yield
                     until = time.perf_counter() + self.budget
-                faces = order[start[c] : start[c + 1]]
+                faces = faces_of[c]
                 inside = np.unique(lchart[faces])
                 lfaces = [lorder[lstart[i] : lstart[i + 1]] for i in inside]
                 if not all(np.all(chart[f] == c) for f in lfaces):  # not nested: try a lower level
@@ -1237,27 +1288,31 @@ class NewUVs:
                 corners = self._corners(faces)
                 corner_uv[corners] = luv[corners]
                 rows.pop(c, None)
+                del faces_of[c]
                 for i, f in zip(inside, lfaces):
                     chart[f] = next_id
                     rows[next_id] = int(lrows[int(i)])
                     if lrows[int(i)] != 2:
                         born.append(next_id)
+                        faces_of[next_id] = np.sort(f)
                     next_id += 1
             if born:  # the new charts are checked together
-                faces = np.flatnonzero(np.isin(chart, born))
+                faces = np.sort(np.concatenate([faces_of[b] for b in born]))
                 yield
                 still += [int(c) for c in (yield from self._charts_lying(chart, faces, corner_uv))]
             pending = still
+            keep = set(pending)
+            for c in [c for c in faces_of if c not in keep]:
+                del faces_of[c]  # born charts that lie flat: done
             yield
-            order, start = grouped(chart, next_id)
             if pending:  # the levels started from now on lay out only the charts inside what still lies over itself
-                pend_faces = np.concatenate([order[start[c] : start[c + 1]] for c in pending])
+                pend_faces = np.concatenate([faces_of[c] for c in pending])
         for job in list(jobs.values()) + list(levels.values()):  # levels that turned out not to be needed
             if job is not None:
                 job.stop()
         until = time.perf_counter() + self.budget
         for c in pending:  # last resort: grid patches
-            faces = order[start[c] : start[c + 1]]
+            faces = faces_of[c]
             placed = []
             for p in np.unique(patch[faces]):
                 if time.perf_counter() > until:  # a grid layout per patch: a slice holds as many as fit its time
