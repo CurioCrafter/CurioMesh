@@ -846,8 +846,9 @@ class CURIOMESH_PT_pop_uv(bpy.types.Panel):
         col.prop(us, "time_per_pass")
         col = layout.column(align=True)
         col.prop(us, "fill_page")
-        if not us.fill_page:
-            col.prop(us, "pixel_density")
+        sub = col.row(align=True)  # always drawn (greyed while Fill the page is on): the rows below never jump
+        sub.active = not us.fill_page
+        sub.prop(us, "pixel_density")
         col.prop(us, "texture_size")
         col.prop(us, "clean_down_to")
         col.label(text=tr(f"Gap {uvnew.gap_texels(us.texture_size, us.clean_down_to)} px: clean down to {us.clean_down_to} px ({uvnew.mip_level(us.texture_size, us.clean_down_to)} levels)"))
