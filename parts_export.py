@@ -26,6 +26,7 @@ from .triadq import issues
 from .triadq import parts as P
 from .triadq import segment as S
 from .agentcmd import AgentError as PartsError
+from .translations import tip, tr
 
 WARNING = "This zip holds the mesh pieces of your model named below. Check them before you share it."
 
@@ -258,11 +259,11 @@ class CURIOMESH_OT_parts_export(bpy.types.Operator):
         try:
             out = export_parts(None, self.directory or None, self.note)
         except PartsError as exc:
-            self.report({"ERROR"}, f"{exc} {exc.hint}".strip())
+            self.report({"ERROR"}, tr(f"{exc} {exc.hint}".strip()))
             return {"CANCELLED"}
         left = f" Left out: {len(out['skipped'])} (see parts.json)." if out["skipped"] else ""
         guided.state["message"] = f"Wrote {len(out['parts'])} part(s) to {out['folder']}.{left}"
-        self.report({"INFO"}, guided.state["message"])
+        self.report({"INFO"}, tr(guided.state["message"]))
         return {"FINISHED"}
 
 
@@ -290,10 +291,10 @@ class CURIOMESH_OT_parts_report(bpy.types.Operator):
         try:
             out = report_parts(None, path, self.note)
         except PartsError as exc:
-            self.report({"ERROR"}, f"{exc} {exc.hint}".strip())
+            self.report({"ERROR"}, tr(f"{exc} {exc.hint}".strip()))
             return {"CANCELLED"}
         guided.state["message"] = f"Report saved to {out['path']}. {WARNING}"
-        self.report({"INFO"}, guided.state["message"])
+        self.report({"INFO"}, tr(guided.state["message"]))
         return {"FINISHED"}
 
 
@@ -312,8 +313,8 @@ class CURIOMESH_OT_send_problem(bpy.types.Operator):
     @classmethod
     def description(cls, context, props):
         if props.kind == "FIX":
-            return "Save the fixed parts, your original surface and the settings in a zip and open the issue form, so the fix can become part of CurioMesh. CurioMesh sends nothing: you attach the zip yourself"
-        return cls.bl_description
+            return tip("Save the fixed parts, your original surface and the settings in a zip and open the issue form, so the fix can become part of CurioMesh. CurioMesh sends nothing: you attach the zip yourself")
+        return tip(cls.bl_description)
 
     @classmethod
     def poll(cls, context):
@@ -321,21 +322,21 @@ class CURIOMESH_OT_send_problem(bpy.types.Operator):
 
     def invoke(self, context, event):
         title = "Share a Fix" if self.kind == "FIX" else "Send as a Problem"
-        return context.window_manager.invoke_props_dialog(self, width=420, title=title)
+        return context.window_manager.invoke_props_dialog(self, width=420, title=tr(title))
 
     def draw(self, context):
         col = self.layout.column(align=True)
         col.label(text="CurioMesh sends nothing. It saves a zip of the marked")
         col.label(text="parts and opens the issue form. You attach the zip yourself.")
         col.label(text="The zip holds pieces of your mesh: only share what you may.")
-        col.prop(self, "note", text="How you fixed it" if self.kind == "FIX" else "What is wrong")
+        col.prop(self, "note", text=tr("How you fixed it" if self.kind == "FIX" else "What is wrong"))
 
     def execute(self, context):
         note = f"[Fix that worked] {self.note}" if self.kind == "FIX" else self.note
         try:
             out = report_parts(None, None, note)
         except PartsError as exc:
-            self.report({"ERROR"}, f"{exc} {exc.hint}".strip())
+            self.report({"ERROR"}, tr(f"{exc} {exc.hint}".strip()))
             return {"CANCELLED"}
         try:
             version = ".".join(str(i) for i in _version())
@@ -343,7 +344,7 @@ class CURIOMESH_OT_send_problem(bpy.types.Operator):
         except Exception:  # no browser: the zip is still saved
             pass
         guided.state["message"] = f"Report saved to {out['path']}. Attach it to the issue form. {WARNING}"
-        self.report({"INFO"}, guided.state["message"])
+        self.report({"INFO"}, tr(guided.state["message"]))
         bpy.ops.curiomesh.problem_saved("INVOKE_DEFAULT", path=out["path"])
         return {"FINISHED"}
 
@@ -362,7 +363,7 @@ class CURIOMESH_OT_problem_saved(bpy.types.Operator):
     def draw(self, context):
         col = self.layout.column(align=True)
         col.label(text="Zip saved. Attach it to the issue form yourself:")
-        col.label(text=self.path)
+        col.label(text=tr(self.path))
         col.operator("wm.path_open", text="Open Folder").filepath = os.path.dirname(self.path)
 
     def execute(self, context):

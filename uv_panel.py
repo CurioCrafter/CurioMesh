@@ -25,6 +25,7 @@ import numpy as np
 
 from . import history, overlay, tidylive, uv_draw, uv_layers
 from .triadq import uvbake, uvkeep, uvnew, uvscore, uvtrial
+from .translations import tip, tr
 
 BUDGET = 0.008  # seconds of work per modal tick, like Look First
 REST = 0.15  # seconds after the value stops moving: the run starts again
@@ -562,10 +563,10 @@ class CURIOMESH_OT_uv_tool(bpy.types.Operator):
 
     @classmethod
     def description(cls, context, props):
-        return {"new": "Makes new UVs for the active mesh: few seams, out of sight, straight rows. Shown first, Enter keeps them",
+        return tip({"new": "Makes new UVs for the active mesh: few seams, out of sight, straight rows. Shown first, Enter keeps them",
                 "layout": "Packs the islands as they are onto the page again, with the gap. Keep going tries other orders and keeps the best",
                 "cut": "Click an edge to cut the UVs there, click it again to join it back. New UVs follow your cuts",
-                "bake": "Gives each face that still crosses a seam its own small island and bakes your mesh into just those. The rest of the texture is untouched"}[props.tool]
+                "bake": "Gives each face that still crosses a seam its own small island and bakes your mesh into just those. The rest of the texture is untouched"}[props.tool])
 
     @classmethod
     def poll(cls, context):
@@ -616,35 +617,35 @@ class CURIOMESH_OT_uv_tool(bpy.types.Operator):
     def _execute(self, context):
         s, err = self._open(context)
         if err or s is None:
-            self.report({"WARNING"}, err)
+            self.report({"WARNING"}, tr(err))
             return {"CANCELLED"}
         s.finish()
         if not s.ready():
-            self.report({"WARNING"}, (s.cand.refusal if s.cand is not None else "") or f"{s.trial.name} did not finish")
+            self.report({"WARNING"}, tr((s.cand.refusal if s.cand is not None else "") or f"{s.trial.name} did not finish"))
             return {"CANCELLED"}
         err = _apply(context, s)
         if err:
-            self.report({"WARNING"}, err)
+            self.report({"WARNING"}, tr(err))
             return {"CANCELLED"}
         return {"FINISHED"}
 
     def invoke(self, context, event):
         area, region = tidylive._view(context)
         if region is None:
-            self.report({"WARNING"}, "Open a 3D view first: the preview is drawn there.")
+            self.report({"WARNING"}, tr("Open a 3D view first: the preview is drawn there."))
             return {"CANCELLED"}
         close()
         tidylive.close("")
         s, err = self._open(context)
         if err or s is None:
-            self.report({"WARNING"}, err)
+            self.report({"WARNING"}, tr(err))
             return {"CANCELLED"}
         s.area, s.region, s.region_ptr = area, region, region.as_pointer()
         live["session"] = self._s = s
         _add_handlers()
         self._timer = context.window_manager.event_timer_add(1.0 / 60.0, window=context.window)
         hint = f"{s.trial.name}: " + ("click an edge to cut or join it. " if s.trial.picks else "") + "Enter keeps it, Esc cancels, B before/after, A again, K keep going."
-        area.header_text_set(hint)
+        area.header_text_set(tr(hint))
         context.window_manager.modal_handler_add(self)
         overlay.tag_redraw()
         return {"RUNNING_MODAL"}
@@ -676,9 +677,9 @@ class CURIOMESH_OT_uv_tool(bpy.types.Operator):
         close()
         self._finish(context)
         if err:
-            self.report({"WARNING"}, err)
+            self.report({"WARNING"}, tr(err))
             return {"CANCELLED"}
-        self.report({"INFO"}, f"{s.trial.name}: {numbers_text(s)}")
+        self.report({"INFO"}, tr(f"{s.trial.name}: {numbers_text(s)}"))
         return {"FINISHED"}
 
     def modal(self, context, event):
@@ -780,15 +781,15 @@ class CURIOMESH_OT_uv_look(bpy.types.Operator):
             if mode == "light":
                 return bpy.ops.curiomesh.uv_seam_fit("INVOKE_DEFAULT")
             if us is not None and (us.uvs == "NEW" or (us.uvs == "AUTO" and not _source_has_uvs())):
-                self.report({"INFO"}, "New UVs are made on Apply. After Apply, Look shows them on the mesh.")
+                self.report({"INFO"}, tr("New UVs are made on Apply. After Apply, Look shows them on the mesh."))
                 return {"CANCELLED"}
             if mode == "exact":
-                self.report({"INFO"}, "Seam Fit: Exact keeps every seam as a border during the search, so there is nothing to fit after it.")
+                self.report({"INFO"}, tr("Seam Fit: Exact keeps every seam as a border during the search, so there is nothing to fit after it."))
                 return {"CANCELLED"}
-            self.report({"INFO"}, "UVs are Off: nothing to look at.")
+            self.report({"INFO"}, tr("UVs are Off: nothing to look at."))
             return {"CANCELLED"}
         if target(context) is None:
-            self.report({"WARNING"}, "Make a result first with Start, or select a mesh.")
+            self.report({"WARNING"}, tr("Make a result first with Start, or select a mesh."))
             return {"CANCELLED"}
         return bpy.ops.curiomesh.uv_tool("INVOKE_DEFAULT", tool="new" if not context.object.data.uv_layers else "layout")
 
@@ -849,13 +850,13 @@ class CURIOMESH_PT_pop_uv(bpy.types.Panel):
             col.prop(us, "pixel_density")
         col.prop(us, "texture_size")
         col.prop(us, "clean_down_to")
-        col.label(text=f"Gap {uvnew.gap_texels(us.texture_size, us.clean_down_to)} px: clean down to {us.clean_down_to} px ({uvnew.mip_level(us.texture_size, us.clean_down_to)} levels)")
+        col.label(text=tr(f"Gap {uvnew.gap_texels(us.texture_size, us.clean_down_to)} px: clean down to {us.clean_down_to} px ({uvnew.mip_level(us.texture_size, us.clean_down_to)} levels)"))
         layout.prop(us, "sharpen_cuts")
         layout.separator()
         layout.label(text="On the active mesh:")
         grid = layout.grid_flow(columns=2, align=True)
         for kind, words, _tip in KINDS:
-            grid.operator("curiomesh.uv_tool", text=words).tool = kind
+            grid.operator("curiomesh.uv_tool", text=tr(words)).tool = kind
         op = layout.operator("curiomesh.uv_tool", text="Bake every spot", icon="SHADERFX")  # fix every spot like this
         op.tool, op.value, op.keep_going = "bake", 1.0, True
 

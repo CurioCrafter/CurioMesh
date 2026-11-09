@@ -22,6 +22,7 @@ import mathutils
 from . import history, overlay, tidylive
 from .triadq import autofix
 from .triadq import trial as T
+from .translations import tip, tr
 
 GAP = 0.01  # seconds between timer ticks while working: the interface stays usable
 REDRAW = 0.25  # seconds between panel redraws while working
@@ -461,10 +462,10 @@ class CURIOMESH_PT_pop_autofix(bpy.types.Panel):
         for key in autofix.GROUPS:
             label, what = GROUP_TEXT[key]
             col = layout.column(align=True)
-            col.prop(pg, key, text=label)
+            col.prop(pg, key, text=tr(label))
             sub = col.row()
             sub.active = False
-            sub.label(text=what)
+            sub.label(text=tr(what))
 
 
 def _same_size(rep: dict) -> bool:
@@ -478,13 +479,13 @@ def draw_working(box) -> None:
     """Three fixed rows in the panel's status box: title, progress, Stop. Replaces the old block that pushed the sliders down."""
     job = fx["job"]
     long = len(job.status) > 30
-    box.label(text=job.status[:36] if long else "Auto Fix is working", icon="TIME")
+    box.label(text=tr(job.status[:36] if long else "Auto Fix is working"), icon="TIME")
     pct = min(max(float(job.fraction), 0.0), 1.0)
     if hasattr(box, "progress"):
-        box.progress(factor=pct, type="BAR", text=f"{pct * 100:.0f}%" if long else job.status)
+        box.progress(factor=pct, type="BAR", text=tr(f"{pct * 100:.0f}%" if long else job.status))
     else:
         filled = int(round(pct * 20))
-        box.label(text=f"[{'#' * filled}{'-' * (20 - filled)}] {pct * 100:.0f}%")
+        box.label(text=tr(f"[{'#' * filled}{'-' * (20 - filled)}] {pct * 100:.0f}%"))
     box.operator("curiomesh.autofix_stop", text="Stop (keeps what it fixed)", icon="CANCEL")
 
 
@@ -520,12 +521,12 @@ def draw_readout(layout, context) -> None:
             sub.active = False
             overlay.wrap_label(sub, "Each fix is a step in History. Ctrl+Z takes them back one by one.", width=WIDTH, limit=2)
     if rows:
-        box.prop(pg, "open", text=f"{len(rows)} line{'s' if len(rows) != 1 else ''}", icon="DOWNARROW_HLT" if pg.open else "RIGHTARROW", emboss=False)
+        box.prop(pg, "open", text=tr(f"{len(rows)} line{'s' if len(rows) != 1 else ''}"), icon="DOWNARROW_HLT" if pg.open else "RIGHTARROW", emboss=False)
         if pg.open:
             col = box.column(align=True)
             for i, r in enumerate(rows):
                 row = col.row(align=True)
-                row.label(text=r["text"])
+                row.label(text=tr(r["text"]))
                 row.operator("curiomesh.autofix_show", text="Show").line = i
 
 
@@ -580,7 +581,7 @@ def _frame(context) -> None:
     at = pts[fx["show"]["spot"] % len(pts)]
     rv3d.view_location = obj.matrix_world @ mathutils.Vector(at.tolist())
     rv3d.view_distance = min(rv3d.view_distance, max(0.3 * float(obj.dimensions.length), 1e-3))
-    area.header_text_set(f"Spot {fx['show']['spot'] % len(pts) + 1} of {len(pts)}. Show again for the next, Esc to stop.")
+    area.header_text_set(tr(f"Spot {fx['show']['spot'] % len(pts) + 1} of {len(pts)}. Show again for the next, Esc to stop."))
     area.tag_redraw()
 
 
@@ -673,8 +674,8 @@ class CURIOMESH_OT_autofix_show(bpy.types.Operator):
         rep = fx["report"]
         rows = lines(rep) if rep is not None else []
         if 0 <= properties.line < len(rows):
-            return f"Shows where this was found, one spot at a time. Fixed by {rows[properties.line]['tool']}. Press again for the next, Esc to stop"
-        return cls.bl_description
+            return tip(f"Shows where this was found, one spot at a time. Fixed by {rows[properties.line]['tool']}. Press again for the next, Esc to stop")
+        return tip(cls.bl_description)
 
     @classmethod
     def poll(cls, context):

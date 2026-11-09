@@ -25,6 +25,7 @@ from . import autofix_live, autoretopo, history, organize, overlay, segments, ti
 from .triadq import ladder as L
 from .triadq import tasks
 from .triadq import parts as P
+from .translations import tip, tr
 
 MOST_FACES = 400_000  # faces of your mesh: past this each rung is a long search, so there is no ladder
 ROWS_MOST = 100_000  # Clean Rows rungs only up to here: one took over three minutes on a 17,000 face bust
@@ -502,7 +503,7 @@ def draw(layout, gs) -> None:
     if picked is not None:
         a, b, moved = picked
         words = STYLE_WORDS.get(a[0], a[0]) if not moved else f"{STYLE_WORDS.get(a[0], a[0])}, {len(moved)} piece{'s' if len(moved) != 1 else ''} {STYLE_WORDS.get(b[0], b[0])}"
-        box.label(text=f"Showing: {words}, Detail {a[1]:g}%", icon="MESH_GRID")
+        box.label(text=tr(f"Showing: {words}, Detail {a[1]:g}%"), icon="MESH_GRID")
     note = status()
     if note:
         overlay.wrap_label(box, note, icon="TIME", width=36, limit=2)
@@ -633,8 +634,8 @@ class CURIOMESH_OT_part_size(tidytools.PartSwap, bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.bigger:
-            return "Shows the picked parts redone with bigger quads, then Enter keeps them. Fewer faces there; the rest stays as it is"
-        return "Shows the picked parts redone with smaller quads, then Enter keeps them. More faces and more detail there; the rest stays as it is"
+            return tip("Shows the picked parts redone with bigger quads, then Enter keeps them. Fewer faces there; the rest stays as it is")
+        return tip("Shows the picked parts redone with smaller quads, then Enter keeps them. More faces and more detail there; the rest stays as it is")
 
     @classmethod
     def poll(cls, context):

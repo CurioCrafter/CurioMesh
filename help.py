@@ -3,6 +3,10 @@
 """Plain-words help for every step of the panel. `help_button(layout, topic)` draws a small "?" that pops the text up."""
 
 try:
+    from .translations import tr
+except ImportError:  # loaded on its own by the unit tests
+    from translations import tr
+try:
     import bpy
 except ImportError:  # unit tests run without Blender
     bpy = None
@@ -53,10 +57,13 @@ def text(topic: str) -> str:
 
 
 def _wrap(layout, body: str) -> None:
-    import textwrap
+    try:
+        from . import translations as T
+    except ImportError:
+        import translations as T
 
-    for line in textwrap.wrap(body, WIDTH):
-        layout.label(text=line)
+    for line in T.wrap(tr(body), WIDTH):
+        layout.label(text=line, translate=False)
 
 
 if bpy is not None:
@@ -75,7 +82,7 @@ if bpy is not None:
             def draw(menu, _context):
                 _wrap(menu.layout, body)
 
-            context.window_manager.popup_menu(draw, title=title, icon="QUESTION")
+            context.window_manager.popup_menu(draw, title=tr(title), icon="QUESTION")
             return {"FINISHED"}
 
     CLASSES = (CURIOMESH_OT_help,)

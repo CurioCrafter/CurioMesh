@@ -26,6 +26,8 @@ from . import batch, fix_select, game_export, guided, history, live, overlay, pa
 from . import agent_mailbox, help, parts_export, parts_import, promptgen  # main-only
 from . import uv_panel  # main-only: uv
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
+from . import translations
+from .translations import tr
 
 D = overlay.PREF_DEFAULTS
 
@@ -70,6 +72,14 @@ SUBPANEL_TOGGLES = (
 class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
+    language: bpy.props.EnumProperty(
+        name="Language",
+        description=translations.LANGUAGE_TIP,
+        items=translations.LANGUAGE_ITEMS,
+        get=translations.get_language,
+        set=translations.set_language,
+        options={"SKIP_SAVE"},
+    )
     panel_tab: bpy.props.StringProperty(
         name="Sidebar Tab",
         description="Name of the tab in the 3D Viewport sidebar (N panel) that holds CurioMesh",
@@ -194,6 +204,10 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         layout.use_property_decorate = False
 
         box = layout.box()
+        box.label(text="Language", icon="WORLD")
+        box.prop(self, "language")
+
+        box = layout.box()
         box.label(text="Panels", icon="WINDOW")
         col = box.column()
         col.prop(self, "panel_tab")
@@ -205,7 +219,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         shown.label(text="Show these panels")
         flow = shown.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
         for name, label in SUBPANEL_TOGGLES:
-            flow.prop(self, name, text=label, toggle=True)
+            flow.prop(self, name, text=tr(label), toggle=True)
 
         box = layout.box()
         box.label(text="Dashboard (HUD)", icon="OVERLAY")
@@ -284,6 +298,7 @@ def register():
     if _registered:
         unregister()  # a second register() (scripts, reloads) starts clean instead of raising "already registered"
     _registered = True
+    translations.register()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_settings = bpy.props.PointerProperty(type=CURIOMESH_PG_settings)
@@ -329,6 +344,7 @@ def unregister():
         del bpy.types.Scene.curiomesh_settings
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    translations.unregister()
 
 
 if __name__ == "__main__":

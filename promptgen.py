@@ -3,6 +3,10 @@
 """Write a ready prompt for the user's AI agent. `build(info)` is pure text; `gather(context)` reads the open scene."""
 
 try:
+    from .translations import tr
+except ImportError:  # loaded on its own by the unit tests
+    from translations import tr
+try:
     import bpy
 except ImportError:  # unit tests run without Blender
     bpy = None
@@ -187,7 +191,7 @@ if bpy is not None:
             block = bpy.data.texts.get("CurioMesh AI prompt") or bpy.data.texts.new("CurioMesh AI prompt")
             block.clear()
             block.write(prompt)
-            self.report({"INFO"}, "Prompt copied. It is also in the text block 'CurioMesh AI prompt'.")
+            self.report({"INFO"}, tr("Prompt copied. It is also in the text block 'CurioMesh AI prompt'."))
             return {"FINISHED"}
 
     CLASSES = (CURIOMESH_OT_write_prompt,)

@@ -18,6 +18,7 @@ from mathutils import Vector
 
 from . import overlay, tidytools
 from .triadq import issues
+from .translations import tip, tr
 
 LISTED = 8  # spots shown in the panel; Next Issue walks through all of them
 SPOT_COLOUR = (1.0, 0.45, 0.0, 0.6)
@@ -143,7 +144,7 @@ class CURIOMESH_OT_issue_select(_IssueOp, bpy.types.Operator):
             return {"CANCELLED"}
         ui["cur"] = self.index
         if not _select(context, found[self.index]):
-            self.report({"WARNING"}, "The preview is gone: run Auto again")
+            self.report({"WARNING"}, tr("The preview is gone: run Auto again"))
             return {"CANCELLED"}
         overlay.tag_redraw()
         return {"FINISHED"}
@@ -199,11 +200,11 @@ class CURIOMESH_OT_issue_redo(_SpotPartOp, tidytools.PartSwap, bpy.types.Operato
         from . import segments
 
         if properties.marked:
-            return "Shows the marked parts remade with smaller quads, which usually clears folded or crossing faces. Enter keeps them, Esc changes nothing. The old versions stay in their tries"
+            return tip("Shows the marked parts remade with smaller quads, which usually clears folded or crossing faces. Enter keeps them, Esc changes nothing. The old versions stay in their tries")
         p = spot_part(properties.index)
         if not 0 <= p < len(segments.seg["parts"]):
-            return cls.bl_description
-        return f"Shows {segments.name_of(p)} ({segments.seg['parts'][p]['after']:,} faces now) remade with smaller quads, which usually clears folded or crossing faces. Enter keeps it; the old version stays in its tries"
+            return tip(cls.bl_description)
+        return tip(f"Shows {segments.name_of(p)} ({segments.seg['parts'][p]['after']:,} faces now) remade with smaller quads, which usually clears folded or crossing faces. Enter keeps it; the old version stays in its tries")
 
     def plan(self, context) -> dict:
         return redo_plan(self._part(), self.index)
@@ -229,11 +230,11 @@ class CURIOMESH_OT_issue_keep_original(_SpotPartOp, tidytools.PartSwap, bpy.type
         from . import segments
 
         if properties.marked:
-            return f"Shows your own faces back on the marked parts, about {segments.original_cost(sorted(segments.seg['sel'])):,} more faces, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it"
+            return tip(f"Shows your own faces back on the marked parts, about {segments.original_cost(sorted(segments.seg['sel'])):,} more faces, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it")
         p = spot_part(properties.index)
         if not 0 <= p < len(segments.seg["parts"]):
-            return cls.bl_description
-        return f"Shows your own faces back on {segments.name_of(p)}, about {segments.original_cost([p]):,} more faces, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it"
+            return tip(cls.bl_description)
+        return tip(f"Shows your own faces back on {segments.name_of(p)}, about {segments.original_cost([p]):,} more faces, then Enter keeps them. Put Reduced Back or Ctrl+Z undoes it")
 
     def plan(self, context) -> dict:
         return original_plan(self._part(), self.index)
@@ -364,9 +365,9 @@ class CURIOMESH_OT_issue_save(_IssueOp, bpy.types.Operator, ExportHelper):
         try:
             save_report(self.filepath)
         except OSError as exc:
-            self.report({"ERROR"}, f"Could not save the issue report: {exc}")
+            self.report({"ERROR"}, tr(f"Could not save the issue report: {exc}"))
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Issue report saved: {self.filepath}")
+        self.report({"INFO"}, tr(f"Issue report saved: {self.filepath}"))
         return {"FINISHED"}
 
 
@@ -381,7 +382,7 @@ class CURIOMESH_OT_issue_compare(_IssueOp, bpy.types.Operator, ImportHelper):
         try:
             compare_report(self.filepath)
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:  # not a report, or not one of ours
-            self.report({"ERROR"}, f"Could not read that report: {exc}")
+            self.report({"ERROR"}, tr(f"Could not read that report: {exc}"))
             return {"CANCELLED"}
         overlay.tag_redraw()
         return {"FINISHED"}
@@ -394,17 +395,17 @@ def draw_reports(layout) -> None:
     if res is None or res.get("issues") is None:
         layout.label(text="Reports need a finished result", icon="INFO")
         return
-    layout.label(text=f"{len(found)} spot{'s' if len(found) != 1 else ''} with bad faces" if found else "No bad spots found", icon="ERROR" if found else "CHECKMARK")
+    layout.label(text=tr(f"{len(found)} spot{'s' if len(found) != 1 else ''} with bad faces" if found else "No bad spots found"), icon="ERROR" if found else "CHECKMARK")
     for kind, count in sorted(res["issues"]["totals"].items(), key=lambda kv: -issues.WEIGHTS.get(kv[0], 0)):
-        layout.label(text=f"{count:,} {KIND_WORDS.get(kind, kind)}", icon="BLANK1")
+        layout.label(text=tr(f"{count:,} {KIND_WORDS.get(kind, kind)}"), icon="BLANK1")
     row = layout.row(align=True)
     row.operator("curiomesh.issue_save", icon="FILE_TICK")
     row.operator("curiomesh.issue_compare", icon="FILE_REFRESH")
     diff = ui["diff"]
     if diff is not None:
-        layout.label(text=f"Since that report: {len(diff['fixed'])} fixed, {len(diff['still'])} still there, {len(diff['new'])} new", icon="INFO")
+        layout.label(text=tr(f"Since that report: {len(diff['fixed'])} fixed, {len(diff['still'])} still there, {len(diff['new'])} new"), icon="INFO")
         for kind, t in diff["totals"].items():
-            layout.label(text=f"   {KIND_WORDS.get(kind, kind)}: {t['old']:,} before, {t['new']:,} now")
+            layout.label(text=tr(f"   {KIND_WORDS.get(kind, kind)}: {t['old']:,} before, {t['new']:,} now"))
 
 
 def draw_overlay(guided, preview, res, flat, batch_for_shader) -> None:
@@ -517,7 +518,7 @@ def marked_card(layout) -> None:
         spot = found[cur]
         row = box.row(align=True)
         row.operator("curiomesh.issue_step", text="", icon="TRIA_LEFT").step = -1
-        row.label(text=f"Spot {cur + 1} of {len(found)}: {summary(spot['kinds'])}")
+        row.label(text=tr(f"Spot {cur + 1} of {len(found)}: {summary(spot['kinds'])}"))
         row.operator("curiomesh.issue_step", text="", icon="TRIA_RIGHT").step = 1
     else:
         box.label(text="No bad spots found", icon="CHECKMARK")
@@ -531,12 +532,12 @@ def marked_card(layout) -> None:
         sub.label(text="Click parts in the view to mark them", icon="INFO")
         return
     bad = bad_faces(marked)
-    box.label(text=f"{len(marked)} marked" + (f", {bad:,} bad faces" if bad else ""), icon="CHECKBOX_HLT")
+    box.label(text=tr(f"{len(marked)} marked" + (f", {bad:,} bad faces" if bad else "")), icon="CHECKBOX_HLT")
     row = box.row()
     row.scale_y = 1.3
     op = row.operator("curiomesh.issue_redo", text="Redo Marked", icon="FILE_REFRESH")
     op.marked = True
-    op = box.operator("curiomesh.issue_keep_original", text=f"Keep Original on Marked (+{segments.original_cost(marked):,} faces)", **icons.kw("keep_original", "LOOP_BACK"))
+    op = box.operator("curiomesh.issue_keep_original", text=tr(f"Keep Original on Marked (+{segments.original_cost(marked):,} faces)"), **icons.kw("keep_original", "LOOP_BACK"))
     op.marked = True
     box.operator("ed.undo", text="Undo Last Fix", icon="LOOP_BACK")
     if has_op("send_problem"):  # defined in parts_export.py

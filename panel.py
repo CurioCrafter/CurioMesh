@@ -19,6 +19,7 @@ from . import autofix_live, faceloops, flowedit, hard_surface, hardware, icons, 
 from . import verdict as V
 from . import uv_panel  # main-only: uv
 from . import help as helpmod, promptgen  # main-only
+from .translations import tip, tr
 
 FLOW_EDITOR_OP = ("CURIOMESH_OT_flow_edit", "curiomesh.flow_edit")  # drawn as [Draw on the mesh] once registered
 WIDTH = 36  # characters per wrapped line in the sidebar
@@ -63,16 +64,16 @@ def _ends(layout, left: str, right: str) -> None:
     """The words at both ends of a slider, small and grey."""
     row = layout.row(align=True)
     row.active = False
-    row.label(text=left)
+    row.label(text=tr(left))
     sub = row.row(align=True)
     sub.alignment = "RIGHT"
-    sub.label(text=right)
+    sub.label(text=tr(right))
 
 
 def _pro_toggle(layout, text: str = "Pro") -> None:
     prefs = _prefs()
     if isinstance(prefs, bpy.types.AddonPreferences):
-        layout.prop(prefs, "pro_mode", text=text, toggle=True, **icons.kw("pro", "PREFERENCES"))
+        layout.prop(prefs, "pro_mode", text=tr(text), toggle=True, **icons.kw("pro", "PREFERENCES"))
 
 
 def result_ready() -> bool:
@@ -90,7 +91,7 @@ def setup_words(gs) -> str:
         words.append(gs.bl_rna.properties["detail_pick"].enum_items[gs.detail_pick].name)
     if gs.sym_axis != "OFF":
         words.append(f"Mirror {gs.sym_axis.title()}")
-    return ", ".join(words)
+    return ", ".join(tr(w) for w in words)
 
 
 # --------------------------------------------------------------------------- operators
@@ -107,8 +108,8 @@ class CURIOMESH_OT_pick_use(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if properties.use == "AUTO":
-            return "Start looks at your mesh and picks the Use for you, then says what it picked and why"
-        return next((tip for key, _label, tip in profiles.PROFILE_ITEMS if key == properties.use), cls.bl_description)
+            return tip("Start looks at your mesh and picks the Use for you, then says what it picked and why")
+        return tip(next((tip for key, _label, tip in profiles.PROFILE_ITEMS if key == properties.use), cls.bl_description))
 
     def execute(self, context):
         gs = context.scene.curiomesh_guided
@@ -161,31 +162,31 @@ def draw_steps(layout, context) -> None:
     for i, name in enumerate(STEPS, 1):
         cell = row.row(align=True)
         cell.active = i == step
-        cell.label(text=name, icon="CHECKMARK" if i < step else ("RADIOBUT_ON" if i == step else "BLANK1"))
+        cell.label(text=tr(name), icon="CHECKMARK" if i < step else ("RADIOBUT_ON" if i == step else "BLANK1"))
     if not _compact():
         sub = layout.row()
         sub.active = False
-        sub.label(text=STEP_HINTS[step])
+        sub.label(text=tr(STEP_HINTS[step]))
 
 
 def draw_dashboard_button(layout, context) -> None:
     on = bool(context.scene.curiomesh_settings.hud_enabled)
     row = layout.row(align=True)
-    row.operator("curiomesh.hud_toggle", text="Hide Dashboard" if on else "Show Dashboard", icon="OVERLAY", depress=on)
+    row.operator("curiomesh.hud_toggle", text=tr("Hide Dashboard" if on else "Show Dashboard"), icon="OVERLAY", depress=on)
     helpmod.help_button(row, "dashboard")
 
 
 def _slot(layout, text: str, rows: int, icon: str = "NONE", width: int = WIDTH) -> None:
     """A message in exactly `rows` label rows (blank rows when there is nothing to say), so what sits below never moves."""
-    import textwrap
+    from . import translations as T
 
-    lines = textwrap.wrap(str(text), width=width) if text else []
+    lines = T.wrap(tr(str(text)), width) if text else []
     if len(lines) > rows:
         lines = lines[:rows]
-        lines[-1] = lines[-1][: width - 3] + "..."
+        lines[-1] = T.clip(lines[-1], width - 3) + "..."
     for i in range(rows):
         shown = i < len(lines)
-        layout.label(text=lines[i] if shown else "", icon=icon if i == 0 and shown else "BLANK1")
+        layout.label(text=lines[i] if shown else "", icon=icon if i == 0 and shown else "BLANK1", translate=False)
 
 
 def draw_review_button(layout, scale: float = 1.5, count: int | None = None) -> None:
@@ -198,14 +199,14 @@ def draw_review_button(layout, scale: float = 1.5, count: int | None = None) -> 
     if count is not None and not reviewing:
         row.alert = count > 0
         row.enabled = count > 0
-    row.operator("curiomesh.seg_review", text=text, icon="VIEWZOOM", depress=reviewing).mode = "SPOTS"
+    row.operator("curiomesh.seg_review", text=tr(text), icon="VIEWZOOM", depress=reviewing).mode = "SPOTS"
 
 
 def draw_empty(layout, context) -> None:
     box = layout.box()
     active = context.object
     if active is not None and active.type != "MESH":
-        box.label(text=f"{active.name} is a {active.type.title()}, not a mesh", icon="ERROR")
+        box.label(text=tr(f"{active.name} is a {active.type.title()}, not a mesh"), icon="ERROR")
         overlay.wrap_label(box, "Convert it first: Object menu, Convert, Mesh.", icon="BLANK1", width=WIDTH, limit=2)
         return
     row = box.row()
@@ -215,19 +216,19 @@ def draw_empty(layout, context) -> None:
     row = box.row(align=True)
     row.active = False
     for name, text, stock in (("step_pick", "Pick", "RESTRICT_SELECT_OFF"), ("step_start", "Start", "PLAY"), ("step_adjust", "Adjust", "OPTIONS"), ("step_finish", "Finish", "CHECKMARK")):
-        row.label(text=text, **icons.kw(name, stock))
+        row.label(text=tr(text), **icons.kw(name, stock))
 
 
 def draw_mesh_line(layout, obj) -> None:
     row = layout.split(factor=0.62, align=True)  # the name gets the room: "marble_bus..." was cut at half width
     row.label(text=obj.name, icon="MESH_DATA")
-    row.label(text=f"{len(obj.data.polygons):,} faces")
+    row.label(text=tr(f"{len(obj.data.polygons):,} faces"))
 
 
 def draw_use_tiles(layout, gs) -> None:
     """What is it for? Eight picture tiles, the picked one pressed in, then one line about it."""
     row = layout.row()
-    row.label(text="" if _compact() else "What is it for?")
+    row.label(text=tr("" if _compact() else "What is it for?"))
     helpmod.help_button(row, "use")
     grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
     for key, text, name, stock in TILES:
@@ -236,9 +237,9 @@ def draw_use_tiles(layout, gs) -> None:
         found = icons.icon(name)
         if found:
             col.template_icon(icon_value=found, scale=2.0)
-            col.operator("curiomesh.pick_use", text=text, depress=picked).use = key
+            col.operator("curiomesh.pick_use", text=tr(text), depress=picked).use = key
         else:
-            col.operator("curiomesh.pick_use", text=text, icon=stock, depress=picked).use = key
+            col.operator("curiomesh.pick_use", text=tr(text), icon=stock, depress=picked).use = key
     if gs.use_auto:
         words = gs.auto_why or "Auto looks at your mesh when you press Start and picks the Use for it, then says why."
     else:
@@ -267,7 +268,7 @@ def draw_detail(layout, gs, faces: int) -> None:
         col.prop(gs, "auto_reduce_percent" if pick == "PERCENT" else "auto_reduce_count")
         sub = col.row()
         sub.active = False
-        sub.label(text=f"Aiming for about {G.auto_target(gs, faces):,} faces")
+        sub.label(text=tr(f"Aiming for about {G.auto_target(gs, faces):,} faces"))
     row = col.row(align=True)
     row.prop(gs, "sym_axis", **icons.kw("mirror", "MOD_MIRROR"))
     row.popover(panel="CURIOMESH_PT_pop_mirror", text="", icon="PREFERENCES")
@@ -285,7 +286,7 @@ def draw_start(layout, gs, faces: int, again: bool) -> None:
     row = outer.row()
     row.scale_y = 1.4 if again else 2.1
     row.enabled = G.progress_info() is None
-    row.operator("curiomesh.guided_auto_all" if gs.use_auto else "curiomesh.guided_auto_start", text="Start again" if again else "Start", **icons.kw("step_start", "PLAY"))
+    row.operator("curiomesh.guided_auto_all" if gs.use_auto else "curiomesh.guided_auto_start", text=tr("Start again" if again else "Start"), **icons.kw("step_start", "PLAY"))
     helpmod.help_button(outer, "start")
     if not again and not _compact():
         sub = layout.row()
@@ -309,7 +310,7 @@ def draw_setup(layout, context, gs, obj, again: bool = False) -> None:
 def draw_working(layout, gs, searching) -> None:
     sub = layout.row()
     sub.active = False
-    sub.label(text=setup_words(gs), icon="BLANK1")
+    sub.label(text=tr(setup_words(gs)), icon="BLANK1")
     box = layout.box()
     row = box.row()
     row.label(text="Working: you can keep using Blender", **icons.kw("status_working", "TIME"))
@@ -333,7 +334,7 @@ def draw_verdict(layout, gs) -> None:
     box = layout.box()
     head = box.row()
     head.alert = level == "BAD"
-    head.label(text=title, **icons.kw(*STATUS_ICONS[level]))
+    head.label(text=tr(title), **icons.kw(*STATUS_ICONS[level]))
     helpmod.help_button(head, "verdict")
     col = box.column(align=True)
     col.active = False
@@ -348,9 +349,9 @@ def draw_verdict(layout, gs) -> None:
         stats.append((f"You asked for about {report['asked']:,}", "NONE"))
         short = G.short_of_target(report["asked"], after)
         if short:
-            import textwrap
+            from . import translations as T
 
-            stats += [(line, "ERROR" if i == 0 else "BLANK1") for i, line in enumerate(textwrap.wrap(short, width=WIDTH)[:3])]
+            stats += [(line, "ERROR" if i == 0 else "BLANK1") for i, line in enumerate(T.wrap(tr(short), WIDTH)[:3])]
     follows = report.get("guides")
     if follows:
         stats.append((f"Guides: {follows['strokes']} strokes, nearest edge {100.0 * follows['mean']:.2f}% of the size away", "NONE"))
@@ -358,26 +359,26 @@ def draw_verdict(layout, gs) -> None:
     if bend:
         stats.append((f"Joint lines: {bend['found']} of {bend['loops']} loops found, gap {100.0 * bend['gap']:.0f}% of asked", "NONE"))
     for text, icon in stats + [("", "NONE")] * (3 - len(stats)):  # at least three rows, so the spots box below stays put
-        col.label(text=text, icon=icon)
+        col.label(text=tr(text), icon=icon)
     box2 = layout.box()  # always drawn: the same rows with or without bad spots
     line = box2.row()
     if bad:
         line.alert = level == "BAD"
-        line.label(text=f"{len(bad)} spot{'s' if len(bad) != 1 else ''} with bad faces", **icons.kw("view_bad", "ERROR"))
+        line.label(text=tr(f"{len(bad)} spot{'s' if len(bad) != 1 else ''} with bad faces"), **icons.kw("view_bad", "ERROR"))
     else:
         line.active = False
         line.label(text="No bad spots", **icons.kw("status_good", "CHECKMARK"))
     draw_review_button(box2, 1.5, len(bad))
     sub = box2.row()
     sub.active = False
-    sub.label(text="Mark parts to fix, or try the sliders below" if bad else "Next: try the sliders below, then Apply", icon="FORWARD")
+    sub.label(text=tr("Mark parts to fix, or try the sliders below" if bad else "Next: try the sliders below, then Apply"), icon="FORWARD")
 
 
 def draw_status(layout, gs, searching, done) -> None:
     message = G.status()
     show = bool(message) and not searching and not (done and message == G.state["auto_base"]["summary"])  # while searching the bar already says it
     if done:  # a result is shown: this box is always drawn at the same height, so the Adjust sliders below never jump
-        import textwrap
+        from . import translations as T
 
         box = layout.box()
         if autofix_live.busy():
@@ -386,7 +387,7 @@ def draw_status(layout, gs, searching, done) -> None:
         problem = show and G._is_problem(message)
         box.alert = problem
         text = " | ".join(message.split(" | ")[:2]) if show else ""
-        _slot(box, text, max(3, min(8, len(textwrap.wrap(text, width=32)))) if problem else 3, "ERROR" if problem else "INFO", 32)
+        _slot(box, text, max(3, min(8, len(T.wrap(tr(text), 32)))) if problem else 3, "ERROR" if problem else "INFO", 32)
         return
     if show:
         box = layout.box()
@@ -398,7 +399,7 @@ def draw_status(layout, gs, searching, done) -> None:
 def draw_classic_notice(layout, gs) -> None:
     box = layout.box()
     words = gs.bl_rna.properties["scope"].enum_items[gs.scope].name
-    box.label(text=f"This file uses Classic Guided ({words})", icon="INFO")
+    box.label(text=tr(f"This file uses Classic Guided ({words})"), icon="INFO")
     row = box.row(align=True)
     _pro_toggle(row, "Open in Pro")
     row.prop_enum(gs, "scope", "AUTO", text="Use the main path")
@@ -445,7 +446,7 @@ class CURIOMESH_PT_guided(bpy.types.Panel):
         elif done:
             draw_verdict(layout, gs)
             autofix_live.draw_readout(layout, context)
-            body = G.fold(layout, gs, "ui_setup_open", f"Settings: {setup_words(gs)}")
+            body = G.fold(layout, gs, "ui_setup_open", tr(f"Settings: {setup_words(gs)}"))
             if body is not None:
                 draw_setup(body, context, gs, obj, again=True)
         else:
@@ -501,7 +502,7 @@ def draw_shape_flow(layout, context, gs) -> None:
         row.prop(gs, "bend_sharp", toggle=True)
     if len(gs.guide_curves):
         kinds = [g.kind for g in gs.guide_curves]
-        col.label(text=f"{kinds.count('GUIDE')} flow lines, {kinds.count('LOOP')} rings, {kinds.count('BEND')} joint lines")
+        col.label(text=tr(f"{kinds.count('GUIDE')} flow lines, {kinds.count('LOOP')} rings, {kinds.count('BEND')} joint lines"))
         row = col.row()
         row.template_list("CURIOMESH_UL_guided_guides", "", gs, "guide_curves", gs, "guide_index", rows=3)
         side = row.column(align=True)
@@ -523,7 +524,7 @@ def draw_shape_flow(layout, context, gs) -> None:
         col.prop(gs, "density_strength")
         balls = G.markers(context.scene)
         if balls:
-            col.label(text=f"{sum(1 for b in balls if b[G.MARKER_KEY] > 0)} More and {sum(1 for b in balls if b[G.MARKER_KEY] < 0)} Less Detail balls", icon="SPHERE")
+            col.label(text=tr(f"{sum(1 for b in balls if b[G.MARKER_KEY] > 0)} More and {sum(1 for b in balls if b[G.MARKER_KEY] < 0)} Less Detail balls"), icon="SPHERE")
         elif obj is not None and obj.vertex_groups.get(gs.density_group) is None and obj.vertex_groups.get(gs.less_group) is None:
             overlay.wrap_label(col, "Paint More or Less Here, or put the 3D cursor on the mesh and add a ball; scale it to change its reach.", icon="INFO", width=WIDTH, limit=3)
 
@@ -547,7 +548,7 @@ def draw_options(layout, context, gs) -> None:
     autofix_live.draw_option(col, context, gs)
     factor = hardware.style_factor(gs.auto_style, gs.auto_method)
     if factor > 1:
-        col.label(text=f"Slow: about {factor:g}x Fewest Faces, or more", icon="TIME")
+        col.label(text=tr(f"Slow: about {factor:g}x Fewest Faces, or more"), icon="TIME")
     if gs.auto_profile in profiles.MULTIRES_USES or gs.multires_on or (obj is not None and obj.data.uv_layers and gs.bake_detail != "NORMAL_COLOR"):
         col.separator()
         col.label(text="Detail", icon="MOD_MULTIRES")
@@ -579,6 +580,15 @@ class CURIOMESH_PT_pop_options(_Popover, bpy.types.Panel):
 
     def draw(self, context):
         draw_options(self.layout, context, context.scene.curiomesh_guided)
+        draw_language(self.layout)
+
+
+def draw_language(layout) -> None:
+    """One small row: Blender's interface language, which CurioMesh follows (it changes all of Blender)."""
+    prefs = _prefs()
+    if isinstance(prefs, bpy.types.AddonPreferences):
+        layout.separator()
+        layout.prop(prefs, "language", icon="WORLD")
 
 
 class CURIOMESH_PT_pop_mirror(_Popover, bpy.types.Panel):
@@ -656,7 +666,7 @@ def draw_adjust(layout, gs) -> None:
         col = layout.column(align=True)
         row = col.row()
         row.label(text="Quad Size", **icons.kw("size", "FULLSCREEN_EXIT"))
-        row.label(text=f"{len(G.state['res']['faces']):,} faces")
+        row.label(text=tr(f"{len(G.state['res']['faces']):,} faces"))
         col.prop(gs, "quad_size", text="", slider=True)
         _ends(col, "smaller quads", "bigger quads")
         col = layout.column(align=True)
@@ -665,7 +675,7 @@ def draw_adjust(layout, gs) -> None:
         shown = ladder.lad["shown"]
         if shown is not None:
             a, b, moved = shown
-            row.label(text=ladder.STYLE_WORDS.get(a[0], a[0]) if not moved else f"{len(moved)} pieces {ladder.STYLE_WORDS.get(b[0], b[0])}")
+            row.label(text=tr(ladder.STYLE_WORDS.get(a[0], a[0]) if not moved else f"{len(moved)} pieces {ladder.STYLE_WORDS.get(b[0], b[0])}"))
         col.prop(gs, "quad_order", text="", slider=True)
         _ends(col, "fewest faces", "even rows")
         _slot(layout, ladder.status(), 2, "TIME")
@@ -755,13 +765,13 @@ def draw_spots_line(layout) -> None:
     row = layout.row()
     if found:
         row.alert = any(any(k in V.SERIOUS for k in s.get("kinds", {})) for s in found)
-        row.label(text=f"{len(found)} spot{'s' if len(found) != 1 else ''} with bad faces", **icons.kw("status_bad", "ERROR"))
+        row.label(text=tr(f"{len(found)} spot{'s' if len(found) != 1 else ''} with bad faces"), **icons.kw("status_bad", "ERROR"))
     else:
         row.label(text="No bad spots found", **icons.kw("status_good", "CHECKMARK"))
     kept = issue_panel.original_parts()
     if kept:
         row = layout.row(align=True)
-        row.label(text=f"{len(kept)} part{'s' if len(kept) != 1 else ''} show your own faces", **icons.kw("keep_original", "LOOP_BACK"))
+        row.label(text=tr(f"{len(kept)} part{'s' if len(kept) != 1 else ''} show your own faces"), **icons.kw("keep_original", "LOOP_BACK"))
         row.operator("curiomesh.issue_put_back", text="Put reduced back", icon="LOOP_FORWARDS").part = -1
 
 
@@ -776,9 +786,9 @@ def draw_part_card(layout, gs) -> None:
     box = layout.box()
     if len(selected) == 1:
         r = segments.seg["parts"][selected[0]]
-        box.label(text=f"{segments.name_of(selected[0])}: {r['after']:,} faces, {segments.method_name(r['method'])}", icon="OBJECT_DATA")
+        box.label(text=tr(f"{segments.name_of(selected[0])}: {r['after']:,} faces, {segments.method_name(r['method'])}"), icon="OBJECT_DATA")
     else:
-        box.label(text=f"{len(selected)} parts, {sum(segments.seg['parts'][p]['after'] for p in selected):,} faces", icon="OBJECT_DATA")
+        box.label(text=tr(f"{len(selected)} parts, {sum(segments.seg['parts'][p]['after'] for p in selected):,} faces"), icon="OBJECT_DATA")
     row = box.row(align=True)  # main-only
     row.operator("curiomesh.parts_export", text="Send to Agent", icon="EXPORT")  # main-only
     row.operator("curiomesh.parts_import", text="Bring Back", icon="IMPORT")  # main-only
@@ -832,10 +842,10 @@ class CURIOMESH_PT_pop_partedit(_Popover, bpy.types.Panel):
         segment_goals.draw_edit(self.layout)
         sub = self.layout.row()
         sub.active = False
-        sub.label(text=f"{len(segments.seg['parts']):,} parts, {len(segments.seg['sel'])} selected")
+        sub.label(text=tr(f"{len(segments.seg['parts']):,} parts, {len(segments.seg['sel'])} selected"))
         row = self.layout.row(align=True)
         for what, text in (("ALL", "All"), ("TUBE", "Tubes"), ("FLAT", "Flat"), ("ROUGH", "Rough"), ("NONE", "None")):
-            row.operator("curiomesh.seg_select", text=text).what = what
+            row.operator("curiomesh.seg_select", text=tr(text)).what = what
 
 
 class CURIOMESH_PT_pop_finder(_Popover, bpy.types.Panel):
@@ -910,7 +920,7 @@ class CURIOMESH_PT_better(_Sub, bpy.types.Panel):
         if segments.ready():
             draw_review_button(layout, 1.0)
             n = len(segments.seg["sel"])
-            layout.label(text=f"{n} part(s) marked" if n else "Click bad spots in the 3D view to mark them", icon="RESTRICT_SELECT_OFF")
+            layout.label(text=tr(f"{n} part(s) marked" if n else "Click bad spots in the 3D view to mark them"), icon="RESTRICT_SELECT_OFF")
             row = layout.row(align=True)
             row.operator("curiomesh.send_problem", text="Send as a Problem", icon="ERROR").kind = "PROBLEM"
             row.operator("curiomesh.send_problem", text="Share a Fix", icon="CHECKMARK").kind = "FIX"
@@ -1000,7 +1010,7 @@ class CURIOMESH_PT_pro_engine(_Pro, bpy.types.Panel):
         col.prop(gs, "auto_method")
         factor = hardware.style_factor(gs.auto_style, gs.auto_method)
         if factor > 1:
-            col.label(text=f"Slow: about {factor:g}x Fewest Faces, or more", icon="TIME")
+            col.label(text=tr(f"Slow: about {factor:g}x Fewest Faces, or more"), icon="TIME")
         col.prop(gs, "auto_output")
         col.prop(gs, "auto_aim")
         col = layout.column(align=True)
@@ -1046,7 +1056,7 @@ def draw_computer(layout, gs) -> None:
     sub.prop(gs, "auto_effort")
     sub.prop(gs, "auto_gpu", toggle=True, icon="SHADING_RENDERED")
     if machine is not None and gs.auto_effort == "AUTO":
-        sub.label(text=f"Auto picked {hardware.settings_for(gs.auto_effort, machine).name}", icon="BLANK1")
+        sub.label(text=tr(f"Auto picked {hardware.settings_for(gs.auto_effort, machine).name}"), icon="BLANK1")
     sub.prop(gs, "auto_parallel", toggle=True, icon="MOD_ARRAY")
     sub.operator("curiomesh.guided_check_pc", icon="FILE_REFRESH")
     row = sub.row(align=True)
@@ -1131,12 +1141,12 @@ def draw_teach(layout, obj) -> None:
     row.operator("curiomesh.guided_edit_preview", text="Edit Preview", icon="EDITMODE_HLT")
     row.operator("curiomesh.teach_remember", text="Remember", icon="BOOKMARKS")
     known = len(G._library())
-    col.label(text=f"{known} fix{'' if known == 1 else 'es'} remembered on this PC")
+    col.label(text=tr(f"{known} fix{'' if known == 1 else 'es'} remembered on this PC"))
     if G.state["fixes_in_memory"]:
         overlay.wrap_label(col, "Blender's config folder can't be written, so these last only until you close Blender. Export them to keep them.", icon="ERROR", width=WIDTH, limit=4)
     if G.state["found"]:
         col.label(text="You've fixed something like this before:", icon="INFO")
-        col.operator("curiomesh.teach_apply", text=f"Apply ({len(G.state['found'])} places)", icon="CHECKMARK")
+        col.operator("curiomesh.teach_apply", text=tr(f"Apply ({len(G.state['found'])} places)"), icon="CHECKMARK")
     else:
         col.operator("curiomesh.teach_find", icon="VIEWZOOM")
     row = col.row(align=True)
@@ -1144,7 +1154,7 @@ def draw_teach(layout, obj) -> None:
     row.operator("curiomesh.teach_import", icon="IMPORT")
     kept = len(G._kept(obj)) if obj is not None else 0
     if kept:
-        col.operator("curiomesh.teach_forget_kept", text=f"Forget {kept} Kept Fix{'' if kept == 1 else 'es'}", icon="X")
+        col.operator("curiomesh.teach_forget_kept", text=tr(f"Forget {kept} Kept Fix{'' if kept == 1 else 'es'}"), icon="X")
 
 
 class CURIOMESH_PT_pro_teach(_Pro, bpy.types.Panel):
@@ -1265,7 +1275,7 @@ def draw_classic(layout, context, gs) -> None:
     row.operator("curiomesh.guided_lock", icon="LOCKED")
     row.operator("curiomesh.guided_redraw_strip", icon="MOD_SOLIDIFY")
     if G.state["lock"] is not None:
-        layout.operator("curiomesh.guided_unlock", icon="UNLOCKED", text=f"Unlock All ({int(G.state['lock']['locked'].sum()):,})")
+        layout.operator("curiomesh.guided_unlock", icon="UNLOCKED", text=tr(f"Unlock All ({int(G.state['lock']['locked'].sum()):,})"))
     row = layout.row(align=True)
     row.scale_y = 1.6 if previewing else 1.2
     sub = row.row(align=True)

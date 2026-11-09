@@ -10,6 +10,10 @@ from types import SimpleNamespace
 
 import bpy
 import numpy as np
+try:
+    from .translations import clip, tip, tr
+except ImportError:  # loaded on its own by the unit tests
+    from translations import clip, tip, tr
 
 PREVIEW_NAME = "CurioMesh_Preview"  # the name a new Live preview gets; it is found by its mark, never by its name
 REGION_PREVIEW_NAME = "CurioMesh_RegionPreview"
@@ -261,18 +265,22 @@ def pref_swatch(layout, name: str, text: str = "") -> None:
     """A colour swatch bound to a preference (plain label when the preferences are not a live struct)."""
     prefs = get_prefs()
     if isinstance(prefs, bpy.types.AddonPreferences):
-        layout.prop(prefs, name, text=text)
+        layout.prop(prefs, name, text=tr(text))
     elif text:
-        layout.label(text=text)
+        layout.label(text=tr(text))
 
 
 def wrap_label(layout, text: str, icon: str = "NONE", width: int = 38, limit: int = 4) -> None:
-    """Word-wrapped label lines (Blender labels never wrap on their own)."""
-    import textwrap
+    """Word-wrapped label lines (Blender labels never wrap on their own), in the user's language.
+    A translation longer than the English gets as many more lines as it needs, so nothing is cut off."""
+    from . import translations as T
 
-    lines = textwrap.wrap(str(text), width=width) or [""]
+    shown = T.tr(str(text))
+    if text and shown != text:
+        limit = max(limit, -(-limit * T.text_width(shown) // max(T.text_width(str(text)), 1)))
+    lines = T.wrap(shown, width) or [""]
     for i, line in enumerate(lines[:limit]):
-        layout.label(text=line if i < limit - 1 or len(lines) <= limit else line[: width - 3] + "...", icon=icon if i == 0 else "BLANK1")
+        layout.label(text=line if i < limit - 1 or len(lines) <= limit else T.clip(line, width - 3) + "...", icon=icon if i == 0 else "BLANK1", translate=False)
 
 
 def apply_hud_default(scene=None) -> None:
@@ -502,6 +510,7 @@ def _fill(shader, pts, color, mode="TRI_FAN"):
 def _text(x, y, size, color, text):
     import blf
 
+    text = tr(text)
     blf.size(0, size)
     blf.color(0, *color)
     blf.position(0, x, y, 0)
@@ -693,7 +702,7 @@ def _text_right(xr, y, size, color, text):
     import blf
 
     blf.size(0, size)
-    width = blf.dimensions(0, text)[0]
+    width = blf.dimensions(0, tr(text))[0]
     return _text(xr - width, y, size, color, text)
 
 
@@ -702,7 +711,7 @@ def _hud_button(shader, x_right, y_mid, s, text, action, rects, hover, active=Fa
     import blf
 
     blf.size(0, 10 * s)
-    tw = blf.dimensions(0, text)[0]
+    tw = blf.dimensions(0, tr(text))[0]
     bw, bh = tw + 12 * s, 16 * s
     x0, y0 = x_right - bw, y_mid - bh / 2
     shader.bind()
@@ -780,7 +789,7 @@ def _draw_hud() -> None:
         if collapsed:
             tail = f"{job['frac'] * 100:.0f}%  {job['stage']}" if job is not None else (f"{model['ratio'] * 100:.0f}% quads" if model["ratio"] is not None else "")
             room = max(8, int((bx - 2 * s * 4 - left - 82 * s) / (5.4 * s)))
-            _text(left + 82 * s, top - 10 * s, 10 * s, muted, ((model["name"][:10] + "  " if model["name"] else "") + tail)[:room])
+            _text(left + 82 * s, top - 10 * s, 10 * s, muted, clip((model["name"][:10] + "  " if model["name"] else "") + tr(tail), room))
             gpu.state.blend_set("NONE")
             return
         _text(left + 95 * s, top - 10 * s, 11 * s, muted, model["name"][:8] or "no mesh")
@@ -817,15 +826,15 @@ def _draw_hud() -> None:
             _text(cx, top - 106 * s, 14 * s, color, value)
 
         if job is not None:
-            _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), job_text(job)[:56])
-            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + job["stage"][:44])
+            _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), clip(tr(job_text(job)), 56))
+            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + clip(tr(job["stage"]), 44))
             _text(left, top - 164 * s, 10 * s, label, f"Quads so far: {ratio * 100:.1f}%" if ratio is not None else "Quads so far: --")
         else:
             if model["batch"]:
-                _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), model["batch"][:46])
+                _text(left, top - 124 * s, 10 * s, (0.5, 0.8, 1.0, 1.0), clip(tr(model["batch"]), 46))
             elif model["info"]:
-                _text(left, top - 124 * s, 10 * s, label, model["info"][:46])
-            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + model["hint"][:44])
+                _text(left, top - 124 * s, 10 * s, label, clip(tr(model["info"]), 46))
+            _text(left, top - 144 * s, 12 * s, (*accent, 1.0), "> " + clip(tr(model["hint"]), 44))
         gpu.state.blend_set("NONE")
     except Exception as exc:
         LAST_DRAW_ERROR = repr(exc)
@@ -847,7 +856,7 @@ class CURIOMESH_OT_toggle_heatmap(bpy.types.Operator):
         if settings.heatmap_enabled and obj is not None and obj.type == "MESH":
             stats = get_stats(obj)
             if stats is not None and stats.faces > HEATMAP_MAX_FACES:
-                self.report({"WARNING"}, f"Heatmap skipped: over {HEATMAP_MAX_FACES:,} faces.")
+                self.report({"WARNING"}, tr(f"Heatmap skipped: over {HEATMAP_MAX_FACES:,} faces."))
         return {"FINISHED"}
 
 
@@ -914,7 +923,7 @@ class CURIOMESH_OT_hud_toggle(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         on = getattr(getattr(context.scene, "curiomesh_settings", None), "hud_enabled", False)
-        return "Hide the dashboard from the 3D view" if on else "Show the dashboard (quad quality, job progress and a Stop button) in the 3D view"
+        return tip("Hide the dashboard from the 3D view" if on else "Show the dashboard (quad quality, job progress and a Stop button) in the 3D view")
 
     def execute(self, context):
         settings = context.scene.curiomesh_settings
