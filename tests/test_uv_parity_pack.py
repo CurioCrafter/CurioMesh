@@ -10,12 +10,12 @@ import unittest
 
 import numpy as np
 
-import uv_parity_common as common
+import uv_parity_common as common  # noqa: F401  (puts the add-on folder on the path)
 from uv_parity_common import needs_native
 
 from triadq import uvpack
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 BENCH = Path(__file__).resolve().parents[3] / "bench" / "uvplan"
 
@@ -94,7 +94,7 @@ def touched_blocks(tris, charts, placed, c, s):
 
     ok, dx, dy, q = placed[c]
     mine = [v for t, ch in enumerate(charts) if ch == c for v in tris[6 * t:6 * t + 6]]
-    pts = [v + (dx if i % 2 == 0 else dy) for i, v in enumerate(uvpack.turn_tris(mine, q))]
+    pts = [v + (dx if i % 2 == 0 else dy) for i, v in enumerate(uvpack.turn_tris(uvpack.spin_tris(mine, q >> 2), q))]  # angle step, then quarters
     y0 = int(min(pts[1::2]) // 1)
     out = set()
     for y, rows in enumerate(uvpack.raster(pts, y0, int(-(-max(pts[1::2]) // 1)) - y0), y0):
@@ -248,6 +248,29 @@ class Parity(unittest.TestCase):
         tris, charts, flags = random_charts(40, 51)
         counts = [sum(p[0] for p in uvpack.pack_into((160, 160), 1 + uvpack.EFFORT_STEP * e, [], tris, charts, 40, as_box=flags)) for e in range(4)]
         self.assertEqual(counts, sorted(counts))
+
+    def test_free_turns_match_the_twin_keep_the_gap_and_fit_what_quarters_cannot(self):
+        # two long strips lying at +30 and -30 degrees: quarter turns never make them parallel, turned to lie flat they fit
+        tris, charts = [], []
+        c30 = 0.8660254037844386
+        for c, (L, W, s30) in enumerate(((150.0, 22.0, 0.5), (140.0, 20.0, -0.5))):
+            pts = [(x * c30 - y * s30, x * s30 + y * c30) for x, y in ((0, 0), (L, 0), (L, W), (0, W))]
+            for a, b, d in ((0, 1, 2), (0, 2, 3)):
+                tris += [*pts[a], *pts[b], *pts[d]]
+                charts.append(c)
+        small, more, _ = random_charts(6, 5)
+        tris += small
+        charts += [c + 2 for c in more]
+        n = 8
+        quarters = uvpack.pack_into((160, 160), 1, [], tris, charts, n, turn_ok=[1] * n)
+        self.assertFalse(all(p[0] for p in quarters), "quarter turns alone do not fit the strips")
+        for effort in (0, 1):
+            k = 1 + uvpack.EFFORT_STEP * effort + uvpack.FREE_TURNS
+            ref = uvpack.pack_into((160, 160), k, [], tris, charts, n, turn_ok=[1] * n)
+            self.assertTrue(all(p[0] for p in ref), f"free turns fit everything (effort {effort})")
+            self.assertEqual(block_gap_breaks(tris, charts, ref, 160, 1), [])
+            ok, dx, dy, q = wait(turbo.uvpack_pack_into([], tris, charts, n, [0] * n, [1] * n, 160, 160, k))
+            self.assertEqual([(bool(a), int(b), int(c), int(d)) for a, b, c, d in zip(ok, dx, dy, q)], [(bool(a), b, c, d) for a, b, c, d in ref], f"effort {effort}")
 
     def test_every_policy_matches_the_twin_and_keeps_the_gap(self):
         # both placement rules (best short side fit, bottom-left) x every orientation policy, native against twin

@@ -10,7 +10,7 @@ that kernel's package: `# main-only: uv begin <kernel>` ... `# main-only: uv end
 from __future__ import annotations
 
 from . import turbo
-from .triadq import uvchart, uvflat, uvpack, uvscore, uvseams, uvsight, uvsnap
+from .triadq import uvchart, uvflat, uvkeep, uvpack, uvscore, uvseams, uvsight, uvsnap
 
 # main-only: uv begin seam
 def _install_seam() -> None:
@@ -84,7 +84,8 @@ def _install_flat() -> None:
 # main-only: uv begin chart
 def _install_chart() -> None:
     uvchart.set_fast(probe=turbo.uvchart_probe, build=turbo.uvchart_build, level=turbo.uvchart_level, uvs=turbo.uvchart_uvs,
-                     cuts=turbo.uvchart_cuts, keep_going=turbo.uvchart_pass, may_lie=turbo.uvchart_may_lie)
+                     cuts=turbo.uvchart_cuts, keep_going=turbo.uvchart_pass, may_lie=turbo.uvchart_may_lie,
+                     hide=turbo.uvhide_make, hide_ready=turbo.uvhide_ready)
 # main-only: uv end chart
 
 # main-only: uv begin pack
@@ -93,7 +94,13 @@ def _install_pack() -> None:
 # main-only: uv end pack
 
 
-_INSTALLERS = (_install_seam, _install_snap, _install_qem, _install_score, _install_sight, _install_flat, _install_chart, _install_pack)
+# main-only: uv begin keep
+def _install_keep() -> None:
+    uvkeep.set_fast(face_tree=turbo.face_tree, pictures=turbo.pictures, check=turbo.uvscore_check)
+# main-only: uv end keep
+
+
+_INSTALLERS = (_install_seam, _install_snap, _install_qem, _install_score, _install_sight, _install_flat, _install_chart, _install_pack, _install_keep)
 
 
 def install() -> bool:
@@ -108,5 +115,5 @@ def install() -> bool:
 
 
 def uninstall() -> None:
-    for core in (uvseams, uvsnap, uvscore, uvsight, uvflat, uvchart, uvpack):
+    for core in (uvseams, uvsnap, uvscore, uvsight, uvflat, uvchart, uvpack, uvkeep):
         core.FAST.clear()

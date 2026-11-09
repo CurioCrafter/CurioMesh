@@ -531,13 +531,14 @@ class ChartTree:
     def patches(self) -> np.ndarray:
         return np.array(self.patch, np.int64)
 
-    def level(self, x: float):
-        """(chart per face, cut per edge, numbers in `LEVEL_COLUMNS`), cached per x."""
+    def level(self, x: float, hide: bool = True):
+        """(chart per face, cut per edge, numbers in `LEVEL_COLUMNS`), cached per (x, hide). `hide` False: the charts
+        before their borders slide out of sight (the first result is shown from these while the moves are made)."""
 
-        x = float(x)
-        if x not in self._cache:
-            self._cache[x] = self._level(x)
-        chart, cut, numbers = self._cache[x]
+        key = (float(x), bool(hide))
+        if key not in self._cache:
+            self._cache[key] = self._level(*key)
+        chart, cut, numbers = self._cache[key]
         return chart.copy(), cut.copy(), numbers.copy()
 
     def _level(self, x: float, hide: bool = True):
@@ -1443,9 +1444,8 @@ class Charts:
         n[8], n[9], n[10], n[11], n[12], n[16], n[17] = len(tree.merges), grid_merges, pole_merges, 0, exact_evals, dropped, top
         n[20] = lay_over
         tree.start_uv = corner_uv
-        from . import uvhide  # R7hide: the borders' slides out of sight, made here in slices (imports this module)
-
-        tree._hide = yield from uvhide.moves(tree)
+        # R7hide's slides of the borders out of sight are made later, in slices (`uvhide.moves`, from New UVs), or on the
+        # first level asked for with `hide` (R8late)
 
 
 def build(points, indptr, flat, **options) -> ChartTree:
@@ -1482,7 +1482,7 @@ def _annulus_row(t: Topo, cut, patch, p: int, members, cost):
         return not cut[e] and f1 >= 0 and patch[f0] == p and patch[f1] == p
 
     best = None
-    for v in sorted(v for v, l in loops.items() if l == ids[0]):
+    for v in sorted(v for v, loop in loops.items() if loop == ids[0]):
         inward = [e for e in t.vedge[v] if inside(e)]
         if len(inward) != 1:
             continue

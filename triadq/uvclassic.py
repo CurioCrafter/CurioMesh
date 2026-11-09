@@ -3,11 +3,11 @@
 
 """Classic path UV handling (package A1c): pairing that no longer refuses UV meshes, and per-side texture transfer.
 
-Our own design and code. `pair` replaces the `_pair_natively` call in the engine: a mesh with no UVs goes straight to
-`_pair_natively` (identical result), a UV mesh gets only the pairs whose two triangles agree on the UVs of their shared
-edge (a pair across a seam stays two triangles, per face, instead of one bad pair dropping every UV). `preserve_textures`
-replaces the island-blind DataTransfer with K1's side-aware transfer (`uvseams`, SPEC 4.8) when the native core is on.
-No `bpy` import: only the mesh objects handed in are touched.
+Our own design and code. `pair` stands where the engine's faster pairing call was: a mesh with no UVs goes straight to
+it (identical result), a UV mesh gets only the pairs whose two triangles agree on the UVs of their shared edge (a pair
+across a seam stays two triangles, per face, instead of one bad pair dropping every UV). `preserve_textures` replaces
+the island-blind DataTransfer with K1's side-aware transfer (`uvseams`, SPEC 4.8), with the faster kernel when it is
+installed and with the NumPy twin when it is not. No `bpy` import: only the mesh objects handed in are touched.
 """
 
 from __future__ import annotations
@@ -20,26 +20,26 @@ from . import uvseams
 
 
 def pair(mesh, prep, seeds):
-    """Drop-in for `engine._pair_natively(mesh, prep, seeds)`; returns the same kind of result (None: Python pairs)."""
+    """Drop-in for the engine's faster pairing call (`fast_pairs(mesh, prep, seeds)`); returns the same kind of result
+    (None: the engine pairs in Python)."""
 
     from . import engine as E  # late: the engine imports this module
 
+    fast_pairs = E._pair_natively  # None without the compiled core, or for a mesh with UVs
     if mesh.uvs is None or mesh.face_uvs is None:
-        return E._pair_natively(mesh, prep, seeds)  # no UVs: untouched native fast path
+        return fast_pairs(mesh, prep, seeds)  # no UVs: the untouched fast path
     face_a, face_b, quads, scores = prep.candidates
     mesh, bad = _sanitize(mesh)
     keep = _agree(mesh, face_a, face_b, quads, bad)
     if keep is None:
         return None
-    if keep.all() and E._turbo is None and not bad.any():
+    filtered = replace(prep, candidates=(face_a[keep], face_b[keep], quads[keep], scores[keep]), table=None)
+    found = fast_pairs(replace(mesh, uvs=None, face_uvs=None), filtered, seeds)  # same kernel, UVs attached below
+    if found is not None:
+        return {seed: (_with_uvs(mesh, filtered, out), breaks, rescued) for seed, (out, breaks, rescued) in found.items()}
+    if keep.all() and not bad.any():
         return None  # nothing to filter, Python pairs lazily as before
-    prep = replace(prep, candidates=(face_a[keep], face_b[keep], quads[keep], scores[keep]), table=None)
-    if E._turbo is not None:
-        bare = replace(mesh, uvs=None, face_uvs=None)  # same native kernel, UVs attached below
-        found = E._pair_natively(bare, prep, seeds)
-        if found is not None:
-            return {seed: (_with_uvs(mesh, prep, out), breaks, rescued) for seed, (out, breaks, rescued) in found.items()}
-    return {seed: E._pair_triangles(mesh, prep, seed) for seed in seeds}
+    return {seed: E._pair_triangles(mesh, filtered, seed) for seed in seeds}
 
 
 def _sanitize(mesh):
@@ -75,7 +75,7 @@ def _agree(mesh, face_a, face_b, quads, bad):
 
 
 def _with_uvs(mesh, prep, out):
-    """`out` (quads, then the unpaired triangles, from the native kernel) with the face UVs of `mesh` attached."""
+    """`out` (quads, then the unpaired triangles, from the faster kernel) with the face UVs of `mesh` attached."""
 
     face_a, face_b, quads, _ = prep.candidates
     by_quad = {tuple(q): (a, b) for q, a, b in zip(quads.tolist(), face_a.tolist(), face_b.tolist())}
@@ -151,8 +151,8 @@ FIX_FOLDS = False
 
 def preserve_textures(source, target, config, allow_python_bvh: bool = True):
     """Per-side transfer of every UV layer. Returns "TRANSFERRED", or None to let the old DataTransfer/BVH code run
-    (not a transfer mode, no source UVs, no native core, or the transfer gave nothing usable); the reason is stored on
-    the target as `curiomesh_uv_note` when it is a missing native core."""
+    (not a transfer mode, no source UVs, or the transfer gave nothing usable). Without the faster kernel the NumPy
+    twin of the same transfer runs (same result, slower)."""
 
     if str(config.texture_mode or "PROJECT").upper() not in {"TRANSFER", "PROJECT"}:
         return None
@@ -160,12 +160,6 @@ def preserve_textures(source, target, config, allow_python_bvh: bool = True):
     if not layers:
         return None
     _ensure_fast()
-    if uvseams.FAST.get("transfer") is None:
-        try:
-            target["curiomesh_uv_note"] = "Native core off: textures moved with the older island-blind transfer."
-        except Exception:
-            pass
-        return None
     try:
         sp, si, sf, material = _polys(source)
         rp, ri, rf, _ = _polys(target)

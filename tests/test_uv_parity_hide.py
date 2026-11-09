@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 import unittest
 
 import numpy as np
@@ -20,7 +21,7 @@ from uv_parity_common import needs_native
 from test_uv_parity_chart import cube, speckled, tube
 from triadq import uvchart, uvhide
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 
 def seen_px(mesh, seed=3):
@@ -116,6 +117,47 @@ class Parity(unittest.TestCase):
         a, b = seen[tcut].sum(), seen[np.asarray(kcut, bool)].sum()
         self.assertLess(abs(a - b) / max(a, b), 0.25, (a, b))
         self.assertTrue(math.isfinite(a))
+
+
+@needs_native
+class Late(unittest.TestCase):
+    """R8late: the first result comes from the charts before the slides, the slid ones are swapped in when ready."""
+
+    def test_first_result_before_the_slides_then_the_slid_charts(self):
+        fast = common.addon_module("uv_fast")
+        kn = common.addon_module("triadq.uvnew")
+        kt = common.addon_module("turbo")
+        try:
+            self.assertTrue(fast.install())
+            mesh = speckled(16, 7, 0.4)
+            seen = seen_px(mesh)
+            job = kt.uvchart_build(*mesh, seen_edge_px=seen, out_of_sight=True, px_per_unit=100.0, build_stretch=0.05)
+            job._thread.join(120)
+            tree = job.result()
+            self.assertFalse(kt.uvhide_ready(tree))
+            settings = kn.Settings(out_of_sight=False, hidden_pct=100.0, texture_px=256, stretch_allowed=5.0)
+            stage = kn.NewUVs(*mesh, settings=settings, _keep={"tree": tree})
+            shown = None
+            while not stage.done:
+                stage.step()
+                if stage.first_ready and shown is None:
+                    shown = (stage.revision, stage.result)
+                if stage.waiting:
+                    time.sleep(0.0005)
+            self.assertIsNone(stage.error)
+            self.assertTrue(kt.uvhide_ready(tree))
+            self.assertGreater(stage.revision, shown[0] + 1, "the slid layout came after the first one")
+            self.assertIn("hide_s", stage.result.timing)
+            first_cut, last_cut = (seen[np.asarray(kn.cut_edges(mesh[1], mesh[2], r.uv), bool)[: len(seen)]].sum() for r in (shown[1], stage.result))
+            self.assertLess(last_cut, first_cut)
+            again = stage.again(stretch_allowed=4.0)  # the moves are made: straight to the slid charts
+            again.run()
+            self.assertTrue(again._hidden)
+            nxt = stage.keep_going()  # Keep going packs the slid charts again
+            nxt.run()
+            np.testing.assert_array_equal(nxt.result.chart, stage.result.chart)
+        finally:
+            fast.uninstall()
 
 
 if __name__ == "__main__":

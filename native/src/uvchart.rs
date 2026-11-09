@@ -638,7 +638,7 @@ pub struct Tree {
     pub start_uv: Vec<f64>,
     pub build_stretch: f64,
     pub numbers: [f64; NUMBERS_LEN],
-    cache: Mutex<HashMap<u64, Arc<Level>, FxBuild>>,
+    cache: Mutex<HashMap<(u64, bool), Arc<Level>, FxBuild>>,
     smooth_cache: Mutex<Option<Arc<Smooth>>>,
 }
 
@@ -1142,6 +1142,7 @@ impl Tree {
             weight: vec![0.0; np],
             length: vec![0.0; np],
             hull: vec![Vec::new(); np],
+            solo: false,
         };
         let ppu2 = self.numbers[num::PX_PER_UNIT] * self.numbers[num::PX_PER_UNIT];
         for (p, m) in members.iter().enumerate() {
@@ -1202,8 +1203,14 @@ impl Tree {
             // (the copy is made, and dropped, on the worker thread).
             let me = &b;
             let corners: Vec<Vec<usize>> = groups.iter().map(|g| g.iter().flat_map(|&p| me.faces[p as usize].iter().flat_map(|&f| t.face_corners(f as usize))).collect()).collect();
+            // A group smaller than its share of the worker threads measures on its own thread (R9first): the other
+            // groups keep the rest busy, and handing its small band solves to busy threads only queued them. The merges
+            // are the same either way (a measure depends only on its two charts).
+            let threads = rayon::current_num_threads();
             let runs: Vec<(Vec<f64>, Vec<Merge>, Counts)> = groups.par_iter().zip(corners.par_iter()).map(|(g, hs)| {
-                let (gb, m, c) = self.run_merges(me.subset(g), g, stop);
+                let mut sub = me.subset(g);
+                sub.solo = hs.len() * threads < t.corners();
+                let (gb, m, c) = self.run_merges(sub, g, stop);
                 let uv: Vec<f64> = hs.iter().flat_map(|&h| [gb.corner_uv[2 * h], gb.corner_uv[2 * h + 1]]).collect();
                 (uv, m, c)
             }).collect();
@@ -1384,7 +1391,7 @@ impl Tree {
         // (its gap ring outweighs its box: joining always saves page); a larger one keeps the shape rule. Passes repeat
         // until one joins nothing (a pair is tried again only when one of its charts changed).
         let mut tried: HashMap<(u32, u32), (u32, u32), FxBuild> = HashMap::default();
-        let parallel = t.nf >= PARALLEL_FACES;
+        let parallel = t.nf >= PARALLEL_FACES && !b.solo;
         // Full glues measured ahead: (o, p) -> (versions of o and p then, the shared segments, the measure).
         let mut ahead: HashMap<(u32, u32), (u32, u32, Vec<u32>, (Option<Eval>, usize)), FxBuild> = HashMap::default();
         while !stop.load(Ordering::Relaxed) {
@@ -1632,6 +1639,9 @@ struct Build<'t> {
     length: Vec<f64>,
     /// Per chart: the corners on the convex hull of its layout (for its box on the page).
     hull: Vec<Vec<u32>>,
+    /// This build runs beside other piece groups on a worker thread of its own (R9first): it measures ahead on this
+    /// thread only.
+    solo: bool,
 }
 
 /// The candidate queue in two heaps, not measured yet (`open`) and measured (`done`), popped as one: measuring ahead
@@ -1772,6 +1782,7 @@ impl<'t> Build<'t> {
             weight: self.weight.clone(),
             length: self.length.clone(),
             hull,
+            solo: false,
         }
     }
 
@@ -1940,7 +1951,7 @@ impl<'t> Build<'t> {
     /// first is simply not used).
     /// Returns the number measured.
     fn prefetch(&mut self, heap: &mut Queue, first: &Cand, memo: &mut Memo, stop: &AtomicBool) -> usize {
-        let parallel = self.tree.topo.nf >= PARALLEL_FACES;
+        let parallel = self.tree.topo.nf >= PARALLEL_FACES && !self.solo;
         let want = if parallel { PREFETCH } else { 1 };
         let mut batch = vec![(first.a, first.b, first.va, first.vb)];
         let mut back: Vec<Cand> = Vec::new();
@@ -2104,11 +2115,16 @@ impl<'t> Build<'t> {
             uv[2 * v] /= cnt[v].max(1.0);
             uv[2 * v + 1] /= cnt[v].max(1.0);
         }
-        let ok = uvflat::quick_stretch(&local.chart(), &mut uv, &free, 0.0, stop).is_ok();
-        if !ok {
-            uv.iter_mut().for_each(|x| *x = f64::NAN);
-        }
-        let per = tree.face_stretch(&local, &uv);
+        // quick_stretch already scored these UVs: reuse its per-face stretch (same numbers as `face_stretch`).
+        let quick = uvflat::quick_stretch_per(&local.chart(), &mut uv, &free, 0.0, stop).ok();
+        let per = match quick {
+            Some((_, _, per)) if uv.iter().all(|x| x.is_finite()) => per,
+            Some(_) => tree.face_stretch(&local, &uv),
+            None => {
+                uv.iter_mut().for_each(|x| *x = f64::NAN);
+                tree.face_stretch(&local, &uv)
+            }
+        };
         let q = self.union_quantile(a, b, &per, &sc.fstamp, stamp);
         Eval { glued, cost, stretch: q, pole: true, local, uv, rigid: Some(rigid), face_str: per }
     }
@@ -3041,12 +3057,20 @@ impl Tree {
     /// skipping (not stopping at) the others; a segment whose glue would leave a chart that is not a disk stays cut.
     /// Cached per x.
     pub fn level(&self, x_pct: f64) -> Arc<Level> {
-        let key = x_pct.to_bits();
+        self.level_hide(x_pct, true)
+    }
+
+    /// `level` with the borders slid out of sight (`hide`; the first call makes the moves, R7hide) or as the merges
+    /// left them (the first result is shown from these while the moves are made, R8late). Cached per (x, hide).
+    pub fn level_hide(&self, x_pct: f64, hide: bool) -> Arc<Level> {
+        let key = (x_pct.to_bits(), hide);
         if let Some(l) = self.cache.lock().unwrap().get(&key) {
             return l.clone();
         }
         let mut l = self.compute_level(x_pct);
-        crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        if hide {
+            crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        }
         let l = Arc::new(l);
         self.cache.lock().unwrap().insert(key, l.clone());
         l

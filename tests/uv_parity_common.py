@@ -16,7 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import turbo  # noqa: E402
+try:
+    import turbo  # noqa: E402  (the compiled core's wrapper; a build without it runs every NumPy test)
+except ImportError:
+    turbo = None
 
 KERNELS = ("seam", "snap", "qem", "score", "sight", "flat", "chart", "pack")
 TWINS = {"seam": "uvseams", "snap": "uvsnap", "score": "uvscore", "sight": "uvsight", "flat": "uvflat", "chart": "uvchart", "pack": "uvpack"}
@@ -36,10 +39,11 @@ def addon_module(name: str):
 
 
 def native_module():
-    return turbo.native()
+    return turbo.native() if turbo is not None else None
 
 
-needs_native = unittest.skipIf(native_module() is None, "native module not built")
+needs_wrapper = unittest.skipIf(turbo is None, "no compiled-core wrapper in this build (turbo.py): only the tests of the wrapper itself are skipped")
+needs_native = unittest.skipIf(native_module() is None, "compiled core not built or not loaded: only its parity half is skipped")
 
 
 def rs_constants(kernel: str) -> dict:

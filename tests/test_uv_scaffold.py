@@ -12,9 +12,9 @@ import unittest
 import numpy as np
 
 import uv_parity_common as common
-from uv_parity_common import KERNELS, ROOT, TWINS, needs_native
+from uv_parity_common import KERNELS, ROOT, TWINS, needs_native, needs_wrapper
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 
 class Layer:
@@ -57,10 +57,11 @@ class Scaffold(unittest.TestCase):
                 self.assertEqual(getattr(module, name), value, f"{twin}.{name}")
 
     def test_twins_avoid_banned_words(self):
-        for twin in TWINS.values():
+        for twin in (*TWINS.values(), "uvkeep", "uvbake", "uvhide"):  # the cores the Python-only build runs too
             text = (ROOT / "triadq" / f"{twin}.py").read_text(encoding="utf-8")
             self.assertIsNone(re.search(r"turbo|native|rust|gpu", text, re.I), twin)
 
+    @needs_wrapper
     def test_every_kernel_has_balanced_blocks(self):
         for path in ("native/src/lib.rs", "turbo.py", "uv_fast.py"):
             text = (ROOT / path).read_text(encoding="utf-8")
@@ -71,6 +72,7 @@ class Scaffold(unittest.TestCase):
         for kernel in KERNELS:
             self.assertIn(f"register_uv{kernel}(m)?;", lib)
 
+    @needs_wrapper
     def test_job_never_blocks_and_hands_back_result_or_error(self):
         gate = threading.Event()
         started = time.perf_counter()
@@ -88,6 +90,7 @@ class Scaffold(unittest.TestCase):
         with self.assertRaises(ZeroDivisionError):
             bad.result()
 
+    @needs_wrapper
     def test_job_stop_sets_the_flag(self):
         class Flag:
             hit = False
@@ -100,6 +103,7 @@ class Scaffold(unittest.TestCase):
         job.stop()
         self.assertTrue(flag.hit)
 
+    @needs_wrapper
     def test_wrappers_return_none_without_the_module(self):
         turbo.set_enabled(False)
         try:

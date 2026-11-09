@@ -405,8 +405,7 @@ def _check(base: UVBase, uv, keep: bool, **kw):
                 yield
             numbers, straddle, _flipped = job.result()
             return uvscore.as_dict(np.asarray(numbers)), np.asarray(straddle)
-    yield
-    got = uvscore.check(res, src, texture_px=tex, use_fast=False, **{k: v for k, v in kw.items() if v is not None})
+    got = yield from uvscore.check_steps(res, src, texture_px=tex, **{k: v for k, v in kw.items() if v is not None})  # sliced: no long step without the fast core
     return uvscore.as_dict(got.numbers), np.asarray(got.straddle)
 
 

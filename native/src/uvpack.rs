@@ -46,6 +46,21 @@ pub const MAX_K: i64 = 20;
 pub const EFFORT_STEP: i64 = 32;
 /// `pack_into` orders (see there); effort 0 uses the first, each more effort one more.
 pub const ORDER_MODES: [u8; 4] = [0, 1, 2, 3];
+/// `pack_into` turns charts by any angle when `k` carries this flag (`k + FREE_TURNS`): every chart then turns by quarters,
+/// and `turn_ok` says whether it may also turn by the other angles (a chart with straight rows must not).
+pub const FREE_TURNS: i64 = 16777216;
+/// An angle is stored as j, t = j / TURN_STEPS = tan(angle / 2) in [0, 1) (0 to 90 degrees; quarters do the rest). The
+/// rotation ((1 - t^2) / (1 + t^2), 2t / (1 + t^2)) needs no sine or cosine, so the twin computes the same bits.
+pub const TURN_STEPS: i64 = 65536;
+/// Angles tried per chart at effort 0: this many even steps of t, plus the angles that lay the chart's longest hull edges
+/// along an axis (`HULL_EDGES`); each more effort doubles both (Keep going).
+pub const FREE_SPLIT: i64 = 6;
+pub const HULL_EDGES: usize = 4;
+/// Highest effort `pack_into` reads (more effort tries more angles until the steps reach TURN_STEPS).
+pub const MAX_EFFORT: i64 = 13;
+/// The beam on the first chart runs when that chart's owned blocks cover at least 1 / (BEAM_SHARE << effort) of the page
+/// (a big first chart decides the page; for a small one every start answers the same, only slower). Keep going lowers it.
+pub const BEAM_SHARE: i64 = 8;
 
 /// Compile probe: calls every `crate::` helper this kernel is assigned. Returns 1 when all worked.
 pub fn probe() -> usize {
@@ -599,15 +614,16 @@ impl Grid {
             .sum()
     }
 
-    /// Best spot for a shape: inside the used height first (least waste), else the lowest row.
-    pub fn find(&self, s: &Shape) -> Option<(i64, i64, i64)> {
+    /// Best spot for a shape: inside the used height first (least waste), else the lowest row; only spots whose page height stays at most `top_max` (a spot above it cannot beat one already
+    /// found for another way of the chart, so the answer is the same and the scan stops sooner).
+    pub fn find_upto(&self, s: &Shape, top_max: i64) -> Option<(i64, i64, i64)> {
         let (h, used_h) = (s.h(), self.height());
         if h > self.ny || s.w > self.nx {
             return None;
         }
         let mut best: Option<((i64, i64, i64), i64, i64)> = None;
         let mut y = 0;
-        while y + h <= self.ny {
+        while y + h <= self.ny && (y + h).max(used_h) <= top_max {
             if let Some(x) = self.leftmost(s, y) {
                 let top = (y + h).max(used_h);
                 let score = (top, self.waste(s, x, y), y);
@@ -674,7 +690,77 @@ pub fn turn_tris(tris: &[f64], quarter: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Result per chart: placed, shift to add to the (turned) triangles, quarter turns.
+/// The rotation of angle step `j` (see `TURN_STEPS`): (cos, sin) from t = j / TURN_STEPS with plain arithmetic.
+pub fn turn_of(j: i64) -> (f64, f64) {
+    let t = j as f64 / TURN_STEPS as f64;
+    let d = 1.0 + t * t;
+    ((1.0 - t * t) / d, (2.0 * t) / d)
+}
+
+/// Rotate points by angle step `j` ((x, y) -> (c x - s y, s x + c y)); j = 0 leaves them as they are.
+pub fn spin_tris(tris: &[f64], j: i64) -> Vec<f64> {
+    if j == 0 {
+        return tris.to_vec();
+    }
+    let (c, s) = turn_of(j);
+    tris.chunks_exact(2).flat_map(|p| [c * p[0] - s * p[1], s * p[0] + c * p[1]]).collect()
+}
+
+/// Convex hull of points (x, y pairs), counter-clockwise (Andrew 1979, "Another efficient algorithm for convex hulls in
+/// two dimensions").
+pub fn hull(pts: &[f64]) -> Vec<(f64, f64)> {
+    let mut p: Vec<(f64, f64)> = pts.chunks_exact(2).map(|q| (q[0], q[1])).collect();
+    p.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    p.dedup();
+    if p.len() < 3 {
+        return p;
+    }
+    let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+    let mut h: Vec<(f64, f64)> = Vec::with_capacity(2 * p.len());
+    for pass in 0..2 {
+        let start = h.len();
+        let seq: Box<dyn Iterator<Item = &(f64, f64)>> = if pass == 0 { Box::new(p.iter()) } else { Box::new(p.iter().rev()) };
+        for &q in seq {
+            while h.len() >= start + 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    h
+}
+
+/// Angle steps tried for a chart at `effort` (always 0 first): `FREE_SPLIT << effort` even steps of t, and the angles that lay
+/// each of its `HULL_EDGES << effort` longest hull edges along an axis (t = dx / (len + dy) for the edge turned into the
+/// first quadrant: the half-angle formula, no trig). Sorted, no repeats.
+pub fn free_angles(tris: &[f64], effort: i64) -> Vec<i64> {
+    let n = (FREE_SPLIT << effort).min(TURN_STEPS);
+    let mut out: Vec<i64> = (0..n).map(|i| i * TURN_STEPS / n).collect();
+    let h = hull(tris);
+    let mut edges: Vec<(f64, f64, f64)> = (0..h.len())
+        .map(|i| {
+            let (a, b) = (h[i], h[(i + 1) % h.len()]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            (dx * dx + dy * dy, dx, dy)
+        })
+        .filter(|e| e.0 > 0.0)
+        .collect();
+    edges.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+    for &(l2, mut dx, mut dy) in edges.iter().take(HULL_EDGES << effort) {
+        while !(dx > 0.0 && dy >= 0.0) {
+            (dx, dy) = (dy, -dx); // a quarter turn clockwise until the edge points into the first quadrant
+        }
+        let t = dx / (l2.sqrt() + dy); // turning by the angle with this t lays the edge along y (then x by a quarter)
+        out.push(((t * TURN_STEPS as f64).round() as i64).rem_euclid(TURN_STEPS));
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Result per chart: placed, shift to add to the (turned) triangles, turn: `quarter % 4` quarter turns after turning by
+/// angle step `quarter / 4` (see `turn_of`; 0 without `FREE_TURNS`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChartPlace {
     pub ok: bool,
@@ -692,7 +778,9 @@ pub struct ChartPlace {
 /// gives the same layout (no clock). Charts may turn when `turn_ok`. `k` may carry an effort in its high bits (`EFFORT_STEP`).
 #[allow(clippy::too_many_arguments)]
 pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart: &[i64], charts: usize, as_box: &[u8], turn_ok: &[u8], stop: &AtomicBool) -> Vec<ChartPlace> {
-    let (k, effort) = ((k + 1).rem_euclid(EFFORT_STEP) - 1, ((k + 1).div_euclid(EFFORT_STEP)).clamp(0, ORDER_MODES.len() as i64 - 1) as usize);
+    let (free, k) = if k >= FREE_TURNS - 1 { (true, k - FREE_TURNS) } else { (false, k) };
+    let (k, effort) = ((k + 1).rem_euclid(EFFORT_STEP) - 1, ((k + 1).div_euclid(EFFORT_STEP)).clamp(0, MAX_EFFORT));
+    let orders = (effort as usize).min(ORDER_MODES.len() - 1);
     let (g, ring) = if k < 0 { (1, 0) } else { (block(k), 1) };
     let mut base = Grid::new(page.0 / g, page.1 / g);
     if !seed.is_empty() {
@@ -732,6 +820,7 @@ pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart
     };
     order.sort_by(|&a, &c| key(c).0.total_cmp(&key(a).0).then(key(c).1.total_cmp(&key(a).1)).then(a.cmp(&c)));
     let offsets = shifts(g);
+    let few: Vec<(i64, i64)> = offsets.iter().copied().filter(|&(sx, sy)| sx % (g / 2).max(1) == 0 && sy % (g / 2).max(1) == 0).collect();
     // every way a chart can sit (each quarter at its best corner offset), worked out once: it does not depend on the page
     struct Way {
         shape: Shape,
@@ -741,41 +830,54 @@ pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart
         fy: i64,
         q: usize,
     }
-    let ways: Vec<Vec<Way>> = (0..charts)
-        .into_par_iter() // each chart on its own; the answer does not depend on the thread count
-        .map(|c| {
-            if per[c].is_empty() {
-                return Vec::new();
-            }
-            let quarters: &[usize] = if turn_ok.get(c).copied().unwrap_or(0) != 0 { &[0, 1, 2, 3] } else { &[0] };
-            quarters
-                .iter()
-                .map(|&q| {
-                    let t = turn_tris(&per[c], q);
-                    let e = extent(&t);
-                    let (fx, fy) = (e.0.floor() as i64, e.1.floor() as i64);
-                    let rows = ((e.3.ceil() as i64).max(fy + 1) - fy) as usize;
-                    let local: Vec<f64> = t.chunks_exact(2).flat_map(|p| [p[0] - fx as f64, p[1] - fy as f64]).collect();
-                    let mut core = raster(&local, 0, rows);
-                    if as_box.get(c).copied().unwrap_or(0) != 0 {
-                        let cw = core.iter().flatten().map(|i| i.1).max().unwrap_or(1);
-                        core = vec![vec![(0, cw)]; rows];
-                    }
-                    let mut pick: Option<(Shape, i64, i64)> = None;
-                    for &(sx, sy) in &offsets {
-                        let shape = owned_shape(&core, g, sx, sy, ring);
-                        if pick.as_ref().map_or(true, |p| shape.area < p.0.area) {
-                            pick = Some((shape, sx, sy));
-                        }
-                    }
-                    let (shape, sx, sy) = pick.unwrap();
-                    Way { shape, sx, sy, fx, fy, q }
-                })
-                .collect()
+    // the angle steps of each chart, then every (chart, angle, quarter) worked out on its own (the answer does not depend on
+    // the thread count): a few big charts with many angles keep every thread busy too
+    // the charts that may turn by any angle: the first `2 << effort` of the order (the biggest; Keep going adds more)
+    let mut spun = vec![false; charts];
+    if free {
+        for &c in order.iter().filter(|&&c| turn_ok.get(c).copied().unwrap_or(0) != 0 && as_box.get(c).copied().unwrap_or(0) == 0).take(2 << effort.min(40)) {
+            spun[c] = true;
+        }
+    }
+    let spins: Vec<Vec<i64>> = (0..charts).into_par_iter().map(|c| if spun[c] { free_angles(&per[c], effort) } else { vec![0] }).collect();
+    let tasks: Vec<(usize, i64, usize)> = (0..charts)
+        .flat_map(|c| {
+            let quarters: &[usize] = if turn_ok.get(c).copied().unwrap_or(0) != 0 || free { &[0, 1, 2, 3] } else { &[0] };
+            spins[c].iter().flat_map(move |&j| quarters.iter().map(move |&q| (c, j, q)))
         })
         .collect();
+    let built: Vec<Way> = tasks
+        .par_iter()
+        .map(|&(c, j, q)| {
+            let t = turn_tris(&spin_tris(&per[c], j), q);
+            let e = extent(&t);
+            let (fx, fy) = (e.0.floor() as i64, e.1.floor() as i64);
+            let rows = ((e.3.ceil() as i64).max(fy + 1) - fy) as usize;
+            let local: Vec<f64> = t.chunks_exact(2).flat_map(|p| [p[0] - fx as f64, p[1] - fy as f64]).collect();
+            let mut core = raster(&local, 0, rows);
+            if as_box.get(c).copied().unwrap_or(0) != 0 {
+                let cw = core.iter().flatten().map(|i| i.1).max().unwrap_or(1);
+                core = vec![vec![(0, cw)]; rows];
+            }
+            let mut pick: Option<(Shape, i64, i64)> = None;
+            // a chart turned by an angle is big: a quarter of the corner offsets is enough for it (a block in 150)
+            for &(sx, sy) in if j != 0 { &few } else { &offsets } {
+                let shape = owned_shape(&core, g, sx, sy, ring);
+                if pick.as_ref().map_or(true, |p| shape.area < p.0.area) {
+                    pick = Some((shape, sx, sy));
+                }
+            }
+            let (shape, sx, sy) = pick.unwrap();
+            Way { shape, sx, sy, fx, fy, q: q + 4 * j as usize }
+        })
+        .collect();
+    let mut ways: Vec<Vec<Way>> = (0..charts).map(|_| Vec::new()).collect();
+    for (&(c, _, _), w) in tasks.iter().zip(built) {
+        ways[c].push(w);
+    }
     // Place the charts in `order`; the charts that found no room are listed (in that order).
-    let place = |order: &[usize]| -> (Vec<ChartPlace>, Vec<usize>) {
+    let place = |order: &[usize], root: Option<(usize, usize)>, quarters: bool| -> (Vec<ChartPlace>, Vec<usize>) {
+        let strict = root.is_some(); // a tried start ends at its first chart without room (it only has to answer yes or no)
         let mut occ = base.clone();
         let mut out = vec![ChartPlace::default(); charts];
         let mut failed = Vec::new();
@@ -785,8 +887,13 @@ pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart
                 continue;
             }
             let mut best: Option<((i64, i64, i64, usize), &Way, i64, i64)> = None;
-            for w in &ways[c] {
-                if let Some((x, y, waste)) = occ.find(&w.shape) {
+            let forced = root.filter(|r| r.0 == c).map(|r| r.1);
+            for (wi, w) in ways[c].iter().enumerate() {
+                if forced.is_some_and(|f| f != wi) || (quarters && w.q >= 4) {
+                    continue;
+                }
+                let cap = best.as_ref().map_or(i64::MAX, |b| b.0 .0);
+                if let Some((x, y, waste)) = occ.find_upto(&w.shape, cap) {
                     let score = ((y + w.shape.h()).max(occ.height()), waste, y, w.q);
                     if best.as_ref().map_or(true, |b| score < b.0) {
                         best = Some((score, w, x, y));
@@ -798,19 +905,25 @@ pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart
                     occ.add(&w.shape, x, y);
                     out[c] = ChartPlace { ok: true, dx: (x + ring) * g + w.sx - w.fx, dy: (y + ring) * g + w.sy - w.fy, quarter: w.q };
                 }
-                None => failed.push(c),
+                None => {
+                    failed.push(c);
+                    if strict {
+                        failed.extend(order.iter().copied().filter(|&o| !out[o].ok && o != c));
+                        break;
+                    }
+                }
             }
         }
         (out, failed)
     };
     // One order, with repair rounds: charts that found no room go first in the next round; go on while a round leaves
     // fewer of them (it stops by itself when a round gains nothing).
-    let solve = |mut order: Vec<usize>| -> (Vec<ChartPlace>, Vec<usize>) {
-        let (mut out, mut failed) = place(&order);
-        while !failed.is_empty() && !stop.load(Ordering::Relaxed) {
+    let solve = |mut order: Vec<usize>, root: Option<(usize, usize)>, quarters: bool| -> (Vec<ChartPlace>, Vec<usize>) {
+        let (mut out, mut failed) = place(&order, root, quarters);
+        while root.is_none() && !failed.is_empty() && !stop.load(Ordering::Relaxed) {
             let mut next: Vec<usize> = failed.clone();
             next.extend(order.iter().copied().filter(|c| !failed.contains(c)));
-            let (o2, f2) = place(&next);
+            let (o2, f2) = place(&next, root, quarters);
             if f2.len() >= failed.len() {
                 break;
             }
@@ -826,7 +939,7 @@ pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart
     let longer = |c: usize| ways[c].iter().map(|w| w.shape.h().max(w.shape.w)).min().unwrap_or(0);
     let bbox = |c: usize| ways[c].iter().map(|w| w.shape.h() * w.shape.w).min().unwrap_or(0);
     let mut best: Option<(Vec<ChartPlace>, usize)> = None;
-    for mode in ORDER_MODES.iter().take(1 + effort) {
+    for mode in ORDER_MODES.iter().take(1 + orders) {
         let mut ord = order.clone();
         match *mode {
             0 => ord.sort_by(|&a, &c| own(c).cmp(&own(a)).then(a.cmp(&c))),
@@ -834,12 +947,27 @@ pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart
             2 => ord.sort_by(|&a, &c| longer(c).cmp(&longer(a)).then(own(c).cmp(&own(a))).then(a.cmp(&c))),
             _ => {}
         }
-        let (out, failed) = solve(ord);
-        if failed.is_empty() {
-            return out;
+        // The first chart decides most of the page when it is big: with free turns every way of it is tried as the start
+        // (the greedy pick first, then the others in their order), the rest placed greedily after it; the first start that
+        // places everything wins. (A beam on the first chart; the nofit view of Bennell and Oliveira 2008 says a chart's
+        // angle fixes which bays the next one can use, which a greedy pick by height alone does not see.)
+        // quarter turns first (exactly the layout without free turns, so turning by angles never answers worse), then the
+        // angles greedily, then the beam
+        for quarters in if free { vec![true, false] } else { vec![false] } {
+            let (out, failed) = solve(ord.clone(), None, quarters);
+            if failed.is_empty() {
+                return out;
+            }
+            if best.as_ref().map_or(true, |b| failed.len() < b.1) {
+                best = Some((out, failed.len()));
+            }
         }
-        if best.as_ref().map_or(true, |b| failed.len() < b.1) {
-            best = Some((out, failed.len()));
+        if let Some(c) = ord.first().copied().filter(|&c| free && ways[c].len() > 4 && own(c) * (BEAM_SHARE << effort.min(40)) >= base.nx * base.ny) {
+            // the tried starts run side by side; the first in way order that places everything wins (the same every time)
+            let won = (0..ways[c].len()).into_par_iter().map(|wi| solve(ord.clone(), Some((c, wi)), false)).find_first(|r| r.1.is_empty());
+            if let Some((out, _)) = won {
+                return out;
+            }
         }
         if stop.load(Ordering::Relaxed) {
             break;
@@ -993,16 +1121,17 @@ mod tests {
             tc.push(c);
             flags.push(u8::from(lcg(&mut seed_rng) < 0.4));
         }
-        for k in [0_i64, 1, 2] {
-            let first = pack_into((256, 256), k, &[], &tris, &tc, 30, &flags, &[1; 30], &never());
-            let again = pack_into((256, 256), k, &[], &tris, &tc, 30, &flags, &[1; 30], &never());
+        for (k, free) in [(0_i64, 0), (1, 0), (2, 0), (1, FREE_TURNS), (2, FREE_TURNS + EFFORT_STEP)] {
+            let first = pack_into((256, 256), k + free, &[], &tris, &tc, 30, &flags, &[1; 30], &never());
+            let again = pack_into((256, 256), k + free, &[], &tris, &tc, 30, &flags, &[1; 30], &never());
+            let k = k % EFFORT_STEP;
             assert!(first.iter().all(|p| p.ok), "k {k}");
             assert!(first.iter().zip(&again).all(|(a, b)| (a.dx, a.dy, a.quarter) == (b.dx, b.dy, b.quarter)), "same input, same layout");
             for j in 0..=k {
                 let s = 1_i64 << j;
                 let mut owner: std::collections::HashMap<(i64, i64), usize> = std::collections::HashMap::new();
                 for (c, p) in first.iter().enumerate() {
-                    let t: Vec<f64> = turn_tris(&tris[6 * c..6 * c + 6], p.quarter).chunks_exact(2).flat_map(|q| [q[0] + p.dx as f64, q[1] + p.dy as f64]).collect();
+                    let t: Vec<f64> = turn_tris(&spin_tris(&tris[6 * c..6 * c + 6], (p.quarter / 4) as i64), p.quarter).chunks_exact(2).flat_map(|q| [q[0] + p.dx as f64, q[1] + p.dy as f64]).collect();
                     let ylo = t.chunks_exact(2).map(|q| q[1]).fold(f64::INFINITY, f64::min).floor() as i64;
                     let yhi = t.chunks_exact(2).map(|q| q[1]).fold(f64::NEG_INFINITY, f64::max).ceil() as i64;
                     for (r, rows) in raster(&t, ylo, (yhi - ylo) as usize).iter().enumerate() {

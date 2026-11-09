@@ -40,7 +40,7 @@ STRETCH_CHUNK = 8000  # triangles measured per slice in the stretch check
 CELLS_PER_TRI = 8  # grid cells per triangle (on average) in the overlap test's spatial hash
 CHECK_PAIRS = 200  # triangle pairs tested in one go (a slice)
 WRITE_CHUNK = 20000  # corners written per slice
-LADDER_AHEAD = 3  # lower Stretch allowed levels the compiled kernel lays out at the same time when charts must be redone
+LADDER_AHEAD = 8  # lower Stretch allowed levels the compiled kernel lays out at the same time when charts must be redone
 QUICK_FACES = 6000  # a mesh with this many faces or more gets a first layout before the repairs (Settings.quick_first)
 TRI_CHUNK = 4000  # triangles turned into grid entries per slice
 FACE_CHUNK = 6000  # faces whose triangles are built and measured in one slice
@@ -89,7 +89,7 @@ class Settings:
         self.density = None  # px per mesh unit; None = Fill the page
         self.quick_first = True  # big meshes: show a first layout before small charts are laid out again or joined to a neighbour, then the full one
         self.hidden_l = 0.0  # 0 = the cores' default L
-        self.nest_effort = 0  # Keep going level of the outline packing: each more tries one more placement order (see `NewUVs.keep_going`)
+        self.nest_effort = 0  # Keep going level of the outline packing: each more tries more angles, more charts turned by any angle and one more placement order (see `NewUVs.keep_going`)
         for key, value in kw.items():
             if not hasattr(self, key):
                 raise TypeError(f"unknown New UVs setting {key!r}")
@@ -265,26 +265,45 @@ def cut_edges(indptr, flat, uv, tol: float = 1e-6) -> np.ndarray:
     return _drive(_cut_edges(indptr, flat, uv, tol))
 
 
-_OCT = [np.array(d, float).reshape(2, 1) for d in ((1, 0), (0, 1), (1, 1), (1, -1))]
+OCTAGON_FROM = 256  # R9first: charts with more corners than this drop the points inside their extreme octagon first (cheaper than the hull loop)
+_OCT2 = np.array(((1, 0), (0, 1), (1, 1), (1, -1)), float).T  # the octagon's four directions, one per column
+
+
+def _octagon(p: np.ndarray) -> np.ndarray:
+    """Akl-Toussaint: drop the points inside the octagon of the extreme points (they are not on the hull)."""
+
+    proj = p @ _OCT2
+    ext = np.unique(np.concatenate((np.argmin(proj, axis=0), np.argmax(proj, axis=0))))
+    o = p[ext]
+    o = o[np.argsort(np.arctan2(o[:, 1] - o[:, 1].mean(), o[:, 0] - o[:, 0].mean()))]
+    edge = np.roll(o, -1, axis=0) - o
+    inside = ((edge[:, 0:1] * (p[:, 1][None] - o[:, 1:2]) - edge[:, 1:2] * (p[:, 0][None] - o[:, 0:1])) > 0).all(axis=0)
+    if len(o) >= 3 and inside.any():
+        return np.concatenate([p[~inside], o])
+    return p
 
 
 def _hull(p: np.ndarray) -> np.ndarray:
     """Convex hull of 2D points (Andrew's monotone chain), counter-clockwise, no repeated end point."""
 
-    if len(p) > 512:  # Akl-Toussaint: points inside the octagon of the extreme points are not on the hull
-        ext = np.unique(np.concatenate([np.argmin(p @ d, axis=0) for d in _OCT] + [np.argmax(p @ d, axis=0) for d in _OCT]))
-        o = p[ext]
-        o = o[np.argsort(np.arctan2(o[:, 1] - o[:, 1].mean(), o[:, 0] - o[:, 0].mean()))]
-        edge = np.roll(o, -1, axis=0) - o
-        inside = np.ones(len(p), bool)
-        for a_, e_ in zip(o, edge):
-            inside &= (e_[0] * (p[:, 1] - a_[1]) - e_[1] * (p[:, 0] - a_[0])) > 0
-        if len(o) >= 3 and inside.any():
-            p = np.concatenate([p[~inside], o])
+    if len(p) > 512:
+        p = _octagon(p)
     pts = np.unique(np.round(p, 12), axis=0)
     if len(pts) <= 2:
         return pts
     pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))].tolist()
+    return np.array(_chain(pts))
+
+
+def min_area_angle(p: np.ndarray) -> float:
+    """Angle (radians) that turns `p` into its smallest axis-aligned box: rotating calipers over the hull's edges."""
+
+    h = _hull(p)
+    return _calipers(h) if len(h) >= 3 else 0.0
+
+
+def _chain(pts: list) -> list:
+    """Andrew's monotone chain over x-then-y sorted, distinct points (lists): the hull counter-clockwise from the first."""
 
     def half(seq):
         out = []
@@ -295,22 +314,50 @@ def _hull(p: np.ndarray) -> np.ndarray:
         return out
 
     lower, upper = half(pts), half(pts[::-1])
-    return np.array(lower[:-1] + upper[:-1])
+    return lower[:-1] + upper[:-1]
 
 
-def min_area_angle(p: np.ndarray) -> float:
-    """Angle (radians) that turns `p` into its smallest axis-aligned box: rotating calipers over the hull's edges."""
+def _calipers(h: np.ndarray) -> float:
+    """`min_area_angle` on a hull (counter-clockwise, at least 3 points)."""
 
-    h = _hull(p)
-    if len(h) < 3:
-        return 0.0
-    d = np.roll(h, -1, axis=0) - h
+    d = np.concatenate((h[1:], h[:1])) - h
     ang = np.arctan2(d[:, 1], d[:, 0])
     c, s = np.cos(-ang), np.sin(-ang)
     x = h[None, :, 0] * c[:, None] - h[None, :, 1] * s[:, None]
     y = h[None, :, 0] * s[:, None] + h[None, :, 1] * c[:, None]
     area = (x.max(axis=1) - x.min(axis=1)) * (y.max(axis=1) - y.min(axis=1))
     return float(-ang[int(np.argmin(area))])
+
+
+def min_area_angles(uv: np.ndarray, order: np.ndarray, bounds: np.ndarray, which, budget: float = 0.004):
+    """Generator, returns `min_area_angle` of each group in `which` (group c is `uv[order[bounds[c]:bounds[c + 1]]]`;
+    0.0 for fewer than 3 distinct points). R9first: the same hulls and angles without the per-chart `np.unique` and
+    array round trips (most charts are small, so those fixed costs were most of the orient stage). Yields every
+    `budget` seconds."""
+
+    out = np.zeros(len(which))
+    until = time.perf_counter() + budget
+    for i, c in enumerate(which):
+        if time.perf_counter() > until:
+            yield
+            until = time.perf_counter() + budget
+        a, b = bounds[c], bounds[c + 1]
+        if b - a <= 2:
+            continue
+        q = uv[order[a:b]]
+        if b - a > OCTAGON_FROM:  # the octagon filter of `_hull` (Akl-Toussaint): the same hull from fewer points
+            q = _octagon(q)
+        q = np.round(q, 12)
+        q = q[np.lexsort((q[:, 1], q[:, 0]))]
+        keep = np.ones(len(q), bool)
+        keep[1:] = (q[1:, 0] != q[:-1, 0]) | (q[1:, 1] != q[:-1, 1])
+        q = q[keep]
+        if len(q) <= 2:
+            continue
+        h = _chain(q.tolist())
+        if len(h) >= 3:
+            out[i] = _calipers(np.array(h))
+    return out
 
 
 def rows_angle(uv: np.ndarray, col: np.ndarray, row: np.ndarray, indptr, flat) -> float | None:
@@ -367,6 +414,8 @@ class NewUVs:
         self.first_ready = False  # True once `result` holds a complete layout (box packing); the outline packing may still improve it
         self._active = None  # the sliced core stage being polled
         self._nest_state = None
+        self._hidden = True  # R8late: the levels used are the ones whose borders slid out of sight (False for the first result)
+        self._hide_job = self._late_nest = None
         self.gained = None  # Keep going run: did the scale grow
         self._keep = _keep or {}
         self._work = self._run()
@@ -497,8 +546,78 @@ class NewUVs:
             tree = stage.tree
         self.tree = tree
         res.timing["charts_s"] = time.perf_counter() - t1
-        t2 = time.perf_counter()
 
+        # 3-6 on the charts as the merges left them, then (R8late) the same on the charts whose borders slid out of sight
+        # (R7hide's moves, made as a later step on a worker or in slices while the first result is shown), swapped in
+        # when it is ready, the way the outline packing's layout is. A tree whose moves are made (`again`), and `run()`,
+        # go to the hidden charts at once.
+        self._hidden = self._whole or self._hide_ready(tree)
+        yield from self._from_charts(tree, area, seen_face, inside, res.timing, t0, show=True)
+        if not self._hidden and not self._stop:
+            shown = self.result
+            th = time.perf_counter()
+            self._tick("hide", 0.95)
+            moved = yield from self._make_hide(tree)
+            hide_s = time.perf_counter() - th
+            if moved and not self._stop:
+                self._hidden = True
+                head = {k: shown.timing[k] for k in ("seen_s", "charts_s") if k in shown.timing}
+                late = yield from self._from_charts(tree, area, seen_face, inside, head, t0, show=False)
+                if not self._stop:
+                    late.timing["first_s"] = shown.timing.get("first_s")
+                    late.timing["hide_s"] = hide_s
+                    late.timing["pack_s"] = late.timing["total_s"] - sum(late.timing.get(k, 0.0) for k in ("flatten_s", "charts_s", "seen_s", "hide_s"))
+                    self.result, self._nest_state = late, self._late_nest
+                    self.revision += 1
+        self._tick("done", 1.0)
+        yield
+
+    def _hide_ready(self, tree) -> bool:
+        """The tree's borders have slid out of sight already (its levels with `hide` cost only the replay)."""
+
+        if hasattr(tree, "topo"):
+            return getattr(tree, "_hide", None) is not None
+        ready = uvchart.FAST.get("hide_ready")
+        return True if ready is None else bool(ready(tree))  # no binding: the kernel's levels hide by themselves
+
+    def _make_hide(self, tree):
+        """Generator: make the tree's moves (kernel job, or the twin in slices); returns the faces moved (0 when stopped)."""
+
+        if hasattr(tree, "topo"):
+            from . import uvhide
+
+            gen = uvhide.moves(tree)
+            while True:
+                if self._stop:
+                    return 0
+                try:
+                    next(gen)
+                except StopIteration as done:
+                    tree._hide = done.value
+                    return int(done.value.moved)
+                yield
+        # the moves start once the first result and its outline packing are done: run beside them, they made Blender's
+        # slices of those stages 12-35 ms on 4 cores
+        fast = uvchart.FAST.get("hide")
+        job = self._hide_job = fast(tree) if fast is not None else None
+        if job is None:
+            return 0
+        while not job.done():
+            if self._stop:
+                return 0  # the moves still finish on the worker and are kept with the tree
+            yield WAIT
+        return int(job.result())
+
+    def _from_charts(self, tree, area, seen_face, inside, head, t0, show):
+        """Generator: the layout of the tree's charts (hidden or not, `self._hidden`), from the flatten to the outline
+        packing; returns its `Result`. `show`: each layout goes into `self.result` as it is made (the first result);
+        else the caller swaps the finished one in."""
+
+        s = self.settings
+        nf = len(self.indptr) - 1
+        res = Result()
+        res.timing = dict(head)
+        t2 = time.perf_counter()
         x_now = float(s.stretch_allowed)
         # 3. charts at Stretch allowed, flattened
         self._tick("flatten", 0.5)
@@ -510,13 +629,14 @@ class NewUVs:
 
         # 3b-6. The layout in one pass, or in two on a big mesh: a first one (no small chart is yet laid out again or joined to a
         # neighbour: that takes a second or more), shown at once, then the full one.
-        passes = ("first", "full") if s.quick_first and not self._whole and nf >= QUICK_FACES and not self._stop else ("full",)
+        passes = ("first", "full") if show and s.quick_first and not self._whole and nf >= QUICK_FACES and not self._stop else ("full",)
         first_total = None
         for kind in passes:
             if kind == "full" and len(passes) == 2 and self._stop:
                 break  # Stop: the first layout stays
             res = Result()
             res.timing, res.messages = dict(head), list(head_messages)
+            res.seen_face, res.seen_edge_px = seen_face, inside
             t3 = time.perf_counter()
             if kind == "first" or len(passes) == 1:
                 chart1, corner_uv1, rows1, back = yield from self._split_overlapping(tree, chart0, corner_uv0, rows0, x_now)
@@ -543,40 +663,52 @@ class NewUVs:
             res.timing["first_s"] = first_total
             base_messages = res.messages
             res.messages = list(self.messages) + base_messages
-            self.result = res
-            self.revision += 1
-            self.first_ready = True
+            if show:
+                self.result = res
+                self.revision += 1
+                self.first_ready = True
             self._tick("first" if kind == "first" else "pack", 0.9)
             yield
 
         # the outline packing improves the layout in the background of the preview
-        self._nest_state = (ctx, base_messages)
+        nest_state = (ctx, base_messages)
+        if show:
+            self._nest_state = nest_state
+        else:
+            self._late_nest = nest_state
         t5 = time.perf_counter()
         yield from self._finish_nest(res, ctx)
         res.timing["nest_s"] = time.perf_counter() - t5
         res.timing["total_s"] = time.perf_counter() - t0
-        res.timing["pack_s"] = res.timing["total_s"] - res.timing["flatten_s"] - res.timing["charts_s"] - res.timing["seen_s"]
+        res.timing["pack_s"] = res.timing["total_s"] - res.timing["flatten_s"] - res.timing.get("charts_s", 0.0) - res.timing.get("seen_s", 0.0)
         res.messages = list(self.messages) + base_messages
-        self.revision += 1
-        self._tick("done", 1.0)
-        yield
+        if show:
+            self.revision += 1
+        return res
 
     def _finish_nest(self, res, ctx):
         """Generator: the outline packing of a layout, written into `res` (scale and corner UVs) when it beats what `res` holds."""
 
         s = self.settings
         lu, lv, chart, nchart, width, height, area2, page, k, corner_chart = (ctx[key] for key in ("lu", "lv", "chart", "nchart", "width", "height", "area2", "page", "k", "corner_chart"))
+        self._free = ~np.asarray(ctx.get("on", np.zeros(nchart, bool)), bool)  # straight-row charts turn by quarters only
         nest = None
         if s.density is None and not self._stop:
             self._tick("nest", 0.92)
             nest = yield from self._nest(lu, lv, chart, nchart, width, height, area2, res.scale, page, k)
         if nest is not None:
             sc, ok, dx, dy, quarter = nest
+            cs, sn = uvpack.turn_of(quarter >> 2)  # the packer's angle step per chart (0: none), then its quarter turns
             out = np.empty_like(res.uv)
             for i in range(0, len(out), WRITE_CHUNK):
                 sl = slice(i, i + WRITE_CHUNK)
+                cc = corner_chart[sl]
                 x, y = lu[sl] * sc, lv[sl] * sc
-                q, cc = quarter[corner_chart[sl]], corner_chart[sl]
+                spun = np.flatnonzero(quarter[cc] >= 4)  # corners of the few charts turned by an angle
+                if len(spun):
+                    x0, y0, c_, s_ = x[spun], y[spun], cs[cc[spun]], sn[cc[spun]]
+                    x[spun], y[spun] = c_ * x0 - s_ * y0, s_ * x0 + c_ * y0  # the same arithmetic as the packer
+                q = quarter[cc] & 3
                 tx = np.select([q == 1, q == 2, q == 3], [-y, -x, y], x)  # (x, y) -> (-y, x) per quarter, as the packer turns
                 ty = np.select([q == 1, q == 2, q == 3], [x, -y, -x], y)
                 out[sl, 0] = (tx + dx[cc]) / page[0]
@@ -586,7 +718,8 @@ class NewUVs:
         res.nest_effort = int(s.nest_effort)
 
     def keep_going(self):
-        """Keep going for the layout: a run that continues the outline packing of this finished run with one more placement order
+        """Keep going for the layout: a run that continues the outline packing of this finished run with more effort (more angles,
+        more charts turned by any angle, one more placement order)
         and a finer search (the charts, the pictures and everything before the packing are reused, so a pass takes the packing's
         time only). Its result is never worse than this one's; `gained` says whether the scale grew. Call it on the new run
         until `gained` is False or `exhausted` is True: that is when a pass gains nothing, and it stops by itself. None when
@@ -599,9 +732,9 @@ class NewUVs:
 
     @property
     def exhausted(self) -> bool:
-        """True when Keep going has no more placement orders to try."""
+        """True when Keep going has no more effort to add (`uvpack.MAX_EFFORT`)."""
 
-        return self.settings.nest_effort >= len(uvpack.ORDER_MODES) - 1
+        return self.settings.nest_effort >= uvpack.MAX_EFFORT
 
     def _layout(self, res, chart, corner_uv, chart_rows, area, seen_face, x_now):
         """Generator: the corner UVs of charts laid out in the plane, on the page as boxes (stages 4 to 6 of the pipeline).
@@ -631,6 +764,7 @@ class NewUVs:
         yield
         fbounds = np.searchsorted(chart[face_order], np.arange(nchart + 1))
         angle = np.zeros(nchart)
+        boxed = []
         until = time.perf_counter() + self.budget
         for c in range(nchart):
             if time.perf_counter() > until:
@@ -645,7 +779,9 @@ class NewUVs:
                         angle[c] = got[4]
                         continue
                 res.on_chart[face_order[fbounds[c] : fbounds[c + 1]]] = False  # no clean labels: not counted as a straight-rows chart
-            angle[c] = min_area_angle(corner_uv[cc]) if len(cc) > 2 else 0.0
+            boxed.append(c)
+        if boxed:  # the other charts: their smallest box by rotating calipers, all at once
+            angle[boxed] = yield from min_area_angles(corner_uv, order, bounds, boxed, self.budget)
         res.col, res.row = col, row
         yield
         ca, sa = np.cos(angle)[corner_chart], np.sin(angle)[corner_chart]
@@ -724,7 +860,7 @@ class NewUVs:
             yield
         res.uv = out
         res.timing["write_s"] = time.perf_counter() - t4
-        return dict(lu=lu, lv=lv, chart=chart, nchart=nchart, width=width, height=height, area2=a2 * (fit * factor) ** 2, page=page, k=k, corner_chart=corner_chart)
+        return dict(lu=lu, lv=lv, chart=chart, nchart=nchart, on=on, width=width, height=height, area2=a2 * (fit * factor) ** 2, page=page, k=k, corner_chart=corner_chart)
 
     def _redo_stretched(self, chart, corner_uv, rows, x, only_lying=False):
         """A small chart (at most `REDO_FACES` faces) whose layout stretches more than Stretch allowed somewhere, or more
@@ -807,7 +943,13 @@ class NewUVs:
                 got = _l2_stretch(lpts[local[lt]], new[lt], np.zeros(len(lt), np.int64), 1)
                 if not (np.isfinite(got).all() and got.max() < best_w):
                     continue
-                if any(overlap_pairs(new[lt], OVERLAP_EPS * float(np.median(ar)) ** 0.5)):
+                hit = False
+                for found in overlap_pairs(new[lt], OVERLAP_EPS * float(np.median(ar)) ** 0.5):
+                    if found:
+                        hit = True
+                        break
+                    yield  # R9first: a slice per chunk of pairs (`any()` ran them all in one slice: 8-24 ms)
+                if hit:
                     continue
                 best, best_w = new, got.max()
             if best is None:
@@ -955,7 +1097,7 @@ class NewUVs:
         tri_chart = chart[fan_face].astype(np.int64)
         yield
         boxy = (area >= BOX_LIKE * width * height).astype(np.uint8)  # fills its box: reserved as a box
-        turn_ok = np.ones(nchart, np.uint8)
+        turn_ok = getattr(self, "_free", np.ones(nchart, bool)).astype(np.uint8)  # with FREE_TURNS: may also turn by any angle
         total = float(area.sum())
         if not total > 0:
             return None
@@ -982,7 +1124,7 @@ class NewUVs:
         guess = (-b + np.sqrt(b * b - 4.0 * total * c)) / (2.0 * total)
         effort = int(self.settings.nest_effort)
         tol = NEST_TOL / (1 << effort)  # Keep going searches finer
-        k_call = k + uvpack.EFFORT_STEP * effort
+        k_call = k + uvpack.EFFORT_STEP * effort + uvpack.FREE_TURNS  # every chart turns by quarters, the free ones by any angle
         lo, hi = float(s0), None
         s_try = float(s0 * (1.0 + tol) if effort else max(guess, s0 * (1.0 + tol)))  # Keep going starts just above what is already packed
         best = None
@@ -1063,7 +1205,7 @@ class NewUVs:
         charts of a lower Stretch allowed (half, quarter, ... when they lie inside it) and finally by its grid patches,
         whose exact layout cannot overlap. Returns (chart, corner UV, rows per chart, number of charts sent back)."""
 
-        indptr, nf = self.indptr, len(self.indptr) - 1
+        nf = len(self.indptr) - 1
         nchart = int(chart.max()) + 1
         chart, corner_uv = chart.copy(), corner_uv.copy()
         self._unresolved = set()
@@ -1089,7 +1231,7 @@ class NewUVs:
             if level_fast is not None:
                 for r in range(min(upto, len(ladder))):
                     if r not in levels and r not in started:
-                        levels[r] = level_fast(tree, float(ladder[r]))
+                        levels[r] = level_fast(tree, float(ladder[r]), hide=bool(getattr(self, "_hidden", True)))
 
         def start_rung(r, wait):
             """Generator: start rung r's layout job once its level's charts are there (waits only when `wait`)."""
@@ -1115,6 +1257,7 @@ class NewUVs:
         pend_faces = np.flatnonzero(np.isin(chart, pending)) if pending else np.zeros(0, np.int64)  # charts born below lie inside these
         patch = np.asarray(tree.patches() if callable(getattr(tree, "patches", None)) else tree.patch, dtype=np.int64)
         order, start = grouped(chart, next_id)
+        faces_of = {c: order[start[c] : start[c + 1]] for c in pending}  # R9first: the faces of each pending chart, kept up to date (no regrouping per rung)
         rung = 0
         while pending and rung < len(ladder):
             x = ladder[rung]
@@ -1142,7 +1285,7 @@ class NewUVs:
                 if time.perf_counter() > until:
                     yield
                     until = time.perf_counter() + self.budget
-                faces = order[start[c] : start[c + 1]]
+                faces = faces_of[c]
                 inside = np.unique(lchart[faces])
                 lfaces = [lorder[lstart[i] : lstart[i + 1]] for i in inside]
                 if not all(np.all(chart[f] == c) for f in lfaces):  # not nested: try a lower level
@@ -1151,27 +1294,31 @@ class NewUVs:
                 corners = self._corners(faces)
                 corner_uv[corners] = luv[corners]
                 rows.pop(c, None)
+                del faces_of[c]
                 for i, f in zip(inside, lfaces):
                     chart[f] = next_id
                     rows[next_id] = int(lrows[int(i)])
                     if lrows[int(i)] != 2:
                         born.append(next_id)
+                        faces_of[next_id] = np.sort(f)
                     next_id += 1
             if born:  # the new charts are checked together
-                faces = np.flatnonzero(np.isin(chart, born))
+                faces = np.sort(np.concatenate([faces_of[b] for b in born]))
                 yield
                 still += [int(c) for c in (yield from self._charts_lying(chart, faces, corner_uv))]
             pending = still
+            keep = set(pending)
+            for c in [c for c in faces_of if c not in keep]:
+                del faces_of[c]  # born charts that lie flat: done
             yield
-            order, start = grouped(chart, next_id)
             if pending:  # the levels started from now on lay out only the charts inside what still lies over itself
-                pend_faces = np.concatenate([order[start[c] : start[c + 1]] for c in pending])
+                pend_faces = np.concatenate([faces_of[c] for c in pending])
         for job in list(jobs.values()) + list(levels.values()):  # levels that turned out not to be needed
             if job is not None:
                 job.stop()
         until = time.perf_counter() + self.budget
         for c in pending:  # last resort: grid patches
-            faces = order[start[c] : start[c + 1]]
+            faces = faces_of[c]
             placed = []
             for p in np.unique(patch[faces]):
                 if time.perf_counter() > until:  # a grid layout per patch: a slice holds as many as fit its time
@@ -1229,7 +1376,8 @@ class NewUVs:
         fast = uvchart.FAST.get("uvs")
         if fast is None or hasattr(tree, "topo"):
             return None
-        kw = dict(rows=ROWS_INDEX.get(self.settings.rows, 3), stretch_allowed=float(x) / 100.0, texture_px=float(self.settings.texture_px))
+        kw = dict(rows=ROWS_INDEX.get(self.settings.rows, 3), stretch_allowed=float(x) / 100.0, texture_px=float(self.settings.texture_px),
+                  hide=bool(getattr(self, "_hidden", True)))
         job = None if only is None else fast(tree, float(x), only=only, **kw)
         return job if job is not None else fast(tree, float(x), **kw)
 
@@ -1259,7 +1407,7 @@ class NewUVs:
             self._active = None
             return (yield from self._flatten_finish(job))
         # NumPy twin: chart by chart.
-        chart, cut, _ = tree.level(float(x))
+        chart, cut, _ = tree.level(float(x), hide=bool(getattr(self, "_hidden", True)))
         chart = np.asarray(chart, dtype=np.int64)
         corner_uv = np.zeros((len(self.flat), 2))
         rows = np.zeros(int(chart.max()) + 1 if len(chart) else 0, np.int64)
