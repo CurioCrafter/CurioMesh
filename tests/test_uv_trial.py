@@ -178,6 +178,27 @@ class UVOnly(unittest.TestCase):
         more, _, _ = run_sliced(UT.measure(lt, lb, more))
         self.assertLess(more.numbers["overlap_pct"], 0.01)
 
+    def test_new_keep_going_continues_the_outline_packing(self):
+        fast = common.addon_module("uv_fast")
+        try:
+            if not fast.install():
+                self.skipTest("no outline packer: Keep going has nothing to continue")
+            p, ip, fl = cube_mesh(4)
+            base = UT.make_uv_base(p, ip, fl, texture_px=512)
+            trial = UT.NewUVs()
+            settings = dict(trial.defaults, new=uvnew.Settings(out_of_sight=False, hidden_pct=100.0, time_per_pass=0.5))
+            cand, _, _ = run_sliced(trial.run(base, settings))
+            cand, _, _ = run_sliced(UT.measure(trial, base, cand))
+            first = cand.extra["run"]
+            more, _, _ = run_sliced(trial.run(base, dict(settings, keep_going=True), cand))
+            self.assertFalse(more.refusal, more.refusal)
+            self.assertIs(more.extra["run"]._keep.get("nest_from"), first)  # NewUVs.keep_going(), not a box repack
+            self.assertEqual(more.extra["run"].settings.nest_effort, first.settings.nest_effort + 1)
+            more, _, _ = run_sliced(UT.measure(trial, base, more))
+            self.assertEqual(trial.gained(cand, more), more.numbers["space_used_pct"] > cand.numbers["space_used_pct"] + 1e-9)
+        finally:
+            fast.uninstall()
+
     def test_cut_toggle(self):
         cuts = UT.toggle_cut((), 5, 2)
         self.assertEqual(cuts, ((2, 5),))
