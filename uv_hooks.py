@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import uv_layers
+from . import sliced, uv_layers
 from .triadq import uvkeep
 from .triadq.types import FlatFaces
 
@@ -89,6 +89,13 @@ def _source_data(source):
 
 
 def after_apply(mesh, source, res, gs) -> None:
+    sliced.finish(after_apply_steps(mesh, source, res, gs))
+
+
+def after_apply_steps(mesh, source, res, gs):
+    """`after_apply` as timer steps (`sliced`): a transfer with no finished fit runs in short pieces. Stop keeps the
+    UVs the mesh was made with (guided's own transfer) and says so in LAST["messages"]."""
+    yield from ()
     if uvkeep.mode_of(gs) != "light":
         return
     src = _source_data(source)
@@ -100,7 +107,18 @@ def after_apply(mesh, source, res, gs) -> None:
     c = uvkeep.CANDIDATES.get(key)
     fitted = c is not None
     if c is None:  # no finished fit for this result: the per-side transfer alone, geometry untouched
-        c = uvkeep.run(uvkeep.fit_stage(source, src, res, gs, only_transfer=True))
+        stage = uvkeep.fit_stage(source, src, res, gs, only_transfer=True)
+        sliced.tick("Carrying the UVs over")
+        while not stage.done:
+            if sliced.stopped():
+                stage.stop()
+            stage.step()
+            yield
+        c = stage.candidate
+        if c is None:  # stopped
+            LAST.clear()
+            LAST.update(hash="", fitted=False, numbers={}, messages=["Stopped: the UVs are a plain copy from your mesh"])
+            return
         c.messages.append("Seam Fit was not run on this result. Look runs it.")
     uv_layers.apply_candidate(mesh, c.points, c.indptr, c.flat, c.material, c.layers, c.active)
     _write_back(res, c)

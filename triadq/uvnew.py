@@ -552,6 +552,8 @@ class NewUVs:
         # when it is ready, the way the outline packing's layout is. A tree whose moves are made (`again`), and `run()`,
         # go to the hidden charts at once.
         self._hidden = self._whole or self._hide_ready(tree)
+        if self._whole and hasattr(tree, "topo") and getattr(tree, "_hide", None) is None:
+            yield from self._make_hide(tree)  # in slices: the first hidden level would make the same moves in one call
         yield from self._from_charts(tree, area, seen_face, inside, res.timing, t0, show=True)
         if not self._hidden and not self._stop:
             shown = self.result

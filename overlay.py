@@ -596,7 +596,7 @@ def job_info():
         if info is None:
             return None
         frac, words = info
-        runner = guided.state["work"]["runner"]
+        runner = guided.sliced.JOB or guided.state["work"]["runner"]  # an Apply writing its UVs in slices, or the search
     except Exception:
         return None
     done, total = getattr(runner, "progress", None) or (0, 0)

@@ -2195,4 +2195,11 @@ MESSAGES = {
     "{{name}}: drag the ring for {{handle}}. Enter keeps it, Esc cancels, B shows before/after.": "{{name}}：拖动圆环以调整{{handle}}。Enter 保留，Esc 取消，B 显示前后对比。",
     "{{name}}: {{ask}}. Enter keeps it, Esc goes back a step, B shows before/after.": "{{name}}：{{ask}}。Enter 保留，Esc 返回上一步，B 显示前后对比。",
     "| Part": "| 部分",
+    "Carrying the UVs over": "正在传递 UV",
+    "Esc stops": "按 Esc 停止",
+    "Making the bake UVs": "正在生成烘焙用 UV",
+    "Stopped: Smart Project made the bake UVs": "已停止：烘焙用 UV 由智能 UV 投射生成",
+    "Stopped: the UVs are a plain copy from your mesh": "已停止：UV 是从你的网格直接复制的",
+    "Stopping...": "正在停止...",
+    "Writing the result": "正在写入结果",
 }

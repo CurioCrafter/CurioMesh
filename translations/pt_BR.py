@@ -2195,4 +2195,11 @@ MESSAGES = {
     "{{name}}: drag the ring for {{handle}}. Enter keeps it, Esc cancels, B shows before/after.": "{{name}}: arraste o anel para {{handle}}. Enter mantém, Esc cancela, B mostra antes/depois.",
     "{{name}}: {{ask}}. Enter keeps it, Esc goes back a step, B shows before/after.": "{{name}}: {{ask}}. Enter mantém, Esc volta um passo, B mostra antes/depois.",
     "| Part": "| Parte",
+    "Carrying the UVs over": "Passando as UVs",
+    "Esc stops": "Esc para",
+    "Making the bake UVs": "Criando as UVs do bake",
+    "Stopped: Smart Project made the bake UVs": "Parado: a Projeção Inteligente criou as UVs do bake",
+    "Stopped: the UVs are a plain copy from your mesh": "Parado: as UVs são uma cópia simples da sua malha",
+    "Stopping...": "Parando...",
+    "Writing the result": "Gravando o resultado",
 }

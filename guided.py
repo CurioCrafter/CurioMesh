@@ -27,7 +27,7 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from . import guides, live, overlay, region, segments, symmetry, textures
+from . import guides, live, overlay, region, segments, sliced, symmetry, textures
 from . import loops as edgeloops
 from . import autofix_live, autoretopo, blockout, faceloops, flowedit, hard_surface, hardware, history, jobpack, ladder, multires, organize, profiles, teach, turbo
 from .triadq import areas, detail, fit, patch
@@ -2213,6 +2213,8 @@ def _poll():
         gs = getattr(context.scene, "curiomesh_guided", None)
         if gs is None or not gs.enabled:
             return None
+        if sliced.JOB is not None:  # an Apply is writing its UVs in slices: nothing here may change the result under it
+            return POLL_SECONDS
         active = context.object
         if active is not None and active.type == "MESH" and not overlay.is_preview(active) and active.name != state["source"] and active.mode == "OBJECT":
             state.update(source=active.name, lock=None, sig=None, auto_base=None)
@@ -2977,7 +2979,12 @@ class CURIOMESH_OT_guided_frame(bpy.types.Operator):
 
 
 def _bake_result(source, out, gs, new_uvs: bool) -> str:
-    """Bake on Apply. A failed bake leaves the result as it was: the quads are still good. Returns text for the report."""
+    return sliced.finish(_bake_result_steps(source, out, gs, new_uvs))
+
+
+def _bake_result_steps(source, out, gs, new_uvs: bool):
+    """Bake on Apply, as timer steps (`sliced`: the unwrap runs in short pieces). A failed bake leaves the result as it
+    was: the quads are still good. Returns text for the report."""
     src = _source_data(source)
     co = np.empty(len(out.data.vertices) * 3, dtype=np.float64)
     out.data.vertices.foreach_get("co", co)
@@ -2997,11 +3004,12 @@ def _bake_result(source, out, gs, new_uvs: bool) -> str:
             labels = piece if piece is not None and len(piece) == len(out.data.polygons) else None
             images = textures.bake_texture_sets(source, out, count=gs.bake_sets, labels=labels, resolution=int(gs.bake_size), cage=cage)
         else:
-            images = textures.bake_detail(source, out, with_color=color, resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
+            images = yield from textures.bake_detail_steps(source, out, with_color=color, resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
     except Exception as exc:  # the bake has its own rollback, and the quads are worth keeping
         return f". Bake failed: {exc}"
     sets = f" in {len(images) // 2} texture sets" if color and len(images) > 2 else ""
-    return f", {len(images)} textures baked at {gs.bake_size}{sets} (a Triangulate modifier keeps the bake's triangles on export)"
+    done = f", {len(images)} textures baked at {gs.bake_size}{sets} (a Triangulate modifier keeps the bake's triangles on export)"
+    return done + (" | Stopped: Smart Project made the bake UVs" if sliced.stopped() else "")
 
 
 def _write_instances(out, source, instances) -> int:
@@ -3032,9 +3040,14 @@ def _blockout_result() -> bool:
 
 
 def _write_result(context, source, res, gs, name: str):
-    """A new object from a result, with UVs, normals, shading and materials as your mesh has them. Returns (object, bake text)."""
+    return sliced.finish(_write_result_steps(context, source, res, gs, name))
+
+
+def _write_result_steps(context, source, res, gs, name: str):
+    """A new object from a result, with UVs, normals, shading and materials as your mesh has them, as timer steps
+    (`sliced`). Returns (object, bake text)."""
     mesh = _make_mesh(name, source, res)
-    uv_hooks.after_apply(mesh, source, res, gs)  # main-only: uv
+    yield from uv_hooks.after_apply_steps(mesh, source, res, gs)  # main-only: uv
     _shade_by_angle(mesh)
     if not _blockout_result():
         _transfer_normals(mesh, _source_data(source), res)
@@ -3050,7 +3063,7 @@ def _write_result(context, source, res, gs, name: str):
             copy.material = slot.material
     baked = ""
     if gs.bake_detail != "OFF":
-        baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
+        baked = yield from _bake_result_steps(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
     return out, baked
 
 
@@ -3101,6 +3114,7 @@ class _AskFirst:
         return []
 
     def invoke(self, context, event):
+        self._invoked = True  # a sliced Apply runs in timer slices from here, after the dialog too (sliced.SlicedOp)
         machine_info()
         lines = [] if state["no_ask"] or bpy.app.background else self._question(context)
         if not lines:
@@ -3171,7 +3185,7 @@ class CURIOMESH_OT_guided_make_lods(_AskFirst, bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
+class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
     bl_idname = "curiomesh.guided_apply"
     bl_label = "Apply"
     bl_description = "Write the preview as <name>_Retopo (or into your object, see Result). Undo restores"
@@ -3181,10 +3195,13 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
     def poll(cls, context):
         return state["res"] is not None and state_source() is not None
 
+    job_name = "Writing the result"
+
     def _question(self, context):
         return _ask_lines(context, applying=True)
 
-    def execute(self, context):
+    def steps(self, context):
+        """Apply: the result is made at once, its UV work then runs in timer slices from a button (sliced.SlicedOp)."""
         self._remember()
         gs = _gs(context)
         source = state_source()
@@ -3197,7 +3214,9 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             self.report({"WARNING"}, tr("Nothing to apply"))
             return {"CANCELLED"}
         if gs.scope == "AUTO" and gs.blockout_separate and _blockout_result():
-            made = [_write_result(context, source, part, gs, f"{source.name}_Part")[0] for part in blockout.split_result(res)]
+            made = []
+            for part in blockout.split_result(res):
+                made.append((yield from _write_result_steps(context, source, part, gs, f"{source.name}_Part"))[0])
             gs.enabled = False  # removes the preview, stops the timer
             bpy.ops.object.select_all(action="DESELECT")
             for obj in made:
@@ -3212,7 +3231,8 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             self.report({"INFO"}, tr("Keep Copies as Instances was not used: this result has no exact copies, or it is baked, mirrored, tidied or repaired"))
         written = instances["rest"] if instances else res
         mesh = _make_mesh(source.name + "_Retopo", source, written)
-        uv_hooks.after_apply(mesh, source, written, gs)  # main-only: uv
+        yield from uv_hooks.after_apply_steps(mesh, source, written, gs)  # main-only: uv
+        uv_stop = " | Stopped: the UVs are a plain copy from your mesh" if sliced.stopped() else ""
         _shade_by_angle(mesh)
         if not _blockout_result():
             _transfer_normals(mesh, _source_data(source), written)
@@ -3235,7 +3255,7 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             _mark_edges(mesh, multires.hard_edges(mesh), True, False)
             flat_faces = segments.segment_goals.faces_without_detail(res)
         if gs.bake_detail != "OFF":  # first, while level 0 is all there is: a bake reads the levels too
-            baked = _bake_result(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
+            baked = yield from _bake_result_steps(source, out, gs, res.get("chart") is None)  # without seams kept, the old UVs can stretch
         flag = res.get("flag")
         if flag is not None and len(flag) == len(mesh.polygons) and flag.any():
             mesh.polygons.foreach_set("select", flag)  # the faces that could not be repaired, ready in Edit Mode
@@ -3262,7 +3282,8 @@ class CURIOMESH_OT_guided_apply(_AskFirst, bpy.types.Operator):
             count += sum(len(group["faces"]) for group in instances["groups"])
             baked = f", in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes"
         state["applied"] = f"{count:,} faces written to {out.name}{baked}{levels}"
-        self.report({"WARNING"} if baked.startswith("Bake failed") else {"INFO"}, tr(state["applied"]))
+        state["applied"] += uv_stop
+        self.report({"WARNING"} if baked.startswith("Bake failed") or sliced.stopped() else {"INFO"}, tr(state["applied"]))
         return {"FINISHED"}
 
 
@@ -3418,7 +3439,9 @@ class CURIOMESH_OT_guided_stop_work(bpy.types.Operator):
     def execute(self, context):
         gs = _gs(context)
         work = state["work"]
-        if work is not None and isinstance(work["runner"], segments.PartJob) and state["auto_base"] is not None:
+        if sliced.JOB is not None:  # an Apply writing its UVs: it ends with what it has (sliced.SlicedOp)
+            sliced.JOB.stop()
+        elif work is not None and isinstance(work["runner"], segments.PartJob) and state["auto_base"] is not None:
             _show_base(context, state_source())
             state["message"] = "Stopped. The parts are as they were"
         elif work is not None and work["key"][1] == "BOOL" and state["auto_base"] is not None:
@@ -3819,7 +3842,10 @@ def _clock(seconds: float) -> str:
 
 
 def progress_info(kind: str | None = None):
-    """(fraction 0 to 1, words) for the job running now, or None. kind: "AUTO", "BOOL", or None for either."""
+    """(fraction 0 to 1, words) for the job running now, or None. kind: "AUTO", "BOOL", or None for either (or an Apply
+    writing its UVs in slices)."""
+    if sliced.JOB is not None:
+        return None if kind else (sliced.JOB.fraction, sliced.JOB.stage)
     work = state["work"]
     if work is None or not work["runner"].busy:
         return None
