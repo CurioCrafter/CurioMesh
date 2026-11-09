@@ -241,6 +241,14 @@ class AfterApply(unittest.TestCase):
         finally:
             UT.APPLIED_EXTRA.clear()
 
+    def test_a_kept_transfer_is_not_reused_after_your_uvs_change(self):
+        from uv_hooks_fake import FakeMesh
+
+        self.hooks.kinds(None, self.source, self.src, self.gs)
+        self.hooks.after_apply(FakeMesh(), self.source, self.result(), self.gs)
+        self.source.data.uv_layers[0].data.foreach_set("uv", (self.sa.layers[0][1] * 0.5).ravel())  # you unwrapped your mesh again
+        self.assertGreater(len(list(self.hooks.after_apply_steps(FakeMesh(), self.source, self.result(), self.gs))), 0)
+
     def test_without_a_fit_only_the_transfer_is_written(self):
         from uv_hooks_fake import FakeMesh
 

@@ -18,7 +18,7 @@ from .triadq.types import FlatFaces
 
 SOURCE_DATA = None  # tests set this; inside Blender guided._source_data is used
 LAST: dict = {}  # what the last after_apply wrote: {"hash", "fitted", "numbers", "messages"}
-TRANSFERS: dict = {}  # result key -> the per-side transfer last written for it (no Seam Fit run on that result)
+TRANSFERS: dict = {}  # (result key, source key, settings) -> the per-side transfer last written for it (no Seam Fit run on that result)
 
 
 def kinds(old_charts, source, src, gs):
@@ -138,7 +138,9 @@ def _fit_for(source, res, gs):
     c = uvkeep.CANDIDATES.get(key)
     if c is not None:
         return c, True
-    c = TRANSFERS.get(key)
+    s = uvkeep.settings_of(gs)  # the transfer reads your mesh's UVs and these settings: a change makes it again
+    kept = (key, sa.key, tuple(name for name, _uv in sa.layers), s.texture_px, tuple(s.repeat), s.allowance, tuple(s.cut_here))
+    c = TRANSFERS.get(kept)
     if c is None:
         stage = uvkeep.fit_stage(source, src, res, gs, only_transfer=True)
         sliced.tick("Carrying the UVs over")
@@ -156,5 +158,5 @@ def _fit_for(source, res, gs):
             return None, False
         c.messages.append("Seam Fit was not run on this result. Look runs it.")
         TRANSFERS.clear()  # one is enough: the result Apply writes next
-        TRANSFERS[key] = c
+        TRANSFERS[kept] = c
     return c, False
