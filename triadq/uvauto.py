@@ -26,7 +26,7 @@ import sys
 
 import numpy as np
 
-from . import autofix, trial as T, uvkeep, uvsnap, uvseams
+from . import autofix, trial as T, uvkeep, uvsnap, uvseams, uvtrial
 
 # Constants table (starting values, nothing here is a limit).
 NEAR = 1.0  # a seam's spot is the faces with a corner within this many local edges of it (the snap's corridor)
@@ -190,16 +190,10 @@ def _flat(faces):
 
 def _to_segments(q, a, b):
     """Distance of each point of `q` (m, 3) to the nearest of the segments a[i]-b[i] (closest point on a segment:
-    Ericson 2005, 5.1.2)."""
+    Ericson 2005, 5.1.2). The segments are binned in a grid first (`uvtrial._to_segments`: the same distances, each point
+    measured against the segments near it instead of all of them)."""
 
-    ab = b - a
-    l2 = np.maximum((ab * ab).sum(1), 1e-30)
-    best = np.full(len(q), np.inf)
-    for s in range(0, len(a), 256):
-        A, AB = a[None, s:s + 256], ab[None, s:s + 256]
-        t = np.clip(((q[:, None, :] - A) * AB).sum(2) / l2[None, s:s + 256], 0.0, 1.0)
-        best = np.minimum(best, np.linalg.norm(q[:, None, :] - (A + t[..., None] * AB), axis=2).min(1))
-    return best
+    return uvtrial._to_segments(q, a, b)
 
 
 def _segment_distance(q, line):

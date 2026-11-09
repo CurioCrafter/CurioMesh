@@ -1416,8 +1416,9 @@ def _layer_steps(sa: Source, luv, P, ip, fl, look: dict, texture_px: float, use_
         while not job.done():
             yield
         u, e, fold = job.result()
-    else:
-        u, e, fold = yield from uvseams.layer_steps(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, sa.points)
+    else:  # the fold fix in slices (uvseams.layer_steps), the same numbers as uvseams.layer
+        yield from uvseams.layer_steps(sa.indptr, sa.flat, luv, P, ip, fl, look, texture_px, True, sa.points, got)
+        return
     got.update(uv=u, expected=e, fold=fold)
 
 

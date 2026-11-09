@@ -18,6 +18,7 @@ from .triadq.types import FlatFaces
 
 SOURCE_DATA = None  # tests set this; inside Blender guided._source_data is used
 LAST: dict = {}  # what the last after_apply wrote: {"hash", "fitted", "numbers", "messages"}
+TRANSFERS: dict = {}  # result key -> the per-side transfer last written for it (no Seam Fit run on that result)
 
 
 def kinds(old_charts, source, src, gs):
@@ -89,38 +90,71 @@ def _source_data(source):
 
 
 def after_apply(mesh, source, res, gs) -> None:
+    """Writes the UVs in one call (`after_apply_steps` run to the end)."""
+
     sliced.finish(after_apply_steps(mesh, source, res, gs))
 
 
 def after_apply_steps(mesh, source, res, gs):
-    """`after_apply` as timer steps (`sliced`): a transfer with no finished fit runs in short pieces. Stop keeps the
-    UVs the mesh was made with (guided's own transfer) and says so in LAST["messages"]."""
-    yield from ()
-    if uvkeep.mode_of(gs) != "light":
+    """Generator: `after_apply` as timer steps (`sliced`). With a finished fit for `res` (the trial's, filed when it ran)
+    it writes at once; without one the per-side transfer runs first, a FitStage step per yield, and is kept for this
+    result, so a second Apply of it writes at once. Closing the generator early writes nothing. Stop keeps the UVs the
+    mesh was made with (guided's own transfer) and says so in LAST["messages"]."""
+
+    got = yield from _fit_for(source, res, gs)
+    if got is None:
         return
-    src = _source_data(source)
-    sa, plan = uvkeep.plan_for(source, src, gs)
-    if sa is None:
+    c, fitted = got
+    if c is None:  # stopped
+        LAST.clear()
+        LAST.update(hash="", fitted=False, numbers={}, messages=["Stopped: the UVs are a plain copy from your mesh"])
         return
-    faces = FlatFaces.of(res["faces"])
-    key = uvkeep.result_key(res["co"], faces.indptr, faces.flat)
-    c = uvkeep.CANDIDATES.get(key)
-    fitted = c is not None
-    if c is None:  # no finished fit for this result: the per-side transfer alone, geometry untouched
-        stage = uvkeep.fit_stage(source, src, res, gs, only_transfer=True)
-        sliced.tick("Carrying the UVs over")
-        while not stage.done:
-            if sliced.stopped():
-                stage.stop()
-            stage.step()
-            yield
-        c = stage.candidate
-        if c is None:  # stopped
-            LAST.clear()
-            LAST.update(hash="", fitted=False, numbers={}, messages=["Stopped: the UVs are a plain copy from your mesh"])
-            return
-        c.messages.append("Seam Fit was not run on this result. Look runs it.")
     uv_layers.apply_candidate(mesh, c.points, c.indptr, c.flat, c.material, c.layers, c.active)
     _write_back(res, c)
     LAST.clear()
     LAST.update(hash=c.key, fitted=fitted, numbers=dict(c.numbers), messages=list(c.messages))
+
+
+def prepare_steps(source, res, gs):
+    """Generator: what Apply of `res` will write, worked out ahead in slices (a FitStage step per yield) and kept, so
+    the Apply writes at once. For a timer to run once a result is shown; writes nothing."""
+
+    yield from _fit_for(source, res, gs)
+
+
+def _fit_for(source, res, gs):
+    """Generator -> (candidate, fitted) for `res`, or None (Seam Fit not Light, or no UVs): the finished fit when there is
+    one, else the per-side transfer alone (geometry untouched), made in slices and kept in TRANSFERS. (None, False) when
+    Stop (`sliced.stopped`) ended the transfer."""
+
+    if uvkeep.mode_of(gs) != "light":
+        return None
+    src = _source_data(source)
+    sa, plan = uvkeep.plan_for(source, src, gs)
+    if sa is None:
+        return None
+    faces = FlatFaces.of(res["faces"])
+    key = uvkeep.result_key(res["co"], faces.indptr, faces.flat)
+    c = uvkeep.CANDIDATES.get(key)
+    if c is not None:
+        return c, True
+    c = TRANSFERS.get(key)
+    if c is None:
+        stage = uvkeep.fit_stage(source, src, res, gs, only_transfer=True)
+        sliced.tick("Carrying the UVs over")
+        try:
+            while not stage.done:
+                if sliced.stopped():
+                    stage.stop()
+                stage.step()
+                yield
+        finally:
+            if not stage.done:
+                stage.stop()
+        c = stage.candidate
+        if c is None:  # stopped: nothing kept
+            return None, False
+        c.messages.append("Seam Fit was not run on this result. Look runs it.")
+        TRANSFERS.clear()  # one is enough: the result Apply writes next
+        TRANSFERS[key] = c
+    return c, False
