@@ -269,10 +269,8 @@ def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, p
         part = np.asarray(seams["face_part"], np.int64)
     if part.min() == part.max():
         return
-    vpart = np.empty(len(P), np.int64)
-    for i in range(0, len(P), 4096):
-        vpart[i:i + 4096] = part[np.asarray(nearest(P[i:i + 4096])[1], np.int64)]
-        yield
+    near_part = lambda q: part[np.asarray(nearest(q)[1], np.int64)]  # noqa: E731
+    vpart = np.asarray((yield from _in_chunks(near_part, P)), np.int64)
     # Every switch along an edge, not only one per edge: a strip of another side thinner than the edge (a trim band, a
     # rim) has two. Each edge is sampled at steps of at most SWITCH_STEP source edges and every step whose two ends
     # are nearest different sides is bisected.
@@ -286,11 +284,8 @@ def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, p
     inner = pieces - 1  # samples strictly inside each edge
     s_edge = np.repeat(np.arange(len(elen)), inner)
     s_t = (np.arange(len(s_edge)) - np.repeat(np.cumsum(inner) - inner, inner) + 1) / np.repeat(pieces, inner).astype(np.float64)
-    s_lab = np.empty(len(s_edge), np.int64)
     s_at = PA[s_edge] + s_t[:, None] * (PB - PA)[s_edge]
-    for i in range(0, len(s_edge), 4096):
-        s_lab[i:i + 4096] = part[np.asarray(nearest(s_at[i:i + 4096])[1], np.int64)]
-        yield
+    s_lab = np.asarray((yield from _in_chunks(near_part, s_at)), np.int64) if len(s_edge) else np.zeros(0, np.int64)
     # samples per edge in order: t = 0 (end a), the inner ones, t = 1 (end b)
     starts = np.cumsum(pieces + 1) - (pieces + 1)
     n_all = int((pieces + 1).sum())
@@ -311,15 +306,13 @@ def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, p
     lo, hi = all_t[step].copy(), all_t[step + 1].copy()
     for _ in range(steps):
         mid = 0.5 * (lo + hi)
-        same = part[np.asarray(nearest(pa + mid[:, None] * (pb - pa))[1], np.int64)] == first
+        same = np.asarray((yield from _in_chunks(near_part, pa + mid[:, None] * (pb - pa))), np.int64) == first
         lo, hi = np.where(same, mid, lo), np.where(same, hi, mid)
-        yield
     tx = 0.5 * (lo + hi)
     x = pa + tx[:, None] * (pb - pa)
-    at_a, fa, _ = nearest(pa + lo[:, None] * (pb - pa))
-    at_b, fb, _ = nearest(pa + hi[:, None] * (pb - pa))
+    at_a, fa, _ = yield from _in_chunks(nearest, pa + lo[:, None] * (pb - pa))
+    at_b, fb, _ = yield from _in_chunks(nearest, pa + hi[:, None] * (pb - pa))
     fa, fb = np.asarray(fa, np.int64), np.asarray(fb, np.int64)
-    yield
     uva = _uv_at(sP, sip, sfl, suv, fa, np.asarray(at_a).reshape(-1, 3))
     yield
     uvb = _uv_at(sP, sip, sfl, suv, fb, np.asarray(at_b).reshape(-1, 3))
@@ -566,7 +559,7 @@ def ball_sides_steps(look_region, points, indptr, flat, label, d0, trees: Region
     ok = {}
     for r, fs in by_r.items():
         corners = np.concatenate([np.arange(ip[f], ip[f + 1]) for f in fs])
-        got = trees.nearest(r, P[fl[corners]])
+        got = yield from _in_chunks(lambda q, r=r: trees.nearest(r, q), P[fl[corners]])
         if got is None:
             continue
         inside = got[2] <= d0[fl[corners]] + trees.eps
@@ -610,7 +603,7 @@ def side_reread_steps(look: dict, sides, src_points, src_indptr, src_flat, src_r
         corner = np.concatenate([np.arange(ip[f], ip[f + 1]) for f in fs.tolist()])
         q = P[fl[corner]]
         cen = np.array([P[fl[ip[f]:ip[f + 1]]].mean(0) for f in fs.tolist()])
-        got = trees.nearest(r, np.r_[q, cen])
+        got = yield from _in_chunks(lambda x, r=r: trees.nearest(r, x), np.r_[q, cen])
         if got is None:
             continue
         at, g, _d = got
@@ -683,7 +676,7 @@ def _meeting_points_steps(P, mesh, faces, vlabel, part, nearest, out: dict, leve
     for _ in range(levels if len(idx) else 0):
         T, L = tri[idx], lab[idx]
         mids = np.stack([(T[:, 0] + T[:, 1]) / 2, (T[:, 1] + T[:, 2]) / 2, (T[:, 2] + T[:, 0]) / 2], 1)  # ab, bc, ca
-        ml = part[np.asarray(nearest(mids.reshape(-1, 3))[1], np.int64)].reshape(-1, 3)
+        ml = part[np.asarray((yield from _in_chunks(nearest, mids.reshape(-1, 3)))[1], np.int64)].reshape(-1, 3)
         kids_p = np.stack([np.stack([T[:, 0], mids[:, 0], mids[:, 2]], 1), np.stack([mids[:, 0], T[:, 1], mids[:, 1]], 1),
                            np.stack([mids[:, 2], mids[:, 1], T[:, 2]], 1), np.stack([mids[:, 0], mids[:, 1], mids[:, 2]], 1)], 1)
         kids_l = np.stack([np.stack([L[:, 0], ml[:, 0], ml[:, 2]], 1), np.stack([ml[:, 0], L[:, 1], ml[:, 1]], 1),
@@ -699,6 +692,31 @@ def _meeting_points_steps(P, mesh, faces, vlabel, part, nearest, out: dict, leve
     out["at"] = [tri[i].mean(0) if ok[i] else None for i in range(n)]
 
 
+
+
+LOOKUP_CHUNK = 256  # points per closest-point call between two yields (each call is pointwise, so chunks give the same answers)
+MOVES_PER_STEP = 32  # vertex moves checked (`_move_ok`, a few ms each) between two yields
+
+
+def _in_chunks(fn, q):
+    """Generator: `fn(points)` over `q` (N, 3) in LOOKUP_CHUNK pieces, a yield after each; returns the parts joined as one
+    call would give them (an array, or a tuple of arrays). None when a part is None (a side with no polygons)."""
+
+    q = np.asarray(q, np.float64).reshape(-1, 3)
+    if len(q) <= LOOKUP_CHUNK:
+        got = fn(q)
+        yield
+        return got
+    parts = []
+    for i in range(0, len(q), LOOKUP_CHUNK):
+        got = fn(q[i:i + LOOKUP_CHUNK])
+        yield
+        if got is None:
+            return None
+        parts.append(got)
+    if isinstance(parts[0], tuple):
+        return tuple(np.concatenate([np.asarray(x[k]) for x in parts]) for k in range(len(parts[0])))
+    return np.concatenate([np.asarray(x) for x in parts])
 
 
 SWITCH_SNAP_AGAIN = True  # a vertex may slide again in a later pass; passes stop when one mends no more faces than the last
@@ -739,8 +757,7 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
     moved_once = set()  # a vertex moved onto a side line stays there: it touches both sides, so every pass ends
     while passes is None or pass_no < passes:
         pass_no += 1
-        lab = np.asarray(label_of(P), np.int64)
-        yield
+        lab = np.asarray((yield from _in_chunks(label_of, P)), np.int64)
         face_of = np.repeat(np.arange(nf), np.diff(ip))
         wild = np.zeros(len(P), bool)  # a vertex slid onto a line touches both sides
         wild[np.asarray(moved_all, np.int64)] = True
@@ -759,13 +776,19 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
             break
         last_mixed, P_before, moved_before = n_mixed, P.copy(), list(moved_all)
         cand = {}  # (v, w) -> kept side
-        for f in range(nf):
-            if only is not None and not only[f]:
-                continue
+        lab_hi = np.full(nf, np.iinfo(np.int64).min, np.int64)
+        np.maximum.at(lab_hi, face_of, lab[fl])
+        lab_lo = np.full(nf, np.iinfo(np.int64).max, np.int64)
+        np.minimum.at(lab_lo, face_of, lab[fl])
+        todo = (lab_hi != lab_lo) & (np.diff(ip) > 0)  # faces whose corners lie on more than one side
+        if only is not None:
+            todo &= np.asarray(only, bool)
+        yield
+        for n_, f in enumerate(np.flatnonzero(todo).tolist()):
+            if n_ % 256 == 255:
+                yield
             fv = fl[ip[f]:ip[f + 1]]
             fl_ = lab[fv]
-            if (fl_ == fl_[0]).all():
-                continue
             sides, counts = np.unique(fl_, return_counts=True)
             keep = int(sides[np.argmax(counts)])
             n = len(fv)
@@ -775,8 +798,6 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
                 for j in ((i - 1) % n, (i + 1) % n):
                     if fl_[j] == keep:
                         cand[(int(fv[i]), int(fv[j]))] = keep
-            if f % 2048 == 2047:
-                yield
         if not cand:
             break
         keys = list(cand)
@@ -788,10 +809,9 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
         lo, hi = np.zeros(len(keys)), np.ones(len(keys))
         for _ in range(steps):
             mid = 0.5 * (lo + hi)
-            same = np.asarray(label_of(pa + mid[:, None] * (pb - pa)), np.int64) == first
+            same = np.asarray((yield from _in_chunks(label_of, pa + mid[:, None] * (pb - pa))), np.int64) == first
             lo, hi = np.where(same, mid, lo), np.where(same, hi, mid)
-            yield
-        after = np.asarray(label_of(pa + hi[:, None] * (pb - pa)), np.int64)
+        after = np.asarray((yield from _in_chunks(label_of, pa + hi[:, None] * (pb - pa))), np.int64)
         to = pa + (0.5 * (lo + hi))[:, None] * (pb - pa)
         dist = np.linalg.norm(to - pa, axis=1)
         good = (after == want) & (dist <= limit[vv])
@@ -805,7 +825,7 @@ def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict,
             if _keeps_edges(pos, mesh, v, t) and _move_ok(pos, mesh, v, t):
                 pos[v] = t
                 done.add(v)
-            if c % 256 == 255:
+            if c % MOVES_PER_STEP == MOVES_PER_STEP - 1:
                 yield
         if not done:
             break
@@ -852,7 +872,7 @@ def ball_snap_steps(points, indptr, flat, only, trees: RegionTrees, label, d0, m
     for v, r in pairs:
         by_r.setdefault(r, []).append(v)
     for r, vs in by_r.items():
-        got = trees.nearest(r, P[vs])
+        got = yield from _in_chunks(lambda q, r=r: trees.nearest(r, q), P[vs])
         if got is None:
             continue
         for v, q, dd in zip(vs, got[0], got[2].tolist()):
@@ -887,7 +907,7 @@ def ball_snap_steps(points, indptr, flat, only, trees: RegionTrees, label, d0, m
         if _keeps_edges(pos, mesh, v, t) and _move_ok(pos, mesh, v, t):
             pos[v] = t
             done.add(v)
-        if c % 256 == 255:
+        if c % MOVES_PER_STEP == MOVES_PER_STEP - 1:
             yield
     out["points"] = np.array(pos, np.float64).ravel()
     out["moved"] = np.array(sorted(done), np.int64)

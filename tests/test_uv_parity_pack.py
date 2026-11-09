@@ -188,6 +188,22 @@ class Twin(unittest.TestCase):
             self.assertTrue(all(p[0] for p in first), f"k {k}")
             self.assertEqual(block_gap_breaks(tris, charts, first, 256, k), [], f"k {k}: blocks two charts touch, grown by one block, must never meet")
 
+    def test_pack_into_steps_yields_often_and_gives_the_same_layout(self):
+        tris, charts, flags = random_charts(30, 7)
+        seed = [10, 10, 90, 10, 10, 90]
+        for k in (1, 1 + uvpack.FREE_TURNS + uvpack.EFFORT_STEP):
+            steps = uvpack.pack_into_steps((200, 200), k, seed, tris, charts, 30, as_box=flags, turn_ok=[1] * 30)
+            n = 0
+            while True:
+                try:
+                    next(steps)
+                    n += 1
+                except StopIteration as end:
+                    got = end.value
+                    break
+            self.assertGreater(n, 30, "a yield per chart placed at least")
+            self.assertEqual(got, uvpack.pack_into((200, 200), k, seed, tris, charts, 30, as_box=flags, turn_ok=[1] * 30))
+
     def test_a_small_chart_sits_in_the_bay_of_a_big_one(self):
         # an L: 80 x 80 minus the 60 x 60 corner; a 20 x 20 square has no room beside it on a 96 page, but fits in the notch
         big = [0, 0, 80, 0, 0, 20, 80, 0, 80, 20, 0, 20, 0, 20, 20, 20, 0, 80, 20, 20, 20, 80, 0, 80]
