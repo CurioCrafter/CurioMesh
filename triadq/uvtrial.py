@@ -483,8 +483,12 @@ def _same_pairs(a, b) -> bool:
 
 
 def _poll_new(run):
-    while not run.done:
-        yield run.step()
+    try:
+        while not run.done:
+            yield run.step()
+    finally:
+        if not run.done:  # dropped unfinished (a drag, Again, Esc, Cancel): its worker jobs stop too, so none piles up
+            run.stop()
     if run.error is not None:
         return None, f"New UVs could not be made ({run.error})."
     return run.result, ""
@@ -601,9 +605,13 @@ def _pack(base: UVBase, uv, k: int, budget: float, resume=None, passes: int = 0)
     r = resume or {}
     stage = uvpack.FillPage(w.tolist(), h.tolist(), [True] * n, np.maximum(area, 1e-12).tolist(), page, k, order=r.get("order"),
                             policy=int(r.get("policy", 0)), scale=float(r.get("scale", 0.0)), passes=passes, budget=budget)
-    while not stage.done:
-        stage.step()
-        yield
+    try:
+        while not stage.done:
+            stage.step()
+            yield
+    finally:
+        if not stage.done:  # dropped unfinished: the page search on the worker stops too
+            stage.stop()
     fill = stage.result
     if fill is None:
         return None, None

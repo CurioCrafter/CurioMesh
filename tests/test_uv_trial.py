@@ -130,6 +130,16 @@ def cube_mesh(n=4):
 
 
 class UVOnly(unittest.TestCase):
+    def test_a_dropped_run_stops(self):
+        """A drag, Again or Esc drops the preview's generator mid-run: the run stops, so no worker job is left going."""
+        p, ip, fl = cube_mesh(4)
+        run = uvnew.NewUVs(p, ip, fl, settings=uvnew.Settings(out_of_sight=False, hidden_pct=100.0), budget=UT.NEW_SLICE)
+        work = UT._poll_new(run)
+        for _ in range(3):
+            next(work)
+        work.close()
+        self.assertTrue(run._stop)
+
     def test_new_then_layout_keep_going(self):
         p, ip, fl = cube_mesh(4)
         base = UT.make_uv_base(p, ip, fl, texture_px=512)
