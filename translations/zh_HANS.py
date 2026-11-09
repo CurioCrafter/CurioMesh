@@ -2202,4 +2202,5 @@ MESSAGES = {
     "Stopped: the UVs are a plain copy from your mesh": "已停止：UV 是从你的网格直接复制的",
     "Stopping...": "正在停止...",
     "Writing the result": "正在写入结果",
+    "Not baked, kept as they are: {0}": "未烘焙，保持原样：{0}",
 }

@@ -2202,4 +2202,5 @@ MESSAGES = {
     "Stopped: the UVs are a plain copy from your mesh": "停止しました: UV は元のメッシュからの単純なコピーです",
     "Stopping...": "停止中...",
     "Writing the result": "結果を書き込み中",
+    "Not baked, kept as they are: {0}": "ベイクせず、そのまま残しました: {0}",
 }

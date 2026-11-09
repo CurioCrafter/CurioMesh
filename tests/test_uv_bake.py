@@ -60,5 +60,32 @@ class FloatUndo(unittest.TestCase):
                 sys.modules["bpy"] = old
 
 
+def _node(type_, **kw):
+    return types.SimpleNamespace(type=type_, label="", image=None, outputs=[], **kw)
+
+
+def _link(image_node, to_node, socket):
+    out = types.SimpleNamespace(name="Color", links=[])
+    out.links.append(types.SimpleNamespace(to_node=to_node, to_socket=types.SimpleNamespace(name=socket)))
+    image_node.outputs.append(out)
+
+
+class BakeTypes(unittest.TestCase):
+    def test_normal_only_into_normal_maps(self):
+        def image(name, space):
+            return types.SimpleNamespace(name=name, colorspace_settings=types.SimpleNamespace(name=space))
+
+        normal, rough, ao, color = image("n", "Non-Color"), image("r", "Non-Color"), image("ao", "Non-Color"), image("c", "sRGB")
+        bsdf, nmap, mix = _node("BSDF_PRINCIPLED"), _node("NORMAL_MAP"), _node("MIX")
+        nodes = [bsdf, nmap, mix]
+        for im, to, socket in ((normal, nmap, "Color"), (rough, bsdf, "Roughness"), (ao, mix, "B"), (color, bsdf, "Base Color")):
+            n = _node("TEX_IMAGE")
+            n.image = im
+            _link(n, to, socket)
+            nodes.append(n)
+        got = {im.name: uvbake.bake_type(im, nodes) for im in (normal, rough, ao, color)}
+        self.assertEqual(got, {"n": "NORMAL", "r": "ROUGHNESS", "ao": None, "c": "DIFFUSE"})
+
+
 if __name__ == "__main__":
     unittest.main()

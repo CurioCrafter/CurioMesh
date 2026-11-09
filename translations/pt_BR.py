@@ -2202,4 +2202,5 @@ MESSAGES = {
     "Stopped: the UVs are a plain copy from your mesh": "Parado: as UVs são uma cópia simples da sua malha",
     "Stopping...": "Parando...",
     "Writing the result": "Gravando o resultado",
+    "Not baked, kept as they are: {0}": "Não processadas, ficam como estão: {0}",
 }

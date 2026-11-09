@@ -299,6 +299,51 @@ def after_bake(obj, images) -> dict | None:
     return out
 
 
+# What each image in the material holds, so Bake those spots bakes that data into it. Our own baked maps say it in their
+# node label (CurioMesh_Normal ...); other images say it by the socket they feed.
+_LABEL_BAKE = {"CurioMesh_BaseColor": "DIFFUSE", "CurioMesh_Normal": "NORMAL", "CurioMesh_Roughness": "ROUGHNESS",
+               "CurioMesh_Emit": "EMIT"}
+_SOCKET_BAKE = {"Normal": "NORMAL", "Roughness": "ROUGHNESS", "Emission": "EMIT", "Emission Color": "EMIT"}
+
+
+def _fed_sockets(node, seen=None):
+    """(node, socket) pairs an image node's Color output reaches, through reroutes."""
+    seen = set() if seen is None else seen
+    out = []
+    for socket in getattr(node, "outputs", ()):
+        if getattr(socket, "name", "") not in ("Color", "Output"):
+            continue
+        for link in getattr(socket, "links", ()):
+            to = link.to_node
+            if getattr(to, "type", "") == "REROUTE":
+                if id(to) not in seen:
+                    seen.add(id(to))
+                    out += _fed_sockets(to, seen)
+            else:
+                out.append((to, link.to_socket))
+    return out
+
+
+def bake_type(image, nodes) -> str | None:
+    """The bake type for `image` (one of its material's TEX_IMAGE nodes is among `nodes`): NORMAL only for a normal map
+    (feeds a Normal Map node's Color or a Normal input), ROUGHNESS, EMIT, DIFFUSE for colour images. None for a data
+    image no bake can make (metallic, AO, height, masks): it is left as it is."""
+
+    for node in nodes:
+        if getattr(node, "type", "") != "TEX_IMAGE" or node.image is not image:
+            continue
+        if getattr(node, "label", "") in _LABEL_BAKE:
+            return _LABEL_BAKE[node.label]
+        for to, socket in _fed_sockets(node):
+            if getattr(to, "type", "") == "NORMAL_MAP" and socket.name == "Color":
+                return "NORMAL"
+            if getattr(to, "type", "") not in ("NORMAL_MAP", "BUMP", "DISPLACEMENT") and socket.name in _SOCKET_BAKE:
+                return _SOCKET_BAKE[socket.name]
+    if image.colorspace_settings.name != "Non-Color":
+        return "DIFFUSE"
+    return None
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Baked images follow Ctrl+Z
 # ---------------------------------------------------------------------------------------------------------------------
