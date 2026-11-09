@@ -366,7 +366,9 @@ def fix(job, points, faces, looks):
     job.stage = f"Moving edges onto {len(spots)} UV seams"
     budget = getattr(job, "uv_budget", None)
     if budget is None:
-        budget = lambda before: max(1.1 * job.detail, before)  # Auto's own test for its polish
+        def budget(before):  # Auto's own test for its polish
+            return max(1.1 * job.detail, before)
+
     p = yield from autofix.propose(trial, base, {}, spots, look, budget)
     a.report.update(fixed=len(p.fixed), left=len(p.left), reason=p.reason, words=p.words, strength=p.held)
     if p.reason:
