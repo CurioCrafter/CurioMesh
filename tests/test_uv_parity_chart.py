@@ -222,6 +222,32 @@ class Parity(unittest.TestCase):
             np.testing.assert_array_equal(kcut, tcut)
             np.testing.assert_array_equal(kn[:5], tn[:5])
 
+    def test_regions_of_a_large_piece_match(self):
+        """R10big: one piece of more than REGION_MIN_FACES faces (the L-parts tile 14 x 16 times) runs its merge rounds
+        region by region, then across the region borders: the kernel (regions on worker threads) and the twin make the
+        same merges in the same order."""
+
+        tiles_x, tiles_y = 14, 16
+        points, indptr, flat = grid(10 * tiles_x, 8 * tiles_y)
+        f = np.arange(len(indptr) - 1)
+        i, j = f % (10 * tiles_x) % 10, f // (10 * tiles_x) % 8
+        label = np.where((i < 4) & (j < 5), 1, np.where((i >= 7) & (j >= 4), 2, 0)) + 3 * (f % (10 * tiles_x) // 10 + tiles_x * (f // (10 * tiles_x) // 8))
+        self.assertGreater(len(f), uvchart.REGION_MIN_FACES)
+        twin = uvchart.build(points, indptr, flat, part_label=label, use_fast=False)
+        members = [[] for _ in range(twin.n_patches)]
+        for face, p in enumerate(twin.patch):
+            members[p].append(face)
+        self.assertEqual(len(set(uvchart._regions(twin.topo, twin.points.tolist(), members))), 4)
+        kern = self.kernel(points, indptr, flat, part_label=label)
+        stretch, _, pole, ptr, ids = kern.merges()
+        self.assertEqual(len(stretch), len(twin.merges))
+        self.assertGreater(len(stretch), 100)
+        for k, (segs, s, _, p) in enumerate(twin.merges):
+            self.assertEqual(list(ids[ptr[k]:ptr[k + 1]]), list(segs))
+            self.assertAlmostEqual(stretch[k], s, places=6)
+            self.assertEqual(bool(pole[k]), p)
+        np.testing.assert_array_equal(kern.level(10.0)[0], twin.level(10.0)[0])
+
     def test_levels_nest_and_stay_disks_with_smoother_outlines(self):
         """R6: the outline smoothing moves patches (fewer cut outline weight) and, with the last merge round, keeps every
         level's charts disks, each inside one chart of every level above it (the redo of a chart that lies over itself

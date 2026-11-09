@@ -42,6 +42,9 @@
 //!   (boundary smoothing of chart growing: Sander, Wood, Gortler, Snyder, Hoppe 2003, "Multi-chart geometry images";
 //!   Julius, Kraevoy, Sheffer 2005, "D-Charts"; our move, gain and guards). Every level replays the moves, so lower
 //!   levels' charts stay inside higher ones (the redo of a chart that lies over itself relies on it).
+//! - Large pieces (R10big): a mesh piece of more than `REGION_MIN_FACES` faces is cut into regions by recursive
+//!   coordinate bisection (Berger, Bokhari 1987, "A partitioning strategy for nonuniform problems on multiprocessors");
+//!   each merge round runs region by region apart (worker threads), then across the region borders (ours).
 //! - Keep going: one discrete cut move per pass on patch borders, accepted only when the score drops (idea of
 //!   discrete cut moves: Li, Kaufman, Kim, Sorkine-Hornung, Jacobson, Sheffer 2018, "OptCuts"; our moves and score).
 
@@ -1143,6 +1146,10 @@ impl Tree {
             length: vec![0.0; np],
             hull: vec![Vec::new(); np],
             solo: false,
+            region: Arc::new(self.regions(members)),
+            my_region: NONE,
+            defer: false,
+            deferred: Vec::new(),
         };
         let ppu2 = self.numbers[num::PX_PER_UNIT] * self.numbers[num::PX_PER_UNIT];
         for (p, m) in members.iter().enumerate() {
@@ -1159,28 +1166,32 @@ impl Tree {
             }
         }
         // Patch layouts.
-        let layouts: Vec<(Local, bool, Vec<f64>)> = {
+        // Each patch is laid out, measured and given its hull apart (on worker threads on a big mesh); a patch's
+        // corners are its own, so the hull read from its local layout is the one read back from `corner_uv`.
+        let layouts: Vec<(Local, bool, Vec<f64>, Vec<f64>, BTreeSet<(u64, u32)>, Vec<u32>)> = {
             let dsu = &b.dsu;
             let one = |p: usize| {
                 let local = Local::new(t, &self.points, &members[p], |c| dsu.find(c));
-                if let Some(uv) = tube_layout(&local, tube_uv) {
-                    return (local, false, uv);
-                }
-                let (g, uv) = self.patch_layout(&local, stop);
-                (local, g, uv)
+                let (g, uv) = match tube_layout(&local, tube_uv) {
+                    Some(uv) => (false, uv),
+                    None => self.patch_layout(&local, stop),
+                };
+                let per = self.face_stretch(&local, &uv);
+                let vals: BTreeSet<(u64, u32)> = local.faces.iter().zip(&per).map(|(&f, &x)| (bits(x), f)).collect();
+                let hull = hull_of(local.corner.iter().zip(&local.fl).map(|(&h, &v)| (h, [uv[2 * v as usize], uv[2 * v as usize + 1]])));
+                (local, g, uv, per, vals, hull)
             };
             if t.nf >= PARALLEL_FACES { (0..np).into_par_iter().map(one).collect() } else { (0..np).map(one).collect() }
         };
-        for (p, (local, g, uv)) in layouts.into_iter().enumerate() {
+        for (p, (local, g, uv, per, vals, hull)) in layouts.into_iter().enumerate() {
             local.scatter(&uv, &mut b.corner_uv);
-            let per = self.face_stretch(&local, &uv);
             for (k, &f) in local.faces.iter().enumerate() {
                 b.face_str[f as usize] = per[k];
-                b.vals[p].insert((bits(per[k]), f));
             }
+            b.vals[p] = vals;
             b.stretch[p] = quantile(&per, uvflat::STRETCH_QUANTILE);
             b.grid[p] = g;
-            b.hull[p] = hull_of(local.corner.iter().map(|&h| (h, [b.corner_uv[2 * h as usize], b.corner_uv[2 * h as usize + 1]])));
+            b.hull[p] = hull;
         }
         let grid_patches = b.grid.iter().filter(|&&g| g).count() as f64;
         for (s, seg) in self.segments.iter().enumerate() {
@@ -1270,7 +1281,7 @@ impl Tree {
             pieces[k].0 += members[p].len();
             pieces[k].1.push(p as u32);
         }
-        let want = (2 * threads).min(PIECE_GROUPS).min(pieces.len());
+        let want = (GROUPS_PER_THREAD * threads).min(PIECE_GROUPS).min(pieces.len());
         if want <= 1 {
             return vec![(0..np as u32).collect()];
         }
@@ -1287,14 +1298,160 @@ impl Tree {
         }).collect()
     }
 
+    /// R10big: regions of the large mesh pieces, per patch (NONE elsewhere). A piece (faces joined across edges) of
+    /// more than `REGION_MIN_FACES` faces is cut in two by face count across the longest side of the box of its
+    /// patches' centres, and each half again while it has more than `REGION_FACES` (recursive coordinate bisection,
+    /// Berger and Bokhari 1987, "A partitioning strategy for nonuniform problems on multiprocessors"); regions are
+    /// numbered in that order, pieces by their first patch. It depends on the mesh alone, not on the threads, so the
+    /// charts are the same on any processor.
+    fn regions(&self, members: &[Vec<u32>]) -> Vec<u32> {
+        let t = &self.topo;
+        let np = self.n_patches;
+        let mut region = vec![NONE; np];
+        let mut d = Dsu::new(t.nf);
+        for e in 0..t.ne() {
+            let [h0, h1] = t.euse[e];
+            if h1 != NONE {
+                d.union(t.cface[h0 as usize], t.cface[h1 as usize]);
+            }
+        }
+        let mut piece_of: HashMap<u32, usize, FxBuild> = HashMap::default();
+        let mut pieces: Vec<(usize, Vec<u32>)> = Vec::new();
+        for (p, m) in members.iter().enumerate() {
+            let Some(&f) = m.first() else { continue };
+            let k = *piece_of.entry(d.find(f)).or_insert_with(|| {
+                pieces.push((0, Vec::new()));
+                pieces.len() - 1
+            });
+            pieces[k].0 += m.len();
+            pieces[k].1.push(p as u32);
+        }
+        let mut next = 0u32;
+        for (n, ps) in pieces {
+            if n <= REGION_MIN_FACES {
+                continue;
+            }
+            // Patch centres: the mean of their faces' corner points.
+            let centre: HashMap<u32, [f64; 3], FxBuild> = ps.iter().map(|&p| {
+                let (mut c, mut k) = ([0f64; 3], 0usize);
+                for &f in &members[p as usize] {
+                    for h in t.face_corners(f as usize) {
+                        let v = t.flat[h] as usize;
+                        for (x, cx) in c.iter_mut().enumerate() {
+                            *cx += self.points[3 * v + x];
+                        }
+                        k += 1;
+                    }
+                }
+                (p, c.map(|x| x / k.max(1) as f64))
+            }).collect();
+            let mut out: Vec<Vec<u32>> = Vec::new();
+            let mut todo = vec![ps];
+            while let Some(mut set) = todo.pop() {
+                let total: usize = set.iter().map(|&p| members[p as usize].len()).sum();
+                if total <= REGION_FACES || set.len() < 2 {
+                    out.push(set);
+                    continue;
+                }
+                let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                for p in &set {
+                    for x in 0..3 {
+                        lo[x] = lo[x].min(centre[p][x]);
+                        hi[x] = hi[x].max(centre[p][x]);
+                    }
+                }
+                let axis = (0..3).max_by(|&x, &y| (hi[x] - lo[x]).total_cmp(&(hi[y] - lo[y])).then(y.cmp(&x))).unwrap();
+                set.sort_by(|&p, &q| centre[&p][axis].total_cmp(&centre[&q][axis]).then(p.cmp(&q)));
+                let (mut acc, mut cut) = (0usize, set.len() - 1);
+                for (i, &p) in set.iter().enumerate() {
+                    acc += members[p as usize].len();
+                    if 2 * acc >= total {
+                        cut = i + 1;
+                        break;
+                    }
+                }
+                let right = set.split_off(cut.clamp(1, set.len() - 1));
+                todo.push(right); // the lower half first
+                todo.push(set);
+            }
+            for set in out {
+                for p in set {
+                    region[p as usize] = next;
+                }
+                next += 1;
+            }
+        }
+        region
+    }
+
+    /// R10big: a merge round's part inside the regions of the large pieces. Every queued candidate goes to the region
+    /// of its two charts (a chart's region is its root patch's); each region runs the round on its own copy of the
+    /// build (`Build::region_copy`, on worker threads on a big mesh), noting the pairs it meets across its border; the
+    /// copies are taken back in region order (charts of other pieces and outside regions run as one more region).
+    /// Returns the pairs across region borders as they are now (roots), sorted, for the round's part across them.
+    #[allow(clippy::too_many_arguments)]
+    fn region_round<'t>(&'t self, b: &mut Build<'t>, heap: &mut Queue, patches: &[u32], seq: &mut u64, cnt: &mut Counts, merges: &mut Vec<Merge>, stop: &AtomicBool) -> Vec<(u32, u32)> {
+        let t = &self.topo;
+        let region = b.region.clone();
+        // region -> (patches whose chart is rooted in it, the roots, the queued candidates of its charts)
+        let mut by: std::collections::BTreeMap<u32, (Vec<u32>, Vec<u32>, Queue)> = std::collections::BTreeMap::new();
+        for &p in patches {
+            let r = b.find(p);
+            let e = by.entry(region[r as usize]).or_insert_with(|| (Vec::new(), Vec::new(), Queue::default()));
+            e.0.push(p);
+            if r == p {
+                e.1.push(p);
+            }
+        }
+        let mut deferred: Vec<(u32, u32)> = Vec::new();
+        let queued: Vec<Cand> = std::mem::take(&mut heap.open).into_vec().into_iter().chain(std::mem::take(&mut heap.done).into_vec()).collect();
+        for c in queued {
+            let (ka, kb) = (region[c.a as usize], region[c.b as usize]);
+            if ka != kb || b.crosses_region(c.a) || b.crosses_region(c.b) {
+                deferred.push((c.a, c.b));
+            } else if let Some(e) = by.get_mut(&ka) {
+                e.2.push(c);
+            }
+        }
+        let jobs: Vec<(u32, Vec<u32>, Vec<u32>, Vec<u32>, Queue)> = by.into_iter().filter(|x| !x.1 .2.open.is_empty() || !x.1 .2.done.is_empty()).map(|(k, (members, roots, q))| {
+            let faces: Vec<u32> = roots.iter().flat_map(|&r| b.faces[r as usize].iter().copied()).collect();
+            (k, members, roots, faces, q)
+        }).collect();
+        let start = *seq;
+        let me = &*b;
+        let run = |(k, _, roots, _, q): &(u32, Vec<u32>, Vec<u32>, Vec<u32>, Queue)| {
+            let mut sub = me.region_copy(*k, roots);
+            let mut q = Queue { open: q.open.clone(), done: q.done.clone() };
+            let (mut s, mut memo, mut live) = (start, Memo::default(), 0usize);
+            let mut c = Counts { top: 1.0, ..Counts::default() };
+            let mut m = Vec::new();
+            sub.merge_round(&mut q, &mut s, &mut memo, &mut live, &mut c, &mut m, stop);
+            (sub, c, m, s)
+        };
+        let outs: Vec<(Build<'t>, Counts, Vec<Merge>, u64)> = if t.nf >= PARALLEL_FACES { jobs.par_iter().map(run).collect() } else { jobs.iter().map(run).collect() };
+        for ((_, members, _, faces, _), (mut sub, c, m, s)) in jobs.iter().zip(outs) {
+            *seq = (*seq).max(s);
+            cnt.add(&c);
+            deferred.append(&mut sub.deferred);
+            b.absorb(sub, members, faces, &m);
+            merges.extend(m);
+        }
+        let mut pairs: Vec<(u32, u32)> = deferred.into_iter().map(|(x, y)| {
+            let (x, y) = (b.find(x), b.find(y));
+            (x.min(y), x.max(y))
+        }).filter(|&(x, y)| x != y).collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
+    }
+
     /// The merge rounds and the last round (6.4, R6) over the charts of `patches` (whole pieces): the build, the
     /// merges in merge order and what was counted.
     fn run_merges<'t>(&'t self, mut b: Build<'t>, patches: &[u32], stop: &AtomicBool) -> (Build<'t>, Vec<Merge>, Counts) {
         let t = &self.topo;
         let mut heap = Queue::default();
         let mut seq = 0u64;
-        let (mut exact_evals, mut dropped, mut grid_merges, mut pole_merges, mut lay_over) = (0usize, 0usize, 0usize, 0usize, 0usize);
-        let mut top = 1.0f64;
+        let mut cnt = Counts { top: 1.0, ..Counts::default() };
         let mut merges: Vec<Merge> = Vec::new();
         for &p in patches {
             b.push_for(&mut heap, &mut seq, p);
@@ -1304,6 +1461,9 @@ impl Tree {
         // measured twice. Entries of charts that changed are dropped when the store outgrows the live pairs.
         let mut memo: Memo = HashMap::default();
         let mut memo_live = 0usize;
+        // R10big: a piece large enough to have regions (`Tree::regions`) runs each round region by region, apart (on
+        // worker threads), and then across the region borders.
+        let regional = patches.iter().any(|&p| b.region[p as usize] != NONE);
         // Candidates measured above the round's cap wait for the round whose cap they fit (their measure stays valid
         // while both charts are unchanged).
         for (round, &cap) in round_caps(self.build_stretch).iter().enumerate() {
@@ -1316,74 +1476,20 @@ impl Tree {
                     if st <= 1.0 + cap { heap.push(c) } else { b.parked.push((c, st)) }
                 }
             }
-            while let Some(c) = heap.pop() {
-                if stop.load(Ordering::Relaxed) {
-                    break;
+            if regional {
+                let deferred = self.region_round(&mut b, &mut heap, patches, &mut seq, &mut cnt, &mut merges, stop);
+                // Across the borders: each pair of charts on two sides of a region border queued afresh (charts as they
+                // are now), and the round goes on over the whole piece.
+                for (a, c) in deferred {
+                    b.push_pair(&mut heap, &mut seq, a, c);
                 }
-                if b.find(c.a) != c.a || b.find(c.b) != c.b || b.ver[c.a as usize] != c.va || b.ver[c.b as usize] != c.vb {
-                    continue; // stale: the new chart pushed its own candidates
-                }
-                let hit = matches!(memo.get(&(c.a, c.b)), Some(&(va, vb, _)) if (va, vb) == (c.va, c.vb));
-                let ev = if hit {
-                    memo.remove(&(c.a, c.b)).unwrap().2
-                } else {
-                    exact_evals += b.prefetch(&mut heap, &c, &mut memo, stop);
-                    match memo.remove(&(c.a, c.b)) {
-                        Some((va, vb, ev)) if (va, vb) == (c.va, c.vb) => ev,
-                        _ => continue, // the segments cannot be glued into a disk
-                    }
-                };
-                let added = ev.stretch - b.stretch[c.a as usize].max(b.stretch[c.b as usize]);
-                let (irr, plain, parts) = b.shape(c.a, c.b, &ev.glued);
-                if !c.exact {
-                    seq += 1;
-                    let key = key_of(added, ev.cost, irr);
-                    heap.push(Cand { key, exact: true, seq, ..c });
-                    memo.insert((c.a, c.b), (c.va, c.vb, ev));
-                    continue;
-                }
-                if !(ev.stretch <= 1.0 + self.build_stretch) {
-                    dropped += 1;
-                    b.failed.insert((c.a, c.b), (c.va, c.vb, ev.glued.len()));
-                    continue;
-                }
-                b.last_st.insert((c.a, c.b), ev.stretch);
-                if ev.stretch > 1.0 + cap {
-                    memo.insert((c.a, c.b), (c.va, c.vb, ev));
-                    let st = memo[&(c.a, c.b)].2.stretch;
-                    b.parked.push((c, st));
-                    if memo.len() > 2 * memo_live + 4096 {
-                        let ok = |b: &mut Build, k: &(u32, u32), v: &(u32, u32, Eval)| b.find(k.0) == k.0 && b.find(k.1) == k.1 && b.ver[k.0 as usize] == v.0 && b.ver[k.1 as usize] == v.1;
-                        memo.retain(|k, v| ok(&mut b, k, v));
-                        memo_live = memo.len();
-                    }
-                    continue;
-                }
-                if plain > SHAPE_MAX && plain > parts && !b.saves_page(c.a, c.b, &ev) {
-                    // Too irregular: not tried again until the smaller chart changes (as a union that lies over).
-                    let small = if b.faces[c.a as usize].len() <= b.faces[c.b as usize].len() { c.a } else { c.b };
-                    b.refused.insert((c.a, c.b), (small, b.ver[small as usize]));
-                    continue;
-                }
-                if b.lies_over(c.a, c.b, &ev) {
-                    lay_over += 1;
-                    b.failed.insert((c.a, c.b), (c.va, c.vb, ev.glued.len()));
-                    // Not tried again until the smaller chart changes: the bigger one growing elsewhere seldom frees it.
-                    let small = if b.faces[c.a as usize].len() <= b.faces[c.b as usize].len() { c.a } else { c.b };
-                    b.refused.insert((c.a, c.b), (small, b.ver[small as usize]));
-                    continue;
-                }
-                top = top.max(ev.stretch);
-                if ev.pole { pole_merges += 1 } else { grid_merges += 1 }
-                let (stretch, cost, pole, glued) = (ev.stretch, ev.cost, ev.pole, ev.glued.clone());
-                let r = b.apply(c.a, c.b, ev);
-                merges.push(Merge { segs: glued, stretch, cost, pole });
-                b.push_for(&mut heap, &mut seq, r);
             }
+            b.merge_round(&mut heap, &mut seq, &mut memo, &mut memo_live, &mut cnt, &mut merges, stop);
             if stop.load(Ordering::Relaxed) {
                 break;
             }
         }
+        let Counts { mut exact_evals, dropped, mut grid_merges, mut pole_merges, lay_over, mut top, .. } = cnt;
         // R6: a last round in which every chart, smallest first, tries to join a neighbour (the neighbour with the
         // longest shared border first), glued along all it shares or else hinged on the costliest shared segment (the
         // two unfold flat about it; the rest of the shared border stays cut). It runs after every other merge so the
@@ -1642,6 +1748,12 @@ struct Build<'t> {
     /// This build runs beside other piece groups on a worker thread of its own (R9first): it measures ahead on this
     /// thread only.
     solo: bool,
+    /// R10big: region per patch (`Tree::regions`; NONE outside a piece large enough), shared by every copy; in a
+    /// region's copy (`defer`), the region it runs and the pairs it met across the region border.
+    region: Arc<Vec<u32>>,
+    my_region: u32,
+    defer: bool,
+    deferred: Vec<(u32, u32)>,
 }
 
 /// The candidate queue in two heaps, not measured yet (`open`) and measured (`done`), popped as one: measuring ahead
@@ -1673,8 +1785,17 @@ const PREFETCH: usize = 24;
 /// Fewer candidates than this to measure ahead: only the one at the top is measured, on this thread (waking the
 /// worker threads for a handful of small band solves costs more than it saves).
 const PREFETCH_PARALLEL: usize = 8;
-/// Groups of mesh pieces the merge tree runs apart at most (each holds a copy of the build).
+/// Groups of mesh pieces the merge tree runs apart at most (each holds a copy of the build), and per worker thread:
+/// more groups than threads even out groups that take longer than their face count says (R10big).
 const PIECE_GROUPS: usize = 16;
+const GROUPS_PER_THREAD: usize = 4;
+/// R10big: a mesh piece of more faces than `REGION_MIN_FACES` runs each merge round region by region (`Tree::regions`),
+/// apart, and then across the region borders; its regions are halved until each has at most `REGION_FACES` faces.
+/// Gothic statue (19,239 faces in one piece) and lion head (19,963): 4 regions, the tree 0.4-0.6 s sooner on 4 logical
+/// cores; a piece of 10,520 faces (horse statue) in 2 regions came out 0.14 s slower than measuring ahead, so smaller
+/// pieces keep the one queue (measured, bench/uvplan/_r10big).
+pub const REGION_MIN_FACES: usize = 16384;
+pub const REGION_FACES: usize = 8192;
 /// Charts of the last merge round whose full glues are measured ahead together.
 const LAST_AHEAD: usize = 64;
 /// Meshes from this many faces measure ahead and lay out patches on worker threads (each measure is a small band
@@ -1783,7 +1904,145 @@ impl<'t> Build<'t> {
             length: self.length.clone(),
             hull,
             solo: false,
+            region: self.region.clone(),
+            my_region: NONE,
+            defer: false,
+            deferred: Vec::new(),
         }
+    }
+
+    /// One merge round (6.4): candidates popped best first, measured (ahead, `prefetch`), queued again by their
+    /// measured rank, then judged against the round's cap, the shape rule and lying over; a union made pushes its own
+    /// candidates. Runs until the queue is empty or a stop.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_round(&mut self, heap: &mut Queue, seq: &mut u64, memo: &mut Memo, memo_live: &mut usize, cnt: &mut Counts, merges: &mut Vec<Merge>, stop: &AtomicBool) {
+        let build_stretch = self.tree.build_stretch;
+        let cap = self.cap;
+        while let Some(c) = heap.pop() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if self.find(c.a) != c.a || self.find(c.b) != c.b || self.ver[c.a as usize] != c.va || self.ver[c.b as usize] != c.vb {
+                continue; // stale: the new chart pushed its own candidates
+            }
+            let hit = matches!(memo.get(&(c.a, c.b)), Some(&(va, vb, _)) if (va, vb) == (c.va, c.vb));
+            let ev = if hit {
+                memo.remove(&(c.a, c.b)).unwrap().2
+            } else {
+                cnt.exact_evals += self.prefetch(heap, &c, memo, stop);
+                match memo.remove(&(c.a, c.b)) {
+                    Some((va, vb, ev)) if (va, vb) == (c.va, c.vb) => ev,
+                    _ => continue, // the segments cannot be glued into a disk
+                }
+            };
+            let added = ev.stretch - self.stretch[c.a as usize].max(self.stretch[c.b as usize]);
+            let (irr, plain, parts) = self.shape(c.a, c.b, &ev.glued);
+            if !c.exact {
+                *seq += 1;
+                let key = key_of(added, ev.cost, irr);
+                heap.push(Cand { key, exact: true, seq: *seq, ..c });
+                memo.insert((c.a, c.b), (c.va, c.vb, ev));
+                continue;
+            }
+            if !(ev.stretch <= 1.0 + build_stretch) {
+                cnt.dropped += 1;
+                self.failed.insert((c.a, c.b), (c.va, c.vb, ev.glued.len()));
+                continue;
+            }
+            self.last_st.insert((c.a, c.b), ev.stretch);
+            if ev.stretch > 1.0 + cap {
+                let st = ev.stretch;
+                memo.insert((c.a, c.b), (c.va, c.vb, ev));
+                self.parked.push((c, st));
+                if memo.len() > 2 * *memo_live + 4096 {
+                    let ok = |b: &mut Build, k: &(u32, u32), v: &(u32, u32, Eval)| b.find(k.0) == k.0 && b.find(k.1) == k.1 && b.ver[k.0 as usize] == v.0 && b.ver[k.1 as usize] == v.1;
+                    memo.retain(|k, v| ok(self, k, v));
+                    *memo_live = memo.len();
+                }
+                continue;
+            }
+            if plain > SHAPE_MAX && plain > parts && !self.saves_page(c.a, c.b, &ev) {
+                // Too irregular: not tried again until the smaller chart changes (as a union that lies over).
+                let small = if self.faces[c.a as usize].len() <= self.faces[c.b as usize].len() { c.a } else { c.b };
+                self.refused.insert((c.a, c.b), (small, self.ver[small as usize]));
+                continue;
+            }
+            if self.lies_over(c.a, c.b, &ev) {
+                cnt.lay_over += 1;
+                self.failed.insert((c.a, c.b), (c.va, c.vb, ev.glued.len()));
+                // Not tried again until the smaller chart changes: the bigger one growing elsewhere seldom frees it.
+                let small = if self.faces[c.a as usize].len() <= self.faces[c.b as usize].len() { c.a } else { c.b };
+                self.refused.insert((c.a, c.b), (small, self.ver[small as usize]));
+                continue;
+            }
+            cnt.top = cnt.top.max(ev.stretch);
+            if ev.pole { cnt.pole_merges += 1 } else { cnt.grid_merges += 1 }
+            let (stretch, cost, pole, glued) = (ev.stretch, ev.cost, ev.pole, ev.glued.clone());
+            let r = self.apply(c.a, c.b, ev);
+            merges.push(Merge { segs: glued, stretch, cost, pole });
+            self.push_for(heap, seq, r);
+        }
+    }
+
+    /// A copy for one region's part of a merge round (`Tree::region_round`): the charts `roots` (whose root patch is
+    /// in `region`) keep their lists; the others' are left empty (no merge in the region reaches them, and a pair
+    /// across the border is only noted, in `deferred`).
+    fn region_copy(&self, region: u32, roots: &[u32]) -> Build<'t> {
+        let mut sub = self.subset(roots);
+        sub.my_region = region;
+        sub.defer = true;
+        sub.solo = true;
+        sub.quick = 0;
+        sub.parked = Vec::new();
+        sub
+    }
+
+    /// Take back what a region's part of a round changed: its patches (`members`, every patch whose chart root is in
+    /// the region), the faces and corners of their charts, the segments its merges glued, and the pairs it judged.
+    fn absorb(&mut self, mut sub: Build<'t>, members: &[u32], faces: &[u32], merges: &[Merge]) {
+        let t = &self.tree.topo;
+        for &p in members {
+            let p = p as usize;
+            self.cpar[p] = sub.cpar[p];
+            self.faces[p] = std::mem::take(&mut sub.faces[p]);
+            self.segs[p] = std::mem::take(&mut sub.segs[p]);
+            self.vals[p] = std::mem::take(&mut sub.vals[p]);
+            self.bnd[p] = std::mem::take(&mut sub.bnd[p]);
+            self.hull[p] = std::mem::take(&mut sub.hull[p]);
+            self.stretch[p] = sub.stretch[p];
+            self.grid[p] = sub.grid[p];
+            self.chi[p] = sub.chi[p];
+            self.ver[p] = sub.ver[p];
+            self.area[p] = sub.area[p];
+            self.weight[p] = sub.weight[p];
+            self.length[p] = sub.length[p];
+        }
+        for &f in faces {
+            let f = f as usize;
+            self.owner[f] = sub.owner[f];
+            self.face_str[f] = sub.face_str[f];
+            for h in t.face_corners(f) {
+                self.dsu.parent[h] = sub.dsu.parent[h];
+                self.dsu.size[h] = sub.dsu.size[h];
+                self.corner_uv[2 * h] = sub.corner_uv[2 * h];
+                self.corner_uv[2 * h + 1] = sub.corner_uv[2 * h + 1];
+            }
+        }
+        for m in merges {
+            for &s in &m.segs {
+                self.glued_seg[s as usize] = true;
+                for &e in &self.tree.segments[s as usize].edges {
+                    self.eglue[e as usize] = 2;
+                }
+            }
+        }
+        let region = self.region.clone();
+        let mine = |k: &(u32, u32)| region[k.0 as usize] == sub.my_region && region[k.1 as usize] == sub.my_region;
+        self.refused.extend(sub.refused.drain().filter(|(k, _)| mine(k)));
+        self.failed.extend(sub.failed.drain().filter(|(k, _)| mine(k)));
+        self.last_st.extend(sub.last_st.drain().filter(|(k, _)| mine(k)));
+        self.parked.append(&mut sub.parked);
+        self.quick += sub.quick;
     }
 
     /// `quantile(STRETCH_QUANTILE)` over the union of charts a and b where the faces stamped now take `fresh`.
@@ -1929,19 +2188,47 @@ impl<'t> Build<'t> {
             if self.chi[o as usize] != 1 {
                 continue;
             }
-            let (a, b) = (r.min(o), r.max(o));
-            if matches!(self.refused.get(&(a, b)), Some(&(c, v)) if self.ver[c as usize] == v) {
+            if self.defer && (self.region[o as usize] != self.my_region || self.crosses_region(r) || self.crosses_region(o)) {
+                // across a region border, or a chart on one (it grows only in the part across the borders, in the
+                // whole piece's order): queued after the regions' part
+                self.deferred.push((r.min(o), r.max(o)));
                 continue;
             }
-            // The shape changes whenever a chart grows, so the key is estimated afresh (all open segments glued).
-            let (mis, c) = self.estimate(&list);
-            let key = key_of(mis, c, self.shape(a, b, &list).0);
-            *seq += 1;
-            let c = Cand { key, a, b, va: self.ver[a as usize], vb: self.ver[b as usize], exact: false, seq: *seq };
-            match self.last_st.get(&(a, b)) {
-                Some(&st) if st > 1.0 + self.cap => self.parked.push((Cand { exact: true, ..c }, st)),
-                _ => heap.push(c),
-            }
+            self.push_list(heap, seq, r, o, &list);
+        }
+    }
+
+    /// Does chart r (a root) touch a disk chart of another region (R10big)? Such a chart waits for a round's part
+    /// across the region borders.
+    fn crosses_region(&mut self, r: u32) -> bool {
+        let mine = self.region[r as usize];
+        self.neighbours(r).into_iter().any(|(o, _)| self.chi[o as usize] == 1 && self.region[o as usize] != mine)
+    }
+
+    /// Queue the pair r, o glued along `list` (all their open shared segments, as `neighbours` gives them).
+    fn push_list(&mut self, heap: &mut Queue, seq: &mut u64, r: u32, o: u32, list: &[u32]) {
+        let (a, b) = (r.min(o), r.max(o));
+        if matches!(self.refused.get(&(a, b)), Some(&(c, v)) if self.ver[c as usize] == v) {
+            return;
+        }
+        // The shape changes whenever a chart grows, so the key is estimated afresh (all open segments glued).
+        let (mis, c) = self.estimate(list);
+        let key = key_of(mis, c, self.shape(a, b, list).0);
+        *seq += 1;
+        let c = Cand { key, a, b, va: self.ver[a as usize], vb: self.ver[b as usize], exact: false, seq: *seq };
+        match self.last_st.get(&(a, b)) {
+            Some(&st) if st > 1.0 + self.cap => self.parked.push((Cand { exact: true, ..c }, st)),
+            _ => heap.push(c),
+        }
+    }
+
+    /// Queue the pair of charts a, b (both roots) as `push_for` would, when both are disks sharing open segments.
+    fn push_pair(&mut self, heap: &mut Queue, seq: &mut u64, a: u32, b: u32) {
+        if self.chi[a as usize] != 1 || self.chi[b as usize] != 1 {
+            return;
+        }
+        if let Some((_, list)) = self.neighbours(a).into_iter().find(|x| x.0 == b) {
+            self.push_list(heap, seq, a, b, &list);
         }
     }
 

@@ -72,6 +72,12 @@ TUBE_L2_MEDIAN = 1.08
 TUBE_L2_BAD = 1.3
 TUBE_BAD_SHARE = 0.002
 FREE_FACES = 64
+# R10big: a mesh piece of more faces than REGION_MIN_FACES runs each merge round region by region (`_regions`), then
+# across the region borders (the kernel runs the regions apart on worker threads; the charts are the same); its regions
+# are halved until each has at most REGION_FACES faces.
+REGION_MIN_FACES = 16384
+REGION_FACES = 8192
+REGION_NONE = 1 << 32  # outside a piece large enough (sorts after every region, as the kernel's u32::MAX)
 SMOOTH_DEFECT_DEG = 10.0
 SMOOTH_AREA = 1.5
 NUMBERS_LEN = 22
@@ -507,6 +513,68 @@ class Segment:
     def __init__(self, edges, p, q, cost, seen, weight=0.0, length=0.0):
         self.edges, self.p, self.q, self.cost, self.seen = edges, p, q, cost, seen
         self.weight, self.length = weight, length
+
+
+def _regions(t, points, members) -> list:
+    """R10big: regions of the large mesh pieces, per patch (REGION_NONE elsewhere), as the kernel's `Tree::regions`: a
+    piece (faces joined across edges) of more than REGION_MIN_FACES faces is cut in two by face count across the longest
+    side of the box of its patches' centres, and each half again while it has more than REGION_FACES (recursive coordinate bisection,
+    Berger and Bokhari 1987); regions numbered in that order, pieces by their first patch."""
+
+    d = _Dsu(t.nf)
+    for h0, h1 in t.euse:
+        if h1 >= 0:
+            d.union(t.cface[h0], t.cface[h1])
+    piece_of: dict = {}
+    pieces: list = []
+    for p, m in enumerate(members):
+        if not len(m):
+            continue
+        k = piece_of.setdefault(d.find(m[0]), len(pieces))
+        if k == len(pieces):
+            pieces.append([0, []])
+        pieces[k][0] += len(m)
+        pieces[k][1].append(p)
+    region = [REGION_NONE] * len(members)
+    nxt = 0
+    for n, ps in pieces:
+        if n <= REGION_MIN_FACES:
+            continue
+        centre = {}
+        for p in ps:
+            c, k = [0.0, 0.0, 0.0], 0
+            for f in members[p]:
+                for h in t.face_corners(f):
+                    v = t.flat[h]
+                    for x in range(3):
+                        c[x] += points[v][x]
+                    k += 1
+            centre[p] = [x / max(k, 1) for x in c]
+        out, todo = [], [ps]
+        while todo:
+            st = todo.pop()
+            total = sum(len(members[p]) for p in st)
+            if total <= REGION_FACES or len(st) < 2:
+                out.append(st)
+                continue
+            lo = [min(centre[p][x] for p in st) for x in range(3)]
+            hi = [max(centre[p][x] for p in st) for x in range(3)]
+            axis = max(range(3), key=lambda x: (hi[x] - lo[x], -x))
+            st = sorted(st, key=lambda p: (centre[p][axis], p))
+            acc, cut = 0, len(st) - 1
+            for i, p in enumerate(st):
+                acc += len(members[p])
+                if 2 * acc >= total:
+                    cut = i + 1
+                    break
+            cut = min(max(cut, 1), len(st) - 1)
+            todo.append(st[cut:])  # the lower half first
+            todo.append(st[:cut])
+        for st in out:
+            for p in st:
+                region[p] = nxt
+            nxt += 1
+    return region
 
 
 def _members(root) -> list:
@@ -1241,12 +1309,31 @@ class Charts:
             return page(pts) <= page(corner_uv[hull[a]]) + page(corner_uv[hull[b]])
 
         heap: list = []
+        cur = [heap]  # the queue being run (a region's, R10big, or the whole one)
         seq = [0]
+        region = _regions(t, tree.points.tolist(), members)
+        regional = any(r != REGION_NONE for r in region)
+        defer = [None]  # the region being run: a pair across its border is noted in `deferred`
+        deferred: list = []
         refused: dict = {}  # pairs whose union lay over itself: (smaller chart, its version then)
         last_st: dict = {}  # last measured stretch per pair
         parked: list = []  # candidates measured above the round's cap, waiting for the round they fit
         caps = round_caps(tree.build_stretch)
         cap = [caps[0]]
+
+        def push_list(r, o, lst):
+            a, b = min(r, o), max(r, o)
+            ref = refused.get((a, b))
+            if ref is not None and ver[ref[0]] == ref[1]:
+                return
+            mis, c = estimate(lst)
+            key = _key(mis, c, shape(a, b, lst)[0])
+            seq[0] += 1
+            st = last_st.get((a, b))
+            if st is not None and st > 1.0 + cap[0]:
+                parked.append(((key, a, b, seq[0], ver[a], ver[b], True), st))
+            else:
+                heapq.heappush(cur[0], (key, a, b, seq[0], ver[a], ver[b], False))
 
         def push_for(r):
             if chi[r] != 1:
@@ -1254,18 +1341,24 @@ class Charts:
             for o, lst in neighbours(r):
                 if chi[o] != 1:
                     continue
-                a, b = min(r, o), max(r, o)
-                ref = refused.get((a, b))
-                if ref is not None and ver[ref[0]] == ref[1]:
+                if defer[0] is not None and (region[o] != defer[0] or crosses(r) or crosses(o)):
+                    # across a region border, or a chart on one: queued after the regions' part
+                    deferred.append((min(r, o), max(r, o)))
                     continue
-                mis, c = estimate(lst)
-                key = _key(mis, c, shape(a, b, lst)[0])
-                seq[0] += 1
-                st = last_st.get((a, b))
-                if st is not None and st > 1.0 + cap[0]:
-                    parked.append(((key, a, b, seq[0], ver[a], ver[b], True), st))
-                else:
-                    heapq.heappush(heap, (key, a, b, seq[0], ver[a], ver[b], False))
+                push_list(r, o, lst)
+
+        def crosses(r):
+            """Chart r (a root) touches a disk chart of another region (the kernel's `crosses_region`)."""
+
+            return any(chi[o] == 1 and region[o] != region[r] for o, _ in neighbours(r))
+
+        def push_pair(a, b):
+            if chi[a] != 1 or chi[b] != 1:
+                return
+            for o, lst in neighbours(a):
+                if o == b:
+                    push_list(a, b, lst)
+                    break
 
         def evaluate(a, b, lst):
             mark = dsu.mark()
@@ -1345,17 +1438,12 @@ class Charts:
             return r
 
         cached = None
-        for ri, cap_now in enumerate(caps):
-            cap[0] = cap_now
-            if ri > 0:
-                waiting, parked[:] = parked[:], []
-                for c_, st in waiting:
-                    if find(c_[1]) != c_[1] or find(c_[2]) != c_[2] or ver[c_[1]] != c_[4] or ver[c_[2]] != c_[5]:
-                        continue
-                    if st <= 1.0 + cap_now:
-                        heapq.heappush(heap, c_)
-                    else:
-                        parked.append((c_, st))
+
+        def run_heap(heap):
+            """One merge round over the queue `heap` (the kernel's `Build::merge_round`)."""
+
+            nonlocal cached, exact_evals, dropped, lay_over
+            cur[0] = heap
             while heap:
                 if self._stop:
                     break
@@ -1398,6 +1486,40 @@ class Charts:
                     refused[(a, b)] = (small, ver[small])
                     continue
                 push_for(apply_ev(a, b, ev))
+
+        for ri, cap_now in enumerate(caps):
+            cap[0] = cap_now
+            if ri > 0:
+                waiting, parked[:] = parked[:], []
+                for c_, st in waiting:
+                    if find(c_[1]) != c_[1] or find(c_[2]) != c_[2] or ver[c_[1]] != c_[4] or ver[c_[2]] != c_[5]:
+                        continue
+                    if st <= 1.0 + cap_now:
+                        heapq.heappush(heap, c_)
+                    else:
+                        parked.append((c_, st))
+            if regional:
+                # R10big: the round region by region (the kernel runs them apart), then across the region borders.
+                by: dict = {}
+                for c_ in heap:
+                    ka, kb = region[c_[1]], region[c_[2]]
+                    if ka != kb or crosses(c_[1]) or crosses(c_[2]):
+                        deferred.append((c_[1], c_[2]))
+                    else:
+                        by.setdefault(ka, []).append(c_)
+                heap.clear()
+                for k in sorted(by):
+                    hp = by[k]
+                    heapq.heapify(hp)
+                    defer[0] = k
+                    yield from run_heap(hp)
+                defer[0] = None
+                pairs = sorted({(min(x, y), max(x, y)) for x, y in ((find(x), find(y)) for x, y in deferred) if x != y})
+                deferred.clear()
+                cur[0] = heap
+                for a, b in pairs:
+                    push_pair(a, b)
+            yield from run_heap(heap)
         # R6: a last round in which every chart, smallest first, tries to join a neighbour, glued along all it shares or
         # else hinged on the costliest shared segment; small compact charts join free of the shape rule (kernel: the
         # last round in `merge_tree`). Passes repeat until one joins nothing.
