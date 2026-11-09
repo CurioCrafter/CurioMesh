@@ -2104,11 +2104,16 @@ impl<'t> Build<'t> {
             uv[2 * v] /= cnt[v].max(1.0);
             uv[2 * v + 1] /= cnt[v].max(1.0);
         }
-        let ok = uvflat::quick_stretch(&local.chart(), &mut uv, &free, 0.0, stop).is_ok();
-        if !ok {
-            uv.iter_mut().for_each(|x| *x = f64::NAN);
-        }
-        let per = tree.face_stretch(&local, &uv);
+        // quick_stretch already scored these UVs: reuse its per-face stretch (same numbers as `face_stretch`).
+        let quick = uvflat::quick_stretch_per(&local.chart(), &mut uv, &free, 0.0, stop).ok();
+        let per = match quick {
+            Some((_, _, per)) if uv.iter().all(|x| x.is_finite()) => per,
+            Some(_) => tree.face_stretch(&local, &uv),
+            None => {
+                uv.iter_mut().for_each(|x| *x = f64::NAN);
+                tree.face_stretch(&local, &uv)
+            }
+        };
         let q = self.union_quantile(a, b, &per, &sc.fstamp, stamp);
         Eval { glued, cost, stretch: q, pole: true, local, uv, rigid: Some(rigid), face_str: per }
     }

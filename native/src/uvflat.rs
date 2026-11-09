@@ -1875,6 +1875,12 @@ pub fn flatten(points: &[f64], faces: &Faces, chart: &[i64], start: &[f64], col:
 /// `free` (the band around the shared border), every other vertex held at `uv`. Returns (stretch over the faces that
 /// touch a free vertex, stretch over the whole chart) and leaves the band's UVs in `uv`.
 pub fn quick_stretch(chart: &Chart, uv: &mut [f64], free: &[bool], max_bytes: f64, stop: &AtomicBool) -> Result<(f64, f64), String> {
+    quick_stretch_per(chart, uv, free, max_bytes, stop).map(|(band, all, _)| (band, all))
+}
+
+/// `quick_stretch` that also returns the per-face stretch of the chart (what `stretch` gives for the final `uv`),
+/// so a caller needing both does not run `stretch` a second time.
+pub fn quick_stretch_per(chart: &Chart, uv: &mut [f64], free: &[bool], max_bytes: f64, stop: &AtomicBool) -> Result<(f64, f64, Vec<f64>), String> {
     let n = chart.n();
     if uv.len() != 2 * n || free.len() != n {
         return Err("quick_stretch arrays are inconsistent".into());
@@ -1885,7 +1891,7 @@ pub fn quick_stretch(chart: &Chart, uv: &mut [f64], free: &[bool], max_bytes: f6
     arap_run(&el, n, uv, Some(&held), &[], 0.0, None, 0, STOP_TEXEL_SHARE * span / TEXTURE_PX, max_bytes, false, stop)?;
     let (all, per) = stretch_of(&el, chart.faces.count(), uv);
     let band: Vec<f64> = (0..chart.faces.count()).filter(|&f| chart.faces.face(f).iter().any(|&v| free[v as usize])).map(|f| per[f]).collect();
-    Ok((if band.is_empty() { 1.0 } else { quantile(&band, STRETCH_QUANTILE) }, all))
+    Ok((if band.is_empty() { 1.0 } else { quantile(&band, STRETCH_QUANTILE) }, all, per))
 }
 
 /// The vertices within `k` rings (by shared faces) of `seeds` (the band `quick_stretch` frees; used by uvchart).
