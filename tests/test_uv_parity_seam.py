@@ -222,6 +222,25 @@ class Twin(unittest.TestCase):
         self.assertAlmostEqual(float(t["hard_cost"][0]), 8.0)
         self.assertEqual(int(seams["class"][0]), uvseams.HARD)
 
+    def test_faces_read_side_by_side_read_as_one_by_one(self):
+        points, indptr, flat, uv = tube(24, 8, 0.0)
+        rp, ri, rf, _ = tube(13, 5, 0.3)
+        kept = uvseams.LOOKUP_BATCH, uvseams.NEAREST_GROUPS
+        try:
+            out = []
+            for batch in ((1, 1), (64, 8), (7, 3)):
+                uvseams.LOOKUP_BATCH, uvseams.NEAREST_GROUPS = batch
+                uvseams._SOURCES.clear()
+                out.append(uvseams.transfer(points, indptr, flat, uv, rp, ri, rf, use_fast=False))
+        finally:
+            uvseams.LOOKUP_BATCH, uvseams.NEAREST_GROUPS = kept
+        for other in out[1:]:
+            for k, v in out[0].items():
+                if isinstance(v, np.ndarray):
+                    self.assertTrue(np.array_equal(v, other[k], equal_nan=v.dtype.kind == "f"), k)
+                else:
+                    self.assertEqual(v, other[k], k)
+
     def test_stage_slices_stay_short(self):
         points, indptr, flat, uv = tube(24, 8, 0.0)
         rp, ri, rf, _ = tube(24, 8, 0.3)

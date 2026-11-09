@@ -191,6 +191,7 @@ class AfterApply(unittest.TestCase):
     def tearDown(self):
         self.keep.OVERRIDE.clear()
         self.keep.CANDIDATES.clear()
+        self.hooks.TRANSFERS.clear()
         self.hooks.SOURCE_DATA = None
 
     def result(self):
@@ -234,6 +235,26 @@ class AfterApply(unittest.TestCase):
         self.assertEqual(len(res["faces"]), before)
         self.assertEqual(len(mesh.polygons), before)
         self.assertTrue(any("not run" in m for m in self.hooks.LAST["messages"]))
+
+
+    def test_sliced_apply_writes_at_the_end_and_keeps_the_transfer(self):
+        from uv_hooks_fake import FakeMesh
+
+        self.hooks.kinds(None, self.source, self.src, self.gs)
+        mesh, work = FakeMesh(), None
+        work = self.hooks.after_apply_steps(mesh, self.source, self.result(), self.gs)
+        steps = 0
+        for _ in work:
+            steps += 1
+            self.assertEqual(len(mesh.polygons), 0)  # nothing written while the transfer runs
+        self.assertGreater(steps, 1)
+        sliced = self.hooks.LAST["hash"]
+        self.hooks.TRANSFERS.clear()
+        self.hooks.after_apply(FakeMesh(), self.source, self.result(), self.gs)
+        self.assertEqual(self.hooks.LAST["hash"], sliced)
+        again = list(self.hooks.after_apply_steps(FakeMesh(), self.source, self.result(), self.gs))
+        self.assertEqual(again, [])  # the same result again: the kept transfer is written at once
+        self.assertEqual(self.hooks.LAST["hash"], sliced)
 
 
 class ViewLimit(unittest.TestCase):

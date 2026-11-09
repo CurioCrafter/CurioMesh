@@ -18,6 +18,7 @@ from .triadq.types import FlatFaces
 
 SOURCE_DATA = None  # tests set this; inside Blender guided._source_data is used
 LAST: dict = {}  # what the last after_apply wrote: {"hash", "fitted", "numbers", "messages"}
+TRANSFERS: dict = {}  # result key -> the per-side transfer last written for it (no Seam Fit run on that result)
 
 
 def kinds(old_charts, source, src, gs):
@@ -89,6 +90,17 @@ def _source_data(source):
 
 
 def after_apply(mesh, source, res, gs) -> None:
+    """Writes the UVs in one call (`after_apply_steps` run to the end)."""
+
+    for _ in after_apply_steps(mesh, source, res, gs):
+        pass
+
+
+def after_apply_steps(mesh, source, res, gs):
+    """Generator: `after_apply` in slices. With a finished fit for `res` (the trial's, filed when it ran) it writes at
+    once; without one the per-side transfer runs first, a FitStage step per yield, and is kept for this result, so a
+    second Apply of it writes at once. Closing the generator early writes nothing."""
+
     if uvkeep.mode_of(gs) != "light":
         return
     src = _source_data(source)
@@ -99,9 +111,21 @@ def after_apply(mesh, source, res, gs) -> None:
     key = uvkeep.result_key(res["co"], faces.indptr, faces.flat)
     c = uvkeep.CANDIDATES.get(key)
     fitted = c is not None
+    if c is None:
+        c = TRANSFERS.get(key)
     if c is None:  # no finished fit for this result: the per-side transfer alone, geometry untouched
-        c = uvkeep.run(uvkeep.fit_stage(source, src, res, gs, only_transfer=True))
+        stage = uvkeep.fit_stage(source, src, res, gs, only_transfer=True)
+        try:
+            while not stage.done:
+                stage.step()
+                yield
+        finally:
+            if not stage.done:
+                stage.stop()
+        c = stage.candidate
         c.messages.append("Seam Fit was not run on this result. Look runs it.")
+        TRANSFERS.clear()  # one is enough: the result Apply writes next
+        TRANSFERS[key] = c
     uv_layers.apply_candidate(mesh, c.points, c.indptr, c.flat, c.material, c.layers, c.active)
     _write_back(res, c)
     LAST.clear()
