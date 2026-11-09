@@ -17,6 +17,7 @@
 //! - Keep going: other orders and orientation policies, then adjacent swaps accepted only when the page then fits a
 //!   larger scale; a pass that gains nothing ends it (ours).
 
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -41,6 +42,10 @@ pub const RULES: usize = 2;
 pub const POLICIES: usize = 8;
 /// Largest mip level the gap rule accepts (a gap of 2^(k+1) texels).
 pub const MAX_K: i64 = 20;
+/// `pack_into` takes its effort in the high bits of `k` (`k + EFFORT_STEP * effort`, k from -1 to MAX_K), so the call keeps its shape.
+pub const EFFORT_STEP: i64 = 32;
+/// `pack_into` orders (see there); effort 0 uses the first, each more effort one more.
+pub const ORDER_MODES: [u8; 4] = [0, 1, 2, 3];
 
 /// Compile probe: calls every `crate::` helper this kernel is assigned. Returns 1 when all worked.
 pub fn probe() -> usize {
@@ -463,67 +468,117 @@ pub fn dilate(rows: &Rows, r: i64) -> Rows {
         .collect()
 }
 
-/// A chart as row intervals relative to its own corner, plus its extent.
+/// The page as a grid of blocks of `2^k` texels (one bit per block). A chart owns the blocks it touches plus a ring of one
+/// block around them (the gap rule: two charts are mip-clean when the blocks they touch, each grown by one block, do not
+/// meet). With no gap (`k < 0`) a block is one texel and the ring is empty. Rows of `words` u64.
 #[derive(Clone)]
-pub struct Shape {
-    pub w: i64,
-    pub rows: Rows,
+pub struct Grid {
+    pub nx: i64,
+    pub ny: i64,
+    words: usize,
+    bits: Vec<u64>,
+    used: i64,
 }
 
-impl Shape {
-    pub fn h(&self) -> i64 {
-        self.rows.len() as i64
-    }
-}
-
-/// The page's occupied texels per row.
-pub struct Page {
-    pub w: i64,
-    pub rows: Rows,
-}
-
-impl Page {
-    pub fn new(w: i64, h: i64) -> Self {
-        Page { w, rows: vec![Vec::new(); h as usize] }
+impl Grid {
+    pub fn new(nx: i64, ny: i64) -> Self {
+        let (nx, ny) = (nx.max(1), ny.max(1));
+        let words = ((nx + 63) / 64) as usize;
+        Grid { nx, ny, words, bits: vec![0; words * ny as usize], used: 0 }
     }
 
-    pub fn h(&self) -> i64 {
-        self.rows.len() as i64
+    /// Rows up to the last occupied one.
+    pub fn height(&self) -> i64 {
+        self.used
     }
 
-    /// Put absolute row intervals (rows from `y0`) onto the page, clipped to it.
-    pub fn add(&mut self, y0: i64, rows: &Rows, dx: i64) {
-        for (j, v) in rows.iter().enumerate() {
-            let y = y0 + j as i64;
-            if y < 0 || y >= self.h() {
-                continue;
+    fn row(&self, y: i64) -> &[u64] {
+        &self.bits[y as usize * self.words..(y as usize + 1) * self.words]
+    }
+
+    /// Highest set bit in `[a, b)` of row `y`.
+    fn last_set(&self, y: i64, a: i64, b: i64) -> Option<i64> {
+        if a >= b {
+            return None;
+        }
+        let row = self.row(y);
+        let (wa, wb) = ((a >> 6) as usize, ((b - 1) >> 6) as usize);
+        for wi in (wa..=wb).rev() {
+            let mut m = row[wi];
+            if wi == wb {
+                let hi = ((b - 1) & 63) as u32;
+                if hi < 63 {
+                    m &= (1u64 << (hi + 1)) - 1;
+                }
             }
-            let row = &mut self.rows[y as usize];
-            row.extend(v.iter().map(|&(a, b)| (a + dx, b + dx)));
-            *row = merge(std::mem::take(row));
+            if wi == wa {
+                m &= !0u64 << (a & 63);
+            }
+            if m != 0 {
+                return Some(wi as i64 * 64 + 63 - i64::from(m.leading_zeros()));
+            }
+        }
+        None
+    }
+
+    /// First free bit at or after `x` in row `y` (`nx` when the rest of the row is taken).
+    fn next_free(&self, y: i64, x: i64) -> i64 {
+        if x >= self.nx {
+            return self.nx;
+        }
+        let row = self.row(y);
+        let mut wi = (x >> 6) as usize;
+        let mut m = !row[wi] & (!0u64 << (x & 63));
+        loop {
+            if m != 0 {
+                return (wi as i64 * 64 + i64::from(m.trailing_zeros())).min(self.nx);
+            }
+            wi += 1;
+            if wi >= self.words {
+                return self.nx;
+            }
+            m = !row[wi];
         }
     }
 
-    /// Height used so far (rows up to the last occupied one).
-    pub fn height(&self) -> i64 {
-        self.rows.iter().rposition(|r| !r.is_empty()).map_or(0, |p| p as i64 + 1)
+    /// Set the bits `[a, b)` of row `y`, clipped to the grid.
+    pub fn set(&mut self, y: i64, a: i64, b: i64) {
+        let (a, b) = (a.max(0), b.min(self.nx));
+        if y < 0 || y >= self.ny || a >= b {
+            return;
+        }
+        let base = y as usize * self.words;
+        let (wa, wb) = ((a >> 6) as usize, ((b - 1) >> 6) as usize);
+        for wi in wa..=wb {
+            let lo = if wi == wa { a & 63 } else { 0 };
+            let hi = if wi == wb { (b - 1) & 63 } else { 63 };
+            self.bits[base + wi] |= (!0u64 << lo) & (!0u64 >> (63 - hi));
+        }
+        self.used = self.used.max(y + 1);
     }
 
-    /// Leftmost x >= `x0` (a multiple of `step`) where the shape fits at row `y`, or None.
-    fn leftmost(&self, s: &Shape, y: i64, x0: i64, step: i64) -> Option<i64> {
-        let mut x = x0;
+    /// Put a shape on the grid with its corner at block `(x, y)`.
+    pub fn add(&mut self, s: &Shape, x: i64, y: i64) {
+        for (r, v) in s.rows.iter().enumerate() {
+            for &(a, b) in v {
+                self.set(y + r as i64, x + a, x + b);
+            }
+        }
+    }
+
+    /// Leftmost x where the shape fits with its corner in row `y`, or None.
+    fn leftmost(&self, s: &Shape, y: i64) -> Option<i64> {
+        let mut x = 0;
         'again: loop {
-            if x + s.w > self.w {
+            if x + s.w > self.nx {
                 return None;
             }
             for (r, v) in s.rows.iter().enumerate() {
-                let occ = &self.rows[(y + r as i64) as usize];
+                let yy = y + r as i64;
                 for &(a, b) in v {
-                    for &(c, d) in occ {
-                        if c < x + b && d > x + a {
-                            x = ceil_div(d - a, step) * step;
-                            continue 'again;
-                        }
+                    if let Some(p) = self.last_set(yy, x + a, x + b) {
+                        x = self.next_free(yy, p + 1) - a; // skip the taken run the shape's bit `a` would land in
+                        continue 'again;
                     }
                 }
             }
@@ -531,7 +586,7 @@ impl Page {
         }
     }
 
-    /// Texels of free span to the left of the shape in each of its rows (the wasted interval length).
+    /// Free blocks to the left of the shape in each of its rows, up to the next taken block (the wasted span).
     fn waste(&self, s: &Shape, x: i64, y: i64) -> i64 {
         s.rows
             .iter()
@@ -539,22 +594,21 @@ impl Page {
             .filter_map(|(r, v)| v.first().map(|f| (r, f.0)))
             .map(|(r, a)| {
                 let left = x + a;
-                let end = self.rows[(y + r as i64) as usize].iter().map(|c| c.1).filter(|&d| d <= left).max().unwrap_or(0);
-                left - end
+                left - self.last_set(y + r as i64, 0, left).map_or(0, |p| p + 1)
             })
             .sum()
     }
 
-    /// Best spot for a shape: inside the used height first (least waste), else the lowest row. `step` = grid of the origin.
-    pub fn find(&self, s: &Shape, step: i64) -> Option<(i64, i64, i64)> {
+    /// Best spot for a shape: inside the used height first (least waste), else the lowest row.
+    pub fn find(&self, s: &Shape) -> Option<(i64, i64, i64)> {
         let (h, used_h) = (s.h(), self.height());
-        if h > self.h() || s.w > self.w {
+        if h > self.ny || s.w > self.nx {
             return None;
         }
         let mut best: Option<((i64, i64, i64), i64, i64)> = None;
         let mut y = 0;
-        while y + h <= self.h() {
-            if let Some(x) = self.leftmost(s, y, 0, step) {
+        while y + h <= self.ny {
+            if let Some(x) = self.leftmost(s, y) {
                 let top = (y + h).max(used_h);
                 let score = (top, self.waste(s, x, y), y);
                 if best.as_ref().map_or(true, |b| score < b.0) {
@@ -564,10 +618,48 @@ impl Page {
                     break; // lowest row that grows the page: nothing below beats it
                 }
             }
-            y += step;
+            y += 1;
         }
         best.map(|(sc, x, y)| (x, y, sc.1))
     }
+}
+
+/// A chart's owned blocks as intervals per block row, relative to its corner (the ring included).
+#[derive(Clone)]
+pub struct Shape {
+    pub w: i64,
+    pub rows: Rows,
+    pub area: i64,
+}
+
+impl Shape {
+    pub fn h(&self) -> i64 {
+        self.rows.len() as i64
+    }
+}
+
+/// Owned blocks of a chart whose texel rows are `core` (conservative raster, rows from the chart's corner) when its corner
+/// sits `(sx, sy)` texels into a block of `g` texels: the blocks it touches, grown by `ring` blocks all round.
+pub fn owned_shape(core: &Rows, g: i64, sx: i64, sy: i64, ring: i64) -> Shape {
+    let nrows = ((core.len() as i64 - 1 + sy) / g + 1).max(1) as usize;
+    let mut acc: Vec<Vec<(i64, i64)>> = vec![Vec::new(); nrows];
+    for (y, v) in core.iter().enumerate() {
+        let j = ((y as i64 + sy) / g) as usize;
+        for &(a, b) in v {
+            acc[j].push(((a + sx) / g, (b - 1 + sx) / g + 1));
+        }
+    }
+    let rows = dilate(&acc.into_iter().map(merge).collect(), ring);
+    let w = rows.iter().flatten().map(|i| i.1).max().unwrap_or(0);
+    let area = rows.iter().flatten().map(|i| i.1 - i.0).sum();
+    Shape { w, rows, area }
+}
+
+/// The corner offsets inside a block tried for a chart (at most 16, spread evenly).
+pub fn shifts(g: i64) -> Vec<(i64, i64)> {
+    let step = (g / 4).max(1);
+    let list: Vec<i64> = (0..g).step_by(step as usize).collect();
+    list.iter().flat_map(|&sy| list.iter().map(move |&sx| (sx, sy))).collect()
 }
 
 /// Rotate triangles by `quarter` x 90 degrees ((x, y) -> (-y, x)).
@@ -592,18 +684,36 @@ pub struct ChartPlace {
 }
 
 /// Pack charts into a page that may already hold others (`seed` triangles in texels; they stay where they are).
-/// `tri_chart` gives each triangle's chart; `as_box` charts are reserved as their bounding box (and may sit on block
-/// edges); the rest follow their outline with the loose gap. Order: long side, then area. Charts may turn when `turn_ok`.
+/// The page is a grid of blocks of `2^k` texels (no gap, `k < 0`: texels); a chart owns the blocks it touches plus one
+/// ring of blocks around them, and owned blocks never overlap: that is the mip-clean gap rule (neighbours keep at least
+/// two free blocks between the blocks they touch) without wasting a texel beyond it. Each chart is tried turned by every
+/// quarter, at the corner offset inside a block that owns the fewest blocks; `as_box` charts reserve their bounding box,
+/// the rest follow their outline, so a small chart can sit in a big one's bay. Order: most blocks owned first (see `ORDER_MODES`). The same input
+/// gives the same layout (no clock). Charts may turn when `turn_ok`. `k` may carry an effort in its high bits (`EFFORT_STEP`).
 #[allow(clippy::too_many_arguments)]
 pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart: &[i64], charts: usize, as_box: &[u8], turn_ok: &[u8], stop: &AtomicBool) -> Vec<ChartPlace> {
-    let g = block(k);
-    let (loose, tight) = if g == 0 { (0, 0) } else { (2 * g - 1, g) };
-    let mut occ = Page::new(page.0, page.1);
+    let (k, effort) = ((k + 1).rem_euclid(EFFORT_STEP) - 1, ((k + 1).div_euclid(EFFORT_STEP)).clamp(0, ORDER_MODES.len() as i64 - 1) as usize);
+    let (g, ring) = if k < 0 { (1, 0) } else { (block(k), 1) };
+    let mut base = Grid::new(page.0 / g, page.1 / g);
     if !seed.is_empty() {
         let (ylo, yhi) = seed.chunks_exact(2).fold((f64::INFINITY, f64::NEG_INFINITY), |a, p| (a.0.min(p[1]), a.1.max(p[1])));
         let y0 = ylo.floor() as i64;
         let rows = (yhi.ceil() as i64 + 1 - y0).max(1) as usize;
-        occ.add(y0 - loose, &dilate(&raster(seed, y0, rows), loose), -loose);
+        let tex = raster(seed, y0, rows);
+        let (j0, j1) = (y0.div_euclid(g), (y0 + rows as i64 - 1).div_euclid(g));
+        let mut acc: Vec<Vec<(i64, i64)>> = vec![Vec::new(); (j1 - j0 + 1) as usize];
+        for (y, v) in tex.iter().enumerate() {
+            for &(a, b) in v {
+                acc[((y0 + y as i64).div_euclid(g) - j0) as usize].push((a.div_euclid(g), (b - 1).div_euclid(g) + 1));
+            }
+        }
+        for (j, v) in acc.into_iter().enumerate() {
+            for (a, b) in merge(v) {
+                for dj in -ring..=ring {
+                    base.set(j0 + j as i64 + dj, a - ring, b + ring);
+                }
+            }
+        }
     }
     let mut per: Vec<Vec<f64>> = vec![Vec::new(); charts];
     for (t, &c) in tri_chart.iter().enumerate() {
@@ -621,47 +731,121 @@ pub fn pack_into(page: (i64, i64), k: i64, seed: &[f64], tris: &[f64], tri_chart
         (w.max(h), w * h)
     };
     order.sort_by(|&a, &c| key(c).0.total_cmp(&key(a).0).then(key(c).1.total_cmp(&key(a).1)).then(a.cmp(&c)));
-    let mut out = vec![ChartPlace::default(); charts];
-    for c in order {
-        if stop.load(Ordering::Relaxed) {
-            break;
-        }
-        let quarters: &[usize] = if turn_ok.get(c).copied().unwrap_or(0) != 0 { &[0, 1, 2, 3] } else { &[0] };
-        let mut best: Option<((i64, i64, i64, usize), Shape, i64, i64, i64, usize, i64, i64)> = None;
-        for &q in quarters {
-            let t = turn_tris(&per[c], q);
-            let e = extent(&t);
-            let (fx, fy) = (e.0.floor() as i64, e.1.floor() as i64);
-            let rows = ((e.3.ceil() as i64).max(fy + 1) - fy) as usize;
-            let local: Vec<f64> = t.chunks_exact(2).flat_map(|p| [p[0] - fx as f64, p[1] - fy as f64]).collect();
-            let mut core = raster(&local, 0, rows);
-            let boxed = as_box.get(c).copied().unwrap_or(0) != 0;
-            let cw = core.iter().flatten().map(|i| i.1).max().unwrap_or(1);
-            if boxed {
-                core = vec![vec![(0, cw)]; rows];
+    let offsets = shifts(g);
+    // every way a chart can sit (each quarter at its best corner offset), worked out once: it does not depend on the page
+    struct Way {
+        shape: Shape,
+        sx: i64,
+        sy: i64,
+        fx: i64,
+        fy: i64,
+        q: usize,
+    }
+    let ways: Vec<Vec<Way>> = (0..charts)
+        .into_par_iter() // each chart on its own; the answer does not depend on the thread count
+        .map(|c| {
+            if per[c].is_empty() {
+                return Vec::new();
             }
-            // loose: follows the outline, any position; aligned: a box on a block edge with less gap
-            let mut variants: Vec<(i64, i64, Rows, i64)> = vec![(loose, 1, core.clone(), cw)];
-            if boxed && g > 0 {
-                variants.insert(0, (tight, g, core, cw));
+            let quarters: &[usize] = if turn_ok.get(c).copied().unwrap_or(0) != 0 { &[0, 1, 2, 3] } else { &[0] };
+            quarters
+                .iter()
+                .map(|&q| {
+                    let t = turn_tris(&per[c], q);
+                    let e = extent(&t);
+                    let (fx, fy) = (e.0.floor() as i64, e.1.floor() as i64);
+                    let rows = ((e.3.ceil() as i64).max(fy + 1) - fy) as usize;
+                    let local: Vec<f64> = t.chunks_exact(2).flat_map(|p| [p[0] - fx as f64, p[1] - fy as f64]).collect();
+                    let mut core = raster(&local, 0, rows);
+                    if as_box.get(c).copied().unwrap_or(0) != 0 {
+                        let cw = core.iter().flatten().map(|i| i.1).max().unwrap_or(1);
+                        core = vec![vec![(0, cw)]; rows];
+                    }
+                    let mut pick: Option<(Shape, i64, i64)> = None;
+                    for &(sx, sy) in &offsets {
+                        let shape = owned_shape(&core, g, sx, sy, ring);
+                        if pick.as_ref().map_or(true, |p| shape.area < p.0.area) {
+                            pick = Some((shape, sx, sy));
+                        }
+                    }
+                    let (shape, sx, sy) = pick.unwrap();
+                    Way { shape, sx, sy, fx, fy, q }
+                })
+                .collect()
+        })
+        .collect();
+    // Place the charts in `order`; the charts that found no room are listed (in that order).
+    let place = |order: &[usize]| -> (Vec<ChartPlace>, Vec<usize>) {
+        let mut occ = base.clone();
+        let mut out = vec![ChartPlace::default(); charts];
+        let mut failed = Vec::new();
+        for &c in order {
+            if stop.load(Ordering::Relaxed) {
+                failed.push(c);
+                continue;
             }
-            for (r, step, shape_rows, w) in variants {
-                let shape = Shape { w: w + 2 * r, rows: dilate(&shape_rows, r) };
-                if let Some((x, y, waste)) = occ.find(&shape, step) {
-                    let top = (y + shape.h()).max(occ.height());
-                    let score = (top, waste, y, q);
+            let mut best: Option<((i64, i64, i64, usize), &Way, i64, i64)> = None;
+            for w in &ways[c] {
+                if let Some((x, y, waste)) = occ.find(&w.shape) {
+                    let score = ((y + w.shape.h()).max(occ.height()), waste, y, w.q);
                     if best.as_ref().map_or(true, |b| score < b.0) {
-                        best = Some((score, shape, x, y, r, q, fx, fy));
+                        best = Some((score, w, x, y));
                     }
                 }
             }
+            match best {
+                Some((_, w, x, y)) => {
+                    occ.add(&w.shape, x, y);
+                    out[c] = ChartPlace { ok: true, dx: (x + ring) * g + w.sx - w.fx, dy: (y + ring) * g + w.sy - w.fy, quarter: w.q };
+                }
+                None => failed.push(c),
+            }
         }
-        if let Some((_, shape, x, y, r, q, fx, fy)) = best {
-            occ.add(y, &shape.rows, x);
-            out[c] = ChartPlace { ok: true, dx: x + r - fx, dy: y + r - fy, quarter: q };
+        (out, failed)
+    };
+    // One order, with repair rounds: charts that found no room go first in the next round; go on while a round leaves
+    // fewer of them (it stops by itself when a round gains nothing).
+    let solve = |mut order: Vec<usize>| -> (Vec<ChartPlace>, Vec<usize>) {
+        let (mut out, mut failed) = place(&order);
+        while !failed.is_empty() && !stop.load(Ordering::Relaxed) {
+            let mut next: Vec<usize> = failed.clone();
+            next.extend(order.iter().copied().filter(|c| !failed.contains(c)));
+            let (o2, f2) = place(&next);
+            if f2.len() >= failed.len() {
+                break;
+            }
+            order = next;
+            out = o2;
+            failed = f2;
+        }
+        (out, failed)
+    };
+    // The orders: most area owned first (the default), then bounding box of the owned blocks, longer owned side, long side of the
+    // chart. Each more `effort` tries one more when the ones before left a chart without room; the first that places all wins.
+    let own = |c: usize| ways[c].iter().map(|w| w.shape.area).min().unwrap_or(0);
+    let longer = |c: usize| ways[c].iter().map(|w| w.shape.h().max(w.shape.w)).min().unwrap_or(0);
+    let bbox = |c: usize| ways[c].iter().map(|w| w.shape.h() * w.shape.w).min().unwrap_or(0);
+    let mut best: Option<(Vec<ChartPlace>, usize)> = None;
+    for mode in ORDER_MODES.iter().take(1 + effort) {
+        let mut ord = order.clone();
+        match *mode {
+            0 => ord.sort_by(|&a, &c| own(c).cmp(&own(a)).then(a.cmp(&c))),
+            1 => ord.sort_by(|&a, &c| bbox(c).cmp(&bbox(a)).then(a.cmp(&c))),
+            2 => ord.sort_by(|&a, &c| longer(c).cmp(&longer(a)).then(own(c).cmp(&own(a))).then(a.cmp(&c))),
+            _ => {}
+        }
+        let (out, failed) = solve(ord);
+        if failed.is_empty() {
+            return out;
+        }
+        if best.as_ref().map_or(true, |b| failed.len() < b.1) {
+            best = Some((out, failed.len()));
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
         }
     }
-    out
+    best.map_or_else(|| vec![ChartPlace::default(); charts], |b| b.0)
 }
 
 #[cfg(test)]
@@ -794,6 +978,46 @@ mod tests {
             let ylo = t.chunks_exact(2).map(|q| q[1]).fold(f64::INFINITY, f64::min).floor() as i64;
             let yhi = t.chunks_exact(2).map(|q| q[1]).fold(f64::NEG_INFINITY, f64::max).ceil() as i64;
             mark(&raster(&t, ylo, (yhi - ylo) as usize), ylo, 0);
+        }
+    }
+
+    #[test]
+    fn pack_into_keeps_the_block_gap_and_is_the_same_every_time() {
+        let mut seed_rng = 7u64;
+        let mut tris = Vec::new();
+        let mut tc = Vec::new();
+        let mut flags = Vec::new();
+        for c in 0..30_i64 {
+            let (w, h) = (4.0 + 36.0 * lcg(&mut seed_rng), 4.0 + 36.0 * lcg(&mut seed_rng));
+            tris.extend_from_slice(&[0.5, 0.25, w + 0.5, 0.25, 0.5, h + 0.25]);
+            tc.push(c);
+            flags.push(u8::from(lcg(&mut seed_rng) < 0.4));
+        }
+        for k in [0_i64, 1, 2] {
+            let first = pack_into((256, 256), k, &[], &tris, &tc, 30, &flags, &[1; 30], &never());
+            let again = pack_into((256, 256), k, &[], &tris, &tc, 30, &flags, &[1; 30], &never());
+            assert!(first.iter().all(|p| p.ok), "k {k}");
+            assert!(first.iter().zip(&again).all(|(a, b)| (a.dx, a.dy, a.quarter) == (b.dx, b.dy, b.quarter)), "same input, same layout");
+            for j in 0..=k {
+                let s = 1_i64 << j;
+                let mut owner: std::collections::HashMap<(i64, i64), usize> = std::collections::HashMap::new();
+                for (c, p) in first.iter().enumerate() {
+                    let t: Vec<f64> = turn_tris(&tris[6 * c..6 * c + 6], p.quarter).chunks_exact(2).flat_map(|q| [q[0] + p.dx as f64, q[1] + p.dy as f64]).collect();
+                    let ylo = t.chunks_exact(2).map(|q| q[1]).fold(f64::INFINITY, f64::min).floor() as i64;
+                    let yhi = t.chunks_exact(2).map(|q| q[1]).fold(f64::NEG_INFINITY, f64::max).ceil() as i64;
+                    for (r, rows) in raster(&t, ylo, (yhi - ylo) as usize).iter().enumerate() {
+                        for &(a, b) in rows {
+                            for bx in a.div_euclid(s)..=(b - 1).div_euclid(s) {
+                                for (ox, oy) in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 0), (0, 1), (1, -1), (1, 0), (1, 1)] {
+                                    let cell = (bx + ox, (ylo + r as i64).div_euclid(s) + oy);
+                                    let prev = owner.insert(cell, c);
+                                    assert!(prev.is_none() || prev == Some(c), "charts {c} and {prev:?} meet at mip level {j} (k {k})");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

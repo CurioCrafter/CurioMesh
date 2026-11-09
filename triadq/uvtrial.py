@@ -240,7 +240,8 @@ class SeamFit(T.Trial):
         cand.fit = c
         cand.fit_extra = extra + int(n.get("extra_faces", 0))
         split, left = int(n.get("faces_split", 0)), int(n.get("faces_left", 0)) + int(n.get("faces_for_baking", 0))
-        cand.numbers["split"] = (f"{split} faces split, {int(n.get('moved', 0))} points moved", 1 if split or n.get("moved") else 0)
+        moved = int(n.get("moved", 0)) + int(n.get("side_moved", 0))  # side_moved: the side-line snap's moves
+        cand.numbers["split"] = (f"{split} faces split, {moved} points moved", 1 if split or moved else 0)
         cand.numbers["left"] = (f"{left} left for baking" if left else "every seam fitted", -1 if left else 1)
         notes = list(c.messages)
         if int(n.get("held", 0)):
@@ -777,13 +778,14 @@ class BakeSpotsUV(UVTrial):
         straddle = yield from straddlers(base)
         done = prev.extra.get("baked", np.zeros(0, np.int64)) if prev is not None and settings.get("keep_going") else np.zeros(0, np.int64)
         todo = np.setdiff1d(np.flatnonzero(straddle), done)
-        if not len(todo):
-            return UVCand(None, refusal="No faces cross a seam: nothing to bake.")
         area = uvnew.face_areas(base.points, base.indptr, base.flat)
+        dens = _density(base)
+        todo = todo[area[todo] * dens * dens >= 1.0]  # a face under one texel shows no texture: its own island would only take page
+        if not len(todo):
+            return UVCand(None, refusal="No faces cross a seam where it shows: nothing to bake.")
         todo = todo[np.argsort(-area[todo], kind="stable")]  # most damage first: the biggest faces across a seam
         take = todo[: max(1, int(math.ceil(float(settings.get(self.handle, 1.0)) * len(todo))))]
         uv0 = prev.uv if prev is not None and settings.get("keep_going") and prev.uv is not None else base.uv
-        dens = _density(base)
         groups = _groups(base.indptr, base.flat, take)
         yield
         tris, tri_chart, placed_corners = [], [], []

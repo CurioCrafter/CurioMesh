@@ -57,6 +57,16 @@ def tube(around, rows, r=1.0):
     return pts, np.arange(0, len(flat) + 1, 4), np.array(flat)
 
 
+def speckled(n, every, amp):
+    """A wavy n x n grid with every `every`-th quad split in two triangles: many irregular points, ragged patches."""
+
+    points, indptr, flat = grid(n, n, 1.0 / n, lambda x, y: amp * np.sin(5 * x) * np.cos(4 * y))
+    faces = []
+    for k, q in enumerate(flat.reshape(-1, 4)):
+        faces += [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] if k % every == 0 else [list(q)]
+    return points, np.concatenate([[0], np.cumsum([len(f) for f in faces])]), np.array([v for f in faces for v in f])
+
+
 def l_parts():
     """A flat 10x8 grid with an L-shaped part (faces i < 4, j < 5) and a second block (i >= 7, j >= 4): grid unions only."""
 
@@ -123,6 +133,18 @@ class Twin(unittest.TestCase):
         self.assertLess(uvchart._key(0.1, 1.0, square), uvchart._key(0.0, 5.0, strip))
         self.assertGreater(strip, uvchart.SHAPE_MAX)
 
+    def test_thin_tube_becomes_strip_pieces(self):
+        # R5: a long thin open tube (40 rows, 6 around) is cut into two pieces, each cut once along its length.
+        mesh = tube(6, 40, 0.2)
+        tree = uvchart.build(*mesh, use_fast=False)
+        n = dict(zip(uvchart.NUMBER_COLUMNS, tree.numbers()))
+        self.assertEqual((n["tube_faces"], n["patches"], n["not_disk_patches"]), (240, 2, 0))
+        self.assertEqual(tree.level(120.0)[2][:2].tolist(), [2, 0])
+        # boxes: a square's smallest box is its side; a thin diagonal strip's is the strip
+        self.assertEqual(uvchart._min_box([[0, 0], [1, 0], [1, 1], [0, 1]]), (1.0, 1.0))
+        w, h = uvchart._min_box([[0, 0], [10, 10], [10.1, 9.9], [0.1, -0.1]])
+        self.assertAlmostEqual(min(w, h), np.hypot(0.1, 0.1), places=6)
+
     def test_slices_stay_short(self):
         stage = uvchart.Charts(*cube(4), use_fast=False)
         longest = 0.0
@@ -169,6 +191,8 @@ class Parity(unittest.TestCase):
         return twin, kern
 
     def test_topology_matches_on_test_meshes(self):
+        twin, kern = self.same_topology(tube(6, 40, 0.2))  # R5: a thin tube cut into strip pieces
+        self.assertEqual(kern.numbers()[21], 240)
         self.same_topology(cube(4))
         self.same_topology(tube(16, 5))
         points, indptr, flat, label = l_parts()
@@ -197,6 +221,26 @@ class Parity(unittest.TestCase):
             np.testing.assert_array_equal(kc, tc)
             np.testing.assert_array_equal(kcut, tcut)
             np.testing.assert_array_equal(kn[:5], tn[:5])
+
+    def test_levels_nest_and_stay_disks_with_smoother_outlines(self):
+        """R6: the outline smoothing moves patches (fewer cut outline weight) and, with the last merge round, keeps every
+        level's charts disks, each inside one chart of every level above it (the redo of a chart that lies over itself
+        takes the charts of a lower level inside it), in the kernel and in the twin."""
+
+        mesh = speckled(16, 7, 0.4)
+        twin = uvchart.build(*mesh, use_fast=False, build_stretch=0.05)
+        moves, _ = twin._smoothing()
+        self.assertGreater(len(moves), 0)
+        root, glued, _, _, _ = twin._replay(float("inf"))
+        before = sum(w for e, w in enumerate(twin.outline) if twin.cut_base[e] and not glued[e])
+        _, cut, _ = twin.level(1000.0)
+        self.assertLess(sum(w for e, w in enumerate(twin.outline) if cut[e]), before)
+        for tree in (self.kernel(*mesh, build_stretch=0.05), twin):
+            levels = [tree.level(x) for x in (0.0, 1.0, 2.5, 5.0, 1000.0)]
+            for (lo, _, nlo), (hi, _, nhi) in zip(levels, levels[1:]):
+                self.assertEqual((nlo[1], nhi[1]), (0, 0))
+                for c in np.unique(lo):
+                    self.assertEqual(len(np.unique(hi[lo == c])), 1)
 
     def test_stage_uses_the_fast_callable(self):
         uv_fast = common.addon_module("uv_fast")

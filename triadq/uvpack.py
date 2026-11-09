@@ -38,6 +38,8 @@ ORIENTS = 4
 RULES = 2
 POLICIES = 8
 MAX_K = 20
+EFFORT_STEP = 32  # `pack_into` takes its effort in the high bits of k (k + EFFORT_STEP * effort, k from -1 to MAX_K)
+ORDER_MODES = (0, 1, 2, 3)  # pack_into orders: owned area, owned bounding box, longer owned side, long side of the chart
 
 SLICE_SECONDS = 0.003  # one step() of a stage works about this long
 YIELD_EVERY = 1  # a pack gives control back after this many boxes
@@ -163,8 +165,11 @@ def make_order(w, h, weight, mode: int) -> list[int]:
     return sorted(range(len(w)), key=lambda i: (-key(i)[0], -key(i)[1], i))
 
 
-def _pack_gen(w, h, turn_ok, order, pol: int, s: float, page, k: int):
-    """Generator form of one pack: yields now and then, returns [(x, y, turned)] or None."""
+def _pack_gen(w, h, turn_ok, order, pol: int, s: float, page, k: int, clock=None):
+    """Generator form of one pack: yields now and then, returns [(x, y, turned)] or None. `clock` counts the packs (see `_Clock`)."""
+
+    if clock is not None:
+        clock.packs += 1
 
     mr = MaxRects(page[0], page[1], k, pol >= ORIENTS)
     pol %= ORIENTS
@@ -216,14 +221,16 @@ def used(w, h, s: float, page) -> float:
 # ---------------------------------------------------------------- fill the page and keep going
 
 class _Clock:
-    def __init__(self, budget: float, stop):
-        self.start, self.budget, self.stop = time.perf_counter(), budget, stop
+    """Time budget (seconds, 0 = none) and/or a work budget (`max_packs` packs, 0 = none): the work budget gives the same layout every time."""
+
+    def __init__(self, budget: float, stop, max_packs: int = 0):
+        self.start, self.budget, self.stop, self.max_packs, self.packs = time.perf_counter(), budget, stop, max_packs, 0
 
     def stopped(self) -> bool:
         return bool(self.stop is not None and self.stop())
 
     def over(self) -> bool:
-        return self.budget > 0.0 and time.perf_counter() - self.start > self.budget
+        return (self.budget > 0.0 and time.perf_counter() - self.start > self.budget) or (self.max_packs > 0 and self.packs >= self.max_packs)
 
     def halt(self) -> bool:
         return self.stopped() or self.over()
@@ -238,7 +245,7 @@ def _search(w, h, turn_ok, order, pol, page, k, hint, clock):
     s = hint if hint > 0.0 else sqrt(START_FILL * page[0] * page[1] / total)
     lo, hi, best = 0.0, inf, None
     while True:  # bracket
-        p = yield from _pack_gen(w, h, turn_ok, order, pol, s, page, k)
+        p = yield from _pack_gen(w, h, turn_ok, order, pol, s, page, k, clock)
         if p is not None:
             lo, best = s, p
             if hi != inf or clock.halt():
@@ -255,7 +262,7 @@ def _search(w, h, turn_ok, order, pol, page, k, hint, clock):
         return None
     while hi != inf and (hi - lo) > SCALE_TOL * lo and not clock.halt():  # lo is feasible, hi never: the bracket only tightens
         mid = 0.5 * (lo + hi)
-        p = yield from _pack_gen(w, h, turn_ok, order, pol, mid, page, k)
+        p = yield from _pack_gen(w, h, turn_ok, order, pol, mid, page, k, clock)
         if p is not None:
             lo, best = mid, p
         else:
@@ -273,7 +280,7 @@ def _fill_gen(w, h, turn_ok, weight, page, k, order, policy, scale, passes, cloc
         nonlocal inc
         floor_ = inc[0] * (1.0 + MIN_GAIN) if inc else 0.0
         if floor_ > 0.0:
-            probe = yield from _pack_gen(w, h, turn_ok, order_, pol, floor_, page, k)
+            probe = yield from _pack_gen(w, h, turn_ok, order_, pol, floor_, page, k, clock)
             if probe is None:
                 return
         found = yield from _search(w, h, turn_ok, order_, pol, page, k, max(hint, floor_), clock)
@@ -300,7 +307,7 @@ def _fill_gen(w, h, turn_ok, weight, page, k, order, policy, scale, passes, cloc
                 break
             order_[i], order_[i + 1] = order_[i + 1], order_[i]
             target = s * (1.0 + MIN_GAIN)
-            ok = yield from _pack_gen(w, h, turn_ok, order_, pol, target, page, k)
+            ok = yield from _pack_gen(w, h, turn_ok, order_, pol, target, page, k, clock)
             found = None
             if ok is not None:
                 found = yield from _search(w, h, turn_ok, order_, pol, page, k, target, clock)
@@ -332,7 +339,7 @@ class FillPage:
     """Sliceable Fill the page. `step()` works about 3 ms and returns progress 0..1 (1 when done); `result` is the dict of `fill_page`."""
 
     def __init__(self, w, h, turn_ok=None, weight=None, page=(1024, 1024), k: int = 1, order=None, policy: int = 0, scale: float = 0.0,
-                 passes: int = 0, budget: float = 0.0, use_fast: bool = True):
+                 passes: int = 0, budget: float = 0.0, use_fast: bool = True, max_packs: int = 0):
         self.result, self.done, self._job, self._stopped = None, False, None, False
         n = len(w)
         turn_ok = [True] * n if turn_ok is None else turn_ok
@@ -344,7 +351,7 @@ class FillPage:
         if self._job is None:
             w_, h_ = [float(a) for a in w], [float(a) for a in h]
             self._gen = _fill_gen(w_, h_, [bool(a) for a in turn_ok], [float(a) for a in weight], tuple(page), int(k), order, int(policy), float(scale),
-                                  int(passes), _Clock(float(budget), lambda: self._stopped))
+                                  int(passes), _Clock(float(budget), lambda: self._stopped, int(max_packs)))
 
     def stop(self) -> None:
         self._stopped = True
@@ -437,69 +444,113 @@ def dilate(rows, r: int):
     return [_merge([iv for j in range(max(0, y - 2 * r), min(h - 1, y) + 1) for iv in wide[j]]) for y in range(h + 2 * r)]
 
 
-class Page:
-    """The page's occupied texels per row."""
+class Grid:
+    """The page as a grid of blocks of 2^k texels, one bit per block (a Python int per row). A chart owns the blocks it touches
+    plus a ring of one block around them; owned blocks never overlap (the mip-clean gap rule). No gap: a block is a texel."""
 
-    def __init__(self, w: int, h: int):
-        self.w, self.rows = w, [[] for _ in range(h)]
-
-    def add(self, y0: int, rows, dx: int) -> None:
-        for j, v in enumerate(rows):
-            y = y0 + j
-            if 0 <= y < len(self.rows):
-                self.rows[y] = _merge(self.rows[y] + [(a + dx, b + dx) for a, b in v])
+    def __init__(self, nx: int, ny: int):
+        self.nx, self.ny = max(nx, 1), max(ny, 1)
+        self.rows = [0] * self.ny
+        self.used = 0
 
     def height(self) -> int:
-        for y in range(len(self.rows) - 1, -1, -1):
-            if self.rows[y]:
-                return y + 1
-        return 0
+        return self.used
 
-    def _leftmost(self, sw: int, srows, y: int, step: int):
+    def last_set(self, y: int, a: int, b: int):
+        """Highest set bit in [a, b) of row y, or None."""
+
+        if a >= b:
+            return None
+        m = (self.rows[y] >> a) & ((1 << (b - a)) - 1)
+        return None if m == 0 else a + m.bit_length() - 1
+
+    def next_free(self, y: int, x: int) -> int:
+        """First free bit at or after x (nx when the rest of the row is taken)."""
+
+        if x >= self.nx:
+            return self.nx
+        m = (~self.rows[y]) >> x
+        return min(x + (m & -m).bit_length() - 1, self.nx)
+
+    def set(self, y: int, a: int, b: int) -> None:
+        a, b = max(a, 0), min(b, self.nx)
+        if y < 0 or y >= self.ny or a >= b:
+            return
+        self.rows[y] |= ((1 << (b - a)) - 1) << a
+        self.used = max(self.used, y + 1)
+
+    def add(self, shape, x: int, y: int) -> None:
+        for r, v in enumerate(shape[1]):
+            for a, b in v:
+                self.set(y + r, x + a, x + b)
+
+    def _leftmost(self, shape, y: int):
+        w, rows = shape[0], shape[1]
         x = 0
         while True:
-            if x + sw > self.w:
+            if x + w > self.nx:
                 return None
             moved = False
-            for r, v in enumerate(srows):
+            for r, v in enumerate(rows):
                 for a, b in v:
-                    for c, d in self.rows[y + r]:
-                        if c < x + b and d > x + a:
-                            x = _ceil_div(d - a, step) * step
-                            moved = True
-                            break
-                    if moved:
+                    p = self.last_set(y + r, x + a, x + b)
+                    if p is not None:
+                        x = self.next_free(y + r, p + 1) - a
+                        moved = True
                         break
                 if moved:
                     break
             if not moved:
                 return x
 
-    def _waste(self, srows, x: int, y: int) -> int:
+    def _waste(self, shape, x: int, y: int) -> int:
         total = 0
-        for r, v in enumerate(srows):
+        for r, v in enumerate(shape[1]):
             if v:
                 left = x + v[0][0]
-                total += left - max([d for _, d in self.rows[y + r] if d <= left], default=0)
+                p = self.last_set(y + r, 0, left)
+                total += left - (0 if p is None else p + 1)
         return total
 
-    def find(self, sw: int, srows, step: int):
-        h, used_h = len(srows), self.height()
-        if h > len(self.rows) or sw > self.w:
+    def find(self, shape):
+        """Best spot for a shape (w, rows, area): inside the used height first (least waste), else the lowest row."""
+
+        h, used_h = len(shape[1]), self.used
+        if h > self.ny or shape[0] > self.nx:
             return None
         best = None
         y = 0
-        while y + h <= len(self.rows):
-            x = self._leftmost(sw, srows, y, step)
+        while y + h <= self.ny:
+            x = self._leftmost(shape, y)
             if x is not None:
                 top = max(y + h, used_h)
-                score = (top, self._waste(srows, x, y), y)
+                score = (top, self._waste(shape, x, y), y)
                 if best is None or score < best[0]:
                     best = (score, x, y)
                 if top > used_h:
                     break
-            y += step
+            y += 1
         return None if best is None else (best[1], best[2], best[0][1])
+
+
+def owned_shape(core, g: int, sx: int, sy: int, ring: int):
+    """Owned blocks (w, rows, area) of a chart with texel rows `core` whose corner sits (sx, sy) texels into a block of g texels:
+    the blocks it touches grown by `ring` blocks all round."""
+
+    nrows = max((len(core) - 1 + sy) // g + 1, 1)
+    acc = [[] for _ in range(nrows)]
+    for y, v in enumerate(core):
+        for a, b in v:
+            acc[(y + sy) // g].append(((a + sx) // g, (b - 1 + sx) // g + 1))
+    rows = dilate([_merge(v) for v in acc], ring)
+    return max((b for v in rows for _, b in v), default=0), rows, sum(b - a for v in rows for a, b in v)
+
+
+def shifts(g: int):
+    """Corner offsets inside a block that are tried for a chart (at most 16, spread evenly)."""
+
+    lst = list(range(0, g, max(g // 4, 1)))
+    return [(sx, sy) for sy in lst for sx in lst]
 
 
 def turn_tris(tris, quarter: int):
@@ -513,17 +564,30 @@ def turn_tris(tris, quarter: int):
 def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, turn_ok=None, stop=None):
     """Pack charts (`tris` in texels, 6 numbers per triangle, `tri_chart` per triangle) into a page that may hold `seed` triangles.
 
+    The page is a grid of blocks of 2^k texels (no gap, k < 0: texels); a chart owns the blocks it touches plus one ring of
+    blocks around them and owned blocks never overlap: the mip-clean gap rule (neighbours keep two free blocks between the
+    blocks they touch) without wasting a texel beyond it. Each chart is tried turned by every quarter, at the corner offset
+    inside a block that owns the fewest blocks; `as_box` charts reserve their bounding box, the rest follow their outline,
+    so a small chart can sit in a big one's bay. Order: most blocks owned first (other orders with more effort). The same input gives the same layout (no clock).
+
     Returns [(ok, dx, dy, quarter)] per chart: turn the chart's points `quarter` x 90 degrees ((x, y) -> (-y, x)), then add (dx, dy).
     """
 
-    g = block(k)
-    loose, tight = (0, 0) if g == 0 else (2 * g - 1, g)
-    occ = Page(page[0], page[1])
+    k, effort = (k + 1) % EFFORT_STEP - 1, min(max((k + 1) // EFFORT_STEP, 0), len(ORDER_MODES) - 1)
+    g, ring = (1, 0) if k < 0 else (block(k), 1)
+    base = Grid(page[0] // g, page[1] // g)
     if len(seed):
         ys = [seed[i] for i in range(1, len(seed), 2)]
         y0 = int(floor(min(ys)))
         rows = max(int(ceil(max(ys))) + 1 - y0, 1)
-        occ.add(y0 - loose, dilate(raster(seed, y0, rows), loose), -loose)
+        acc = {}
+        for y, v in enumerate(raster(seed, y0, rows)):
+            for a, b in v:
+                acc.setdefault((y0 + y) // g, []).append((a // g, (b - 1) // g + 1))
+        for j, v in acc.items():
+            for a, b in _merge(v):
+                for dj in range(-ring, ring + 1):
+                    base.set(j + dj, a - ring, b + ring)
     per = [[] for _ in range(charts)]
     for t, c in enumerate(tri_chart):
         if 0 <= c < charts:
@@ -541,34 +605,83 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
         return max(w, h), w * h
 
     order = sorted((c for c in range(charts) if per[c]), key=lambda c: (-key(c)[0], -key(c)[1], c))
-    out = [(False, 0, 0, 0)] * charts
+    offsets = shifts(g)
+    ways = [[] for _ in range(charts)]  # every way a chart can sit (each quarter at its best corner offset); it does not depend on the page
     for c in order:
-        if stop is not None and stop():
-            break
-        best = None
         for q in ((0, 1, 2, 3) if turn_ok[c] else (0,)):
             t = turn_tris(per[c], q)
             e = extent(t)
             fx, fy = int(floor(e[0])), int(floor(e[1]))
             rows = max(int(ceil(e[3])), fy + 1) - fy
             core = raster([v - (fx if i % 2 == 0 else fy) for i, v in enumerate(t)], 0, rows)
-            cw = max((b for v in core for _, b in v), default=1)
-            boxed = bool(as_box[c])
-            if boxed:
+            if as_box[c]:
+                cw = max((b for v in core for _, b in v), default=1)
                 core = [[(0, cw)] for _ in range(rows)]
-            variants = [(loose, 1, core, cw)]
-            if boxed and g > 0:
-                variants.insert(0, (tight, g, core, cw))
-            for r, step, srows, w in variants:
-                dil = dilate(srows, r)
-                found = occ.find(w + 2 * r, dil, step)
+            pick = None
+            for sx, sy in offsets:
+                shape = owned_shape(core, g, sx, sy, ring)
+                if pick is None or shape[2] < pick[0][2]:
+                    pick = (shape, sx, sy)
+            ways[c].append((pick[0], pick[1], pick[2], fx, fy, q))
+
+    def place(seq):
+        """Place the charts in `seq`; returns (result per chart, the charts that found no room in that order)."""
+
+        occ = Grid(page[0] // g, page[1] // g)
+        occ.rows, occ.used = list(base.rows), base.used
+        out = [(False, 0, 0, 0)] * charts
+        failed = []
+        for c in seq:
+            if stop is not None and stop():
+                failed.append(c)
+                continue
+            best = None
+            for way in ways[c]:
+                found = occ.find(way[0])
                 if found is not None:
                     x, y, waste = found
-                    score = (max(y + len(dil), occ.height()), waste, y, q)
+                    score = (max(y + len(way[0][1]), occ.height()), waste, y, way[5])
                     if best is None or score < best[0]:
-                        best = (score, dil, x, y, r, q, fx, fy)
-        if best is not None:
-            _, dil, x, y, r, q, fx, fy = best
-            occ.add(y, dil, x)
-            out[c] = (True, x + r - fx, y + r - fy, q)
-    return out
+                        best = (score, way, x, y)
+            if best is None:
+                failed.append(c)
+                continue
+            _, (shape, sx, sy, fx, fy, q), x, y = best
+            occ.add(shape, x, y)
+            out[c] = (True, (x + ring) * g + sx - fx, (y + ring) * g + sy - fy, q)
+        return out, failed
+
+    def solve(seq):
+        """One order with repair rounds: charts that found no room go first in the next round; go on while a round leaves fewer of them."""
+
+        out, failed = place(seq)
+        while failed and not (stop is not None and stop()):
+            lost = set(failed)
+            nxt = failed + [c for c in seq if c not in lost]
+            out2, failed2 = place(nxt)
+            if len(failed2) >= len(failed):
+                break
+            seq, out, failed = nxt, out2, failed2
+        return out, failed
+
+    own = lambda c: min(w[0][2] for w in ways[c])  # noqa: E731
+    longer = lambda c: min(max(len(w[0][1]), w[0][0]) for w in ways[c])  # noqa: E731
+    bbox = lambda c: min(len(w[0][1]) * w[0][0] for w in ways[c])  # noqa: E731
+    best = None
+    for mode in ORDER_MODES[:1 + effort]:
+        if mode == 0:
+            seq = sorted(order, key=lambda c: (-own(c), c))
+        elif mode == 1:
+            seq = sorted(order, key=lambda c: (-bbox(c), c))
+        elif mode == 2:
+            seq = sorted(order, key=lambda c: (-longer(c), -own(c), c))
+        else:
+            seq = list(order)
+        out, failed = solve(seq)
+        if not failed:
+            return out
+        if best is None or len(failed) < best[1]:
+            best = (out, len(failed))
+        if stop is not None and stop():
+            break
+    return best[0] if best else [(False, 0, 0, 0)] * charts

@@ -57,6 +57,10 @@ class Settings:
     view_check: bool = True  # the camera check holds snap moves that would spend more than Most Detail Loss allows
     detail: float = DEFAULT_DETAIL  # Most Detail Loss, percent of the source's picture pixels
     view_pixels: int = VIEW_PIXELS
+    switch_by: str = "part"  # the split cuts the Soft chains plus where the nearest unconnected "part" changes, or every "side" switch (costs more faces per mended face under a small allowance, R5keep)
+    reread: bool = True  # faces whose corners all lie within one side's owner ball read that side
+    switch_snap: bool = True  # corners just over a side line move onto it (zero faces) before any split
+    ball_snap: bool = True  # corners of faces still across a seam move onto the side the face's other corners hold (zero faces), before and after the split
 
 
 def settings_of(gs) -> Settings:
@@ -68,7 +72,7 @@ def settings_of(gs) -> Settings:
     detail = getattr(gs, "auto_detail", None)
     if isinstance(detail, (int, float)) and detail > 0:
         s.detail = float(detail)
-    for key in ("allowance", "split", "snap", "move_share", "texture_px", "repeat", "cut_here", "view_check", "detail", "view_pixels"):
+    for key in ("allowance", "split", "snap", "move_share", "texture_px", "repeat", "cut_here", "view_check", "detail", "view_pixels", "switch_by", "reread", "switch_snap", "ball_snap"):
         if key in ov:
             setattr(s, key, ov[key])
     return s
@@ -153,12 +157,28 @@ def _triaged(sa: Source, f_target: float, allowance: float, settings: Settings) 
 
 
 def _kinds(seams: dict) -> np.ndarray:
-    """Kind of each island: islands joined across every chain that is not Hard."""
+    """Kind of each island: islands joined across every chain that is not Hard, then those groups merged wherever no
+    Hard chain runs between them (a greedy colouring of the groups by their Hard neighbours). Only a Hard chain keeps
+    the search apart; loose pieces and islands with no border between them stay one kind, as with Seam Fit off (kinds
+    per loose piece cost the search 8 % more faces on spinning_wheel_01 with no Hard chain at all, R5keep)."""
 
     isl = seams["chain_island"].reshape(-1, 2)
-    join = seams["class"] != HARD
-    root = uvseams._min_labels(seams["n_islands"], isl[join, 0], isl[join, 1])
-    return uvseams._first_order(root)[0]
+    hard = seams["class"] == HARD
+    root = uvseams._min_labels(seams["n_islands"], isl[~hard, 0], isl[~hard, 1])
+    group, n = uvseams._first_order(root)
+    nbr = [set() for _ in range(int(n))]
+    for a, b in zip(group[isl[hard, 0]].tolist(), group[isl[hard, 1]].tolist()):
+        if a != b:
+            nbr[a].add(b)
+            nbr[b].add(a)
+    colour = np.full(int(n), -1, np.int64)
+    for g in range(int(n)):
+        taken = {int(colour[h]) for h in nbr[g] if colour[h] >= 0}
+        c = 0
+        while c in taken:
+            c += 1
+        colour[g] = c
+    return colour[group]
 
 
 def _risk(seams: dict) -> np.ndarray:
@@ -442,6 +462,11 @@ class FitStage:
         self.done, self.candidate, self.numbers = False, None, {"estimate": True}
         self._stopped = False
         self._now = None
+        self._trees = None  # closest points per source side, built as the re-read needs them
+        self._judge = None  # the camera check's judge, once the snap has drawn it
+        self._last_flipped = None  # the UV Check's flipped faces from the last `_straddling`
+        self._ball_moved = {}  # vertices each ball pass moved
+        self._flip_corners = np.zeros(0, np.int64)  # vertices of faces the last check left turned over
         self._steps = self._run()
 
     def stop(self) -> None:
@@ -473,6 +498,253 @@ class FitStage:
                 return None
         self._now = None
         return tr.result
+
+    def _straddling(self, uv, P, ip, fl, origin=None, tree=None):
+        """Generator: per result face True when the UV Check (its owner-set rule) calls it across a seam after a plain
+        per-side transfer (with `tree`, the global face tree: after the owner-ball re-read too, as the fit reads it);
+        the side switches cut only those. None without the native check."""
+
+        from .topology import _turbo as turbo
+
+        sa, s = self.sa, self.settings
+        if turbo is None or not hasattr(turbo, "uvscore_check"):
+            return None
+        look = yield from self._lookup(uv, P, ip, fl)
+        if look is None:
+            return None
+        got = {}
+        if tree is not None:  # the fit's own counts stay the fit's
+            kept = (getattr(self, "numbers_reread", 0), getattr(self, "numbers_reread_undone", 0))
+            yield from self._reread(look, tree, P, ip, fl, 0, ())
+            yield from self._layer_checked(uv, P, ip, fl, look, got, origin)
+            self._before = None
+            self.numbers_reread, self.numbers_reread_undone = kept
+        else:
+            yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+        job = turbo.uvscore_check(P, ip, fl, got["uv"], self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, uv, sa.material, texture_px=s.texture_px)
+        if job is None:
+            return None
+        while not job.done():
+            yield
+            if self._stopped:
+                job.stop()
+                return None
+        res = job.result()
+        self._last_flipped = np.asarray(res[2]).astype(bool)
+        return np.asarray(res[1]).astype(bool)
+
+    def _reread(self, look, tree, P, ip, fl, n_before, vchain):
+        """Generator: a face whose corners all lie within one side's owner ball reads that side (`uvsnap.ball_sides_steps`,
+        `uvsnap.side_reread_steps`): the lookup's vote by the face centre can pick a side some corners are far from."""
+
+        if tree is None or not self.settings.reread:
+            return
+        from .topology import _turbo as turbo
+
+        sa = self.sa
+        region = np.asarray(self.plan.seams["region"], np.int64)
+        pts = np.asarray(P, np.float64).reshape(-1, 3)
+        _at, near_f, d0 = tree.nearest(pts)
+        label = region[np.asarray(near_f, np.int64)]
+        if self._trees is None:
+            self._trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, lambda a, b: turbo.face_tree(a, b))
+        got = {}
+        self._before = {k: np.array(look[k], copy=True) for k in ("ids", "w", "shift", "slid", "ref_ids", "ref_w", "ref_face", "orient", "region")}
+        yield from uvsnap.ball_sides_steps(look["region"], pts, ip, fl, label, d0, self._trees, got)
+        yield from uvsnap.side_reread_steps(look, got["sides"], sa.points, sa.indptr, sa.flat, region, pts, ip, fl, None, got, trees=self._trees,
+                                            src_uv=sa.layers[sa.active][1])
+        self.numbers_reread = int(got.get("reread", 0))
+
+    def _face_material(self, ip, origin):
+        """Material per face of the current mesh (the UV Check matches source faces of the same material), () when unknown."""
+
+        if self.material is None or len(self.material) != len(self.indptr) - 1:
+            return ()
+        if origin is None:
+            return self.material if len(ip) - 1 == len(self.material) else ()
+        return self.material[np.asarray(origin, np.int64)] if len(origin) == len(ip) - 1 else ()
+
+    def _layer_checked(self, uv, P, ip, fl, look, got, origin=None):
+        """Generator: the active layer through the lookup; then the UV Check's flip test, and every re-read face that
+        shows the texture turned over gets the lookup's own read back (and the layer is read again). The re-read only
+        moves texture that was across a seam; it never turns any over."""
+
+        sa, s = self.sa, self.settings
+        yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+        before = getattr(self, "_before", None)
+        if before is None or len(before["region"]) != len(ip) - 1:
+            return
+        changed = np.asarray(look["region"]) != before["region"]
+        if not changed.any():
+            return
+        from .topology import _turbo as turbo
+
+        job = turbo.uvscore_check(P, ip, fl, got["uv"], self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, uv, sa.material, texture_px=s.texture_px)
+        if job is None:
+            return
+        while not job.done():
+            yield
+        bad = changed & np.asarray(job.result()[2]).astype(bool)
+        if not bad.any():
+            return
+        ipa = np.asarray(ip, np.int64)
+        corner = np.concatenate([np.arange(ipa[f], ipa[f + 1]) for f in np.flatnonzero(bad).tolist()])
+        for k in ("ids", "w"):
+            look[k].reshape(-1, 3)[corner] = before[k].reshape(-1, 3)[corner]
+        for k in ("shift", "slid"):
+            look[k][corner] = before[k][corner]
+        for k in ("ref_ids", "ref_w"):
+            look[k].reshape(-1, 3)[bad] = before[k].reshape(-1, 3)[bad]
+        for k in ("ref_face", "orient", "region"):
+            look[k][bad] = before[k][bad]
+        self.numbers_reread = max(0, int(getattr(self, "numbers_reread", 0)) - int(bad.sum()))
+        self.numbers_reread_undone = int(getattr(self, "numbers_reread_undone", 0)) + int(bad.sum())
+        got.clear()
+        yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+
+    def _ball_pass(self, uv, P, ip, fl, origin, only, lim, tree, numbers, tag, full=False):
+        """Generator: `uvsnap.ball_snap_steps` on the faces still across a seam (`only`, the UV Check's), then the Check
+        again: a vertex whose move leaves one of its faces across a seam that was not, or turns one's texture over, goes
+        back. Passes repeat while one mends faces (Keep going: it stops by itself). Returns (points, only)."""
+
+        if tree is None or only is None or not self.settings.ball_snap:
+            return P, only
+        from .topology import _turbo as turbo
+
+        sa, s = self.sa, self.settings
+        region = np.asarray(self.plan.seams["region"], np.int64)
+        if self._trees is None:
+            self._trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, lambda a, b: turbo.face_tree(a, b))
+        ipa = np.asarray(ip, np.int64)
+        face_of = np.repeat(np.arange(len(ipa) - 1), np.diff(ipa))
+        moved_total = undone_total = passes = 0
+        self._ball_start = np.asarray(P, np.float64).copy()
+        refused = np.zeros(0, np.int64)  # moves taken back stay back, so a later pass tries the faces' other ways
+        mesh = uvsnap._Mesh(P, ip, fl, lazy=True)  # the topology stays; only points move
+        yield from mesh.build(P, ip, fl)
+        while True:
+            pts = np.asarray(P, np.float64).reshape(-1, 3)
+            _at, near_f, d0 = tree.nearest(pts)
+            label = region[np.asarray(near_f, np.int64)]
+            limit = np.asarray(lim, np.float64).ravel()
+            if len(limit) < len(pts):  # vertices the split added: the plain share of their edge
+                limit = np.r_[limit, s.move_share * uvsnap.vertex_edge(P, ip, fl)[len(limit):]]
+            limit = limit.copy()
+            limit[refused] = 0.0
+            got = {}
+            yield from uvsnap.ball_snap_steps(P, ip, fl, only, self._trees, label, d0, limit, got, mesh)
+            if self._stopped:
+                return P, only
+            if self._judge is not None and len(got["moved"]):  # the camera check prices these moves too (SPEC 4.10)
+                view = {}
+                yield from view_limit(self._judge, P, got["points"], ip, fl, limit, s.detail, view)
+                if view["held"]:
+                    got = {}
+                    yield from uvsnap.ball_snap_steps(P, ip, fl, only, self._trees, label, d0, view["limit"], got, mesh)
+                    if self._stopped:
+                        return P, only
+            if not len(got["moved"]):
+                break
+            was_flip = self._last_flipped
+            Q = np.asarray(got["points"], np.float64)
+            now = yield from self._straddling(uv, Q, ip, fl, origin, tree if full else None)
+            if self._stopped or now is None:
+                return P, only
+            worse = now & ~only
+            turned = np.zeros(len(only), bool)
+            if was_flip is not None and self._last_flipped is not None:
+                turned = self._last_flipped & ~was_flip
+            worse |= turned
+            undone = 0
+            if worse.any():  # take back each move that turned a face over or broke as many faces round it as it mended, then read again
+                R = Q.reshape(-1, 3).copy()
+                cand = np.intersect1d(np.unique(fl[worse[face_of]]), got["moved"])
+                corner_v = fl[ipa[0]:ipa[-1]]
+                mend = np.bincount(corner_v, (only & ~now)[face_of], len(pts))
+                broke = np.bincount(corner_v, (now & ~only)[face_of], len(pts))
+                flip_at = np.bincount(corner_v, turned[face_of], len(pts))
+                back = cand[(flip_at[cand] > 0) | (broke[cand] >= mend[cand])]
+                R[back] = pts[back]
+                Q = R.ravel()
+                undone = len(back)
+                refused = np.union1d(refused, back)
+                now = yield from self._straddling(uv, Q, ip, fl, origin, tree if full else None)
+                if self._stopped or now is None:
+                    return P, only
+            gain = int(only.sum()) - int(now.sum())
+            if gain <= 0:
+                self._last_flipped = was_flip
+                if undone and len(got["moved"]) > undone:  # some moves were good but the ones taken back cost as much: try without them
+                    continue
+                break
+            P, only = Q, now
+            moved_total += len(got["moved"]) - undone
+            undone_total += undone
+            passes += 1
+        numbers.update({tag + "_moved": moved_total, tag + "_undone": undone_total, tag + "_passes": passes})
+        start = np.asarray(self._ball_start, np.float64).reshape(-1, 3)
+        now_p = np.asarray(P, np.float64).reshape(-1, 3)
+        self._ball_moved[tag] = np.flatnonzero(np.any(now_p[:len(start)] != start, axis=1))
+        return P, only
+
+    def _last_check(self, P, ip, fl, origin, out, numbers):
+        """Generator: the UV Check on the finished fit, as computed and at single precision. A speck (under
+        FLIP_CLOSE_PX2 texels) it calls flipped, or one standing edge-on to the source polygons nearest it (`edge_on`:
+        its winding against them is rounding), has its UVs closed to a streak on every layer (`streak`, corners move at
+        most STREAK_MOVE_PX), so no rounding can mirror it; a flipped speck that cannot streak gets one UV, its
+        centre's. The card's "left for baking" counts only faces across a seam that show at least one texel
+        (`texel_area`), the faces Bake those spots bakes; the split's own counts are kept beside them."""
+
+        from .topology import _turbo as turbo
+
+        sa, s = self.sa, self.settings
+        a = sa.active
+        numbers.update(faces_left_split=numbers["faces_left"], faces_for_baking_split=numbers["faces_for_baking"])
+        if turbo is None or not hasattr(turbo, "uvscore_check"):
+            return
+        straddle = flipped = None
+        # as computed, and as the mesh stores it (single precision): a face edge-on to the source faces it reads has a
+        # winding that rounding alone can turn, so it counts as flipped when either reading calls it so
+        for pts, luv in ((P, out[a]), (np.asarray(P, np.float32).astype(np.float64), np.asarray(out[a], np.float32).astype(np.float64))):
+            job = turbo.uvscore_check(pts, ip, fl, luv, self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, sa.layers[a][1], sa.material, texture_px=s.texture_px)
+            if job is None:
+                return
+            while not job.done():
+                yield
+                if self._stopped:
+                    job.stop()
+                    return
+            res = job.result()
+            f_ = np.asarray(res[2]).astype(bool)
+            if straddle is None:
+                straddle, flipped = np.asarray(res[1]).astype(bool), f_
+            else:
+                flipped = flipped | f_
+        shows, _density = texel_area(P, ip, fl, out[a], s.texture_px)
+        ipa = np.asarray(ip, np.int64)
+        small = np.flatnonzero(np.abs(_signed_uv_px(ipa, out[a], s.texture_px)) < FLIP_CLOSE_PX2)
+        risky = flipped.copy()
+        if len(small):  # a speck edge-on to the source faces nearest it: the Check's winding test on it is rounding
+            yield
+            risky[small[edge_on(P, ipa, fl, small, sa, self.use_fast)]] = True
+        shut = np.zeros(len(risky), bool)
+        for f in np.flatnonzero(risky).tolist():
+            c = slice(ipa[f], ipa[f + 1])
+            if uv_area_px(out[a][c], s.texture_px) >= FLIP_CLOSE_PX2:
+                continue
+            got = streak(out[a][c])
+            if got is None or np.max(np.linalg.norm(got - out[a][c], axis=1)) * s.texture_px > STREAK_MOVE_PX:
+                if not flipped[f]:
+                    continue  # an edge-on speck the Check reads the right way round keeps its texture
+                got = None
+            shut[f] = True
+            for i in out:
+                out[i][c] = streak(out[i][c]) if got is not None else out[i][c].mean(0)
+        left = int(np.sum(straddle & (shows >= 1.0)))
+        self._flip_corners = np.unique(np.concatenate([np.asarray(fl, np.int64)[ipa[f]:ipa[f + 1]] for f in np.flatnonzero(flipped & ~shut).tolist()] or [np.zeros(0, np.int64)]))
+        numbers.update(flipped_closed=int(shut.sum()), flipped_left=int(np.sum(flipped & ~shut)), faces_under_texel=int(np.sum(straddle & (shows < 1.0))),
+                       faces_left=min(int(numbers["faces_left"]), left))
+        numbers["faces_for_baking"] = left - numbers["faces_left"]
 
     def _drive(self, stage):
         self._now = stage
@@ -509,6 +781,7 @@ class FitStage:
                     if self._stopped:
                         return
                     judge = got.get("judge")
+                    self._judge = judge
                     snap = None if judge is not None else first
                 if judge is not None:  # the first pass had the plain limit; priced by the camera check, then the real pass
                     view = {}
@@ -524,6 +797,7 @@ class FitStage:
             if self._stopped:
                 return
             r = snap.result
+            move_used = move
             P, vchain, vparam = np.asarray(r["points"], np.float64), r["vchain"], r["vparam"]
             numbers.update(moved=int(r["moved"]), held=int(np.sum(r["held"])))
         budget = -1.0
@@ -539,63 +813,147 @@ class FitStage:
         name, uv = sa.layers[sa.active]
         P0, ip0, fl0 = P, ip, fl
         cut_seams, cut_xyz = seams, xyz
-        if soft and s.split and self.use_fast:  # part switches: cut faces spanning two unconnected source pieces
+        tree = None
+        if soft and s.split and self.use_fast:  # side switches: cut faces where the nearest source side changes
             from .topology import _turbo as turbo
             if turbo is not None:
                 tree = turbo.face_tree(sa.points, FlatFaces(sa.indptr, sa.flat))
+                only = None
+                if s.switch_by == "side" or s.switch_snap:
+                    only = yield from self._straddling(uv, P, ip, fl)
+                    if self._stopped:
+                        return
+                if s.switch_snap and only is not None:  # zero faces first: corners over a side line move onto it
+                    region = np.asarray(seams["region"], np.int64)
+                    lim = np.asarray(move_used, np.float64) if s.snap else s.move_share * uvsnap.vertex_edge(P, ip, fl)
+                    side_of = lambda q: region[np.asarray(tree.nearest(np.asarray(q).reshape(-1, 3))[1], np.int64)]  # noqa: E731
+                    got = {}
+                    yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, lim, only, got)
+                    if self._stopped:
+                        return
+                    if self._judge is not None and len(got["moved"]):  # the camera check prices these moves too (SPEC 4.10)
+                        view = {}
+                        yield from view_limit(self._judge, P, got["points"], ip, fl, lim, s.detail, view)
+                        numbers.update(side_view_held=int(view["held"]))
+                        if view["held"]:
+                            got = {}
+                            yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, view["limit"], only, got)
+                            if self._stopped:
+                                return
+                    before_slide = np.asarray(P, np.float64).reshape(-1, 3)
+                    P = np.asarray(got["points"], np.float64)
+                    numbers.update(side_moved=int(len(got["moved"])))
+                    if len(got["moved"]):  # a slide that turns a face's texture over is taken back (the UV Check's flip test)
+                        was = self._last_flipped
+                        only = yield from self._straddling(uv, P, ip, fl)
+                        if self._stopped:
+                            return
+                        if only is not None and was is not None:
+                            now = self._last_flipped & ~was
+                            if now.any():
+                                Q = P.reshape(-1, 3).copy()
+                                face_of = np.repeat(np.arange(len(ip) - 1), np.diff(ip))
+                                vs = np.unique(fl[now[face_of]])
+                                Q[vs] = before_slide[vs]
+                                P = Q.ravel()
+                                numbers.update(side_slides_undone=int(len(vs)))
+                                only = yield from self._straddling(uv, P, ip, fl)
+                                if self._stopped:
+                                    return
+                    P0 = P
+                ball_lim = np.asarray(move_used, np.float64) if s.snap else s.move_share * uvsnap.vertex_edge(P, ip, fl)
+                if s.ball_snap:  # zero faces: corners of faces still across a seam move onto a side the others hold
+                    if only is None:
+                        only = yield from self._straddling(uv, P, ip, fl)
+                    P, only = yield from self._ball_pass(uv, P, ip, fl, None, only, ball_lim, tree, numbers, "ball")
+                    if self._stopped:
+                        return
+                    P0 = P
+                if s.switch_by != "side":
+                    only = None
                 got = {}
-                yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got)
+                yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got, by=s.switch_by, only=only)
                 if self._stopped:
                     return
                 cut_seams = got["seams"]
                 cut_xyz = uvsnap.chain_xyz(cut_seams, sa.points)
-                numbers.update(part_switches=int(cut_seams.get("part_switches", 0)))
-        reserve = 0
+                numbers.update(part_switches=int(cut_seams.get("part_switches", 0)), straddling_before=int(np.sum(only)) if only is not None else -1)
+        n_before = len(P0) // 3 if P0.ndim == 1 else len(P0)
+        hold = np.zeros(0, np.int64)  # vertices the snap after the split leaves where they are (their moves turned a face over)
         while True:
-            P, ip, fl, origin = P0, ip0, fl0, np.arange(nf, dtype=np.int64)
-            if soft and s.split:
-                give = budget if budget < 0 else max(0.0, budget - reserve)
-                cut = uvsnap.Split(P, ip, fl, cut_seams, cut_xyz, vchain, vparam, (), give, use_fast=self.use_fast)
-                yield from self._drive(cut)
+            reserve = 0
+            while True:
+                P, ip, fl, origin = P0, ip0, fl0, np.arange(nf, dtype=np.int64)
+                r_vchain = np.asarray(vchain, np.int64) if len(vchain) else np.full(n_before, -1, np.int64)
+                if soft and s.split:
+                    give = budget if budget < 0 else max(0.0, budget - reserve)
+                    cut = uvsnap.Split(P, ip, fl, cut_seams, cut_xyz, vchain, vparam, (), give, use_fast=self.use_fast)
+                    yield from self._drive(cut)
+                    if self._stopped:
+                        return
+                    r = cut.result
+                    P, ip, fl, origin = np.asarray(r["points"], np.float64), np.asarray(r["indptr"], np.int64), np.asarray(r["flat"], np.int64), np.asarray(r["origin"], np.int64)
+                    r_vchain = np.asarray(r["vchain"], np.int64)
+                    numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
+                                   faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
+                                   split_budget=give)
+                    if s.ball_snap and tree is not None:  # and on what the split left across a seam
+                        left = yield from self._straddling(uv, P, ip, fl, origin, tree)
+                        if self._stopped:
+                            return
+                        lim_after = np.asarray(ball_lim, np.float64).ravel()
+                        lim_after = np.r_[lim_after, s.move_share * uvsnap.vertex_edge(P, ip, fl)[len(lim_after):]]
+                        lim_after[hold[hold < len(lim_after)]] = 0.0
+                        P, _left = yield from self._ball_pass(uv, P, ip, fl, origin, left, lim_after, tree, numbers, "ball_after", full=True)
+                        if self._stopped:
+                            return
+                look = yield from self._lookup(uv, P, ip, fl)
+                if look is None:
+                    return
+                yield from self._reread(look, tree, P, ip, fl, n_before, r_vchain)
+                ready = {}
+                yield from self._layer_checked(uv, P, ip, fl, look, ready, origin)
                 if self._stopped:
                     return
-                r = cut.result
-                P, ip, fl, origin = np.asarray(r["points"], np.float64), np.asarray(r["indptr"], np.int64), np.asarray(r["flat"], np.int64), np.asarray(r["origin"], np.int64)
-                numbers.update(extra_faces=int(r["extra_faces"]), faces_split=int(r["faces_split"]), triangles_left=int(r["triangles_left"]),
-                               faces_left=int(r["faces_left"]), faces_for_baking=int(r["faces_cannot"]) + int(r["faces_bake"]), split_done=bool(r["done"]),
-                               split_budget=give)
-            look = yield from self._lookup(uv, P, ip, fl)
-            if look is None:
-                return
-            ready = {}
-            yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, ready)
+                halve = halve_mask(P, ip, fl, look["orient"]) | still_folded(ip, ready["uv"], ready["expected"])
+                cost = int((np.diff(ip)[halve] - 3).sum())
+                if soft and s.split and budget >= 0 and numbers["extra_faces"] + cost > budget and reserve < cost:
+                    reserve = cost  # room for the cut faces: split again with less
+                    continue
+                break
+            if halve.any():
+                ready = None
+                ip, fl, origin = fan_split(ip, fl, origin, halve)
+                numbers.update(extra_faces=numbers["extra_faces"] + cost, faces_halved=int(halve.sum()), halve_reserve=reserve)
+                look = yield from self._lookup(uv, P, ip, fl)
+                if look is None:
+                    return
+                yield from self._reread(look, tree, P, ip, fl, n_before, r_vchain)
+            out = {}
+            for i, (nm, luv) in enumerate(sa.layers):
+                got = ready if i == sa.active and ready is not None else {}
+                if not got:
+                    if i == sa.active:
+                        yield from self._layer_checked(luv, P, ip, fl, look, got, origin)
+                    else:
+                        yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
+                if self._stopped:
+                    return
+                out[i] = close_flat(P, ip, fl, got["uv"], s.texture_px)
+                if i == sa.active:
+                    f = got["fold"]
+                    numbers.update(folded_before=int(f["folded_before"]), folded_after=int(f["folded_after"]), fold_stuck=int(f["fold_stuck"]),
+                                   fold_untangled=int(f.get("fold_untangled", 0)), fold_reread=int(f.get("fold_reread", 0)))
+            yield from self._last_check(P, ip, fl, origin, out, numbers)
             if self._stopped:
                 return
-            halve = halve_mask(P, ip, fl, look["orient"]) | still_folded(ip, ready["uv"], ready["expected"])
-            cost = int((np.diff(ip)[halve] - 3).sum())
-            if soft and s.split and budget >= 0 and numbers["extra_faces"] + cost > budget and reserve < cost:
-                reserve = cost  # room for the cut faces: split again with less
-                continue
-            break
-        if halve.any():
-            ready = None
-            ip, fl, origin = fan_split(ip, fl, origin, halve)
-            numbers.update(extra_faces=numbers["extra_faces"] + cost, faces_halved=int(halve.sum()), halve_reserve=reserve)
-            look = yield from self._lookup(uv, P, ip, fl)
-            if look is None:
-                return
-        out = {}
-        for i, (nm, luv) in enumerate(sa.layers):
-            got = ready if i == sa.active and ready is not None else {}
-            if not got:
-                yield from _layer_steps(sa, luv, P, ip, fl, look, s.texture_px, self.use_fast, got)
-            if self._stopped:
-                return
-            out[i] = close_flat(P, ip, fl, got["uv"], s.texture_px)
-            if i == sa.active:
-                f = got["fold"]
-                numbers.update(folded_before=int(f["folded_before"]), folded_after=int(f["folded_after"]), fold_stuck=int(f["fold_stuck"]),
-                               fold_untangled=int(f.get("fold_untangled", 0)), fold_reread=int(f.get("fold_reread", 0)))
+            back = np.setdiff1d(np.intersect1d(self._flip_corners, self._ball_moved.get("ball_after", np.zeros(0, np.int64))), hold)
+            if not len(back):
+                break
+            hold = np.r_[hold, back]  # a face the fit turned over: the moves after the split at its corners are taken back, and the fit runs again
+            numbers["ball_after_held"] = int(len(hold))
+        numbers["side_reread"] = int(getattr(self, "numbers_reread", 0))
+        numbers["side_reread_undone"] = int(getattr(self, "numbers_reread_undone", 0))
         layers = [(nm, out[i]) for i, (nm, _u) in enumerate(sa.layers)]
         mat = (self.material if self.material is not None else np.zeros(nf, np.int64))[origin]
         pts = P.reshape(-1, 3)
@@ -652,6 +1010,107 @@ def still_folded(indptr, uv, expected) -> np.ndarray:
     a, b = q[s + k] - q[s], q[s + k + 1] - q[s]
     bad = (a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1]) * x[tri_face] <= 0.0
     return (fan > 1) & (x != 0.0) & (np.bincount(tri_face, bad, len(sizes)) > 0)
+
+
+FLIP_CLOSE_PX2 = 4.0  # a face showing fewer texels than this (a 2 x 2 block) is a speck: flipped or edge-on, its UVs close to a streak
+
+
+def uv_area_px(uv, texture_px: float = TEXTURE_PX) -> float:
+    """Texels one polygon's UVs (corner order) cover (shoelace)."""
+
+    u = np.asarray(uv, np.float64).reshape(-1, 2) * float(texture_px)
+    return 0.5 * abs(float(np.sum(u[:, 0] * np.roll(u[:, 1], -1) - np.roll(u[:, 0], -1) * u[:, 1])))
+
+
+STREAK_MOVE_PX = 1.0  # a speck's corners move at most this many texels when its UVs are closed to a streak
+
+
+def streak(uv):
+    """A polygon's UVs (corner order) closed to a line along their long way: a triangle's shortest edge, or a quad's
+    two short opposite edges, shrink to their midpoints. Every fan triangle (0, k, k+1) then has two equal corners, so
+    no rounding gives it a winding. None for other polygons."""
+
+    u = np.asarray(uv, np.float64).reshape(-1, 2).copy()
+    n = len(u)
+    if n == 3:
+        e = [float(np.linalg.norm(u[(i + 1) % 3] - u[i])) for i in range(3)]
+        i = int(np.argmin(e))
+        j = (i + 1) % 3
+        u[i] = u[j] = (u[i] + u[j]) / 2.0
+        return u
+    if n == 4:
+        pairs = ((0, 1), (2, 3)) if np.linalg.norm(u[1] - u[0]) + np.linalg.norm(u[3] - u[2]) <= np.linalg.norm(u[2] - u[1]) + np.linalg.norm(u[0] - u[3]) else ((1, 2), (3, 0))
+        for i, j in pairs:
+            u[i] = u[j] = (u[i] + u[j]) / 2.0
+        return u
+    return None
+
+
+EDGE_ON_COS = 0.05  # a fan triangle this close to perpendicular (|cos| of the normals) to the source polygon nearest its centre is edge-on to it
+
+
+def _signed_uv_px(indptr, uv, texture_px: float) -> np.ndarray:
+    ip = np.asarray(indptr, np.int64)
+    u = np.asarray(uv, np.float64).reshape(-1, 2) * float(texture_px)
+    nf = len(ip) - 1
+    owner = np.repeat(np.arange(nf), np.diff(ip))
+    nxt = np.arange(1, len(u) + 1)
+    nxt[ip[1:] - 1] = ip[:-1]
+    return np.bincount(owner, u[:, 0] * u[nxt, 1] - u[nxt, 0] * u[:, 1], nf) / 2.0
+
+
+def edge_on(points, indptr, flat, faces, sa: "Source", use_fast: bool = True) -> np.ndarray:
+    """Per face in `faces`: True when every fan triangle of it stands edge-on (EDGE_ON_COS) to the source polygon nearest
+    its centre (the fast face tree; all False without it). Such a face reads the texture at a grazing angle, and the
+    sign of its winding against those source faces is down to rounding."""
+
+    from .topology import _turbo as turbo
+
+    faces = np.asarray(faces, np.int64)
+    if turbo is None or not use_fast or not len(faces):
+        return np.zeros(len(faces), bool)
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    sizes = np.diff(ip)[faces]
+    fan = np.maximum(sizes - 2, 0)
+    tf = np.repeat(np.arange(len(faces)), fan)
+    k = np.arange(len(tf)) - np.repeat(np.cumsum(fan) - fan, fan) + 1
+    s0 = ip[faces][tf]
+    a, b, c = P[fl[s0]], P[fl[s0 + k]], P[fl[s0 + k + 1]]
+    n = np.cross(b - a, c - a)
+    tree = turbo.face_tree(sa.points, FlatFaces(sa.indptr, sa.flat))
+    _at, g, _d = tree.nearest((a + b + c) / 3.0)
+    g = np.asarray(g, np.int64)
+    sP = np.asarray(sa.points, np.float64).reshape(-1, 3)
+    sip, sfl = np.asarray(sa.indptr, np.int64), np.asarray(sa.flat, np.int64)
+    s_own = np.repeat(np.arange(len(sip) - 1), np.diff(sip))
+    s_nxt = np.arange(1, len(sfl) + 1)
+    s_nxt[sip[1:] - 1] = sip[:-1]
+    cr = np.cross(sP[sfl], sP[sfl[s_nxt]])
+    sn = np.stack([np.bincount(s_own, cr[:, j], len(sip) - 1) for j in range(3)], 1)[g]  # Newell normals of the nearest polygons
+    cos = np.abs((n * sn).sum(1)) / np.maximum(np.linalg.norm(n, axis=1) * np.linalg.norm(sn, axis=1), 1e-300)
+    return np.bincount(tf, cos >= EDGE_ON_COS, len(faces)) == 0
+
+
+def texel_area(points, indptr, flat, uv, texture_px: float = TEXTURE_PX) -> tuple:
+    """(texels per face at the layout's own density, density): 3D area x density^2, density = the median over faces of
+    sqrt(UV texels / 3D area), the texels per mesh unit of the layout. A face below 1 shows no texture of its own."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    nf = len(ip) - 1
+    if nf == 0:
+        return np.zeros(0), float(texture_px)
+    owner = np.repeat(np.arange(nf), np.diff(ip))
+    nxt = np.arange(1, len(fl) + 1)
+    nxt[ip[1:] - 1] = ip[:-1]
+    cr = np.cross(P[fl], P[fl[nxt]])
+    a3 = np.linalg.norm(np.stack([np.bincount(owner, cr[:, k], nf) for k in range(3)], 1), axis=1) / 2.0
+    u = np.asarray(uv, np.float64).reshape(-1, 2) * float(texture_px)
+    a2 = np.abs(np.bincount(owner, u[:, 0] * u[nxt, 1] - u[nxt, 0] * u[:, 1], nf)) / 2.0
+    ok = (a3 > 0) & (a2 > 0)
+    dens = float(np.median(np.sqrt(a2[ok] / a3[ok]))) if ok.any() else float(texture_px)
+    return a3 * dens * dens, dens
 
 
 SLIVER_UV_PX2 = 1e-3  # a fan triangle with twice its UV area below this many texels squared shows nothing (and its winding is rounding)

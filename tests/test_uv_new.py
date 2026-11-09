@@ -186,6 +186,40 @@ class WithKernels(unittest.TestCase):
         finally:
             fast.uninstall()
 
+    def test_the_same_mesh_gives_the_same_layout_and_keep_going_never_lowers_it(self):
+        fast = common.addon_module("uv_fast")
+        kn = common.addon_module("triadq.uvnew")  # the add-on's own copy of the modules, the one `fast` installs the kernels into
+        kp = common.addon_module("triadq.uvpack")
+        try:
+            self.assertTrue(fast.install())
+            self.assertIn("pack_into", kp.FAST)
+
+            def make(**kw):
+                return kn.NewUVs(*cube(4), settings=kn.Settings(out_of_sight=False, hidden_pct=100.0, texture_px=256, **kw))
+
+            first = make()
+            r1 = first.run()
+            r2 = make(time_per_pass=0.0001).run()  # no clock anywhere in the layout: a tiny Time per pass changes nothing
+            self.assertTrue(np.array_equal(r1.uv, r2.uv) and r1.scale == r2.scale)
+            stage, passes = first, 0
+            while not stage.exhausted:
+                nxt = stage.keep_going()
+                self.assertIsNotNone(nxt)
+                while not nxt.done:
+                    nxt.step()
+                    if nxt.waiting:
+                        time.sleep(0.0005)
+                self.assertIsNone(nxt.error)
+                self.assertGreaterEqual(nxt.result.scale, stage.result.scale)
+                self.assertEqual(nxt.result.nest_effort, stage.settings.nest_effort + 1)
+                stage, passes = nxt, passes + 1
+                if not stage.gained:
+                    break  # a pass that gains nothing ends it
+            self.assertLessEqual(passes, len(kp.ORDER_MODES) - 1)
+            self.assertIsNone(make(density=100.0).keep_going())  # not finished (and a fixed density packs boxes): nothing to continue
+        finally:
+            fast.uninstall()
+
 
 if __name__ == "__main__":
     unittest.main()

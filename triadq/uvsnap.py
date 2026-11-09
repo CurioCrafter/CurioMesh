@@ -51,7 +51,10 @@ WARP_COSINE = 0.5
 
 SKIPPED, ACCEPTED, REFUSED, NO_PATH, ON_EDGES, SHORT, PARTLY_HELD = 0, 1, 2, 3, 4, 5, 6
 KEPT, SPLIT, LEFT, CANNOT, BAKE = 0, 1, 2, 3, 4
-SOFT = 2
+IGNORE, SOFT = 0, 2
+OWNER_EPS_DIAG, OWNER_EPS_EDGE = 1e-4, 0.05  # the UV Check's owner ball (SPEC 9.1): nearest + max(this x diagonal, this x median source edge)
+SWITCH_STEP = 0.5  # part_switches samples each result edge at most this many source edges apart, so thin strips are found
+SWITCH_BY = "side"  # part_switches: "side" = where the nearest side region changes, "part" = only between unconnected pieces
 SLICE_S = 0.002  # one step() of a stage does about this much work (short: a loaded PC can stretch a slice several times)
 
 # Optional faster callables, set by the one adapter (uv_fast.py); the NumPy code runs when a name is missing.
@@ -219,17 +222,17 @@ def _uv_at(src_P, src_ip, src_fl, src_uv, face, at):
 
 
 def part_switches(seams: dict, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, texture_px: float = 1024.0,
-                  steps: int = 16) -> dict:
+                  steps: int = 16, by: str = SWITCH_BY, only=None) -> dict:
     """`part_switches_steps` in one call: the seam dict with the part switches added."""
 
     out = {}
-    for _ in part_switches_steps(seams, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, out, texture_px, steps):
+    for _ in part_switches_steps(seams, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, out, texture_px, steps, by, only):
         pass
     return out["seams"]
 
 
 def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, points, indptr, flat, nearest, out: dict,
-                        texture_px: float = 1024.0, steps: int = 16):
+                        texture_px: float = 1024.0, steps: int = 16, by: str = SWITCH_BY, only=None):
     """Generator (yields between short pieces; `out["seams"]` at the end): the seam dict with **part switches** added as
     Soft chains: on the result mesh, the lines where the nearest source piece changes between two unconnected pieces
     (a bolt on a plate, a cap pushed into a body).
@@ -254,30 +257,65 @@ def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, p
     yield from mesh.build(P, indptr, flat)
     if mesh.nf == 0 or len(sip) < 3:
         return
-    if "face_part" not in seams:
-        got = {}
-        yield from _parts_steps(sfl, sip, np.asarray(seams["weld"], np.int64), int(seams["n_welded"]), got)
-        seams["face_part"] = got["part"]
-    part = np.asarray(seams["face_part"], np.int64)
+    if by == "side" and "region" not in seams:
+        by = "part"  # a seam dict without side regions: only the unconnected pieces are known
+    if by == "side":  # every change of side region (UV island joined across Ignore/Shift chains), parts included
+        part = np.asarray(seams["region"], np.int64)
+    else:
+        if "face_part" not in seams:
+            got = {}
+            yield from _parts_steps(sfl, sip, np.asarray(seams["weld"], np.int64), int(seams["n_welded"]), got)
+            seams["face_part"] = got["part"]
+        part = np.asarray(seams["face_part"], np.int64)
     if part.min() == part.max():
         return
-    vface = np.zeros(len(P), np.int64)
+    vpart = np.empty(len(P), np.int64)
     for i in range(0, len(P), 4096):
-        vface[i:i + 4096] = np.asarray(nearest(P[i:i + 4096])[1], np.int64)
+        vpart[i:i + 4096] = part[np.asarray(nearest(P[i:i + 4096])[1], np.int64)]
         yield
-    vpart = part[vface]
-    cross = np.flatnonzero(vpart[mesh.ea] != vpart[mesh.eb])
-    if not len(cross):
+    # Every switch along an edge, not only one per edge: a strip of another side thinner than the edge (a trim band, a
+    # rim) has two. Each edge is sampled at steps of at most SWITCH_STEP source edges and every step whose two ends
+    # are nearest different sides is bisected.
+    sizes = np.diff(sip)
+    s_next = np.arange(len(sfl)) + 1
+    s_next[sip[1:][sizes > 0] - 1] = sip[:-1][sizes > 0]
+    src_edge = float(np.median(np.linalg.norm(sP[sfl[s_next]] - sP[sfl], axis=1))) if len(sfl) else 1.0
+    PA, PB = P[mesh.ea], P[mesh.eb]
+    elen = np.linalg.norm(PB - PA, axis=1)
+    pieces = np.maximum(1, np.ceil(elen / max(SWITCH_STEP * src_edge, 1e-30))).astype(np.int64)
+    inner = pieces - 1  # samples strictly inside each edge
+    s_edge = np.repeat(np.arange(len(elen)), inner)
+    s_t = (np.arange(len(s_edge)) - np.repeat(np.cumsum(inner) - inner, inner) + 1) / np.repeat(pieces, inner).astype(np.float64)
+    s_lab = np.empty(len(s_edge), np.int64)
+    s_at = PA[s_edge] + s_t[:, None] * (PB - PA)[s_edge]
+    for i in range(0, len(s_edge), 4096):
+        s_lab[i:i + 4096] = part[np.asarray(nearest(s_at[i:i + 4096])[1], np.int64)]
+        yield
+    # samples per edge in order: t = 0 (end a), the inner ones, t = 1 (end b)
+    starts = np.cumsum(pieces + 1) - (pieces + 1)
+    n_all = int((pieces + 1).sum())
+    all_e = np.repeat(np.arange(len(elen)), pieces + 1)
+    all_t = np.zeros(n_all)
+    all_l = np.empty(n_all, np.int64)
+    all_l[starts] = vpart[mesh.ea]
+    all_l[starts + pieces] = vpart[mesh.eb]
+    all_t[starts + pieces] = 1.0
+    inner_pos = np.repeat(starts, inner) + (np.arange(len(s_edge)) - np.repeat(np.cumsum(inner) - inner, inner) + 1)
+    all_l[inner_pos], all_t[inner_pos] = s_lab, s_t
+    step = np.flatnonzero((all_l[:-1] != all_l[1:]) & (all_e[:-1] == all_e[1:]))
+    if not len(step):
         return
-    pa, pb = P[mesh.ea[cross]], P[mesh.eb[cross]]
-    first = vpart[mesh.ea[cross]]
-    lo, hi = np.zeros(len(cross)), np.ones(len(cross))
+    cross = all_e[step]  # edge of each switch (an edge may hold several, in order along it)
+    pa, pb = PA[cross], PB[cross]
+    first = all_l[step]
+    lo, hi = all_t[step].copy(), all_t[step + 1].copy()
     for _ in range(steps):
         mid = 0.5 * (lo + hi)
         same = part[np.asarray(nearest(pa + mid[:, None] * (pb - pa))[1], np.int64)] == first
         lo, hi = np.where(same, mid, lo), np.where(same, hi, mid)
         yield
-    x = pa + (0.5 * (lo + hi))[:, None] * (pb - pa)
+    tx = 0.5 * (lo + hi)
+    x = pa + tx[:, None] * (pb - pa)
     at_a, fa, _ = nearest(pa + lo[:, None] * (pb - pa))
     at_b, fb, _ = nearest(pa + hi[:, None] * (pb - pa))
     fa, fb = np.asarray(fa, np.int64), np.asarray(fb, np.int64)
@@ -286,25 +324,94 @@ def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, p
     yield
     uvb = _uv_at(sP, sip, sfl, suv, fb, np.asarray(at_b).reshape(-1, 3))
     yield
-    pair = np.sort(np.stack([part[fa], part[fb]], 1), 1).tolist()
-    point_of_edge = dict(zip(cross.tolist(), range(len(cross))))
+    pair = [tuple(r) for r in np.sort(np.stack([part[fa], part[fb]], 1), 1).tolist()]
+    on_edge = {}
+    for k, e in enumerate(cross.tolist()):
+        on_edge.setdefault(e, []).append(k)
     edge_of = {(x_, y_): e for e, (x_, y_) in enumerate(zip(mesh.ea.tolist(), mesh.eb.tolist()))}
+    # Per face: the switches on its edges with the same side pair are joined when that pair shows exactly twice; the
+    # rest (three sides meeting inside the face, or a pair showing 4 times) are joined to one new point inside the face
+    # (the mean of theirs), which the split cuts as a fan.
     adj = {}
+    face_cut = {}  # face -> (switch pairs joined across it, (junction, its switches) or None)
+    junction = []  # (position, gap px)
+    junction_face = []
+    nx = len(x)
+    gap = np.sqrt(((uva - uvb) ** 2).sum(1)) * texture_px
     for f in range(mesh.nf):
         if f % 1024 == 1023:
             yield
+        if only is not None and not only[f]:
+            continue
         fv = mesh.face(f)
         n = len(fv)
-        ks = [k for k in (point_of_edge.get(edge_of.get((min(fv[i], fv[(i + 1) % n]), max(fv[i], fv[(i + 1) % n])))) for i in range(n)) if k is not None]
-        if len(ks) == 2 and pair[ks[0]] == pair[ks[1]]:
-            adj.setdefault(ks[0], set()).add(ks[1])
-            adj.setdefault(ks[1], set()).add(ks[0])
+        ks = []
+        for i in range(n):
+            e = edge_of.get((min(fv[i], fv[(i + 1) % n]), max(fv[i], fv[(i + 1) % n])))
+            ks.extend(on_edge.get(e, ()))
+        if len(ks) < 2:
+            continue
+        by_pair = {}
+        for k in ks:
+            by_pair.setdefault(pair[k], []).append(k)
+        loose = []
+        links = []
+        for got_ in by_pair.values():
+            if len(got_) == 2:
+                links.append((got_[0], got_[1]))
+            elif len(by_pair) == 1 and len(got_) % 2 == 0:
+                # two sides only, crossing back and forth (a thin strip): in order round the face the sides alternate,
+                # so consecutive switches pair up (1-2, 3-4, ...) and each line cuts off one stretch
+                ring = []
+                for i in range(n):
+                    a_, b_ = fv[i], fv[(i + 1) % n]
+                    e = edge_of.get((min(a_, b_), max(a_, b_)))
+                    fwd = int(mesh.ea[e]) == a_ if e is not None else True
+                    ring += sorted(on_edge.get(e, ()), key=lambda k: tx[k] if fwd else -tx[k])
+                m = len(ring)
+                best = None
+                for off in (0, 1):  # either pairing splits the sides; a pair on one edge cuts nothing, so take the other
+                    prs = [(ring[(i + off) % m], ring[(i + 1 + off) % m]) for i in range(0, m, 2)]
+                    key = (sum(cross[p] == cross[q] for p, q in prs), sum(float(np.linalg.norm(x[p] - x[q])) for p, q in prs))
+                    if best is None or key < best[0]:
+                        best = (key, prs)
+                links += best[1]
+            else:
+                loose.extend(got_)
+        if len(loose) == 2:  # two lone switches: one line between them
+            links.append((loose[0], loose[1]))
+            loose = []
+        for k1, k2 in links:
+            adj.setdefault(k1, set()).add(k2)
+            adj.setdefault(k2, set()).add(k1)
+        fan = None
+        if len(loose) >= 3:
+            j = nx + len(junction)
+            junction.append((x[loose].mean(0), float(gap[loose].max())))
+            junction_face.append(f)
+            for k in loose:
+                adj.setdefault(k, set()).add(j)
+                adj.setdefault(j, set()).add(k)
+            fan = (j, loose)
+        if links or fan:
+            face_cut[f] = (links, fan)
     runs = _walk_runs(adj)
     if not runs:
         return
+    if junction:  # where the sides meet inside each junction face, not the mean of its switches
+        got = {}
+        yield from _meeting_points_steps(P, mesh, junction_face, vpart, part, nearest, got)
+        for i, q in enumerate(got["at"]):
+            if q is not None:
+                junction[i] = (q, junction[i][1])
+        x = np.r_[x, np.array([q for q, _ in junction])]
+        gap = np.r_[gap, np.array([g for _, g in junction])]
+        uva = np.r_[uva, np.zeros((len(junction), 2))]
+        uvb = np.r_[uvb, np.zeros((len(junction), 2))]
+        for i, (_, g) in enumerate(junction):  # a junction's UVs only carry its gap (the split orders its budget by it)
+            uvb[nx + i, 0] = g / texture_px
     base = int(seams["n_welded"])
     order = np.concatenate([np.asarray(r, np.int64) for r in runs])
-    gap = np.sqrt(((uva - uvb) ** 2).sum(1)) * texture_px
     old_ip = np.asarray(seams["run_indptr"], np.int64)
     cls = np.asarray(seams["class"])
     old_extra = seams.get("extra_xyz")
@@ -313,11 +420,551 @@ def part_switches_steps(seams: dict, src_points, src_indptr, src_flat, src_uv, p
     res["uv_a"] = np.r_[np.asarray(seams["uv_a"], np.float64).ravel(), uva[order].ravel()]
     res["uv_b"] = np.r_[np.asarray(seams["uv_b"], np.float64).ravel(), uvb[order].ravel()]
     res["gap_px"] = np.r_[np.asarray(seams["gap_px"], np.float64), gap[order]]
-    res["class"] = np.r_[cls, np.full(len(runs), SOFT, cls.dtype)]
+    new_cls = cls.copy()
+    if by == "side":  # the switches stand for every Soft chain here: the split cuts where the owner changes on the result
+        new_cls[new_cls == SOFT] = IGNORE
+    res["class"] = np.r_[new_cls, np.full(len(runs), SOFT, cls.dtype)]
     res["n_welded"] = base + len(x)
     res["extra_xyz"] = x if old_extra is None else np.r_[np.asarray(old_extra, np.float64).reshape(-1, 3), x]
     res["part_switches"] = len(runs)
     res["part_switch_first"] = len(cls)
+    if by == "side":
+        res["switch_plan"] = _switch_plan(runs, face_cut, cross, tx, x, nx, base, len(cls), mesh)
+
+
+
+def face_sides(points, indptr, flat, label, on_cut) -> np.ndarray:
+    """Per result face the side it lies on: the label (nearest source side region per vertex) its corners agree on,
+    leaving out corners on a cut (`on_cut` per vertex); -1 when they disagree or every corner is on a cut."""
+
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    lab, cut = np.asarray(label, np.int64), np.asarray(on_cut, bool)
+    nf = len(ip) - 1
+    out = np.full(nf, -1, np.int64)
+    cl = np.where(cut[fl], -1, lab[fl])
+    face_of = np.repeat(np.arange(nf), np.diff(ip))
+    hi = np.full(nf, -1, np.int64)
+    np.maximum.at(hi, face_of, cl)
+    lo = np.full(nf, np.iinfo(np.int64).max, np.int64)
+    np.minimum.at(lo, face_of, np.where(cl < 0, np.iinfo(np.int64).max, cl))
+    ok = (hi >= 0) & (lo == hi)
+    out[ok] = hi[ok]
+    return out
+
+
+def _ids_w(sP, sip, sfl, face, at):
+    """(source corner ids (N, 3), barycentric weights (N, 3)) of the closest points `at` on polygons `face` (their
+    nearest fan triangle), the lookup's own form."""
+
+    n = len(face)
+    ids, w = np.zeros((n, 3), np.int64), np.zeros((n, 3))
+    best = np.full(n, np.inf)
+    counts = sip[face + 1] - sip[face]
+    for j in range(1, int(counts.max()) - 1 if n else 0):
+        i = np.flatnonzero(counts > j + 1)
+        c0 = sip[face[i]]
+        a, b, c = sP[sfl[c0]], sP[sfl[c0 + j]], sP[sfl[c0 + j + 1]]
+        ww = _closest_bary_many(at[i], a, b, c)
+        q = ww[:, :1] * a + ww[:, 1:2] * b + ww[:, 2:] * c
+        d = np.sqrt(((q - at[i]) ** 2).sum(1))
+        better = d < best[i]
+        k = i[better]
+        best[k] = d[better]
+        ids[k] = np.stack([c0, c0 + j, c0 + j + 1], 1)[better]
+        w[k] = ww[better]
+    return ids, w
+
+
+def _wind_of(sP, sip, sfl, src_uv, faces) -> np.ndarray:
+    """Sign of the UV area of source polygons `faces` (shoelace over their corners; 0 = no UV area)."""
+
+    uv = np.asarray(src_uv, np.float64).reshape(-1, 2)
+    out = np.zeros(len(faces))
+    for i, h in enumerate(np.asarray(faces, np.int64).tolist()):
+        u = uv[sip[h]:sip[h + 1]]
+        out[i] = np.sign(np.sum(u[:, 0] * np.roll(u[:, 1], -1) - np.roll(u[:, 0], -1) * u[:, 1]))
+    return out
+
+
+def _src_normal(sP, sip, sfl, faces) -> np.ndarray:
+    """Newell normals (not unit) of source polygons `faces`."""
+
+    out = np.zeros((len(faces), 3))
+    for i, h in enumerate(np.asarray(faces, np.int64).tolist()):
+        c = sP[sfl[sip[h]:sip[h + 1]]]
+        out[i] = np.cross(c, np.roll(c, -1, 0)).sum(0)
+    return out
+
+
+class RegionTrees:
+    """Closest-point lookups over the source polygons of one side region at a time, built when first asked (the
+    fast face tree over that region's polygons; `tree_of(points, FlatFaces)`). `eps` is the UV Check's owner-ball
+    reach (SPEC 9.1) for this source."""
+
+    def __init__(self, src_points, src_indptr, src_flat, src_region, tree_of):
+        self.sP = np.asarray(src_points, np.float64).reshape(-1, 3)
+        self.sip, self.sfl = np.asarray(src_indptr, np.int64), np.asarray(src_flat, np.int64)
+        self.reg = np.asarray(src_region, np.int64)
+        self.tree_of = tree_of
+        self.order = np.argsort(self.reg, kind="stable")
+        self.starts = np.searchsorted(self.reg[self.order], np.arange(int(self.reg.max()) + 2 if len(self.reg) else 1))
+        self.trees = {}
+        sizes = np.diff(self.sip)
+        nxt = np.arange(len(self.sfl)) + 1
+        nxt[self.sip[1:][sizes > 0] - 1] = self.sip[:-1][sizes > 0]
+        diag = float(np.linalg.norm(self.sP.max(0) - self.sP.min(0))) if len(self.sP) else 0.0
+        edge = float(np.median(np.linalg.norm(self.sP[self.sfl[nxt]] - self.sP[self.sfl], axis=1))) if len(self.sfl) else 0.0
+        self.eps = max(OWNER_EPS_DIAG * diag, OWNER_EPS_EDGE * edge)
+
+    def nearest(self, r, q):
+        """(closest points, source polygon ids, distances) on side `r`; None when the side has no polygons."""
+
+        from .types import FlatFaces
+
+        if r not in self.trees:
+            own = self.order[self.starts[r]:self.starts[r + 1]] if 0 <= r < len(self.starts) - 1 else np.zeros(0, np.int64)
+            tree = None
+            if len(own):
+                sub_ip = np.r_[0, np.cumsum(self.sip[own + 1] - self.sip[own])].astype(np.int64)
+                sub_fl = np.concatenate([self.sfl[self.sip[g]:self.sip[g + 1]] for g in own.tolist()])
+                tree = self.tree_of(self.sP, FlatFaces(sub_ip, sub_fl))
+            self.trees[r] = (own, tree)
+        own, tree = self.trees[r]
+        if tree is None:
+            return None
+        at, g, d = tree.nearest(np.asarray(q, np.float64).reshape(-1, 3))
+        return np.asarray(at, np.float64).reshape(-1, 3), own[np.asarray(g, np.int64)], np.asarray(d, np.float64)
+
+
+def ball_sides_steps(look_region, points, indptr, flat, label, d0, trees: RegionTrees, out: dict):
+    """Generator: out["sides"] = per result face a side region whose owner ball (the UV Check's rule, SPEC 9.1: within
+    the corner's nearest distance `d0` plus the ball's reach) holds every corner of it, -1 when none does. Tried in
+    order: the lookup's own side, then the sides its corners lie nearest (`label`). A face whose corners all lie nearest
+    the lookup's side keeps it without a test. Our own rule."""
+
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    lab, d0 = np.asarray(label, np.int64), np.asarray(d0, np.float64)
+    lr = np.asarray(look_region, np.int64)
+    nf = len(ip) - 1
+    sizes = np.diff(ip)
+    face_of = np.repeat(np.arange(nf), sizes)
+    agree = np.bincount(face_of, lab[fl] == lr[face_of], nf) == sizes
+    sides = np.where(agree, lr, -1)
+    cand = {}
+    for f in np.flatnonzero(~agree & (sizes > 0)).tolist():
+        cs = [int(lr[f])] if lr[f] >= 0 else []
+        for v in fl[ip[f]:ip[f + 1]].tolist():
+            if int(lab[v]) not in cs:
+                cs.append(int(lab[v]))
+        cand[f] = cs
+    yield
+    by_r = {}
+    for f, cs in cand.items():
+        for r in cs:
+            by_r.setdefault(r, []).append(f)
+    ok = {}
+    for r, fs in by_r.items():
+        corners = np.concatenate([np.arange(ip[f], ip[f + 1]) for f in fs])
+        got = trees.nearest(r, P[fl[corners]])
+        if got is None:
+            continue
+        inside = got[2] <= d0[fl[corners]] + trees.eps
+        k = 0
+        for f in fs:
+            n = int(sizes[f])
+            if inside[k:k + n].all():
+                ok.setdefault(f, set()).add(r)
+            k += n
+        yield
+    for f, cs in cand.items():
+        good = ok.get(f, ())
+        sides[f] = next((r for r in cs if r in good), -1)
+    out["sides"] = sides
+
+
+def side_reread_steps(look: dict, sides, src_points, src_indptr, src_flat, src_region, points, indptr, flat, tree_of, out: dict, trees=None,
+                      src_uv=None):
+    """Generator: re-reads, in a per-side lookup `look` (`uvseams` form), the faces whose side region the lookup picked
+    against `sides` (from `ball_sides_steps` or `face_sides`): every corner and the reference from the nearest point of
+    that side. The lookup votes with the face centre, which on a face cut along a side switch, or on a coarse face
+    beside a crease, can lie nearest the other side; the corners then read the wrong side's texture. `tree_of(points,
+    FlatFaces) -> tree with .nearest` builds a lookup over some source polygons (the fast face tree); `trees` (a
+    RegionTrees) reuses the lookups already built. With `src_uv` (the active layer, per source corner) a face is left as
+    the lookup read it when its new reads would wind two ways (a crease where the side's texture turns over): the fold
+    fix and the halving judge those. Fills out["reread"] (faces changed). Our own rule."""
+
+    sP = np.asarray(src_points, np.float64).reshape(-1, 3)
+    sip, sfl = np.asarray(src_indptr, np.int64), np.asarray(src_flat, np.int64)
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    sides = np.asarray(sides, np.int64)
+    todo = np.flatnonzero((sides >= 0) & (sides != np.asarray(look["region"], np.int64)) & (np.asarray(look["ref_face"]) >= 0))
+    out["reread"] = 0
+    if not len(todo):
+        return
+    trees = trees or RegionTrees(sP, sip, sfl, src_region, tree_of)
+    done = 0
+    for r in np.unique(sides[todo]).tolist():
+        fs = todo[sides[todo] == r]
+        corner = np.concatenate([np.arange(ip[f], ip[f + 1]) for f in fs.tolist()])
+        q = P[fl[corner]]
+        cen = np.array([P[fl[ip[f]:ip[f + 1]]].mean(0) for f in fs.tolist()])
+        got = trees.nearest(r, np.r_[q, cen])
+        if got is None:
+            continue
+        at, g, _d = got
+        nq = len(q)
+        if src_uv is not None:  # keep only faces whose reads all show the texture the same way round
+            wind = _wind_of(sP, sip, sfl, src_uv, g)
+            nf_r = np.array([np.cross(P[fl[ip[f]:ip[f + 1]]], np.roll(P[fl[ip[f]:ip[f + 1]]], -1, 0)).sum(0) for f in fs.tolist()])
+            sizes_r = np.diff(ip)[fs]
+            face_n = np.repeat(nf_r, sizes_r, axis=0)
+            sn = _src_normal(sP, sip, sfl, g)
+            show = wind * np.where((np.r_[face_n, nf_r] * sn).sum(1) >= 0.0, 1.0, -1.0)
+            cshow, rshow = show[:nq], show[nq:]
+            ok_f = np.array([bool(np.all(cshow[k0:k0 + n_] == rshow[i])) and rshow[i] != 0.0
+                             for i, (k0, n_) in enumerate(zip(np.r_[0, np.cumsum(sizes_r)[:-1]].tolist(), sizes_r.tolist()))])
+            if not ok_f.all():
+                keep_c = np.repeat(ok_f, sizes_r)
+                fs, corner, q = fs[ok_f], corner[keep_c], q[keep_c]
+                at, g = np.r_[at[:nq][keep_c], at[nq:][ok_f]], np.r_[g[:nq][keep_c], g[nq:][ok_f]]
+                nq = len(q)
+                if not len(fs):
+                    continue
+        ids, w = _ids_w(sP, sip, sfl, g, at)
+        look["ids"].reshape(-1, 3)[corner] = ids[:nq]
+        look["w"].reshape(-1, 3)[corner] = w[:nq]
+        look["shift"][corner] = False
+        look["slid"][corner] = False
+        look["ref_ids"].reshape(-1, 3)[fs] = ids[nq:]
+        look["ref_w"].reshape(-1, 3)[fs] = w[nq:]
+        rf = g[nq:]
+        look["ref_face"][fs] = rf
+        look["region"][fs] = r
+        # orientation against the reference (its UV winding is applied per layer): turned when it faces away
+        for f, h in zip(fs.tolist(), rf.tolist()):
+            cs = sfl[sip[h]:sip[h + 1]]
+            pf = P[fl[ip[f]:ip[f + 1]]]
+            ns = np.cross(sP[cs], sP[np.roll(cs, -1)]).sum(0)
+            nr = np.cross(pf, np.roll(pf, -1, 0)).sum(0)
+            look["orient"][f] = 1.0 if float(ns @ nr) >= 0.0 else -1.0
+        done += len(fs)
+        yield
+    out["reread"] = done
+
+MEET_LEVELS = 14  # halvings of the triangle that holds the meeting point of three sides (a face / 2^14 is well below a source edge)
+
+
+def _meeting_points_steps(P, mesh, faces, vlabel, part, nearest, out: dict, levels: int = MEET_LEVELS):
+    """Generator: per face in `faces`, the point where three side regions meet on it (out["at"], None when no fan
+    triangle of the face shows three sides at its corners). The fan triangle with three different nearest sides at its
+    corners holds the meeting point (the sides split the plane like a Sperner labelling); it is cut into four at its
+    edge midpoints, `levels` times, keeping a quarter that still shows three sides. Our own use of the textbook
+    subdivision."""
+
+    n = len(faces)
+    tri = np.zeros((n, 3, 3))
+    lab = np.full((n, 3), -1, np.int64)
+    ok = np.zeros(n, bool)
+    for i, f in enumerate(faces):
+        fv = mesh.face(f)
+        best = -1
+        for k in range(1, len(fv) - 1):
+            t = (fv[0], fv[k], fv[k + 1])
+            d = len({int(vlabel[v]) for v in t})
+            if d > best:
+                best = d
+                tri[i] = P[list(t)]
+                lab[i] = [int(vlabel[v]) for v in t]
+        ok[i] = best >= 3
+    yield
+    idx = np.flatnonzero(ok)
+    for _ in range(levels if len(idx) else 0):
+        T, L = tri[idx], lab[idx]
+        mids = np.stack([(T[:, 0] + T[:, 1]) / 2, (T[:, 1] + T[:, 2]) / 2, (T[:, 2] + T[:, 0]) / 2], 1)  # ab, bc, ca
+        ml = part[np.asarray(nearest(mids.reshape(-1, 3))[1], np.int64)].reshape(-1, 3)
+        kids_p = np.stack([np.stack([T[:, 0], mids[:, 0], mids[:, 2]], 1), np.stack([mids[:, 0], T[:, 1], mids[:, 1]], 1),
+                           np.stack([mids[:, 2], mids[:, 1], T[:, 2]], 1), np.stack([mids[:, 0], mids[:, 1], mids[:, 2]], 1)], 1)
+        kids_l = np.stack([np.stack([L[:, 0], ml[:, 0], ml[:, 2]], 1), np.stack([ml[:, 0], L[:, 1], ml[:, 1]], 1),
+                           np.stack([ml[:, 2], ml[:, 1], L[:, 2]], 1), np.stack([ml[:, 0], ml[:, 1], ml[:, 2]], 1)], 1)
+        three = (kids_l[:, :, 0] != kids_l[:, :, 1]) & (kids_l[:, :, 1] != kids_l[:, :, 2]) & (kids_l[:, :, 0] != kids_l[:, :, 2])
+        has = three.any(1)
+        pick = np.argmax(three, 1)
+        r = np.arange(len(idx))
+        tri[idx[has]] = kids_p[r[has], pick[has]]
+        lab[idx[has]] = kids_l[r[has], pick[has]]
+        idx = idx[has]  # a triangle with no three-sided quarter stops where it is
+        yield
+    out["at"] = [tri[i].mean(0) if ok[i] else None for i in range(n)]
+
+
+
+
+SWITCH_SNAP_AGAIN = True  # a vertex may slide again in a later pass; passes stop when one mends no more faces than the last
+
+
+def _keeps_edges(pos, mesh, v, to) -> bool:
+    """False when moving `v` to `to` would bring it within SWITCH_REUSE of an edge's length onto a neighbour: two corners
+    sliding to the same switch point from both ends of their edge would close it, and a face with a zero-length edge
+    has a triangle with no area, whose winding (and the texture's way round on it) is rounding noise."""
+
+    for n in mesh.nbr[v]:
+        if _norm(_sub(to, pos[n])) < SWITCH_REUSE * _norm(_sub(pos[v], pos[n])):
+            return False
+    return True
+
+
+def switch_snap_steps(points, indptr, flat, label_of, max_move, only, out: dict, passes: int | None = None, steps: int = 16):
+    """Generator (zero faces, SPEC 4.5's idea on the side lines): moves result vertices onto the line where the nearest
+    source side changes, so a face whose corners lie on two sides gets one side every corner touches. Per face to mend
+    (`only`, per face; None = every face whose corners' sides differ) the side most of its corners lie on is kept; each
+    other corner moves along its edge towards a kept-side neighbour of the face to the first point where the side
+    changes, when that change is straight into the kept side, the move is within `max_move` (per vertex; the caller's
+    camera check or share of an edge) and no face around the vertex flips or folds (the snap's own guard). Smallest
+    moves first; a vertex moves once (it then touches both sides); passes repeat while one moves something (a face
+    with two corners over the line needs both), `passes` None = no other end. `label_of(points (N, 3)) -> side per point` is the caller's lookup.
+    Fills out["points"] (flat), out["moved"] (vertex ids). Our own rule; bisection is textbook."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3).copy()
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    mesh = _Mesh(P, ip, fl, lazy=True)
+    yield from mesh.build(P, ip, fl)
+    limit = np.asarray(max_move, np.float64).ravel()
+    moved_all = []
+    nf = len(ip) - 1
+    pass_no = 0
+    last_mixed = None
+    moved_once = set()  # a vertex moved onto a side line stays there: it touches both sides, so every pass ends
+    while passes is None or pass_no < passes:
+        pass_no += 1
+        lab = np.asarray(label_of(P), np.int64)
+        yield
+        face_of = np.repeat(np.arange(nf), np.diff(ip))
+        wild = np.zeros(len(P), bool)  # a vertex slid onto a line touches both sides
+        wild[np.asarray(moved_all, np.int64)] = True
+        cl = np.where(wild[fl], -1, lab[fl])
+        hi = np.full(nf, -1, np.int64)
+        np.maximum.at(hi, face_of, cl)
+        lo = np.full(nf, np.iinfo(np.int64).max, np.int64)
+        np.minimum.at(lo, face_of, np.where(cl < 0, np.iinfo(np.int64).max, cl))
+        mixed = (hi >= 0) & (lo < hi)
+        if only is not None:
+            mixed &= np.asarray(only, bool)
+        n_mixed = int(mixed.sum())
+        if SWITCH_SNAP_AGAIN and pass_no > 1 and n_mixed >= last_mixed:  # keep going only while a pass mends faces
+            P = P_before
+            moved_all = moved_before
+            break
+        last_mixed, P_before, moved_before = n_mixed, P.copy(), list(moved_all)
+        cand = {}  # (v, w) -> kept side
+        for f in range(nf):
+            if only is not None and not only[f]:
+                continue
+            fv = fl[ip[f]:ip[f + 1]]
+            fl_ = lab[fv]
+            if (fl_ == fl_[0]).all():
+                continue
+            sides, counts = np.unique(fl_, return_counts=True)
+            keep = int(sides[np.argmax(counts)])
+            n = len(fv)
+            for i in range(n):
+                if fl_[i] == keep:
+                    continue
+                for j in ((i - 1) % n, (i + 1) % n):
+                    if fl_[j] == keep:
+                        cand[(int(fv[i]), int(fv[j]))] = keep
+            if f % 2048 == 2047:
+                yield
+        if not cand:
+            break
+        keys = list(cand)
+        vv = np.array([k[0] for k in keys], np.int64)
+        ww = np.array([k[1] for k in keys], np.int64)
+        want = np.array([cand[k] for k in keys], np.int64)
+        first = lab[vv]
+        pa, pb = P[vv], P[ww]
+        lo, hi = np.zeros(len(keys)), np.ones(len(keys))
+        for _ in range(steps):
+            mid = 0.5 * (lo + hi)
+            same = np.asarray(label_of(pa + mid[:, None] * (pb - pa)), np.int64) == first
+            lo, hi = np.where(same, mid, lo), np.where(same, hi, mid)
+            yield
+        after = np.asarray(label_of(pa + hi[:, None] * (pb - pa)), np.int64)
+        to = pa + (0.5 * (lo + hi))[:, None] * (pb - pa)
+        dist = np.linalg.norm(to - pa, axis=1)
+        good = (after == want) & (dist <= limit[vv])
+        pos = [tuple(p) for p in P.tolist()]
+        done = set()
+        for c, k in enumerate(np.flatnonzero(good)[np.argsort(dist[good], kind="stable")].tolist()):
+            v = int(vv[k])
+            if v in done or (v in moved_once and not SWITCH_SNAP_AGAIN):
+                continue
+            t = tuple(to[k].tolist())
+            if _keeps_edges(pos, mesh, v, t) and _move_ok(pos, mesh, v, t):
+                pos[v] = t
+                done.add(v)
+            if c % 256 == 255:
+                yield
+        if not done:
+            break
+        P = np.array(pos, np.float64)
+        moved_once |= done
+        moved_all += sorted(done)
+    out["points"] = P.ravel()
+    out["moved"] = np.array(sorted(set(moved_all)), np.int64)
+
+
+def ball_snap_steps(points, indptr, flat, only, trees: RegionTrees, label, d0, max_move, out: dict, mesh=None):
+    """Generator (zero faces; the side-line snap's idea with the UV Check's own owner balls, SPEC 9.1): for every face to
+    mend (`only`) whose corners hold no side in common, the side among its corners' nearest ones that the fewest
+    corners lack is chosen (then the shortest moves), and each corner that lacks it moves to the closest point of that
+    side's source polygons (`trees.nearest`): onto the line where its own side meets that one, in any direction, not
+    only along an edge. A corner holds a side when it lies within its nearest distance `d0` plus the ball's reach
+    (`trees.eps`). A move is kept when it is within `max_move` (per vertex), leaves no edge at the vertex nearly closed
+    and flips or folds no face around it (the snap's guard); smallest moves first, a vertex moves once. `label` is the
+    nearest side per vertex; `mesh` the result's `_Mesh` when the caller has it. Fills out["points"] (flat) and
+    out["moved"] (vertex ids). Our own rule."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3).copy()
+    ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    lab, d0 = np.asarray(label, np.int64), np.asarray(d0, np.float64)
+    limit = np.asarray(max_move, np.float64).ravel()
+    out["points"], out["moved"] = P.ravel(), np.zeros(0, np.int64)
+    faces = np.flatnonzero(np.asarray(only, bool)) if only is not None else np.arange(len(ip) - 1)
+    pairs = set()  # (vertex, side) to measure
+    want = {}
+    for f in faces.tolist():
+        fv = fl[ip[f]:ip[f + 1]].tolist()
+        sides = sorted({int(lab[v]) for v in fv})
+        if len(sides) < 2:
+            continue
+        want[f] = (fv, sides)
+        for v in fv:
+            for r in sides:
+                pairs.add((v, r))
+    yield
+    if not want:
+        return
+    dist, at = {}, {}
+    by_r = {}
+    for v, r in pairs:
+        by_r.setdefault(r, []).append(v)
+    for r, vs in by_r.items():
+        got = trees.nearest(r, P[vs])
+        if got is None:
+            continue
+        for v, q, dd in zip(vs, got[0], got[2].tolist()):
+            dist[(v, r)] = dd
+            at[(v, r)] = q
+        yield
+    props = []  # (move, vertex, target)
+    for f, (fv, sides) in want.items():
+        best = None
+        for r in sides:
+            need = [v for v in fv if dist.get((v, r), np.inf) > d0[v] + trees.eps]
+            if any((v, r) not in at for v in need):
+                continue
+            moves = [float(np.linalg.norm(at[(v, r)] - P[v])) for v in need]
+            if not need or any(m > limit[v] for m, v in zip(moves, need)):
+                continue
+            key = (len(need), max(moves))
+            if best is None or key < best[0]:
+                best = (key, [(m, v, at[(v, r)]) for m, v in zip(moves, need)])
+        if best is not None:
+            props += best[1]
+    yield
+    if mesh is None:
+        mesh = _Mesh(P, ip, fl, lazy=True)
+        yield from mesh.build(P, ip, fl)
+    pos = [tuple(p) for p in P.tolist()]
+    done = set()
+    for c, (m, v, q) in enumerate(sorted(props, key=lambda x: (x[0], x[1]))):
+        if v in done:
+            continue
+        t = tuple(np.asarray(q, np.float64).tolist())
+        if _keeps_edges(pos, mesh, v, t) and _move_ok(pos, mesh, v, t):
+            pos[v] = t
+            done.add(v)
+        if c % 256 == 255:
+            yield
+    out["points"] = np.array(pos, np.float64).ravel()
+    out["moved"] = np.array(sorted(done), np.int64)
+
+
+SPLIT_ORDER = "damage"  # the twin's budget order for chain cuts: "damage" (SPEC 4.7) or "per_face" (damage per face spent)
+SWITCH_REUSE = 0.02  # a switch this close to an edge's end (share of the edge) uses that vertex instead of a new one
+
+
+def _switch_plan(runs, face_cut, cross, tx, x, nx, base, first_c, mesh) -> dict:
+    """The split's tables for the switches (`_split_steps` reads them instead of searching crossings): per face the
+    cuts between its switches (chords) and the fan to a junction, as the split's nodes (vertex, edge point, corner)."""
+
+    where = {}
+    seg = {}
+    for ri, r in enumerate(runs):
+        c = first_c + ri
+        for idx, k in enumerate(r):
+            where.setdefault(k, (c, float(idx)))
+        for idx in range(len(r) - 1):
+            seg[(r[idx], r[idx + 1])] = (c, float(idx), float(idx + 1))
+            seg[(r[idx + 1], r[idx])] = (c, float(idx + 1), float(idx))
+    crosses, reuse_tags, corner_at = {}, [], {}
+    node_of = {}
+    for k, (c0, prm) in where.items():
+        if k >= nx:
+            node_of[k] = (_C, base + k, 0)
+            continue
+        e, t = int(cross[k]), float(tx[k])
+        reuse = int(mesh.ea[e]) if t < SWITCH_REUSE else int(mesh.eb[e]) if t > 1.0 - SWITCH_REUSE else None
+        if reuse is None:  # keyed by the point (-1 - k), not the chain: one line may cross an edge twice
+            crosses[(e, -1 - k)] = (0.0, (t, prm, None, c0))
+            node_of[k] = (_E, e, -1 - k)
+        else:
+            reuse_tags.append((reuse, c0, prm))
+            node_of[k] = (_V, reuse, 0)
+    faces = {}
+    for f, (links, fan) in face_cut.items():
+        chords = []
+        for k1, k2 in links:
+            if (k1, k2) not in seg:
+                continue
+            c, p1, p2 = seg[(k1, k2)]
+            if node_of[k1] != node_of[k2]:
+                chords.append((node_of[k1], node_of[k2], c, p1, p2))
+        fn = None
+        if fan is not None:
+            j, ks = fan
+            corner_at[base + j] = (f, tuple(float(v) for v in x[j]))
+            spokes = []
+            for k in ks:
+                if (j, k) in seg and all(node_of[k] != sp[0] for sp in spokes):
+                    c, _pj, pk = seg[(j, k)]
+                    spokes.append((node_of[k], c, pk))
+            fn = (node_of[j], spokes)
+        faces[f] = (chords, fn)
+    return dict(crosses=crosses, faces=faces, corner_at=corner_at, reuse_tags=reuse_tags)
+
+
+def _plan_tables(plan_in: dict, active) -> tuple:
+    """(crosses, fpts, plans, corner_at, reuse_tags) of `_split_steps` from a switch plan, keeping active chains only."""
+
+    plans, fpts = {}, {}
+    for f, (chords, fan) in plan_in["faces"].items():
+        ch = [x for x in chords if active[x[2]]]
+        fn = None
+        if fan is not None:
+            sp = [x for x in fan[1] if active[x[1]]]
+            if len(sp) >= 2:
+                fn = (fan[0], sp)
+        if not ch and fn is None:
+            continue
+        plans[f] = {"chords": ch, "fan": fn, "cannot": False, "whole": False}
+        pts = [(c, a, pa) for a, b, c, pa, pb in ch] + [(c, b, pb) for a, b, c, pa, pb in ch]
+        if fn is not None:
+            pts += [(c, nd, pr) for nd, c, pr in fn[1]] + [(fn[1][0][1], fn[0], 0.0)]
+        fpts[f] = pts
+    return dict(plan_in["crosses"]), fpts, plans, dict(plan_in["corner_at"]), list(plan_in["reuse_tags"])
 
 
 # ---------------------------------------------------------------- small helpers (scalar, same order as the reference)
@@ -910,209 +1557,219 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
         x = np.asarray(x)
         return np.flatnonzero(np.all((FLO <= x) & (FHI >= x), axis=1)).tolist()
 
-    # 1. Crossings per (edge, chain), once.
-    crosses = {}
-    pq = PB - PA
-    m_all = np.stack([pq[:, 1] * EN[:, 2] - pq[:, 2] * EN[:, 1], pq[:, 2] * EN[:, 0] - pq[:, 0] * EN[:, 2], pq[:, 0] * EN[:, 1] - pq[:, 1] * EN[:, 0]], 1)
-    l2_all = pq[:, 0] * pq[:, 0] + pq[:, 1] * pq[:, 1] + pq[:, 2] * pq[:, 2]
-    tags = np.asarray(tag_c, np.int64)
-    for c in range(nc):
-        if not active[c]:
-            continue
-        if stopped():
-            stop_hit = True
-            break
-        ch = chs[c]
-        lo, hi = _bbox(ch.pts, 0.0)
-        sub_e = near_edges(lo, hi)
-        sub_e = sub_e[~((tags[mesh.ea[sub_e]] == c) & (tags[mesh.eb[sub_e]] == c))]
-        best = np.full(len(sub_e), np.inf)
-        bs, bp = np.zeros(len(sub_e)), np.zeros(len(sub_e))
-        for j in range(len(ch.pts) - 1):
-            pa, pb = ch.P[j], ch.P[j + 1]
-            slo, shi = _bbox([ch.pts[j], ch.pts[j + 1]], 0.0)
-            k = np.flatnonzero(np.all((ELO[sub_e] <= np.asarray(shi)) & (EHI[sub_e] >= np.asarray(slo)), axis=1))
-            if not len(k):
-                continue
-            e = sub_e[k]
-            p, m = PA[e], m_all[e]
-            a0, a1 = pa - p, pb - p
-            d0 = a0[:, 0] * m[:, 0] + a0[:, 1] * m[:, 1] + a0[:, 2] * m[:, 2]
-            d1 = a1[:, 0] * m[:, 0] + a1[:, 1] * m[:, 1] + a1[:, 2] * m[:, 2]
-            hit = (d0 > 0.0) != (d1 > 0.0)
-            with np.errstate(all="ignore"):
-                lam = d0 / (d0 - d1)
-                x = np.stack([pa[0] + lam * (pb[0] - pa[0]), pa[1] + lam * (pb[1] - pa[1]), pa[2] + lam * (pb[2] - pa[2])], 1)
-                l2 = l2_all[e]
-                q = pq[e]
-                xp = x - p
-                s = (xp[:, 0] * q[:, 0] + xp[:, 1] * q[:, 1] + xp[:, 2] * q[:, 2]) / l2
-                y = np.stack([p[:, 0] + s * (PB[e][:, 0] - p[:, 0]), p[:, 1] + s * (PB[e][:, 1] - p[:, 1]), p[:, 2] + s * (PB[e][:, 2] - p[:, 2])], 1)
-                g = x - y
-                gapd = np.sqrt(g[:, 0] * g[:, 0] + g[:, 1] * g[:, 1] + g[:, 2] * g[:, 2])
-                ok = hit & (l2 > 0.0) & (s >= 0.0) & (s <= 1.0) & ~(gapd > CROSS_REACH * np.sqrt(l2)) & (gapd < best[k])
-            for i in np.flatnonzero(ok).tolist():  # the far side of a thin part: another face is clearly nearer
-                ei, xi = int(e[i]), tuple(x[i].tolist())
-                own = min(_face_dist(_face_pos(pos, mesh, f), xi) for f in mesh.efaces[ei])
-                if any(f not in mesh.efaces[ei] and _face_dist(_face_pos(pos, mesh, f), xi) < NEARER_SHARE * own for f in faces_at(xi)):
-                    ok[i] = False
-            kk = k[ok]
-            best[kk], bs[kk], bp[kk] = gapd[ok], s[ok], j + lam[ok]
-            yield
-        for i in np.flatnonzero(np.isfinite(best)).tolist():
-            e, s = int(sub_e[i]), float(bs[i])
-            reuse = int(mesh.ea[e]) if s < REUSE_EDGE else int(mesh.eb[e]) if s > 1.0 - REUSE_EDGE else None
-            crosses[(e, c)] = (float(best[i]), (s, float(bp[i]), reuse))
-    cross_keys = sorted(crosses)
-    yield
-
-    # 2. Points per face.
-    fpts = {}
-
-    def push(f, c, node, prm):
-        lst = fpts.setdefault(f, [])
-        if not any(cc == c and nn == node for cc, nn, _ in lst):
-            lst.append((c, node, prm))
-
-    end_tagged = [[False, False] for _ in range(nc)]
-    for v in range(n):
-        if v & 1023 == 1023:
-            yield
-        if tag_c[v] < 0:
-            continue
-        c, prm = tag_c[v], tag_p[v]
-        on = [(c, prm)]
-        if not chs[c].closed and (prm == 0.0 or prm == chs[c].end()):
-            cid = chs[c].start_id if prm == 0.0 else chs[c].end_id
-            on += [(cc, 0.0 if chs[cc].start_id == cid else chs[cc].end()) for cc in corner_map[cid] if cc != c]
-        for cc, pp in on:
-            if pp == 0.0:
-                end_tagged[cc][0] = True
-            if pp == chs[cc].end():
-                end_tagged[cc][1] = True
-            if active[cc]:
-                for f in mesh.vf[v]:
-                    push(f, cc, (_V, v, 0), pp)
-    Pv = np.array(pos, np.float64).reshape(-1, 3)
-    reuse_tags = []
-    yield
-    for i_, (e, c) in enumerate(cross_keys):
-        if i_ & 127 == 127:
-            yield
-        s, prm, reuse = crosses[(e, c)][1]
-        if reuse is not None:
-            reuse_tags.append((reuse, c, prm))
-        node = (_V, reuse, 0) if reuse is not None else (_E, e, c)
-        for f in (mesh.vf[reuse] if reuse is not None else mesh.efaces[e]):
-            push(f, c, node, prm)
-    corner_at = {}
-    for c in range(nc):
-        if not active[c] or chs[c].closed:
-            continue
-        ch = chs[c]
+    plan_in = seams.get("switch_plan")
+    if plan_in is not None:  # the switches' own cuts (part_switches_steps): no crossing search, the plans are exact
+        crosses, fpts, plans, corner_at, reuse_tags = _plan_tables(plan_in, active)
+        for f_, pl in plans.items():  # a junction whose lines all come back to it (loops) is no open chain's end
+            if pl["fan"] is not None and pl["fan"][0][0] == _C:
+                lst_ = corner_map.setdefault(pl["fan"][0][1], [])
+                lst_.extend(c_ for _n, c_, _p in pl["fan"][1] if c_ not in lst_)
+        face_list = sorted(plans)
         yield
-        for k, (cid, prm) in enumerate(((ch.start_id, 0.0), (ch.end_id, ch.end()))):
-            x = ch.at(prm)
-            if end_tagged[c][k]:
+    else:
+        # 1. Crossings per (edge, chain), once.
+        crosses = {}
+        pq = PB - PA
+        m_all = np.stack([pq[:, 1] * EN[:, 2] - pq[:, 2] * EN[:, 1], pq[:, 2] * EN[:, 0] - pq[:, 0] * EN[:, 2], pq[:, 0] * EN[:, 1] - pq[:, 1] * EN[:, 0]], 1)
+        l2_all = pq[:, 0] * pq[:, 0] + pq[:, 1] * pq[:, 1] + pq[:, 2] * pq[:, 2]
+        tags = np.asarray(tag_c, np.int64)
+        for c in range(nc):
+            if not active[c]:
                 continue
-            near = _nearest(Pv, x)
-            if _norm(_sub(pos[near], x)) < REUSE_EDGE * mesh.vedge[near]:
-                reuse_tags.append((near, c, prm))
-                for g in mesh.vf[near]:
-                    push(g, c, (_V, near, 0), prm)
-                continue
-            f = next((f for f in faces_at(x) if _inside(_face_pos(pos, mesh, f), x)), None)
-            if f is None:
-                continue
-            fv = mesh.face(f)
-            kk = len(fv)
-            on_edge = None
-            for i in range(kk):
-                e = side_edge(fv[i], fv[(i + 1) % kk])
-                p, q = pos[mesh.ea[e]], pos[mesh.eb[e]]
-                pqv = _sub(q, p)
-                l2 = _dot(pqv, pqv)
-                if not l2 > 0.0:
-                    continue
-                s = min(max(_dot(_sub(x, p), pqv) / l2, 0.0), 1.0)
-                d = _norm(_sub(x, _lerp(p, q, s)))
-                if d < REUSE_EDGE * math.sqrt(l2) and (on_edge is None or d < on_edge[0]):
-                    on_edge = (d, e, s)
-            if on_edge is not None:
-                _, e, s = on_edge
-                if (e, c) not in crosses:
-                    crosses[(e, c)] = (0.0, (s, prm, None))
-                    for g in mesh.efaces[e]:
-                        push(g, c, (_E, e, c), prm)
-            else:
-                corner_at.setdefault(cid, (f, x))
-                if corner_at[cid][0] == f:
-                    push(f, c, (_C, cid, 0), prm)
-    yield
-
-    # 3. Plans per face.
-    face_list = sorted(fpts)
-    plans = {}
-    for i_, f in enumerate(face_list):
-        if i_ & 15 == 15:
-            yield
-        fv = mesh.face(f)
-        k = len(fv)
-        fe = [side_edge(fv[i], fv[(i + 1) % k]) for i in range(k)]
-        fp = _face_pos(pos, mesh, f)
-        lst = sorted(fpts[f], key=lambda p: (p[0], p[2], p[1]))
-        plan = {"chords": [], "fan": None, "cannot": False, "whole": False}
-        corners = []
-        i = 0
-        while i < len(lst):
-            c = lst[i][0]
-            j = i
-            while j < len(lst) and lst[j][0] == c:
-                j += 1
-            pts = lst[i:j]
+            if stopped():
+                stop_hit = True
+                break
             ch = chs[c]
-            pairs = [(q, q + 1, 0.5 * (pts[q][2] + pts[q + 1][2])) for q in range(len(pts) - 1)]
-            if ch.closed and len(pts) >= 2:
-                mid = 0.5 * (pts[-1][2] + pts[0][2] + ch.end())
-                if mid > ch.end():
-                    mid -= ch.end()
-                pairs.append((len(pts) - 1, 0, mid))
-            explained = [False] * len(pts)
-            for x, y, mid in pairs:
-                na, nb = pts[x][1], pts[y][1]
-                if na == nb:
+            lo, hi = _bbox(ch.pts, 0.0)
+            sub_e = near_edges(lo, hi)
+            sub_e = sub_e[~((tags[mesh.ea[sub_e]] == c) & (tags[mesh.eb[sub_e]] == c))]
+            best = np.full(len(sub_e), np.inf)
+            bs, bp = np.zeros(len(sub_e)), np.zeros(len(sub_e))
+            for j in range(len(ch.pts) - 1):
+                pa, pb = ch.P[j], ch.P[j + 1]
+                slo, shi = _bbox([ch.pts[j], ch.pts[j + 1]], 0.0)
+                k = np.flatnonzero(np.all((ELO[sub_e] <= np.asarray(shi)) & (EHI[sub_e] >= np.asarray(slo)), axis=1))
+                if not len(k):
                     continue
-                ea, eb = _node_edges(na, fv, fe), _node_edges(nb, fv, fe)
-                if any(e in eb for e in ea):
+                e = sub_e[k]
+                p, m = PA[e], m_all[e]
+                a0, a1 = pa - p, pb - p
+                d0 = a0[:, 0] * m[:, 0] + a0[:, 1] * m[:, 1] + a0[:, 2] * m[:, 2]
+                d1 = a1[:, 0] * m[:, 0] + a1[:, 1] * m[:, 1] + a1[:, 2] * m[:, 2]
+                hit = (d0 > 0.0) != (d1 > 0.0)
+                with np.errstate(all="ignore"):
+                    lam = d0 / (d0 - d1)
+                    x = np.stack([pa[0] + lam * (pb[0] - pa[0]), pa[1] + lam * (pb[1] - pa[1]), pa[2] + lam * (pb[2] - pa[2])], 1)
+                    l2 = l2_all[e]
+                    q = pq[e]
+                    xp = x - p
+                    s = (xp[:, 0] * q[:, 0] + xp[:, 1] * q[:, 1] + xp[:, 2] * q[:, 2]) / l2
+                    y = np.stack([p[:, 0] + s * (PB[e][:, 0] - p[:, 0]), p[:, 1] + s * (PB[e][:, 1] - p[:, 1]), p[:, 2] + s * (PB[e][:, 2] - p[:, 2])], 1)
+                    g = x - y
+                    gapd = np.sqrt(g[:, 0] * g[:, 0] + g[:, 1] * g[:, 1] + g[:, 2] * g[:, 2])
+                    ok = hit & (l2 > 0.0) & (s >= 0.0) & (s <= 1.0) & ~(gapd > CROSS_REACH * np.sqrt(l2)) & (gapd < best[k])
+                for i in np.flatnonzero(ok).tolist():  # the far side of a thin part: another face is clearly nearer
+                    ei, xi = int(e[i]), tuple(x[i].tolist())
+                    own = min(_face_dist(_face_pos(pos, mesh, f), xi) for f in mesh.efaces[ei])
+                    if any(f not in mesh.efaces[ei] and _face_dist(_face_pos(pos, mesh, f), xi) < NEARER_SHARE * own for f in faces_at(xi)):
+                        ok[i] = False
+                kk = k[ok]
+                best[kk], bs[kk], bp[kk] = gapd[ok], s[ok], j + lam[ok]
+                yield
+            for i in np.flatnonzero(np.isfinite(best)).tolist():
+                e, s = int(sub_e[i]), float(bs[i])
+                reuse = int(mesh.ea[e]) if s < REUSE_EDGE else int(mesh.eb[e]) if s > 1.0 - REUSE_EDGE else None
+                crosses[(e, c)] = (float(best[i]), (s, float(bp[i]), reuse))
+        cross_keys = sorted(crosses)
+        yield
+
+        # 2. Points per face.
+        fpts = {}
+
+        def push(f, c, node, prm):
+            lst = fpts.setdefault(f, [])
+            if not any(cc == c and nn == node for cc, nn, _ in lst):
+                lst.append((c, node, prm))
+
+        end_tagged = [[False, False] for _ in range(nc)]
+        for v in range(n):
+            if v & 1023 == 1023:
+                yield
+            if tag_c[v] < 0:
+                continue
+            c, prm = tag_c[v], tag_p[v]
+            on = [(c, prm)]
+            if not chs[c].closed and (prm == 0.0 or prm == chs[c].end()):
+                cid = chs[c].start_id if prm == 0.0 else chs[c].end_id
+                on += [(cc, 0.0 if chs[cc].start_id == cid else chs[cc].end()) for cc in corner_map[cid] if cc != c]
+            for cc, pp in on:
+                if pp == 0.0:
+                    end_tagged[cc][0] = True
+                if pp == chs[cc].end():
+                    end_tagged[cc][1] = True
+                if active[cc]:
+                    for f in mesh.vf[v]:
+                        push(f, cc, (_V, v, 0), pp)
+        Pv = np.array(pos, np.float64).reshape(-1, 3)
+        reuse_tags = []
+        yield
+        for i_, (e, c) in enumerate(cross_keys):
+            if i_ & 127 == 127:
+                yield
+            s, prm, reuse = crosses[(e, c)][1]
+            if reuse is not None:
+                reuse_tags.append((reuse, c, prm))
+            node = (_V, reuse, 0) if reuse is not None else (_E, e, c)
+            for f in (mesh.vf[reuse] if reuse is not None else mesh.efaces[e]):
+                push(f, c, node, prm)
+        corner_at = {}
+        for c in range(nc):
+            if not active[c] or chs[c].closed:
+                continue
+            ch = chs[c]
+            yield
+            for k, (cid, prm) in enumerate(((ch.start_id, 0.0), (ch.end_id, ch.end()))):
+                x = ch.at(prm)
+                if end_tagged[c][k]:
+                    continue
+                near = _nearest(Pv, x)
+                if _norm(_sub(pos[near], x)) < REUSE_EDGE * mesh.vedge[near]:
+                    reuse_tags.append((near, c, prm))
+                    for g in mesh.vf[near]:
+                        push(g, c, (_V, near, 0), prm)
+                    continue
+                f = next((f for f in faces_at(x) if _inside(_face_pos(pos, mesh, f), x)), None)
+                if f is None:
+                    continue
+                fv = mesh.face(f)
+                kk = len(fv)
+                on_edge = None
+                for i in range(kk):
+                    e = side_edge(fv[i], fv[(i + 1) % kk])
+                    p, q = pos[mesh.ea[e]], pos[mesh.eb[e]]
+                    pqv = _sub(q, p)
+                    l2 = _dot(pqv, pqv)
+                    if not l2 > 0.0:
+                        continue
+                    s = min(max(_dot(_sub(x, p), pqv) / l2, 0.0), 1.0)
+                    d = _norm(_sub(x, _lerp(p, q, s)))
+                    if d < REUSE_EDGE * math.sqrt(l2) and (on_edge is None or d < on_edge[0]):
+                        on_edge = (d, e, s)
+                if on_edge is not None:
+                    _, e, s = on_edge
+                    if (e, c) not in crosses:
+                        crosses[(e, c)] = (0.0, (s, prm, None))
+                        for g in mesh.efaces[e]:
+                            push(g, c, (_E, e, c), prm)
+                else:
+                    corner_at.setdefault(cid, (f, x))
+                    if corner_at[cid][0] == f:
+                        push(f, c, (_C, cid, 0), prm)
+        yield
+
+        # 3. Plans per face.
+        face_list = sorted(fpts)
+        plans = {}
+        for i_, f in enumerate(face_list):
+            if i_ & 15 == 15:
+                yield
+            fv = mesh.face(f)
+            k = len(fv)
+            fe = [side_edge(fv[i], fv[(i + 1) % k]) for i in range(k)]
+            fp = _face_pos(pos, mesh, f)
+            lst = sorted(fpts[f], key=lambda p: (p[0], p[2], p[1]))
+            plan = {"chords": [], "fan": None, "cannot": False, "whole": False}
+            corners = []
+            i = 0
+            while i < len(lst):
+                c = lst[i][0]
+                j = i
+                while j < len(lst) and lst[j][0] == c:
+                    j += 1
+                pts = lst[i:j]
+                ch = chs[c]
+                pairs = [(q, q + 1, 0.5 * (pts[q][2] + pts[q + 1][2])) for q in range(len(pts) - 1)]
+                if ch.closed and len(pts) >= 2:
+                    mid = 0.5 * (pts[-1][2] + pts[0][2] + ch.end())
+                    if mid > ch.end():
+                        mid -= ch.end()
+                    pairs.append((len(pts) - 1, 0, mid))
+                explained = [False] * len(pts)
+                for x, y, mid in pairs:
+                    na, nb = pts[x][1], pts[y][1]
+                    if na == nb:
+                        continue
+                    ea, eb = _node_edges(na, fv, fe), _node_edges(nb, fv, fe)
+                    if any(e in eb for e in ea):
+                        explained[x] = explained[y] = True
+                        continue
+                    if not _inside(fp, ch.at(mid)):
+                        continue
                     explained[x] = explained[y] = True
-                    continue
-                if not _inside(fp, ch.at(mid)):
-                    continue
-                explained[x] = explained[y] = True
-                if any((a == na and b == nb) or (a == nb and b == na) for a, b, _, _, _ in plan["chords"]):
-                    continue
-                plan["chords"].append((na, nb, c, pts[x][2], pts[y][2]))
-            for p in pts:
-                if p[1][0] == _C and p[1] not in corners:
-                    corners.append(p[1])
-            if any(not ok and p[1][0] == _E for p, ok in zip(pts, explained)):
-                plan["cannot"] = True
-            i = j
-        if corners:
-            cn = corners[0]
-            spokes = [(b, c, pb) if a == cn else (a, c, pa) for a, b, c, pa, pb in plan["chords"] if a == cn or b == cn]
-            has_edge = any(p[1][0] == _E for p in lst)
-            if len(corners) == 1 and len(spokes) >= 2:
-                plan["fan"] = (cn, spokes)
-                plan["chords"] = [ch_ for ch_ in plan["chords"] if ch_[0] != cn and ch_[1] != cn]
-            elif not plan["chords"] and not has_edge:
-                plan["whole"] = True
-            else:
-                plan["cannot"] = True
-        if plan["cannot"]:
-            plan["chords"], plan["fan"] = [], None
-        plans[f] = plan
-    yield
+                    if any((a == na and b == nb) or (a == nb and b == na) for a, b, _, _, _ in plan["chords"]):
+                        continue
+                    plan["chords"].append((na, nb, c, pts[x][2], pts[y][2]))
+                for p in pts:
+                    if p[1][0] == _C and p[1] not in corners:
+                        corners.append(p[1])
+                if any(not ok and p[1][0] == _E for p, ok in zip(pts, explained)):
+                    plan["cannot"] = True
+                i = j
+            if corners:
+                cn = corners[0]
+                spokes = [(b, c, pb) if a == cn else (a, c, pa) for a, b, c, pa, pb in plan["chords"] if a == cn or b == cn]
+                has_edge = any(p[1][0] == _E for p in lst)
+                if len(corners) == 1 and len(spokes) >= 2:
+                    plan["fan"] = (cn, spokes)
+                    plan["chords"] = [ch_ for ch_ in plan["chords"] if ch_[0] != cn and ch_[1] != cn]
+                elif not plan["chords"] and not has_edge:
+                    plan["whole"] = True
+                else:
+                    plan["cannot"] = True
+            if plan["cannot"]:
+                plan["chords"], plan["fan"] = [], None
+            plans[f] = plan
+        yield
 
     # 4. Used crossing vertices and the runs of faces split together.
     used = set()
@@ -1151,7 +1808,8 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
             s = crosses[(e, c)][1][0]
             node_id[node] = len(at)
             at.append(_lerp(pos[mesh.ea[e]], pos[mesh.eb[e]], s))
-            new_tag.append((c, crosses[(e, c)][1][1]))
+            cr_ = crosses[(e, c)][1]
+            new_tag.append((cr_[3] if len(cr_) > 3 else c, cr_[1]))  # a switch point keys its own id, its chain rides along
     for node in used:
         if node[0] == _C:
             cid = node[1]
@@ -1181,7 +1839,7 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
             e = side_edge(a, b)
             on = []
             for c in cross_by_edge.get(e, ()):
-                s, _, reuse = crosses[(e, c)][1]
+                s, _, reuse = crosses[(e, c)][1][:3]
                 node = (_E, e, c)
                 if reuse is None and node in used_set:
                     on.append((s if mesh.ea[e] == a else 1.0 - s, node_id[node]))
@@ -1253,7 +1911,10 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
             piece_cache[f] = pc
         run_list.append((damage, members[0], members, cost))
         yield
-    run_list.sort(key=lambda r: (-r[0], r[1]))
+    if plan_in is not None or SPLIT_ORDER == "per_face":  # most damage per face spent first, so a small allowance mends the most
+        run_list.sort(key=lambda r: (-r[0] / max(r[3], 1), r[1]))
+    else:
+        run_list.sort(key=lambda r: (-r[0], r[1]))
     wanted = 0.0
     for r in run_list:
         wanted += float(r[3])
@@ -1505,7 +2166,7 @@ class Split(_Stage):
     """Split leftovers as a sliced stage (numbers: faces split, triangles left, faces left for baking)."""
 
     def __init__(self, points, indptr, flat, seams: dict, xyz, vchain=(), vparam=(), seen_face=(), budget: float = -1.0, use_fast: bool = True):
-        fast = FAST.get("split") if use_fast else None
+        fast = FAST.get("split") if use_fast and "switch_plan" not in seams else None  # the switches' exact plans run here
         job = fast(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, budget) if fast is not None else None
         super().__init__(job, None)
         if job is None:
