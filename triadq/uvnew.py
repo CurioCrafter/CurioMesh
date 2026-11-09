@@ -943,7 +943,13 @@ class NewUVs:
                 got = _l2_stretch(lpts[local[lt]], new[lt], np.zeros(len(lt), np.int64), 1)
                 if not (np.isfinite(got).all() and got.max() < best_w):
                     continue
-                if any(overlap_pairs(new[lt], OVERLAP_EPS * float(np.median(ar)) ** 0.5)):
+                hit = False
+                for found in overlap_pairs(new[lt], OVERLAP_EPS * float(np.median(ar)) ** 0.5):
+                    if found:
+                        hit = True
+                        break
+                    yield  # R9first: a slice per chunk of pairs (`any()` ran them all in one slice: 8-24 ms)
+                if hit:
                     continue
                 best, best_w = new, got.max()
             if best is None:
