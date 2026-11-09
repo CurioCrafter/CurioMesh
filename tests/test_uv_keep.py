@@ -232,5 +232,90 @@ class ViewLimit(unittest.TestCase):
         self.assertEqual(out["held"], 0)  # 120 wrong pixels fit in half of the 5 touched faces' 312 pixels
 
 
+
+class BruteTree:
+    """Closest points on a few polygons (their fan triangles), the face tree's form, for tests without the native core."""
+
+    def __init__(self, points, faces):
+        from triadq.uvseams import _closest_bary_many
+
+        P = np.asarray(points, float).reshape(-1, 3)
+        ip, fl = np.asarray(faces.indptr), np.asarray(faces.flat)
+        tri, owner = [], []
+        for f in range(len(ip) - 1):
+            for k in range(ip[f] + 1, ip[f + 1] - 1):
+                tri.append((fl[ip[f]], fl[k], fl[k + 1]))
+                owner.append(f)
+        self.a, self.b, self.c = (P[np.array(tri)[:, i]] for i in range(3))
+        self.owner, self.bary = np.array(owner), _closest_bary_many
+
+    def nearest(self, q):
+        at, g, d = [], [], []
+        for x in np.asarray(q, float).reshape(-1, 3):
+            w = self.bary(x, self.a, self.b, self.c)
+            pts = w[:, :1] * self.a + w[:, 1:2] * self.b + w[:, 2:] * self.c
+            i = int(np.argmin(((pts - x) ** 2).sum(1)))
+            at.append(pts[i])
+            g.append(self.owner[i])
+            d.append(float(np.sqrt(((pts[i] - x) ** 2).sum())))
+        return np.array(at), np.array(g), np.array(d)
+
+
+class BallSnap(unittest.TestCase):
+    def test_corners_move_onto_the_side_the_others_hold(self):
+        from triadq import uvsnap
+        from triadq.types import FlatFaces
+
+        sa = two_island_source(16)  # sides meet at x = 0.5
+        region = (sa.points[sa.flat].reshape(-1, 4, 3)[:, :, 0].mean(1) > 0.5).astype(np.int64)
+        trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, lambda a, b: BruteTree(a, b))
+        p, ip, fl = grid(4)  # vertices at x = 0.25, 0.5, 0.75 ...
+        p[p[:, 0] == 0.5, 0] = 0.56  # the middle column just over the line: the faces left of it straddle
+        whole = BruteTree(sa.points, FlatFaces(sa.indptr, sa.flat))
+        _at, g, d0 = whole.nearest(p)
+        label = region[g]
+        out = {}
+        for _ in uvsnap.ball_snap_steps(p, ip, fl, None, trees, label, d0, np.full(len(p), 0.1), out):
+            pass
+        q = out["points"].reshape(-1, 3)
+        self.assertEqual(len(out["moved"]), 5)
+        self.assertTrue(np.allclose(q[out["moved"], 0], 0.5))  # onto the line where the sides meet
+        out = {}
+        for _ in uvsnap.ball_snap_steps(p, ip, fl, None, trees, label, d0, np.full(len(p), 0.05), out):
+            pass
+        self.assertEqual(len(out["moved"]), 0)  # the move limit holds
+
+    def test_a_slide_never_closes_an_edge(self):
+        from triadq import uvsnap
+
+        p, ip, fl = grid(2)
+        mesh = uvsnap._Mesh(p, ip, fl)
+        pos = [tuple(x) for x in p.tolist()]
+        self.assertTrue(uvsnap._keeps_edges(pos, mesh, 4, (0.6, 0.5, 0.0)))
+        self.assertFalse(uvsnap._keeps_edges(pos, mesh, 4, (0.995, 0.5, 0.0)))  # onto its neighbour at x = 1
+
+
+class Specks(unittest.TestCase):
+    def test_streak_leaves_no_fan_triangle_a_winding(self):
+        quad = np.array([[0.0, 0.0], [0.01, 0.0001], [0.0101, 0.0012], [0.0, 0.001]])
+        got = uvkeep.streak(quad)
+        for k in (1, 2):
+            a, b = got[k] - got[0], got[k + 1] - got[0]
+            self.assertEqual(a[0] * b[1] - a[1] * b[0], 0.0)
+            f = np.asarray(got, np.float32)  # and as the mesh stores it
+            a, b = f[k] - f[0], f[k + 1] - f[0]
+            self.assertEqual(float(a[0] * b[1] - a[1] * b[0]), 0.0)
+        self.assertLess(np.max(np.linalg.norm(got - quad, axis=1)), 0.0007)  # the short edges shrink, the long way stays
+        tri = uvkeep.streak(quad[:3])
+        self.assertEqual(uvkeep.uv_area_px(tri), 0.0)
+
+    def test_texel_area_counts_what_a_face_shows(self):
+        p, ip, fl = grid(4)  # 16 faces of 1/16 each, the plane laid out on a quarter of a 1024 page side: 64 x 64 texels each
+        uv = p[fl][:, :2] * 0.25
+        shows, dens = uvkeep.texel_area(p, ip, fl, uv, 1024.0)
+        self.assertAlmostEqual(dens, 256.0)
+        self.assertTrue(np.allclose(shows, 64.0 * 64.0))
+
+
 if __name__ == "__main__":
     unittest.main()
