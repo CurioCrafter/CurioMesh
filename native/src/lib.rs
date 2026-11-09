@@ -1924,14 +1924,15 @@ impl UvChartTree {
     }
 
     /// The charts at Stretch allowed `x` percent (cached): (chart per face, cut per edge, [charts, not disk, merges
-    /// used, segments glued, above the build stretch, ms]).
-    fn level<'py>(&self, py: Python<'py>, x: f64) -> (I64Array<'py>, BoolArray<'py>, F64Array<'py>) {
-        uvchart_level_out(py, &self.0, x)
+    /// used, segments glued, above the build stretch, ms]). `hide` False: before the borders slide out of sight.
+    #[pyo3(signature = (x, hide=true))]
+    fn level<'py>(&self, py: Python<'py>, x: f64, hide: bool) -> (I64Array<'py>, BoolArray<'py>, F64Array<'py>) {
+        uvchart_level_out(py, &self.0, x, hide)
     }
 }
 
-fn uvchart_level_out<'py>(py: Python<'py>, tree: &uvchart::Tree, x: f64) -> (I64Array<'py>, BoolArray<'py>, F64Array<'py>) {
-    let l = py.detach(|| tree.level(x));
+fn uvchart_level_out<'py>(py: Python<'py>, tree: &uvchart::Tree, x: f64, hide: bool) -> (I64Array<'py>, BoolArray<'py>, F64Array<'py>) {
+    let l = py.detach(|| tree.level_hide(x, hide));
     let numbers = vec![l.charts as f64, l.not_disk as f64, l.merges_used as f64, l.segments_glued as f64, f64::from(u8::from(l.above_build)), l.ms];
     (l.chart.iter().map(|&c| c as i64).collect::<Vec<_>>().into_pyarray(py), l.cut.clone().into_pyarray(py), numbers.into_pyarray(py))
 }
@@ -1979,8 +1980,8 @@ fn uvchart_build(
 
 /// `UvChartTree.level` as a module function, so it can run as a job.
 #[pyfunction]
-fn uvchart_level<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, stop: &StopFlag) -> PyResult<(I64Array<'py>, BoolArray<'py>, F64Array<'py>)> {
-    let out = uvchart_level_out(py, &tree.0, x);
+fn uvchart_level<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, hide: bool, stop: &StopFlag) -> PyResult<(I64Array<'py>, BoolArray<'py>, F64Array<'py>)> {
+    let out = uvchart_level_out(py, &tree.0, x, hide);
     uvflat_stopped(stop)?;
     Ok(out)
 }
@@ -1999,10 +2000,10 @@ fn uvchart_opts(rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: 
 /// per face).
 #[pyfunction]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn uvchart_uvs<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64, stop: &StopFlag) -> PyResult<(F64Array<'py>, I64Array<'py>, F64Array<'py>, F64Array<'py>)> {
+fn uvchart_uvs<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64, hide: bool, stop: &StopFlag) -> PyResult<(F64Array<'py>, I64Array<'py>, F64Array<'py>, F64Array<'py>)> {
     let opts = uvchart_opts(rows, stretch_allowed, steps, max_factor_bytes, texture_px);
     let (uv, chart, stats, ratio) = py.detach(|| {
-        let l = tree.0.level(x);
+        let l = tree.0.level_hide(x, hide);
         let (uv, stats, ratio) = tree.0.flatten_cut(&l.cut, &l.chart, None, Some(tree.0.start_of(&l)), &opts, &stop.0);
         (uv, l.chart.iter().map(|&c| c as i64).collect::<Vec<_>>(), stats, ratio)
     });
@@ -2014,11 +2015,11 @@ fn uvchart_uvs<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stret
 /// no stats row): the redo of charts that lie over themselves needs the lower levels' charts inside them only.
 #[pyfunction]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn uvchart_uvs_only<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64, only: PyReadonlyArray1<'_, i64>, stop: &StopFlag) -> PyResult<(F64Array<'py>, I64Array<'py>, F64Array<'py>, F64Array<'py>)> {
+fn uvchart_uvs_only<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, stretch_allowed: f64, steps: usize, max_factor_bytes: f64, texture_px: f64, only: PyReadonlyArray1<'_, i64>, hide: bool, stop: &StopFlag) -> PyResult<(F64Array<'py>, I64Array<'py>, F64Array<'py>, F64Array<'py>)> {
     let opts = uvchart_opts(rows, stretch_allowed, steps, max_factor_bytes, texture_px);
     let only = slice(&only, "only")?.to_vec();
     let (uv, chart, stats, ratio) = py.detach(|| {
-        let l = tree.0.level(x);
+        let l = tree.0.level_hide(x, hide);
         let mut ids: Vec<u32> = only.iter().filter(|&&c| c >= 0 && (c as usize) < l.charts).map(|&c| c as u32).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -2027,6 +2028,27 @@ fn uvchart_uvs_only<'py>(py: Python<'py>, tree: &UvChartTree, x: f64, rows: u8, 
     });
     uvflat_stopped(stop)?;
     Ok((uv.into_pyarray(py), chart.into_pyarray(py), stats.into_pyarray(py), ratio.into_pyarray(py)))
+}
+
+/// Seams out of sight as a later step (R8late): make the moves of the borders (`uvhide::of`), kept per tree, so
+/// levels with `hide` replay them; the number of faces moved. Not stoppable (a stop only reports at the end).
+#[pyfunction]
+fn uvhide_make(py: Python<'_>, tree: &UvChartTree, stop: &StopFlag) -> PyResult<usize> {
+    // its own pool with half the shared one's threads, so a core stays free for Blender's own thread while they run
+    // (with every core of a 4-core Blender on the moves its slices reached 15-18 ms while it only waited)
+    let threads = (rayon::current_num_threads() / 2).max(1);
+    let moved = py.detach(|| match rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("CurioMeshUVHide{i}")).build() {
+        Ok(pool) => pool.install(|| uvhide::of(&tree.0).moved),
+        Err(_) => uvhide::of(&tree.0).moved,
+    });
+    uvflat_stopped(stop)?;
+    Ok(moved)
+}
+
+/// The moves of the borders of this tree are made (`uvhide_make` has run on it).
+#[pyfunction]
+fn uvhide_ready(tree: &UvChartTree) -> bool {
+    uvhide::ready(&tree.0)
 }
 
 /// Per chart: may the layout `corner_uv` (2 per corner) of the charts `chart` (per face) lie over itself
@@ -2093,6 +2115,8 @@ fn register_uvchart(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvchart_may_lie, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_cuts, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_pass, m)?)?;
+    m.add_function(wrap_pyfunction!(uvhide_make, m)?)?;
+    m.add_function(wrap_pyfunction!(uvhide_ready, m)?)?;
     m.add("UVCHART_NUMBERS_LEN", uvchart::NUMBERS_LEN)?;
     m.add("UVCHART_STRETCH_ALLOWED_PCT", uvchart::STRETCH_ALLOWED_PCT)?;
     Ok(())

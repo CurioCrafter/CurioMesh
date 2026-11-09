@@ -638,7 +638,7 @@ pub struct Tree {
     pub start_uv: Vec<f64>,
     pub build_stretch: f64,
     pub numbers: [f64; NUMBERS_LEN],
-    cache: Mutex<HashMap<u64, Arc<Level>, FxBuild>>,
+    cache: Mutex<HashMap<(u64, bool), Arc<Level>, FxBuild>>,
     smooth_cache: Mutex<Option<Arc<Smooth>>>,
 }
 
@@ -2104,11 +2104,16 @@ impl<'t> Build<'t> {
             uv[2 * v] /= cnt[v].max(1.0);
             uv[2 * v + 1] /= cnt[v].max(1.0);
         }
-        let ok = uvflat::quick_stretch(&local.chart(), &mut uv, &free, 0.0, stop).is_ok();
-        if !ok {
-            uv.iter_mut().for_each(|x| *x = f64::NAN);
-        }
-        let per = tree.face_stretch(&local, &uv);
+        // quick_stretch already scored these UVs: reuse its per-face stretch (same numbers as `face_stretch`).
+        let quick = uvflat::quick_stretch_per(&local.chart(), &mut uv, &free, 0.0, stop).ok();
+        let per = match quick {
+            Some((_, _, per)) if uv.iter().all(|x| x.is_finite()) => per,
+            Some(_) => tree.face_stretch(&local, &uv),
+            None => {
+                uv.iter_mut().for_each(|x| *x = f64::NAN);
+                tree.face_stretch(&local, &uv)
+            }
+        };
         let q = self.union_quantile(a, b, &per, &sc.fstamp, stamp);
         Eval { glued, cost, stretch: q, pole: true, local, uv, rigid: Some(rigid), face_str: per }
     }
@@ -3041,12 +3046,20 @@ impl Tree {
     /// skipping (not stopping at) the others; a segment whose glue would leave a chart that is not a disk stays cut.
     /// Cached per x.
     pub fn level(&self, x_pct: f64) -> Arc<Level> {
-        let key = x_pct.to_bits();
+        self.level_hide(x_pct, true)
+    }
+
+    /// `level` with the borders slid out of sight (`hide`; the first call makes the moves, R7hide) or as the merges
+    /// left them (the first result is shown from these while the moves are made, R8late). Cached per (x, hide).
+    pub fn level_hide(&self, x_pct: f64, hide: bool) -> Arc<Level> {
+        let key = (x_pct.to_bits(), hide);
         if let Some(l) = self.cache.lock().unwrap().get(&key) {
             return l.clone();
         }
         let mut l = self.compute_level(x_pct);
-        crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        if hide {
+            crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        }
         let l = Arc::new(l);
         self.cache.lock().unwrap().insert(key, l.clone());
         l

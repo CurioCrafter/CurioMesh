@@ -899,11 +899,15 @@ def _evaluate(m, label, q, bx, cur, room, a, b, lst):
             ok = yield from lay.confirm(m.tree.build_stretch, limit)
             return (lay,) if ok else None
 
-        ra = yield from side(cut.fa, a)
-        if ra is None:
-            continue
-        rb = yield from side(cut.fb, b)
-        if rb is None:
+        # the smaller side first: when it breaks a rule the larger one is never laid out (both must pass)
+        order = ((cut.fa, a), (cut.fb, b)) if len(cut.fa) <= len(cut.fb) else ((cut.fb, b), (cut.fa, a))
+        got = {}
+        for faces, c in order:
+            got[c] = yield from side(faces, c)
+            if got[c] is None:
+                break
+        ra, rb = got.get(a), got.get(b)
+        if ra is None or rb is None:
             continue
         laid = [x for x in (ra[0], rb[0]) if x is not None]
         over = 0.0
