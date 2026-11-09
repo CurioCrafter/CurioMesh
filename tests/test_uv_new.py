@@ -203,6 +203,53 @@ class WithKernels(unittest.TestCase):
         finally:
             fast.uninstall()
 
+    def test_compiled_overlap_check_names_the_same_charts_as_the_numpy_one(self):
+        """R11pier: `uvchart_lying` is the exact twin of `overlapping_charts` (folds, slivers, wound faces, no area)."""
+
+        turbo = common.addon_module("turbo")
+        rng = np.random.default_rng(11)
+        g = grid(12, 9)
+        nf = len(g[1]) - 1
+        base = g[0][g[2]][:, :2].copy()
+        seen = set()
+        for trial in range(40):
+            uv = base + rng.normal(size=base.shape) * (0.02 * (trial % 5))  # from clean to tangled
+            chart = rng.integers(0, 6, nf) if trial % 2 else np.repeat(np.arange(4), -(-nf // 4))[:nf]
+            chart[rng.random(nf) < 0.1] = -1  # faces not checked
+            if trial % 7 == 3:
+                uv[g[1][5] : g[1][6]] = uv[g[1][5]]  # a face with no area
+            faces = np.flatnonzero(chart >= 0)
+            ids, local = np.unique(chart[faces], return_inverse=True)
+            t = uv[uvnew._fan(g[1], faces)]
+            nt = np.maximum(np.diff(g[1])[faces] - 2, 0)
+            want = uvnew._drive(uvnew.overlapping_charts(t, np.repeat(local.reshape(-1), nt), len(ids)))
+            job = turbo.uvchart_lying(g[1], uv.ravel(), chart, uvnew.OVERLAP_EPS)
+            while not job.done():
+                time.sleep(0.0005)
+            got = np.asarray(job.result(), bool)
+            self.assertEqual(got[ids].tolist(), want.tolist(), trial)
+            seen.update(want.tolist())
+        self.assertEqual(seen, {True, False})  # both answers were tested
+
+    def test_compiled_box_angles_match_the_numpy_ones(self):
+        """R11pier: `uvchart_box_angles` gives `min_area_angles`' angles bit for bit (small, repeated, octagon-sized groups)."""
+
+        turbo = common.addon_module("turbo")
+        rng = np.random.default_rng(5)
+        sizes = [1, 2, 3, 3, 4, 7, 40, 600, 5, 100, 300, 2000]
+        uv = np.concatenate([rng.normal(size=(n, 2)) * [2.0, 0.5] + rng.normal(size=2) for n in sizes])
+        uv[4:6] = uv[3]  # repeated points
+        uv[-50:] = np.round(uv[-50:], 1)  # points on a lattice: collinear hull sides
+        label = np.repeat(np.arange(len(sizes)), sizes)
+        order = np.argsort(label, kind="stable")
+        bounds = np.searchsorted(label[order], np.arange(len(sizes) + 1))
+        which = list(range(len(sizes)))
+        want = uvnew._drive(uvnew.min_area_angles(uv, order, bounds, which))
+        job = turbo.uvchart_box_angles(uv.ravel(), order, bounds, np.array(which))
+        while not job.done():
+            time.sleep(0.0005)
+        self.assertEqual(np.asarray(job.result()).tolist(), want.tolist())
+
     def test_the_same_mesh_gives_the_same_layout_and_keep_going_never_lowers_it(self):
         fast = common.addon_module("uv_fast")
         kn = common.addon_module("triadq.uvnew")  # the add-on's own copy of the modules, the one `fast` installs the kernels into

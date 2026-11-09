@@ -432,8 +432,30 @@ def _strip_range(t, y0: float, y1: float):
 def raster(tris, y_origin: int, rows: int):
     """Conservative raster of triangles (6 numbers each): every texel a triangle touches, as merged intervals per row."""
 
+    return _drain(raster_steps(tris, y_origin, rows))
+
+
+def _drain(steps):
+    """Run a generator to the end and return its value."""
+
+    while True:
+        try:
+            next(steps)
+        except StopIteration as end:
+            return end.value
+
+
+RASTER_TRIS_PER_STEP = 512  # triangles `raster_steps` rasterises between two yields
+FIND_ROWS_PER_STEP = 32  # block rows `Grid.find_steps` tries between two yields
+
+
+def raster_steps(tris, y_origin: int, rows: int):
+    """Generator behind `raster`: yields every RASTER_TRIS_PER_STEP triangles, returns the rows."""
+
     acc = [[] for _ in range(rows)]
     for i in range(0, len(tris) - 5, 6):
+        if i and i % (6 * RASTER_TRIS_PER_STEP) == 0:
+            yield
         t = tris[i:i + 6]
         ylo, yhi = min(t[1], t[3], t[5]), max(t[1], t[3], t[5])
         r0 = int(floor(ylo))
@@ -526,12 +548,19 @@ class Grid:
         """Best spot for a shape (w, rows, area): inside the used height first (least waste), else the lowest row; only spots
         whose page height stays at most `top_max` (one above it cannot beat a spot already found for another way)."""
 
+        return _drain(self.find_steps(shape, top_max))
+
+    def find_steps(self, shape, top_max=None):
+        """Generator behind `find`: yields every FIND_ROWS_PER_STEP rows tried, returns the spot."""
+
         h, used_h = len(shape[1]), self.used
         if h > self.ny or shape[0] > self.nx:
             return None
         best = None
         y = 0
         while y + h <= self.ny and (top_max is None or max(y + h, used_h) <= top_max):
+            if y and y % FIND_ROWS_PER_STEP == 0:
+                yield
             x = self._leftmost(shape, y)
             if x is not None:
                 top = max(y + h, used_h)
@@ -643,7 +672,17 @@ def free_angles(tris, effort: int):
 
 
 def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, turn_ok=None, stop=None):
-    """Pack charts (`tris` in texels, 6 numbers per triangle, `tri_chart` per triangle) into a page that may hold `seed` triangles.
+    """`pack_into_steps` run to the end (the same layout)."""
+
+    return _drain(pack_into_steps(page, k, seed, tris, tri_chart, charts, as_box, turn_ok, stop))
+
+
+PLACE_EVERY = 1  # charts `pack_into_steps` places between two yields (each find also yields every FIND_ROWS_PER_STEP rows)
+
+
+def pack_into_steps(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, turn_ok=None, stop=None):
+    """Generator: yields between short pieces (every few raster rows, every way of a chart worked out, every chart placed)
+    and returns what `pack_into` returns. Pack charts (`tris` in texels, 6 numbers per triangle, `tri_chart` per triangle) into a page that may hold `seed` triangles.
 
     The page is a grid of blocks of 2^k texels (no gap, k < 0: texels); a chart owns the blocks it touches plus one ring of
     blocks around them and owned blocks never overlap: the mip-clean gap rule (neighbours keep two free blocks between the
@@ -666,7 +705,7 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
         y0 = int(floor(min(ys)))
         rows = max(int(ceil(max(ys))) + 1 - y0, 1)
         acc = {}
-        for y, v in enumerate(raster(seed, y0, rows)):
+        for y, v in enumerate((yield from raster_steps(seed, y0, rows))):
             for a, b in v:
                 acc.setdefault((y0 + y) // g, []).append((a // g, (b - 1) // g + 1))
         for j, v in acc.items():
@@ -715,6 +754,7 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
                     if pick is None or shape[2] < pick[0][2]:
                         pick = (shape, sx, sy)
                 ways[c].append((pick[0], pick[1], pick[2], fx, fy, q + 4 * j))
+                yield
 
     def place(seq, root=None, quarters=False):
         """Place the charts in `seq` (`root` = (chart, way index) forces that way); returns (result per chart, the charts that
@@ -724,7 +764,9 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
         occ.rows, occ.used = list(base.rows), base.used
         out = [(False, 0, 0, 0)] * charts
         failed = []
-        for c in seq:
+        for n_, c in enumerate(seq):
+            if n_ % PLACE_EVERY == 0:
+                yield
             if stop is not None and stop():
                 failed.append(c)
                 continue
@@ -732,7 +774,7 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
             for wi, way in enumerate(ways[c]):
                 if (root is not None and root[0] == c and root[1] != wi) or (quarters and way[5] >= 4):
                     continue
-                found = occ.find(way[0], None if best is None else best[0][0])
+                found = yield from occ.find_steps(way[0], None if best is None else best[0][0])
                 if found is not None:
                     x, y, waste = found
                     score = (max(y + len(way[0][1]), occ.height()), waste, y, way[5])
@@ -753,11 +795,11 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
         """One order with repair rounds (not for a forced start): charts that found no room go first in the next round; go on
         while a round leaves fewer of them."""
 
-        out, failed = place(seq, root, quarters)
+        out, failed = yield from place(seq, root, quarters)
         while root is None and failed and not (stop is not None and stop()):
             lost = set(failed)
             nxt = failed + [c for c in seq if c not in lost]
-            out2, failed2 = place(nxt, root, quarters)
+            out2, failed2 = yield from place(nxt, root, quarters)
             if len(failed2) >= len(failed):
                 break
             seq, out, failed = nxt, out2, failed2
@@ -777,14 +819,14 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
         else:
             seq = list(order)
         for quarters in ((True, False) if free else (False,)):  # quarter turns first (the layout without free turns), then angles
-            out, failed = solve(seq, None, quarters)
+            out, failed = yield from solve(seq, None, quarters)
             if not failed:
                 return out
             if best is None or len(failed) < best[1]:
                 best = (out, len(failed))
         if free and seq and len(ways[seq[0]]) > 4 and own(seq[0]) * (BEAM_SHARE << effort) >= base.nx * base.ny:  # every way of the first chart as the start; the first that places all wins
             for wi in range(len(ways[seq[0]])):
-                out, failed = solve(seq, (seq[0], wi))
+                out, failed = yield from solve(seq, (seq[0], wi))
                 if not failed:
                     return out
         if stop is not None and stop():

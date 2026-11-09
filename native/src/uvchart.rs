@@ -4441,6 +4441,157 @@ impl Cuts {
     }
 }
 
+/// Per chart id (0..=max of `chart`): does the layout lie over itself? The exact twin of `uvnew.overlapping_charts`
+/// (R11pier): over the fan triangles (corner 0, i, i + 1) of the faces whose `chart` is >= 0, a chart is flagged when
+/// its triangles' signed areas have both signs or one is zero, else when two of its triangles whose boxes meet overlap
+/// by more than `eps_share` times the square root of the chart's mean doubled triangle area (separating axes on the six
+/// sides). Pairs come from a sweep along the longer side of each chart's box, so every pair whose boxes meet is tested
+/// (the NumPy twin's grid gives the same pairs). Charts run in parallel; a chart stops at its first overlap.
+pub fn lying_charts(indptr: &[i64], corner_uv: &[f64], chart: &[i64], eps_share: f64, stop: &AtomicBool) -> Vec<bool> {
+    let nf = chart.len().min(indptr.len().saturating_sub(1));
+    let nc = chart[..nf].iter().map(|&c| c.max(-1) + 1).max().unwrap_or(0) as usize;
+    let mut tris: Vec<Vec<[[f64; 2]; 3]>> = vec![Vec::new(); nc];
+    let uv = |h: i64| [corner_uv[2 * h as usize], corner_uv[2 * h as usize + 1]];
+    for f in 0..nf {
+        if chart[f] < 0 || indptr[f] < 0 || indptr[f + 1] < indptr[f] || indptr[f + 1] as usize * 2 > corner_uv.len() {
+            continue;
+        }
+        let (b, n) = (indptr[f], indptr[f + 1] - indptr[f]);
+        for i in 1..(n - 1).max(1) {
+            tris[chart[f] as usize].push([uv(b), uv(b + i), uv(b + i + 1)]);
+        }
+    }
+    let area2 = |t: &[[f64; 2]; 3]| (t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[1][1] - t[0][1]) * (t[2][0] - t[0][0]);
+    let one = |ts: &Vec<[[f64; 2]; 3]>| -> bool {
+        let (mut pos, mut neg, mut sum) = (false, false, 0.0f64);
+        for t in ts {
+            let a = area2(t);
+            if a == 0.0 {
+                return true;
+            }
+            pos |= a > 0.0;
+            neg |= a < 0.0;
+            sum += a.abs();
+        }
+        if pos && neg {
+            return true;
+        }
+        let eps = eps_share * (sum / ts.len() as f64).sqrt();
+        if ts.len() < 2 || eps.is_nan() {
+            return false; // (a NaN corner makes the twin's every test false too)
+        }
+        let lo: Vec<[f64; 2]> = ts.iter().map(|t| [t[0][0].min(t[1][0]).min(t[2][0]), t[0][1].min(t[1][1]).min(t[2][1])]).collect();
+        let hi: Vec<[f64; 2]> = ts.iter().map(|t| [t[0][0].max(t[1][0]).max(t[2][0]), t[0][1].max(t[1][1]).max(t[2][1])]).collect();
+        let span = |k: usize| lo.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min) - hi.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
+        let k = if span(0) <= span(1) { 0 } else { 1 }; // (spans are negated: the longer side sorts)
+        let mut order: Vec<u32> = (0..ts.len() as u32).collect();
+        order.sort_unstable_by(|&a, &b| lo[a as usize][k].total_cmp(&lo[b as usize][k]));
+        for (i, &a) in order.iter().enumerate() {
+            if i % 256 == 0 && stop.load(Ordering::Relaxed) {
+                return true;
+            }
+            let a = a as usize;
+            for &b in &order[i + 1..] {
+                let b = b as usize;
+                if lo[b][k] > hi[a][k] {
+                    break;
+                }
+                let o = 1 - k;
+                if hi[a][o] >= lo[b][o] && hi[b][o] >= lo[a][o] && hi[b][k] >= lo[a][k] && sat_overlap(&ts[a], &ts[b], eps) {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    tris.par_iter().map(|ts| !ts.is_empty() && one(ts)).collect()
+}
+
+/// Per group in `which` (group c is the points `uv[order[bounds[c]..bounds[c + 1]]]`, 2 per point): the angle that turns
+/// it into its smallest axis-aligned box (rotating calipers over the convex hull; Toussaint 1983), 0 for fewer than 3
+/// distinct points. The twin of `uvnew.min_area_angles` (R11pier): points rounded to 12 decimals and sorted x then y,
+/// Andrew's monotone chain (1979), the same arithmetic per hull edge. Groups run in parallel.
+pub fn box_angles(uv: &[f64], order: &[i64], bounds: &[i64], which: &[i64], stop: &AtomicBool) -> Vec<f64> {
+    let one = |&c: &i64| -> f64 {
+        let (a, b) = (bounds[c as usize] as usize, bounds[c as usize + 1] as usize);
+        if b - a <= 2 || stop.load(Ordering::Relaxed) {
+            return 0.0;
+        }
+        let r = |x: f64| (x * 1e12).round_ties_even() / 1e12; // numpy's round(x, 12)
+        let mut q: Vec<[f64; 2]> = order[a..b].iter().map(|&i| [r(uv[2 * i as usize]), r(uv[2 * i as usize + 1])]).collect();
+        q.sort_by(|p, s| p[0].partial_cmp(&s[0]).unwrap_or(Cmp::Equal).then(p[1].partial_cmp(&s[1]).unwrap_or(Cmp::Equal)));
+        q.dedup_by(|s, p| s[0] == p[0] && s[1] == p[1]);
+        if q.len() <= 2 {
+            return 0.0;
+        }
+        let half = |seq: &mut dyn Iterator<Item = [f64; 2]>| {
+            let mut out: Vec<[f64; 2]> = Vec::new();
+            for p in seq {
+                while out.len() >= 2 {
+                    let (o1, o2) = (out[out.len() - 1], out[out.len() - 2]);
+                    if (o1[0] - o2[0]) * (p[1] - o2[1]) - (o1[1] - o2[1]) * (p[0] - o2[0]) <= 0.0 {
+                        out.pop();
+                    } else {
+                        break;
+                    }
+                }
+                out.push(p);
+            }
+            out.pop();
+            out
+        };
+        let mut h = half(&mut q.iter().copied());
+        h.extend(half(&mut q.iter().rev().copied()));
+        if h.len() < 3 {
+            return 0.0;
+        }
+        let (mut best, mut best_ang) = (f64::NAN, 0.0f64); // (numpy's argmin: the first smallest)
+        for i in 0..h.len() {
+            let n = h[(i + 1) % h.len()];
+            let ang = (n[1] - h[i][1]).atan2(n[0] - h[i][0]);
+            let (c, s) = ((-ang).cos(), (-ang).sin());
+            let (mut x0, mut x1, mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+            for p in &h {
+                let (x, y) = (p[0] * c - p[1] * s, p[0] * s + p[1] * c);
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+            let area = (x1 - x0) * (y1 - y0);
+            if i == 0 || area < best {
+                best = area;
+                best_ang = ang;
+            }
+        }
+        -best_ang
+    };
+    which.par_iter().map(one).collect()
+}
+
+/// Do the insides of two triangles overlap by more than `eps`? The same arithmetic as `uvnew._sat_overlap`.
+fn sat_overlap(p: &[[f64; 2]; 3], q: &[[f64; 2]; 3], eps: f64) -> bool {
+    for t in [p, q] {
+        for i in 0..3 {
+            let (a, b) = (t[i], t[(i + 1) % 3]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let (mut ax, mut ay) = (-dy, dx);
+            let n = (ax * ax + ay * ay).sqrt().max(1e-300);
+            ax /= n;
+            ay /= n;
+            let proj = |s: &[[f64; 2]; 3]| {
+                let v = [s[0][0] * ax + s[0][1] * ay, s[1][0] * ax + s[1][1] * ay, s[2][0] * ax + s[2][1] * ay];
+                (v[0].min(v[1]).min(v[2]), v[0].max(v[1]).max(v[2]))
+            };
+            let ((plo, phi), (qlo, qhi)) = (proj(p), proj(q));
+            if !(phi > qlo + eps && qhi > plo + eps) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub struct Pass {
     pub kind: u8, // 0 nothing, 1 cut added, 2 cut closed
     pub accepted: bool,

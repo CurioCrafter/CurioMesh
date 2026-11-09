@@ -782,7 +782,16 @@ class NewUVs:
                 res.on_chart[face_order[fbounds[c] : fbounds[c + 1]]] = False  # no clean labels: not counted as a straight-rows chart
             boxed.append(c)
         if boxed:  # the other charts: their smallest box by rotating calipers, all at once
-            angle[boxed] = yield from min_area_angles(corner_uv, order, bounds, boxed, self.budget)
+            fast = uvchart.FAST.get("box_angles")  # R11pier: the compiled twin, on a worker
+            job = fast(corner_uv.ravel(), order, bounds, np.asarray(boxed, np.int64)) if fast is not None else None
+            if job is not None:
+                self._active = job
+                while not job.done():
+                    yield WAIT
+                self._active = None
+                angle[boxed] = np.asarray(job.result(), dtype=np.float64)
+            else:
+                angle[boxed] = yield from min_area_angles(corner_uv, order, bounds, boxed, self.budget)
         res.col, res.row = col, row
         yield
         ca, sa = np.cos(angle)[corner_chart], np.sin(angle)[corner_chart]
@@ -1187,6 +1196,21 @@ class NewUVs:
             yield
         if not len(faces):
             return np.zeros(0, np.int64)
+        exact = uvchart.FAST.get("lying")  # R11pier: the compiled twin of `overlapping_charts` (same flags), on a worker
+        if exact is not None:
+            sub = np.full(len(chart), -1, np.int64)
+            sub[faces] = chart[faces]
+            yield
+            job = exact(self.indptr, corner_uv.ravel(), sub, OVERLAP_EPS)
+            if job is not None:
+                self._active = job
+                while not job.done():
+                    yield WAIT
+                self._active = None
+                flags = np.asarray(job.result(), dtype=bool)
+                ids = np.unique(chart[faces])
+                yield
+                return ids[flags[ids]]
         ids, local = np.unique(chart[faces], return_inverse=True)
         local = local.reshape(-1)
         yield

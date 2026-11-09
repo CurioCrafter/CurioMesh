@@ -744,8 +744,7 @@ def _pack_into(page, k, seed, tris, tri_chart, charts):
     fast = uvpack.FAST.get("pack_into")
     job = fast(seed, tris, tri_chart, charts, [False] * charts, [True] * charts, int(page[0]), int(page[1]), int(k)) if fast is not None else None
     if job is None:
-        yield
-        return uvpack.pack_into(page, k, seed, tris, tri_chart, charts, turn_ok=[True] * charts)
+        return (yield from uvpack.pack_into_steps(page, k, seed, tris, tri_chart, charts, turn_ok=[True] * charts))
     while not job.done():
         yield
     ok, dx, dy, q = job.result()  # four arrays, one entry per chart

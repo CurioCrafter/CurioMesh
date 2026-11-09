@@ -171,6 +171,28 @@ class Twin(unittest.TestCase):
         self.assertEqual(out["faces"], 0)
 
 
+class Grid(unittest.TestCase):
+    def test_ball_is_every_triangle_within_reach_in_cell_query_triangle_order(self):
+        rng = np.random.default_rng(3)
+        a = rng.random((400, 3)) * 10.0
+        b, c = a + rng.normal(size=(400, 3)) * 0.4, a + rng.normal(size=(400, 3)) * 0.4
+        b[:20] = a[:20]  # some with no area
+        g = uvscore._Grid(a, b, c)
+        q = np.r_[rng.random((300, 3)) * 12.0 - 1.0, a[:30]]
+        r = rng.random(len(q)) * 1.5
+        got = g.ball(q, r, chunk=97)  # small batches: groups split across them
+        qq, tt = np.repeat(np.arange(len(q)), len(a)), np.tile(np.arange(len(a)), len(q))
+        bary, dist = uvscore._closest(q[qq], a[tt], b[tt], c[tt])
+        keep = dist <= r[qq]
+        cell = g._id(g.cell(q))
+        order = np.lexsort((tt[keep], qq[keep], cell[qq[keep]]))
+        want = (qq[keep][order], tt[keep][order], bary[keep][order], dist[keep][order])
+        self.assertGreater(len(want[0]), 100)
+        for x, y in zip(got, want):
+            self.assertTrue(np.array_equal(x, y))
+        self.assertTrue(np.array_equal(g.nearest(q), dist.reshape(len(q), len(a)).min(1)))  # exact nearest, any radius schedule
+
+
 def base_numbers(**kw):
     n = dict.fromkeys(uvscore.NAMES, float("nan"))
     n.update(faces=1000.0, tris=2000.0, straddle_pct=0.0, drift_p99=0.0, flipped_faces=0.0, flipped_seen_faces=0.0, overlap_pct=0.0,

@@ -225,7 +225,8 @@ def _islands(m: Mesh, tc, tf, tex):
 
 
 def _closest(p, a, b, c):
-    """Closest point on triangle abc to p, all (k, 3): barycentric (k, 3) and distance (Ericson 2005, last put wins)."""
+    """Closest point on triangle abc to p, all (k, 3): barycentric (k, 3) and distance (Ericson 2005, last put wins).
+    Each region's numbers are worked out only for the points in it (the same values as over all points)."""
 
     ab, ac, ap = b - a, c - a, p - a
     d1, d2 = (ab * ap).sum(-1), (ac * ap).sum(-1)
@@ -235,33 +236,39 @@ def _closest(p, a, b, c):
     d5, d6 = (ab * cp).sum(-1), (ac * cp).sum(-1)
     vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
     den = va + vb + vc
-    safe = np.where(np.abs(den) < 1e-300, 1.0, den)
+    flat = np.abs(den) < 1e-300
+    safe = np.where(flat, 1.0, den)
     v, w = vb / safe, vc / safe
     u = 1 - v - w
-    u = np.where(np.abs(den) < 1e-300, 1.0, u)
-    v = np.where(np.abs(den) < 1e-300, 0.0, v)
-    w = np.where(np.abs(den) < 1e-300, 0.0, w)
-
-    def put(mask, uu, vv, ww):
-        nonlocal u, v, w
-        u, v, w = np.where(mask, uu, u), np.where(mask, vv, v), np.where(mask, ww, w)
-
-    z, o = np.zeros_like(d1), np.ones_like(d1)
+    u[flat], v[flat], w[flat] = 1.0, 0.0, 0.0
 
     def div(x, y):
         return x / np.where(y == 0, 1.0, y)
 
-    t = div(d4 - d3, (d4 - d3) + (d5 - d6))
-    put((va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0), z, 1 - t, t)
-    t = div(d2, d2 - d6)
-    put((vb <= 0) & (d2 >= 0) & (d6 <= 0), 1 - t, z, t)
-    put((d6 >= 0) & (d5 <= d6), z, z, o)
-    t = div(d1, d1 - d3)
-    put((vc <= 0) & (d1 >= 0) & (d3 <= 0), 1 - t, t, z)
-    put((d3 >= 0) & (d4 <= d3), z, o, z)
-    put((d1 <= 0) & (d2 <= 0), o, z, z)
+    m = (va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0)
+    if m.any():
+        x, y = (d4 - d3)[m], (d5 - d6)[m]
+        t = div(x, x + y)
+        u[m], v[m], w[m] = 0.0, 1 - t, t
+    m = (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+    if m.any():
+        t = div(d2[m], d2[m] - d6[m])
+        u[m], v[m], w[m] = 1 - t, 0.0, t
+    m = (d6 >= 0) & (d5 <= d6)
+    u[m], v[m], w[m] = 0.0, 0.0, 1.0
+    m = (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+    if m.any():
+        t = div(d1[m], d1[m] - d3[m])
+        u[m], v[m], w[m] = 1 - t, t, 0.0
+    m = (d3 >= 0) & (d4 <= d3)
+    u[m], v[m], w[m] = 0.0, 1.0, 0.0
+    m = (d1 <= 0) & (d2 <= 0)
+    u[m], v[m], w[m] = 1.0, 0.0, 0.0
     q = u[:, None] * a + v[:, None] * b + w[:, None] * c
     return np.stack([u, v, w], 1), np.linalg.norm(p - q, axis=1)
+
+
+BALL_CELLS = 1 << 16  # grid cells looked up per batch of query groups in `_Grid.ball`
 
 
 class _Grid:
@@ -278,8 +285,12 @@ class _Grid:
         median = float(edge[len(edge) // 2] if len(edge) % 2 else (edge[len(edge) // 2 - 1] + edge[len(edge) // 2]) / 2) if n else 0.0
         self.h = max(GRID_EDGES * median, ext / GRID_MAX_DIM, 1e-12)
         self.dim = np.floor((hi - self.lo) / self.h).astype(np.int64) + 1
-        tlo = self.cell(np.minimum(np.minimum(a, b), c))
-        thi = self.cell(np.maximum(np.maximum(a, b), c))
+        self.tmin = np.minimum(np.minimum(a, b), c) if n else np.zeros((0, 3))
+        self.tmax = np.maximum(np.maximum(a, b), c) if n else np.zeros((0, 3))
+        # a triangle whose box lies farther than r + tol from a query is farther than r (tol is far above rounding)
+        self.tol = 1e-9 * (float(np.abs(allp).max()) + self.h)
+        tlo = self.cell(self.tmin)
+        thi = self.cell(self.tmax)
         span = thi - tlo + 1
         count = span.prod(1)
         tri = np.repeat(np.arange(n), count)
@@ -297,44 +308,77 @@ class _Grid:
     def _id(self, cell):
         return (cell[:, 2] * self.dim[1] + cell[:, 1]) * self.dim[0] + cell[:, 0]
 
-    def _tris_in(self, cl, cu):
-        """Triangles in the cells of the box cl..cu (deduplicated)."""
+    def _cands(self, cl, cu):
+        """Triangles in the cells of each box cl[i]..cu[i]: (box, triangle), sorted by box then triangle, deduplicated."""
 
-        xs, ys, zs = (np.arange(cl[k], cu[k] + 1) for k in range(3))
-        cells = np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), -1).reshape(-1, 3)
-        ids = self._id(cells)
+        span = cu - cl + 1
+        count = span.prod(1)
+        box = np.repeat(np.arange(len(cl)), count)
+        k = np.arange(len(box)) - np.repeat(np.cumsum(count) - count, count)
+        sx, sy = span[box, 0], span[box, 1]
+        ids = self._id(np.stack([k % sx, (k // sx) % sy, k // (sx * sy)], 1) + cl[box])
         lo = np.searchsorted(self.ids, ids, side="left")
-        hi = np.searchsorted(self.ids, ids, side="right")
-        if not len(lo):
-            return np.zeros(0, np.int64)
-        picks = np.concatenate([self.tris[x:y] for x, y in zip(lo, hi)]) if (hi > lo).any() else np.zeros(0, np.int64)
-        return np.unique(picks)
+        n = np.searchsorted(self.ids, ids, side="right") - lo
+        at = np.repeat(lo - (np.cumsum(n) - n), n) + np.arange(int(n.sum()))
+        key = np.unique(np.repeat(box, n) * len(self.a) + self.tris[at])
+        return key // len(self.a), key % len(self.a)
 
-    def ball(self, q, r, chunk=40000):
-        """Pairs (query, triangle, barycentric, distance) with distance <= r[query]."""
+    def ball(self, q, r, chunk=1 << 16):
+        """Pairs (query, triangle, barycentric, distance) with distance <= r[query]. Queries are grouped by their cell; a
+        group looks at the triangles in the cells of its box grown by its largest radius. Pairs come in cell order, then
+        query order, then triangle order; about `chunk` pairs are measured at a time, all groups of a batch together."""
 
         out_q, out_t, out_b, out_d = [], [], [], []
         if len(self.a) == 0 or len(q) == 0:
             return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros(0)
+        q, r = np.asarray(q, np.float64), np.asarray(r, np.float64)
         cells = self._id(self.cell(q))
         order = np.argsort(cells, kind="stable")
         sc = cells[order]
-        bounds = np.r_[0, np.flatnonzero(sc[1:] != sc[:-1]) + 1, len(sc)]
-        for g in range(len(bounds) - 1):
-            idx = order[bounds[g]:bounds[g + 1]]
-            rmax = float(r[idx].max())
-            cl = self.cell(q[idx].min(0) - rmax)
-            cu = self.cell(q[idx].max(0) + rmax)
-            cand = self._tris_in(cl, cu)
-            if not len(cand):
-                continue
-            for s in range(0, len(idx), max(1, chunk // len(cand))):
-                part = idx[s:s + max(1, chunk // len(cand))]
-                qq = np.repeat(q[part], len(cand), 0)
-                tt = np.tile(cand, len(part))
-                bary, dist = _closest(qq, self.a[tt], self.b[tt], self.c[tt])
-                keep = dist <= np.repeat(r[part], len(cand))
-                out_q.append(np.repeat(part, len(cand))[keep])
+        starts = np.r_[0, np.flatnonzero(sc[1:] != sc[:-1]) + 1]
+        ends = np.r_[starts[1:], len(sc)]
+        qo, ro = q[order], r[order]
+        rmax = np.maximum.reduceat(ro, starts)
+        cl = self.cell(np.minimum.reduceat(qo, starts, axis=0) - rmax[:, None])
+        cu = self.cell(np.maximum.reduceat(qo, starts, axis=0) + rmax[:, None])
+        ncell = (cu - cl + 1).prod(1)
+        g0, ng = 0, len(starts)
+        while g0 < ng:  # groups in batches of about BALL_CELLS cells
+            g1 = g0 + max(1, int(np.searchsorted(np.cumsum(ncell[g0:]), BALL_CELLS, side="right")))
+            box, tri = self._cands(cl[g0:g1], cu[g0:g1])
+            cb = np.searchsorted(box, np.arange(g1 - g0 + 1))  # candidates of group g0 + i: tri[cb[i]:cb[i + 1]]
+            items = []  # (first query, queries, first candidate, candidates): a group, or part of one, at most `chunk` pairs
+            for i in range(g1 - g0):
+                c0, nc = int(cb[i]), int(cb[i + 1] - cb[i])
+                if not nc:
+                    continue
+                s, e = int(starts[g0 + i]), int(ends[g0 + i])
+                step = max(1, chunk // nc)
+                for a in range(s, e, step):
+                    items.append((a, min(step, e - a), c0, nc))
+            g0 = g1
+            j = 0
+            while j < len(items):
+                k, total = j, 0
+                while k < len(items) and (k == j or total + items[k][1] * items[k][3] <= chunk):
+                    total += items[k][1] * items[k][3]
+                    k += 1
+                it = np.array(items[j:k], np.int64).reshape(-1, 4)
+                j = k
+                per = it[:, 1] * it[:, 3]
+                which = np.repeat(np.arange(len(it)), per)
+                local = np.arange(int(per.sum())) - np.repeat(np.cumsum(per) - per, per)
+                nc = it[which, 3]
+                qq = order[it[which, 0] + local // nc]
+                tt = tri[it[which, 2] + local % nc]
+                p = q[qq]
+                gap = np.maximum(self.tmin[tt] - p, 0.0) + np.maximum(p - self.tmax[tt], 0.0)
+                rr = r[qq] + self.tol
+                near = (gap * gap).sum(1) <= rr * rr
+                qq, tt, p = qq[near], tt[near], p[near]
+                bary, dist = _closest(p, self.a[tt], self.b[tt], self.c[tt])
+                keep = dist <= r[qq]
+                out_q.append(qq[keep])
                 out_t.append(tt[keep])
                 out_b.append(bary[keep])
                 out_d.append(dist[keep])
@@ -457,8 +501,12 @@ def _tri_stats(q, t):
     return a2s, a3
 
 
-def _seam_fit(src_seg, src_mat, res_seg, res_mat, tex):
-    """Distance (px) of each result seam sample to the nearest source seam segment of the same material."""
+SEAM_PAIRS_PER_STEP = 1 << 19  # sample-segment pairs measured between two yields of `_seam_fit_steps`
+
+
+def _seam_fit_steps(src_seg, src_mat, res_seg, res_mat, tex):
+    """Generator: distance (px) of each result seam sample to the nearest source seam segment of the same material;
+    yields every SEAM_PAIRS_PER_STEP pairs (each sample's nearest is its own row, so the blocks do not change it)."""
 
     samples = np.concatenate([res_seg[:, :2], (res_seg[:, :2] + res_seg[:, 2:]) / 2.0, res_seg[:, 2:]])
     smat = np.tile(res_mat, 3)
@@ -470,13 +518,14 @@ def _seam_fit(src_seg, src_mat, res_seg, res_mat, tex):
         idx = np.flatnonzero(smat == mt)
         d = segs[:, 2:] - segs[:, :2]
         l2 = (d * d).sum(1)
-        step = max(1, 4000000 // len(segs))
+        step = max(1, SEAM_PAIRS_PER_STEP // len(segs))
         for s in range(0, len(idx), step):
             p = samples[idx[s:s + step]][:, None, :]
             w = p - segs[None, :, :2]
             t = np.where(l2 > 0, np.clip((w * d).sum(-1) / np.where(l2 > 0, l2, 1.0), 0.0, 1.0), 0.0)
             best = np.sqrt(((w - t[..., None] * d) ** 2).sum(-1)).min(1)
             out[idx[s:s + step]] = best * tex
+            yield
     return out
 
 
@@ -655,9 +704,7 @@ def _check_steps(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_
         ss, smat = segments(src, scut_tri, scut_side, sc, _material(src, sf))
         rs, rmat = segments(res, cut_tri, cut_side, tc, _material(res, tf))
         if len(ss) and len(rs):
-            yield
-            fit = _seam_fit(ss, smat, rs, rmat, tex)
-            yield
+            fit = yield from _seam_fit_steps(ss, smat, rs, rmat, tex)
             num[_I["seam_fit_max"]] = fit.max()
             num[_I["seam_fit_p99"]] = _percentile(fit, 99)
         else:
