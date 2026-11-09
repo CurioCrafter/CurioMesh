@@ -1834,6 +1834,7 @@ fn register_uvflat(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // main-only: uv end flat
 // main-only: uv begin chart
 mod uvchart;
+mod uvhide;
 
 /// Compile probe of the `uvchart` kernel: 1 when every helper it needs is there.
 #[pyfunction]

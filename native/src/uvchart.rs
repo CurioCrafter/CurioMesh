@@ -2833,7 +2833,9 @@ impl Tree {
         if let Some(l) = self.cache.lock().unwrap().get(&key) {
             return l.clone();
         }
-        let l = Arc::new(self.compute_level(x_pct));
+        let mut l = self.compute_level(x_pct);
+        crate::uvhide::apply(self, &mut l); // R7hide: borders slid out of sight
+        let l = Arc::new(l);
         self.cache.lock().unwrap().insert(key, l.clone());
         l
     }
