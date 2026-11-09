@@ -303,7 +303,8 @@ def after_bake(obj, images) -> dict | None:
 # Baked images follow Ctrl+Z
 # ---------------------------------------------------------------------------------------------------------------------
 
-# image name -> [(step, uint8 pixels (h, w, 4))] states, ascending. The step is the scene's HISTORY_KEY counter, which
+# image name -> [(step, pixels (h, w, 4))] states, ascending: uint8 for 8-bit images, float32 for float (HDR) images so
+# Ctrl+Z gives back values above 1 and below 0 exactly. The step is the scene's HISTORY_KEY counter, which
 # Blender's own undo puts back; `restore()` then sets each image to the newest state whose step is not newer.
 _states: dict = {}
 _applied: dict = {}
@@ -317,6 +318,13 @@ def _scene():
 
 def _step(scene) -> int:
     return int(scene.get(HISTORY_KEY, 0))
+
+
+def _pixels_state(image) -> np.ndarray:
+    pixels = _image_array(image)
+    if getattr(image, "is_float", False):
+        return pixels.copy()
+    return np.rint(np.clip(pixels, 0, 1) * 255).astype(np.uint8)
 
 
 def remember_images(scene, images, before: bool = False) -> int:
@@ -333,7 +341,7 @@ def remember_images(scene, images, before: bool = False) -> int:
         if before and any(s == step for s, _ in history):
             continue
         history[:] = [(s, p) for s, p in history if s != step]
-        history.append((step, np.rint(np.clip(_image_array(image), 0, 1) * 255).astype(np.uint8)))
+        history.append((step, _pixels_state(image)))
         history.sort(key=lambda t: t[0])
         _applied[image.name] = step
     return step
@@ -358,7 +366,8 @@ def restore(scene) -> list:
         pixels = next(p for s, p in history if s == want)
         if tuple(image.size) != (pixels.shape[1], pixels.shape[0]):
             continue
-        image.pixels.foreach_set((pixels.astype(np.float32) / 255.0).reshape(-1))
+        values = pixels.astype(np.float32) / 255.0 if pixels.dtype == np.uint8 else pixels
+        image.pixels.foreach_set(values.reshape(-1))
         image.update()
         _applied[name] = want
         changed.append(name)
