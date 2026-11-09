@@ -18,14 +18,13 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
 import math
-
 import threading
 
 import numpy as np
 
-from . import uvseams, uvsnap
+from . import uvscore, uvseams, uvsnap
 from .types import FlatFaces
-from .uvs import MOST_CHARTS, chart_codes
+from .uvs import chart_codes
 
 # Constants table (starting values; the bench tunes them, nothing here is a limit).
 DEFAULT_ALLOWANCE = 0.15  # extra faces for seams, as a share of the faces with Seam Fit off
@@ -42,6 +41,22 @@ HARD, SOFT = uvseams.HARD, uvseams.SOFT
 
 # Set by a test harness (or the panel's property group, later) before the search; every key is optional.
 OVERRIDE: dict = {}
+
+# Optional faster callables, set by the one adapter (uv_fast.py); the NumPy / Blender code runs when a name is missing.
+#   face_tree(points, FlatFaces) -> object with nearest(queries) -> (closest points, polygon, distance), or None
+#   pictures(points, triangles, center, half, pixels) -> the six pictures of `autoretopo.pictures`, or None
+#   check(...) -> a job (done(), result() = (numbers, straddling faces, flipped faces), stop()) for the UV Check, or None
+FAST: dict = {}
+
+
+def set_fast(**callables) -> None:
+    """Install (or, with None, remove) faster callables by name."""
+
+    for key, fn in callables.items():
+        if fn is None:
+            FAST.pop(key, None)
+        else:
+            FAST[key] = fn
 
 
 @dataclass
@@ -247,7 +262,6 @@ def make_plan(sa: Source, f_target: float, settings: Settings) -> Plan:
     kind = kind_of_island[seams["island"]] if len(seams["island"]) else np.zeros(0, np.int64)
     codes = chart_codes(sa.material, kind)
     if codes is None:  # more kinds than Blender can number: turn the least damaging Hard chains Soft until it fits
-        isl = seams["chain_island"].reshape(-1, 2)
         mats = seams["chain_material"].reshape(-1, 2)
         cand = [c for c in np.argsort(_risk(seams), kind="stable") if seams["class"][c] == HARD and mats[c, 0] == mats[c, 1]]
         orig = seams["class"].copy()
@@ -360,32 +374,142 @@ CANDIDATES: OrderedDict = OrderedDict()
 _JUDGES: OrderedDict = OrderedDict()
 
 
+def _tris(sa: Source) -> list:
+    ip, fl = sa.indptr, sa.flat
+    return [(int(fl[a]), int(fl[k]), int(fl[k + 1])) for a, b in zip(ip[:-1], ip[1:]) for k in range(a + 1, b - 1)]
+
+
+def _frame(sa: Source) -> tuple:
+    pts = np.ascontiguousarray(sa.points, np.float64).reshape(-1, 3)
+    low, high = pts.min(0), pts.max(0)
+    return pts, (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
+
+
 def view_judge(sa: Source, pixels: int = VIEW_PIXELS):
-    """The camera check's judge over the source's six pictures (native pictures, the chords PictureJudge), or None
-    without the native pictures. Kept per source."""
+    """The camera check's judge over the source's six pictures (the chords PictureJudge) in one call, or None when no
+    faster `pictures` callable is installed (then `view_judge_steps` draws them in slices). Kept per source."""
 
     key = (sa.key, int(pixels))
     if key in _JUDGES:
         return _JUDGES[key]
+    fast = FAST.get("pictures")
+    if fast is None or not len(sa.points):
+        return None
+    tris = _tris(sa)
+    if not tris:
+        return None
+    pts, center, half = _frame(sa)
+    return _keep_judge(key, fast(pts, tris, center, half, int(pixels)), center, half, pixels)
+
+
+def _keep_judge(key, pictures, center, half, pixels):
     from .chords import PictureJudge
-    from .topology import _turbo as turbo
 
-    if turbo is None:
-        return None
-
-    pts = np.ascontiguousarray(sa.points, np.float64).reshape(-1, 3)
-    ip, fl = sa.indptr, sa.flat
-    tris = [(int(fl[a]), int(fl[k]), int(fl[k + 1])) for a, b in zip(ip[:-1], ip[1:]) for k in range(a + 1, b - 1)]
-    if not len(tris) or not len(pts):
-        return None
-    low, high = pts.min(0), pts.max(0)
-    center, half = (low + high) / 2.0, max(float((high - low).max()) * 0.55, 1e-12)
-    pictures = turbo.pictures(pts, tris, center, half, int(pixels))
     judge = None if pictures is None else PictureJudge(pictures, center, half, int(pixels), VIEW_TURNED_DEG)
     _JUDGES[key] = judge
     while len(_JUDGES) > 2:
         _JUDGES.popitem(last=False)
     return judge
+
+
+def view_judge_steps(sa: Source, pixels: int, out: dict, use_fast: bool = True):
+    """Generator: out["judge"] = the camera check's judge. With a faster `pictures` callable it is drawn on a worker
+    thread (one call, the caller keeps slicing); without it the add-on's own ray pictures (`autoretopo.pictures`, a
+    generator) are drawn a slice at a time on the caller's thread. None outside Blender."""
+
+    key = (sa.key, int(pixels))
+    if key in _JUDGES:
+        out["judge"] = _JUDGES[key]
+        return
+    if use_fast and FAST.get("pictures") is not None:
+        worker = threading.Thread(target=lambda: out.update(judge=view_judge(sa, pixels)), name="CurioMeshUVView", daemon=True)
+        worker.start()
+        while worker.is_alive():
+            yield
+        return
+    out["judge"] = None
+    try:
+        from .. import autoretopo  # the add-on's six pictures by rays; read only, never edited
+    except ImportError:  # outside Blender
+        return
+    if not len(sa.points):
+        return
+    pts, center, half = _frame(sa)
+    polys = [sa.flat[a:b].tolist() for a, b in zip(sa.indptr[:-1].tolist(), sa.indptr[1:].tolist())]
+    yield
+    pictures = yield from autoretopo.pictures(pts, polys, center, half, int(pixels))
+    out["judge"] = _keep_judge(key, pictures, center, half, pixels)
+
+
+def _together(*gens):
+    """Generator: steps every generator in turn until all are exhausted."""
+
+    live = list(gens)
+    while live:
+        for g in list(live):
+            try:
+                next(g)
+            except StopIteration:
+                live.remove(g)
+        yield
+
+
+class _PolyTree:
+    """Closest points on polygons for arrays of queries, the faster face tree's form: (closest points, polygon,
+    distance). Blender's BVHTree (polygons cut the same way, single precision) when there is one; else a NumPy scan
+    over the fan triangles (small meshes, tests)."""
+
+    def __init__(self, points, faces):
+        P = np.asarray(points, np.float64).reshape(-1, 3)
+        ip, fl = np.asarray(faces.indptr, np.int64), np.asarray(faces.flat, np.int64)
+        try:
+            from mathutils.bvhtree import BVHTree
+        except ImportError:
+            BVHTree = None
+        if BVHTree is not None:
+            polys = [fl[a:b].tolist() for a, b in zip(ip[:-1].tolist(), ip[1:].tolist())]
+            self._bvh = BVHTree.FromPolygons(P.tolist(), polys, all_triangles=False, epsilon=0.0)
+            return
+        self._bvh = None
+        tri, owner = [], []
+        for f in range(len(ip) - 1):
+            for k in range(int(ip[f]) + 1, int(ip[f + 1]) - 1):
+                tri.append((fl[ip[f]], fl[k], fl[k + 1]))
+                owner.append(f)
+        t = np.array(tri, np.int64).reshape(-1, 3)
+        self.a, self.b, self.c = P[t[:, 0]], P[t[:, 1]], P[t[:, 2]]
+        self.owner = np.array(owner, np.int64)
+        self.grid = uvscore._Grid(self.a, self.b, self.c) if len(t) else None
+
+    def nearest(self, queries):
+        q = np.asarray(queries, np.float64).reshape(-1, 3)
+        at, face, away = np.full((len(q), 3), np.nan), np.full(len(q), -1, np.int64), np.full(len(q), np.inf)
+        if self._bvh is not None:
+            find = self._bvh.find_nearest
+            for i, x in enumerate(q.tolist()):
+                co, _n, f, d = find(x)
+                if co is not None:
+                    at[i], face[i], away[i] = co, f, d
+            return at, face, away
+        if self.grid is None or not len(q):
+            return at, face, away
+        d = self.grid.nearest(q)  # exact nearest distance, then the triangles at that distance (lowest polygon on ties)
+        qi, ti, bary, dist = self.grid.ball(q, d * (1.0 + 1e-9) + 1e-300)
+        order = np.lexsort((self.owner[ti], dist, qi))
+        qi, ti, bary, dist = qi[order], ti[order], bary[order], dist[order]
+        first = np.r_[True, qi[1:] != qi[:-1]]
+        qi, ti, bary = qi[first], ti[first], bary[first]
+        at[qi] = bary[:, :1] * self.a[ti] + bary[:, 1:2] * self.b[ti] + bary[:, 2:] * self.c[ti]
+        face[qi], away[qi] = self.owner[ti], dist[first]
+        return at, face, away
+
+
+def face_tree(points, faces, use_fast: bool = True):
+    """The closest-point tree over polygons (`faces` a FlatFaces): the faster one when installed, else `_PolyTree`."""
+
+    fast = FAST.get("face_tree") if use_fast else None
+    tree = fast(points, faces) if fast is not None else None
+    return tree if tree is not None else _PolyTree(points, faces)
 
 
 def _face_wrong(judge, P, ip, fl, f) -> float:
@@ -439,6 +563,132 @@ def view_limit(judge, P0, P1, ip, fl, edge_move, detail: float, out: dict):
     out.update(limit=limit, held=held, room=room, spent=spent)
 
 
+class SeamCheck:
+    """The UV Check's straddling and flipped faces of a result against one source layer, by the Check's own rules
+    (`uvscore._check`, SPEC 9.1: owner sets per corner; the winding at each fan triangle's centre against the source
+    triangles within its reach) and the same numbers, for the NumPy path of the fit. The source's half (fan, islands,
+    triangle grid) is built once and kept; every query runs a few hundred points a slice. Only what the fit reads is
+    measured: no drift, stretch or overlap."""
+
+    CHUNK = 256  # queries per slice (about 5-20 ms on a 60k-face source)
+
+    def __init__(self, sa: Source, src_uv, texture_px: float):
+        self.sa, self.tex = sa, float(texture_px) if texture_px and texture_px > 0 else uvscore.TEXTURE_PX
+        self.src = uvscore.mesh(sa.points, sa.indptr, sa.flat, src_uv, sa.material)
+        self._layer = src_uv  # held, so the cache key (its id) stays this layer's
+        self.ready = False
+
+    def _build(self):
+        src = self.src
+        sc, sf = uvscore._fan(src)
+        yield
+        self.region = uvscore._islands(src, sc, sf, self.tex)[0]
+        yield
+        sq = src.points[src.flat[sc]]
+        self.su = src.uv[sc]
+        self.grid = uvscore._Grid(sq[:, 0], sq[:, 1], sq[:, 2])
+        yield
+        diag = float(np.linalg.norm(np.ptp(src.points, axis=0)))
+        edge = np.sort(np.linalg.norm(sq[:, 1] - sq[:, 0], axis=1))
+        n = len(edge)
+        median = float(edge[n // 2] if n % 2 else (edge[n // 2 - 1] + edge[n // 2]) / 2) if n else 0.0
+        self.eps = max(uvscore.EPS_DIAG * diag, uvscore.EPS_EDGE * median)
+        self.s2s, _ = uvscore._tri_stats(sq, self.su)
+        self.sn = np.cross(sq[:, 1] - sq[:, 0], sq[:, 2] - sq[:, 0])
+        self.ready = True
+
+    def _nearest(self, q, stopped):
+        out = np.empty(len(q))
+        for a in range(0, len(q), self.CHUNK):
+            out[a:a + self.CHUNK] = self.grid.nearest(q[a:a + self.CHUNK])
+            yield
+            if stopped():
+                return None
+        return out
+
+    def _ball(self, q, r, stopped):
+        parts = []
+        for a in range(0, len(q), self.CHUNK):
+            qi, ti, bary, _d = self.grid.ball(q[a:a + self.CHUNK], r[a:a + self.CHUNK])
+            parts.append((qi + a, ti, bary))
+            yield
+            if stopped():
+                return None
+        if not parts:
+            return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 3))
+        return tuple(np.concatenate([x[k] for x in parts]) for k in range(3))
+
+    def steps(self, points, indptr, flat, uv, stopped=lambda: False):
+        """Generator: (straddling, flipped) per face of the result (corner UVs `uv`); None when `stopped()`."""
+
+        if not self.ready:
+            yield from self._build()
+        res = uvscore.mesh(points, indptr, flat, uv)
+        nf = len(res.indptr) - 1
+        tc, tf = uvscore._fan(res)
+        rq, ru = res.points[res.flat[tc]], res.uv[tc]
+        a2s, _a3 = uvscore._tri_stats(rq, ru)
+        tex = self.tex
+        # owner sets per result corner
+        cpts = res.points[res.flat]
+        d0 = yield from self._nearest(cpts, stopped)
+        if d0 is None:
+            return None
+        got = yield from self._ball(cpts, d0 + self.eps, stopped)
+        if got is None:
+            return None
+        qi, ti, bary = got
+        reg = self.region[ti]
+        suv = np.einsum("kj,kjc->kc", bary, self.su[ti])
+        pairs = np.unique(np.stack([qi, reg], 1), axis=0) if len(qi) else np.zeros((0, 2), np.int64)
+        many = np.bincount(pairs[:, 0], minlength=len(cpts)) > 1
+        close = np.linalg.norm(suv - res.uv[qi], axis=1) * tex <= uvscore.OWNER_UV_PX
+        use = ~many[qi] | close
+        pairs = np.unique(np.stack([qi[use], reg[use]], 1), axis=0) if len(qi) else pairs
+        corner_face = np.repeat(np.arange(nf), np.diff(res.indptr))
+        fr = np.stack([corner_face[pairs[:, 0]], pairs[:, 1]], 1)
+        uniq, cnt = np.unique(fr, axis=0, return_counts=True) if len(fr) else (np.zeros((0, 2), np.int64), np.zeros(0, np.int64))
+        full = cnt == np.diff(res.indptr)[uniq[:, 0]] if len(uniq) else np.zeros(0, bool)
+        ok_face = np.zeros(nf, bool)
+        ok_face[uniq[full, 0]] = True
+        yield
+        # flips: the reach of each fan triangle from its 7 samples, the winding at its centre
+        sp = np.einsum("ijk,lj->ilk", rq, uvscore._BARY7).reshape(-1, 3)
+        sd0 = yield from self._nearest(sp, stopped)
+        if sd0 is None:
+            return None
+        face_err = sd0.reshape(-1, 7).sum(1) / 7.0
+        slack = np.maximum(face_err, uvscore.DRIFT_EDGE_SLACK * np.linalg.norm(rq[:, 1] - rq[:, 0], axis=1))
+        centre = np.arange(0, len(sp), 7)
+        got = yield from self._ball(sp[centre], sd0[centre] + slack, stopped)
+        if got is None:
+            return None
+        qt, ti, _b = got
+        nr = np.cross(rq[:, 1] - rq[:, 0], rq[:, 2] - rq[:, 0])
+        sgn = np.sign(self.s2s[ti]) * np.sign((self.sn[ti] * nr[qt]).sum(-1))
+        match = (sgn == np.sign(a2s[qt])) | (np.abs(self.s2s[ti]) < uvscore.AREA_MIN)
+        matched = np.zeros(len(tc), bool)
+        matched[qt[match]] = True
+        flipped = np.zeros(nf, bool)
+        flipped[tf[~matched & (np.abs(a2s) >= uvscore.AREA_MIN)]] = True
+        return ~ok_face, flipped
+
+
+_CHECKS: OrderedDict = OrderedDict()
+
+
+def seam_check(sa: Source, src_uv, texture_px: float) -> SeamCheck:
+    """The kept `SeamCheck` for this source layer and texture size."""
+
+    key = (sa.key, id(src_uv), float(texture_px))
+    hit = _CHECKS.get(key)
+    if hit is None:
+        hit = _CHECKS[key] = SeamCheck(sa, src_uv, texture_px)
+        while len(_CHECKS) > 2:
+            _CHECKS.popitem(last=False)
+    return hit
+
+
 def remember(candidate: Candidate) -> None:
     CANDIDATES[candidate.result_key] = candidate
     while len(CANDIDATES) > CACHED_CANDIDATES:
@@ -463,6 +713,7 @@ class FitStage:
         self._stopped = False
         self._now = None
         self._trees = None  # closest points per source side, built as the re-read needs them
+        self._tree = None  # closest points over the whole source
         self._judge = None  # the camera check's judge, once the snap has drawn it
         self._last_flipped = None  # the UV Check's flipped faces from the last `_straddling`
         self._ball_moved = {}  # vertices each ball pass moved
@@ -502,13 +753,9 @@ class FitStage:
     def _straddling(self, uv, P, ip, fl, origin=None, tree=None):
         """Generator: per result face True when the UV Check (its owner-set rule) calls it across a seam after a plain
         per-side transfer (with `tree`, the global face tree: after the owner-ball re-read too, as the fit reads it);
-        the side switches cut only those. None without the native check."""
-
-        from .topology import _turbo as turbo
+        the side switches cut only those. None when stopped."""
 
         sa, s = self.sa, self.settings
-        if turbo is None or not hasattr(turbo, "uvscore_check"):
-            return None
         look = yield from self._lookup(uv, P, ip, fl)
         if look is None:
             return None
@@ -521,17 +768,44 @@ class FitStage:
             self.numbers_reread, self.numbers_reread_undone = kept
         else:
             yield from _layer_steps(sa, uv, P, ip, fl, look, s.texture_px, self.use_fast, got)
-        job = turbo.uvscore_check(P, ip, fl, got["uv"], self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, uv, sa.material, texture_px=s.texture_px)
-        if job is None:
+        res = yield from self._check(P, ip, fl, got["uv"], origin, uv)
+        if res is None:
             return None
-        while not job.done():
-            yield
-            if self._stopped:
-                job.stop()
+        self._last_flipped = res[1]
+        return res[0]
+
+    def _check(self, P, ip, fl, uv, origin, src_uv):
+        """Generator: the UV Check's (straddling, flipped) per face of the mesh (P, ip, fl) with corner UVs `uv`,
+        against the source layer `src_uv`; the faster job is polled when installed, else the NumPy Check runs between
+        two slices. None when stopped."""
+
+        sa, s = self.sa, self.settings
+        mat = self._face_material(ip, origin)
+        fast = FAST.get("check") if self.use_fast else None
+        job = fast(P, ip, fl, uv, mat, sa.points, sa.indptr, sa.flat, src_uv, sa.material, texture_px=s.texture_px) if fast is not None else None
+        if job is not None:
+            while not job.done():
+                yield
+                if self._stopped:
+                    job.stop()
+                    return None
+            res = job.result()
+        else:
+            res = yield from seam_check(sa, src_uv, s.texture_px).steps(P, ip, fl, uv, lambda: self._stopped)
+            if res is None:
                 return None
-        res = job.result()
-        self._last_flipped = np.asarray(res[2]).astype(bool)
-        return np.asarray(res[1]).astype(bool)
+            res = (None,) + res
+        return np.asarray(res[1]).astype(bool), np.asarray(res[2]).astype(bool)
+
+    def _tree_of(self, points, faces):
+        return face_tree(points, faces, self.use_fast)
+
+    def _source_tree(self):
+        """The face tree over the whole source, built once per stage."""
+
+        if self._tree is None:
+            self._tree = self._tree_of(self.sa.points, FlatFaces(self.sa.indptr, self.sa.flat))
+        return self._tree
 
     def _reread(self, look, tree, P, ip, fl, n_before, vchain):
         """Generator: a face whose corners all lie within one side's owner ball reads that side (`uvsnap.ball_sides_steps`,
@@ -539,15 +813,13 @@ class FitStage:
 
         if tree is None or not self.settings.reread:
             return
-        from .topology import _turbo as turbo
-
         sa = self.sa
         region = np.asarray(self.plan.seams["region"], np.int64)
         pts = np.asarray(P, np.float64).reshape(-1, 3)
         _at, near_f, d0 = tree.nearest(pts)
         label = region[np.asarray(near_f, np.int64)]
         if self._trees is None:
-            self._trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, lambda a, b: turbo.face_tree(a, b))
+            self._trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, self._tree_of)
         got = {}
         self._before = {k: np.array(look[k], copy=True) for k in ("ids", "w", "shift", "slid", "ref_ids", "ref_w", "ref_face", "orient", "region")}
         yield from uvsnap.ball_sides_steps(look["region"], pts, ip, fl, label, d0, self._trees, got)
@@ -577,14 +849,10 @@ class FitStage:
         changed = np.asarray(look["region"]) != before["region"]
         if not changed.any():
             return
-        from .topology import _turbo as turbo
-
-        job = turbo.uvscore_check(P, ip, fl, got["uv"], self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, uv, sa.material, texture_px=s.texture_px)
-        if job is None:
+        res = yield from self._check(P, ip, fl, got["uv"], origin, uv)
+        if res is None:
             return
-        while not job.done():
-            yield
-        bad = changed & np.asarray(job.result()[2]).astype(bool)
+        bad = changed & res[1]
         if not bad.any():
             return
         ipa = np.asarray(ip, np.int64)
@@ -609,12 +877,10 @@ class FitStage:
 
         if tree is None or only is None or not self.settings.ball_snap:
             return P, only
-        from .topology import _turbo as turbo
-
         sa, s = self.sa, self.settings
         region = np.asarray(self.plan.seams["region"], np.int64)
         if self._trees is None:
-            self._trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, lambda a, b: turbo.face_tree(a, b))
+            self._trees = uvsnap.RegionTrees(sa.points, sa.indptr, sa.flat, region, self._tree_of)
         ipa = np.asarray(ip, np.int64)
         face_of = np.repeat(np.arange(len(ipa) - 1), np.diff(ipa))
         moved_total = undone_total = passes = 0
@@ -695,29 +961,19 @@ class FitStage:
         centre's. The card's "left for baking" counts only faces across a seam that show at least one texel
         (`texel_area`), the faces Bake those spots bakes; the split's own counts are kept beside them."""
 
-        from .topology import _turbo as turbo
-
         sa, s = self.sa, self.settings
         a = sa.active
         numbers.update(faces_left_split=numbers["faces_left"], faces_for_baking_split=numbers["faces_for_baking"])
-        if turbo is None or not hasattr(turbo, "uvscore_check"):
-            return
         straddle = flipped = None
         # as computed, and as the mesh stores it (single precision): a face edge-on to the source faces it reads has a
         # winding that rounding alone can turn, so it counts as flipped when either reading calls it so
         for pts, luv in ((P, out[a]), (np.asarray(P, np.float32).astype(np.float64), np.asarray(out[a], np.float32).astype(np.float64))):
-            job = turbo.uvscore_check(pts, ip, fl, luv, self._face_material(ip, origin), sa.points, sa.indptr, sa.flat, sa.layers[a][1], sa.material, texture_px=s.texture_px)
-            if job is None:
+            res = yield from self._check(pts, ip, fl, luv, origin, sa.layers[a][1])
+            if res is None:
                 return
-            while not job.done():
-                yield
-                if self._stopped:
-                    job.stop()
-                    return
-            res = job.result()
-            f_ = np.asarray(res[2]).astype(bool)
+            f_ = res[1]
             if straddle is None:
-                straddle, flipped = np.asarray(res[1]).astype(bool), f_
+                straddle, flipped = res[0], f_
             else:
                 flipped = flipped | f_
         shows, _density = texel_area(P, ip, fl, out[a], s.texture_px)
@@ -726,7 +982,7 @@ class FitStage:
         risky = flipped.copy()
         if len(small):  # a speck edge-on to the source faces nearest it: the Check's winding test on it is rounding
             yield
-            risky[small[edge_on(P, ipa, fl, small, sa, self.use_fast)]] = True
+            risky[small[edge_on(P, ipa, fl, small, sa, self.use_fast, self._source_tree())]] = True
         shut = np.zeros(len(risky), bool)
         for f in np.flatnonzero(risky).tolist():
             c = slice(ipa[f], ipa[f + 1])
@@ -770,16 +1026,13 @@ class FitStage:
             if move is None:
                 move = s.move_share * uvsnap.vertex_edge(P, ip, fl)
                 judge = None
-                if s.view_check and self.use_fast:  # the pictures are native only; drawn on a thread while the first pass runs
+                if s.view_check:  # the pictures are drawn while the first pass runs (on a worker only for the faster pictures)
                     got = {}
-                    worker = threading.Thread(target=lambda: got.update(judge=view_judge(sa, s.view_pixels)), name="CurioMeshUVView", daemon=True)
-                    worker.start()
                     first = uvsnap.Snap(P, ip, fl, seams, xyz, max_move=move, use_fast=self.use_fast)
-                    yield from self._drive(first)
-                    while worker.is_alive():
+                    for _ in _together(self._drive(first), view_judge_steps(sa, s.view_pixels, got, self.use_fast)):
                         yield
-                    if self._stopped:
-                        return
+                        if self._stopped:
+                            return
                     judge = got.get("judge")
                     self._judge = judge
                     snap = None if judge is not None else first
@@ -814,70 +1067,70 @@ class FitStage:
         P0, ip0, fl0 = P, ip, fl
         cut_seams, cut_xyz = seams, xyz
         tree = None
-        if soft and s.split and self.use_fast:  # side switches: cut faces where the nearest source side changes
-            from .topology import _turbo as turbo
-            if turbo is not None:
-                tree = turbo.face_tree(sa.points, FlatFaces(sa.indptr, sa.flat))
-                only = None
-                if s.switch_by == "side" or s.switch_snap:
+        if soft and s.split:  # side switches: cut faces where the nearest source side changes
+            yield
+            tree = self._source_tree()
+            yield
+            only = None
+            if s.switch_by == "side" or s.switch_snap:
+                only = yield from self._straddling(uv, P, ip, fl)
+                if self._stopped:
+                    return
+            if s.switch_snap and only is not None:  # zero faces first: corners over a side line move onto it
+                region = np.asarray(seams["region"], np.int64)
+                lim = np.asarray(move_used, np.float64) if s.snap else s.move_share * uvsnap.vertex_edge(P, ip, fl)
+                side_of = lambda q: region[np.asarray(tree.nearest(np.asarray(q).reshape(-1, 3))[1], np.int64)]  # noqa: E731
+                got = {}
+                yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, lim, only, got)
+                if self._stopped:
+                    return
+                if self._judge is not None and len(got["moved"]):  # the camera check prices these moves too (SPEC 4.10)
+                    view = {}
+                    yield from view_limit(self._judge, P, got["points"], ip, fl, lim, s.detail, view)
+                    numbers.update(side_view_held=int(view["held"]))
+                    if view["held"]:
+                        got = {}
+                        yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, view["limit"], only, got)
+                        if self._stopped:
+                            return
+                before_slide = np.asarray(P, np.float64).reshape(-1, 3)
+                P = np.asarray(got["points"], np.float64)
+                numbers.update(side_moved=int(len(got["moved"])))
+                if len(got["moved"]):  # a slide that turns a face's texture over is taken back (the UV Check's flip test)
+                    was = self._last_flipped
                     only = yield from self._straddling(uv, P, ip, fl)
                     if self._stopped:
                         return
-                if s.switch_snap and only is not None:  # zero faces first: corners over a side line move onto it
-                    region = np.asarray(seams["region"], np.int64)
-                    lim = np.asarray(move_used, np.float64) if s.snap else s.move_share * uvsnap.vertex_edge(P, ip, fl)
-                    side_of = lambda q: region[np.asarray(tree.nearest(np.asarray(q).reshape(-1, 3))[1], np.int64)]  # noqa: E731
-                    got = {}
-                    yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, lim, only, got)
-                    if self._stopped:
-                        return
-                    if self._judge is not None and len(got["moved"]):  # the camera check prices these moves too (SPEC 4.10)
-                        view = {}
-                        yield from view_limit(self._judge, P, got["points"], ip, fl, lim, s.detail, view)
-                        numbers.update(side_view_held=int(view["held"]))
-                        if view["held"]:
-                            got = {}
-                            yield from uvsnap.switch_snap_steps(P, ip, fl, side_of, view["limit"], only, got)
+                    if only is not None and was is not None:
+                        now = self._last_flipped & ~was
+                        if now.any():
+                            Q = P.reshape(-1, 3).copy()
+                            face_of = np.repeat(np.arange(len(ip) - 1), np.diff(ip))
+                            vs = np.unique(fl[now[face_of]])
+                            Q[vs] = before_slide[vs]
+                            P = Q.ravel()
+                            numbers.update(side_slides_undone=int(len(vs)))
+                            only = yield from self._straddling(uv, P, ip, fl)
                             if self._stopped:
                                 return
-                    before_slide = np.asarray(P, np.float64).reshape(-1, 3)
-                    P = np.asarray(got["points"], np.float64)
-                    numbers.update(side_moved=int(len(got["moved"])))
-                    if len(got["moved"]):  # a slide that turns a face's texture over is taken back (the UV Check's flip test)
-                        was = self._last_flipped
-                        only = yield from self._straddling(uv, P, ip, fl)
-                        if self._stopped:
-                            return
-                        if only is not None and was is not None:
-                            now = self._last_flipped & ~was
-                            if now.any():
-                                Q = P.reshape(-1, 3).copy()
-                                face_of = np.repeat(np.arange(len(ip) - 1), np.diff(ip))
-                                vs = np.unique(fl[now[face_of]])
-                                Q[vs] = before_slide[vs]
-                                P = Q.ravel()
-                                numbers.update(side_slides_undone=int(len(vs)))
-                                only = yield from self._straddling(uv, P, ip, fl)
-                                if self._stopped:
-                                    return
-                    P0 = P
-                ball_lim = np.asarray(move_used, np.float64) if s.snap else s.move_share * uvsnap.vertex_edge(P, ip, fl)
-                if s.ball_snap:  # zero faces: corners of faces still across a seam move onto a side the others hold
-                    if only is None:
-                        only = yield from self._straddling(uv, P, ip, fl)
-                    P, only = yield from self._ball_pass(uv, P, ip, fl, None, only, ball_lim, tree, numbers, "ball")
-                    if self._stopped:
-                        return
-                    P0 = P
-                if s.switch_by != "side":
-                    only = None
-                got = {}
-                yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got, by=s.switch_by, only=only)
+                P0 = P
+            ball_lim = np.asarray(move_used, np.float64) if s.snap else s.move_share * uvsnap.vertex_edge(P, ip, fl)
+            if s.ball_snap:  # zero faces: corners of faces still across a seam move onto a side the others hold
+                if only is None:
+                    only = yield from self._straddling(uv, P, ip, fl)
+                P, only = yield from self._ball_pass(uv, P, ip, fl, None, only, ball_lim, tree, numbers, "ball")
                 if self._stopped:
                     return
-                cut_seams = got["seams"]
-                cut_xyz = uvsnap.chain_xyz(cut_seams, sa.points)
-                numbers.update(part_switches=int(cut_seams.get("part_switches", 0)), straddling_before=int(np.sum(only)) if only is not None else -1)
+                P0 = P
+            if s.switch_by != "side":
+                only = None
+            got = {}
+            yield from uvsnap.part_switches_steps(seams, sa.points, sa.indptr, sa.flat, uv, P, ip, fl, tree.nearest, got, by=s.switch_by, only=only)
+            if self._stopped:
+                return
+            cut_seams = got["seams"]
+            cut_xyz = uvsnap.chain_xyz(cut_seams, sa.points)
+            numbers.update(part_switches=int(cut_seams.get("part_switches", 0)), straddling_before=int(np.sum(only)) if only is not None else -1)
         n_before = len(P0) // 3 if P0.ndim == 1 else len(P0)
         hold = np.zeros(0, np.int64)  # vertices the snap after the split leaves where they are (their moves turned a face over)
         while True:
@@ -1059,15 +1312,13 @@ def _signed_uv_px(indptr, uv, texture_px: float) -> np.ndarray:
     return np.bincount(owner, u[:, 0] * u[nxt, 1] - u[nxt, 0] * u[:, 1], nf) / 2.0
 
 
-def edge_on(points, indptr, flat, faces, sa: "Source", use_fast: bool = True) -> np.ndarray:
+def edge_on(points, indptr, flat, faces, sa: "Source", use_fast: bool = True, tree=None) -> np.ndarray:
     """Per face in `faces`: True when every fan triangle of it stands edge-on (EDGE_ON_COS) to the source polygon nearest
-    its centre (the fast face tree; all False without it). Such a face reads the texture at a grazing angle, and the
-    sign of its winding against those source faces is down to rounding."""
-
-    from .topology import _turbo as turbo
+    its centre (`tree`: the source's face tree, built when not given). Such a face reads the texture at a grazing angle,
+    and the sign of its winding against those source faces is down to rounding."""
 
     faces = np.asarray(faces, np.int64)
-    if turbo is None or not use_fast or not len(faces):
+    if not len(faces):
         return np.zeros(len(faces), bool)
     P = np.asarray(points, np.float64).reshape(-1, 3)
     ip, fl = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
@@ -1078,7 +1329,8 @@ def edge_on(points, indptr, flat, faces, sa: "Source", use_fast: bool = True) ->
     s0 = ip[faces][tf]
     a, b, c = P[fl[s0]], P[fl[s0 + k]], P[fl[s0 + k + 1]]
     n = np.cross(b - a, c - a)
-    tree = turbo.face_tree(sa.points, FlatFaces(sa.indptr, sa.flat))
+    if tree is None:
+        tree = face_tree(sa.points, FlatFaces(sa.indptr, sa.flat), use_fast)
     _at, g, _d = tree.nearest((a + b + c) / 3.0)
     g = np.asarray(g, np.int64)
     sP = np.asarray(sa.points, np.float64).reshape(-1, 3)

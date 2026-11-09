@@ -14,7 +14,7 @@ from uv_parity_common import needs_native
 
 from triadq import uvseams
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 
 def grid(nx, ny, w, h):

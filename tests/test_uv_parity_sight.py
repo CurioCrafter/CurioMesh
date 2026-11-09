@@ -11,7 +11,7 @@ import numpy as np
 import uv_parity_common as common
 from uv_parity_common import needs_native
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 uvsight = common.addon_module("triadq.uvsight")
 
@@ -44,7 +44,9 @@ def lumpy_sphere(rings=40, around=60, seed=3):
     pts = np.array(pts)
     pts *= (1.0 + 0.15 * np.sin(5 * pts[:, 0] + 2 * pts[:, 1]) * pts[:, 2] + rng.normal(0, 0.004, len(pts)))[:, None]
     quads = []
-    ring = lambda r, c: 1 + (r - 1) * around + c % around
+    def ring(r, c):
+        return 1 + (r - 1) * around + c % around
+
     for r in range(1, rings - 1):
         for c in range(around):
             quads.append((ring(r, c), ring(r, c + 1), ring(r + 1, c + 1), ring(r + 1, c)))
@@ -208,7 +210,6 @@ class Parity(unittest.TestCase):
 
     def test_slices_are_short(self):
         pts, quads = lumpy_sphere(14, 18)
-        held = None
         twin = uvsight.Sight(pts, quads, views=6, pixels=256, draw=turbo.pictures)
         worst, steps = 0.0, 0
         while True:

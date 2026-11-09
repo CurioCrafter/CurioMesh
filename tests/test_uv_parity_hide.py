@@ -21,7 +21,7 @@ from uv_parity_common import needs_native
 from test_uv_parity_chart import cube, speckled, tube
 from triadq import uvchart, uvhide
 
-import turbo
+from uv_parity_common import turbo  # noqa: E402  (None in a build without it)
 
 
 def seen_px(mesh, seed=3):

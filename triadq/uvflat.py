@@ -109,7 +109,9 @@ class Elements:
                 tv.append(verts[:, t])
                 tr.append(q[:, t])
                 tf.append(ids)
-        cat = lambda parts, shape, dtype: np.concatenate(parts) if parts else np.zeros(shape, dtype=dtype)
+        def cat(parts, shape, dtype):
+            return np.concatenate(parts) if parts else np.zeros(shape, dtype=dtype)
+
         self.a, self.b = cat(a, (0,), np.int64), cat(b, (0,), np.int64)
         self.w, self.e = cat(w, (0,), np.float64), cat(e, (0, 2), np.float64)
         self.elem = cat(elem, (0,), np.int64)
@@ -314,7 +316,9 @@ def loop_triples(indptr, flat, n: int) -> np.ndarray:
         if not fan or not all(x[2] for x in fan):
             continue
         nb = sorted({w for x in fan for w in x[:2]})
-        shares = lambda p, q: any((x[0] == p and x[1] == q) or (x[0] == q and x[1] == p) for x in fan)
+        def shares(p, q):
+            return any((x[0] == p and x[1] == q) or (x[0] == q and x[1] == p) for x in fan)
+
         if len(fan) == 4 and len(nb) == 4:
             for i in range(4):
                 for j in range(i + 1, 4):

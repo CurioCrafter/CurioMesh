@@ -190,11 +190,13 @@ def _islands(m: Mesh, tc, tf, tex):
     uv1 = uvc[tri, (side + 1) % 3]
     v0 = vert[tri, side]
     mat = _material(m, tf)[tri]
-    ua, ub, joined_pairs, cut_groups = [], [], [], []
+    ua, ub, cut_groups = [], [], []
 
     def pair(x, y):
         same_dir = v0[x] == v0[y]
-        close = lambda p, q: (np.abs(p - q) <= tol).all(axis=-1)
+        def close(p, q):
+            return (np.abs(p - q) <= tol).all(axis=-1)
+
         same_uv = np.where(same_dir, close(uv0[x], uv0[y]) & close(uv1[x], uv1[y]), close(uv0[x], uv1[y]) & close(uv1[x], uv0[y]))
         return same_uv & (mat[x] == mat[y])
 
@@ -401,6 +403,15 @@ def _fill(p, size):
 
 
 def _raster(m, tc, tf, ru, a3, allow, tex):
+    gen = _raster_steps(m, tc, tf, ru, a3, allow, tex)
+    while True:
+        try:
+            next(gen)
+        except StopIteration as done:
+            return done.value
+
+
+def _raster_steps(m, tc, tf, ru, a3, allow, tex):
     size = int(np.clip(np.round(tex), 16, RASTER_MAX_PX))
     mat = _material(m, tf)
     cen = (ru[:, 0] + ru[:, 1] + ru[:, 2]) / 3.0
@@ -415,12 +426,17 @@ def _raster(m, tc, tf, ru, a3, allow, tex):
         count = np.zeros(size * size, np.int64)
         flag = np.zeros(size * size, bool)
         p = (ru[sel] - pages[pg, 1:3].astype(np.float64)) * float(size)
-        for part in range(0, len(sel), 20000):
-            sl = slice(part, part + 20000)
+        box = (np.ptp(p[:, :, 0], axis=1) + 2.0) * (np.ptp(p[:, :, 1], axis=1) + 2.0)  # texels a triangle's box covers, about
+        box = np.where(np.isfinite(box), box, 0.0)
+        cuts = np.searchsorted(np.cumsum(box), np.arange(TEXELS_PER_STEP, float(box.sum()) + TEXELS_PER_STEP, TEXELS_PER_STEP), side="right")
+        bounds = np.unique(np.r_[0, cuts, np.arange(TRIS_PER_STEP, len(sel), TRIS_PER_STEP), len(sel)].clip(0, len(sel)))
+        for lo_, hi_ in zip(bounds[:-1], bounds[1:]):
+            sl = slice(int(lo_), int(hi_))
             tri, texel = _fill(p[sl], size)
             normal = ~allowed[sel][sl][tri]
             count += np.bincount(texel[normal], minlength=size * size)
             flag[texel[~normal]] = True
+            yield
         c = np.minimum(count, 2)
         covered += float((c > 0).sum())
         over += float((c >= 2).sum())
@@ -505,7 +521,49 @@ def check(res: Mesh, src: "Mesh | None" = None, *, seen_face=None, seen_edge_px=
     return _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart, density, src_region, faces_off, split, tex)
 
 
+def check_steps(res: Mesh, src: "Mesh | None" = None, *, seen_face=None, seen_edge_px=None, allow_overlap=None, col=None, row=None,
+                on_chart=None, density=None, src_region=None, faces_off: int = 0, split=None, texture_px: float = TEXTURE_PX):
+    """Generator: `check` with the NumPy Check run a slice at a time (a few hundred queries or a few thousand triangles
+    per step); returns the same `Check`."""
+
+    tex = float(texture_px) if texture_px and texture_px > 0 else TEXTURE_PX
+    return (yield from _check_steps(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart, density, src_region, faces_off, split, tex))
+
+
 def _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart, density, src_region, faces_off, split, tex):
+    gen = _check_steps(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart, density, src_region, faces_off, split, tex)
+    while True:
+        try:
+            next(gen)
+        except StopIteration as done:
+            return done.value
+
+
+QUERIES_PER_STEP = 512  # nearest / ball queries per slice of the sliced Check
+TRIS_PER_STEP = 5000  # triangles rasterised per slice
+TEXELS_PER_STEP = 1 << 19  # and about this many texels of their boxes
+
+
+def _nearest_steps(grid, q):
+    out = np.empty(len(q))
+    for a in range(0, len(q), QUERIES_PER_STEP):
+        out[a:a + QUERIES_PER_STEP] = grid.nearest(q[a:a + QUERIES_PER_STEP])
+        yield
+    return out
+
+
+def _ball_steps(grid, q, r):
+    parts = []
+    for a in range(0, len(q), QUERIES_PER_STEP):
+        qi, ti, bary, d = grid.ball(q[a:a + QUERIES_PER_STEP], r[a:a + QUERIES_PER_STEP])
+        parts.append((qi + a, ti, bary, d))
+        yield
+    if not parts:
+        return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros(0)
+    return tuple(np.concatenate([x[k] for x in parts]) for k in range(4))
+
+
+def _check_steps(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart, density, src_region, faces_off, split, tex):
     num = np.full(len(NAMES), np.nan)
     nf = len(res.indptr) - 1
     tc, tf = _fan(res)
@@ -519,6 +577,7 @@ def _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart,
     a2s, a3 = _tri_stats(rq, ru)
     a2 = np.abs(a2s)
     label, nisl, cut_tri, cut_side = _islands(res, tc, tf, tex)
+    yield
     straddle = np.zeros(nf, bool)
     flipped_tri = np.zeros(nt, bool)
     vs_source = False
@@ -526,10 +585,12 @@ def _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart,
     if src is not None:
         sc, sf = _fan(src)
         slabel, _, scut_tri, scut_side = _islands(src, sc, sf, tex)
+        yield
         region = slabel if src_region is None or len(src_region) != len(src.indptr) - 1 else np.maximum(np.asarray(src_region), 0)[sf]
         sq = src.points[src.flat[sc]]
         su = src.uv[sc]
         grid = _Grid(sq[:, 0], sq[:, 1], sq[:, 2])
+        yield
         diag = float(np.linalg.norm(np.ptp(src.points, axis=0)))
         edge = np.sort(np.linalg.norm(sq[:, 1] - sq[:, 0], axis=1))
         n = len(edge)
@@ -537,8 +598,8 @@ def _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart,
         eps = max(EPS_DIAG * diag, EPS_EDGE * median)
         # owner sets per result corner
         cpts = res.points[res.flat]
-        d0 = grid.nearest(cpts)
-        qi, ti, bary, _ = grid.ball(cpts, d0 + eps)
+        d0 = yield from _nearest_steps(grid, cpts)
+        qi, ti, bary, _ = yield from _ball_steps(grid, cpts, d0 + eps)
         reg = region[ti]
         suv = np.einsum("kj,kjc->kc", bary, su[ti])
         pairs = np.unique(np.stack([qi, reg], 1), axis=0) if len(qi) else np.zeros((0, 2), np.int64)
@@ -558,11 +619,11 @@ def _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart,
         # drift and flips: 7 samples per result triangle
         sp = np.einsum("ijk,lj->ilk", rq, _BARY7).reshape(-1, 3)
         suv_r = np.einsum("ijk,lj->ilk", ru, _BARY7).reshape(-1, 2)
-        sd0 = grid.nearest(sp)
+        sd0 = yield from _nearest_steps(grid, sp)
         face_err = sd0.reshape(-1, 7).sum(1) / 7.0
         slack = np.maximum(face_err, DRIFT_EDGE_SLACK * np.linalg.norm(rq[:, 1] - rq[:, 0], axis=1))
         rad = sd0 + np.repeat(slack, 7)
-        qi, ti, bary, _ = grid.ball(sp, rad)
+        qi, ti, bary, _ = yield from _ball_steps(grid, sp, rad)
         uv_c = np.einsum("kj,kjc->kc", bary, su[ti])
         duv = np.linalg.norm(uv_c - suv_r[qi], axis=1) * tex
         drift = np.full(len(sp), np.inf)
@@ -594,7 +655,9 @@ def _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart,
         ss, smat = segments(src, scut_tri, scut_side, sc, _material(src, sf))
         rs, rmat = segments(res, cut_tri, cut_side, tc, _material(res, tf))
         if len(ss) and len(rs):
+            yield
             fit = _seam_fit(ss, smat, rs, rmat, tex)
+            yield
             num[_I["seam_fit_max"]] = fit.max()
             num[_I["seam_fit_p99"]] = _percentile(fit, 99)
         else:
@@ -645,8 +708,10 @@ def _check(res, src, seen_face, seen_edge_px, allow_overlap, col, row, on_chart,
         num[_I["pixel_spread"]] = _wquantile(v, a3i[good], 0.95) / max(_wquantile(v, a3i[good], 0.05), 1e-30)
 
     # overlap and space used
+    yield
     if nt:
-        num[_I["overlap_pct"]], num[_I["space_used_pct"]] = _raster(res, tc, tf, ru, a3, allow_overlap, tex)
+        num[_I["overlap_pct"]], num[_I["space_used_pct"]] = yield from _raster_steps(res, tc, tf, ru, a3, allow_overlap, tex)
+    yield
 
     # cut length and seams in sight
     total_area = float(a3.sum())

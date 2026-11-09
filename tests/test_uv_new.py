@@ -12,7 +12,7 @@ import numpy as np
 import uv_parity_common as common
 from uv_parity_common import needs_native
 
-from triadq import uvbake, uvchart, uvflat, uvnew, uvpack, uvscore, uvsight
+from triadq import uvbake, uvchart, uvflat, uvnew, uvpack, uvscore
 from test_uv_parity_chart import cube, grid
 
 
@@ -50,6 +50,23 @@ class Rules(unittest.TestCase):
         side = (b[:, 0] - a[:, 0])[None] * (p[:, 1:2] - a[:, 1][None]) - (b[:, 1] - a[:, 1])[None] * (p[:, 0:1] - a[:, 0][None])
         self.assertTrue((side >= -1e-9).all())  # every point lies left of (or on) every hull edge: counter-clockwise and nothing outside
         self.assertTrue(all(any(np.allclose(v, q) for q in p[:: 1]) for v in h[:5]))
+
+    def test_angles_of_all_charts_at_once_match_one_by_one(self):
+        rng = np.random.default_rng(5)
+        sizes = [1, 2, 3, 3, 7, 40, 600, 5, 100, 300]
+        uv = np.concatenate([rng.normal(size=(n, 2)) * [2.0, 0.5] + rng.normal(size=2) for n in sizes])
+        uv[sizes[0] + sizes[1] + 1] = uv[sizes[0] + sizes[1]]  # repeated points (corners of one vertex)
+        label = np.repeat(np.arange(len(sizes)), sizes)
+        order = np.argsort(label, kind="stable")
+        bounds = np.searchsorted(label[order], np.arange(len(sizes) + 1))
+        gen = uvnew.min_area_angles(uv, order, bounds, list(range(len(sizes))))
+        try:
+            while True:
+                next(gen)
+        except StopIteration as done:
+            got = done.value
+        want = [uvnew.min_area_angle(uv[label == c]) if (label == c).sum() > 2 else 0.0 for c in range(len(sizes))]
+        np.testing.assert_array_equal(got, want)
 
     def test_cut_edges_mark_only_uv_splits(self):
         mesh = grid(2, 1)
