@@ -147,7 +147,7 @@ def _fit_inputs():
     gs = _gs()
     sync()
     s = uvkeep.settings_of(gs)
-    key = (id(res), source.name, s.mode, s.allowance, s.split)
+    key = (id(res), len(res["faces"]), source.name, repr(s))  # every setting the fit reads (Texture size too: Auto calls this without a reset)
     if _FIT_CACHE["key"] == key:
         return _FIT_CACHE["value"]
     if not source.data.uv_layers:
