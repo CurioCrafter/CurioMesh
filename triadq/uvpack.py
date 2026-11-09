@@ -15,6 +15,10 @@ boxes and for charts packed into an existing layout, step for step, so the two g
   packer always aligns; the loose gap is for outlines and for charts already in a layout.
 - Irregular charts: conservative row intervals per texel row, dilated by the gap in both axes (Minkowski sum with a square),
   bottom-left free-interval search (Chazelle 1983); score: least new page height, then least wasted interval length.
+- Any angle (with `FREE_TURNS`): the first charts of the order also turn by even angle steps and by the angles that lay
+  their longest convex hull edges (Andrew 1979) along an axis; the rotation is rational in t = tan(angle / 2), so no trig and
+  the same bits on both sides. The first chart's every way is tried as the start (a beam on the first chart; the nofit view
+  of Bennell and Oliveira 2008, "The geometry of nesting problems: a tutorial"), the first start that places all wins.
 - Fill the page: the largest uniform scale at which everything fits, by a bracket that only tightens (growth steps, then
   bisection), so the best feasible layout is kept and nothing oscillates. Keep going: other orders and orientation
   policies, then adjacent swaps kept only when the page then fits a larger scale.
@@ -40,6 +44,12 @@ POLICIES = 8
 MAX_K = 20
 EFFORT_STEP = 32  # `pack_into` takes its effort in the high bits of k (k + EFFORT_STEP * effort, k from -1 to MAX_K)
 ORDER_MODES = (0, 1, 2, 3)  # pack_into orders: owned area, owned bounding box, longer owned side, long side of the chart
+FREE_TURNS = 16777216  # `pack_into` turns charts by any angle when k carries this flag (turn_ok then means: also by other angles)
+TURN_STEPS = 65536  # an angle is j, t = j / TURN_STEPS = tan(angle / 2) in [0, 1); see `turn_of`
+FREE_SPLIT = 6  # angles per turned chart at effort 0: this many even steps of t ...
+HULL_EDGES = 4  # ... plus the angles laying this many longest hull edges along an axis; each effort doubles both
+MAX_EFFORT = 13  # highest effort pack_into reads
+BEAM_SHARE = 8  # the first-chart beam runs when that chart owns at least 1 / (BEAM_SHARE << effort) of the page
 
 SLICE_SECONDS = 0.003  # one step() of a stage works about this long
 YIELD_EVERY = 1  # a pack gives control back after this many boxes
@@ -512,15 +522,16 @@ class Grid:
                 total += left - (0 if p is None else p + 1)
         return total
 
-    def find(self, shape):
-        """Best spot for a shape (w, rows, area): inside the used height first (least waste), else the lowest row."""
+    def find(self, shape, top_max=None):
+        """Best spot for a shape (w, rows, area): inside the used height first (least waste), else the lowest row; only spots
+        whose page height stays at most `top_max` (one above it cannot beat a spot already found for another way)."""
 
         h, used_h = len(shape[1]), self.used
         if h > self.ny or shape[0] > self.nx:
             return None
         best = None
         y = 0
-        while y + h <= self.ny:
+        while y + h <= self.ny and (top_max is None or max(y + h, used_h) <= top_max):
             x = self._leftmost(shape, y)
             if x is not None:
                 top = max(y + h, used_h)
@@ -561,6 +572,76 @@ def turn_tris(tris, quarter: int):
     return out
 
 
+def turn_of(j):
+    """(cos, sin) of angle step j (int or NumPy array): t = j / TURN_STEPS, ((1 - t^2) / (1 + t^2), 2t / (1 + t^2))."""
+
+    t = j / float(TURN_STEPS)
+    d = 1.0 + t * t
+    return (1.0 - t * t) / d, (2.0 * t) / d
+
+
+def spin_tris(tris, j: int):
+    """Points turned by angle step j ((x, y) -> (c x - s y, s x + c y)); j = 0 leaves them."""
+
+    if j == 0:
+        return list(tris)
+    c, s = turn_of(j)
+    out = []
+    for i in range(0, len(tris) - 1, 2):
+        x, y = tris[i], tris[i + 1]
+        out += [c * x - s * y, s * x + c * y]
+    return out
+
+
+def hull(pts):
+    """Convex hull of x, y pairs, counter-clockwise (Andrew 1979, monotone chain)."""
+
+    p = sorted(set((pts[i], pts[i + 1]) for i in range(0, len(pts) - 1, 2)))
+    if len(p) < 3:
+        return p
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    h = []
+    for seq in (p, p[::-1]):
+        start = len(h)
+        for q in seq:
+            while len(h) >= start + 2 and cross(h[-2], h[-1], q) <= 0.0:
+                h.pop()
+            h.append(q)
+        h.pop()
+    return h
+
+
+def _round_half_away(x: float) -> int:
+    """Round halves away from zero (as the compiled packer rounds)."""
+
+    return int(floor(x + 0.5)) if x >= 0 else -int(floor(-x + 0.5))
+
+
+def free_angles(tris, effort: int):
+    """Angle steps for a chart (0 first): `FREE_SPLIT << effort` even steps of t and the angles laying its
+    `HULL_EDGES << effort` longest hull edges along an axis (t = dx / (len + dy), the half-angle formula). Sorted, no repeats."""
+
+    n = min(FREE_SPLIT << effort, TURN_STEPS)
+    out = {i * TURN_STEPS // n for i in range(n)}
+    h = hull(tris)
+    edges = []
+    for i in range(len(h)):
+        a, b = h[i], h[(i + 1) % len(h)]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        if dx * dx + dy * dy > 0.0:
+            edges.append((dx * dx + dy * dy, dx, dy))
+    edges.sort(key=lambda e: (-e[0], e[1], e[2]))
+    for l2, dx, dy in edges[:HULL_EDGES << effort]:
+        while not (dx > 0.0 and dy >= 0.0):
+            dx, dy = dy, -dx
+        t = dx / (sqrt(l2) + dy)
+        out.add(_round_half_away(t * TURN_STEPS) % TURN_STEPS)
+    return sorted(out)
+
+
 def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, turn_ok=None, stop=None):
     """Pack charts (`tris` in texels, 6 numbers per triangle, `tri_chart` per triangle) into a page that may hold `seed` triangles.
 
@@ -573,7 +654,11 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
     Returns [(ok, dx, dy, quarter)] per chart: turn the chart's points `quarter` x 90 degrees ((x, y) -> (-y, x)), then add (dx, dy).
     """
 
-    k, effort = (k + 1) % EFFORT_STEP - 1, min(max((k + 1) // EFFORT_STEP, 0), len(ORDER_MODES) - 1)
+    free = k >= FREE_TURNS - 1
+    if free:
+        k -= FREE_TURNS
+    k, effort = (k + 1) % EFFORT_STEP - 1, min(max((k + 1) // EFFORT_STEP, 0), MAX_EFFORT)
+    orders = min(effort, len(ORDER_MODES) - 1)
     g, ring = (1, 0) if k < 0 else (block(k), 1)
     base = Grid(page[0] // g, page[1] // g)
     if len(seed):
@@ -606,26 +691,34 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
 
     order = sorted((c for c in range(charts) if per[c]), key=lambda c: (-key(c)[0], -key(c)[1], c))
     offsets = shifts(g)
-    ways = [[] for _ in range(charts)]  # every way a chart can sit (each quarter at its best corner offset); it does not depend on the page
+    few = [(sx, sy) for sx, sy in offsets if sx % max(g // 2, 1) == 0 and sy % max(g // 2, 1) == 0]
+    spun = set()
+    if free:  # the first `2 << effort` charts of the order (the biggest) may turn by any angle; Keep going adds more
+        spun = set([c for c in order if turn_ok[c] and not as_box[c]][:2 << effort])
+    ways = [[] for _ in range(charts)]  # every way a chart can sit (angle, quarter, best corner offset); it does not depend on the page
     for c in order:
-        for q in ((0, 1, 2, 3) if turn_ok[c] else (0,)):
-            t = turn_tris(per[c], q)
-            e = extent(t)
-            fx, fy = int(floor(e[0])), int(floor(e[1]))
-            rows = max(int(ceil(e[3])), fy + 1) - fy
-            core = raster([v - (fx if i % 2 == 0 else fy) for i, v in enumerate(t)], 0, rows)
-            if as_box[c]:
-                cw = max((b for v in core for _, b in v), default=1)
-                core = [[(0, cw)] for _ in range(rows)]
-            pick = None
-            for sx, sy in offsets:
-                shape = owned_shape(core, g, sx, sy, ring)
-                if pick is None or shape[2] < pick[0][2]:
-                    pick = (shape, sx, sy)
-            ways[c].append((pick[0], pick[1], pick[2], fx, fy, q))
+        spins = free_angles(per[c], effort) if c in spun else [0]
+        quarters = (0, 1, 2, 3) if (turn_ok[c] or free) else (0,)
+        for j in spins:
+            for q in quarters:
+                t = turn_tris(spin_tris(per[c], j), q)
+                e = extent(t)
+                fx, fy = int(floor(e[0])), int(floor(e[1]))
+                rows = max(int(ceil(e[3])), fy + 1) - fy
+                core = raster([v - (fx if i % 2 == 0 else fy) for i, v in enumerate(t)], 0, rows)
+                if as_box[c]:
+                    cw = max((b for v in core for _, b in v), default=1)
+                    core = [[(0, cw)] for _ in range(rows)]
+                pick = None
+                for sx, sy in (few if j != 0 else offsets):
+                    shape = owned_shape(core, g, sx, sy, ring)
+                    if pick is None or shape[2] < pick[0][2]:
+                        pick = (shape, sx, sy)
+                ways[c].append((pick[0], pick[1], pick[2], fx, fy, q + 4 * j))
 
-    def place(seq):
-        """Place the charts in `seq`; returns (result per chart, the charts that found no room in that order)."""
+    def place(seq, root=None, quarters=False):
+        """Place the charts in `seq` (`root` = (chart, way index) forces that way); returns (result per chart, the charts that
+        found no room in that order). A forced start ends at its first chart without room (it only answers yes or no)."""
 
         occ = Grid(page[0] // g, page[1] // g)
         occ.rows, occ.used = list(base.rows), base.used
@@ -636,8 +729,10 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
                 failed.append(c)
                 continue
             best = None
-            for way in ways[c]:
-                found = occ.find(way[0])
+            for wi, way in enumerate(ways[c]):
+                if (root is not None and root[0] == c and root[1] != wi) or (quarters and way[5] >= 4):
+                    continue
+                found = occ.find(way[0], None if best is None else best[0][0])
                 if found is not None:
                     x, y, waste = found
                     score = (max(y + len(way[0][1]), occ.height()), waste, y, way[5])
@@ -645,20 +740,24 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
                         best = (score, way, x, y)
             if best is None:
                 failed.append(c)
+                if root is not None:
+                    failed += [o for o in seq if not out[o][0] and o != c]
+                    break
                 continue
             _, (shape, sx, sy, fx, fy, q), x, y = best
             occ.add(shape, x, y)
             out[c] = (True, (x + ring) * g + sx - fx, (y + ring) * g + sy - fy, q)
         return out, failed
 
-    def solve(seq):
-        """One order with repair rounds: charts that found no room go first in the next round; go on while a round leaves fewer of them."""
+    def solve(seq, root=None, quarters=False):
+        """One order with repair rounds (not for a forced start): charts that found no room go first in the next round; go on
+        while a round leaves fewer of them."""
 
-        out, failed = place(seq)
-        while failed and not (stop is not None and stop()):
+        out, failed = place(seq, root, quarters)
+        while root is None and failed and not (stop is not None and stop()):
             lost = set(failed)
             nxt = failed + [c for c in seq if c not in lost]
-            out2, failed2 = place(nxt)
+            out2, failed2 = place(nxt, root, quarters)
             if len(failed2) >= len(failed):
                 break
             seq, out, failed = nxt, out2, failed2
@@ -668,7 +767,7 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
     longer = lambda c: min(max(len(w[0][1]), w[0][0]) for w in ways[c])  # noqa: E731
     bbox = lambda c: min(len(w[0][1]) * w[0][0] for w in ways[c])  # noqa: E731
     best = None
-    for mode in ORDER_MODES[:1 + effort]:
+    for mode in ORDER_MODES[:1 + orders]:
         if mode == 0:
             seq = sorted(order, key=lambda c: (-own(c), c))
         elif mode == 1:
@@ -677,11 +776,17 @@ def pack_into(page, k: int, seed, tris, tri_chart, charts: int, as_box=None, tur
             seq = sorted(order, key=lambda c: (-longer(c), -own(c), c))
         else:
             seq = list(order)
-        out, failed = solve(seq)
-        if not failed:
-            return out
-        if best is None or len(failed) < best[1]:
-            best = (out, len(failed))
+        for quarters in ((True, False) if free else (False,)):  # quarter turns first (the layout without free turns), then angles
+            out, failed = solve(seq, None, quarters)
+            if not failed:
+                return out
+            if best is None or len(failed) < best[1]:
+                best = (out, len(failed))
+        if free and seq and len(ways[seq[0]]) > 4 and own(seq[0]) * (BEAM_SHARE << effort) >= base.nx * base.ny:  # every way of the first chart as the start; the first that places all wins
+            for wi in range(len(ways[seq[0]])):
+                out, failed = solve(seq, (seq[0], wi))
+                if not failed:
+                    return out
         if stop is not None and stop():
             break
     return best[0] if best else [(False, 0, 0, 0)] * charts

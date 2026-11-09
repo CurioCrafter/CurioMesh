@@ -78,9 +78,18 @@ static KEPT: Mutex<Vec<(usize, [u64; 4], Slot)>> = Mutex::new(Vec::new());
 // ponytail: kept by the tree's address plus a fingerprint (faces, merges, build time, start length) because the tree
 // itself is not ours to extend; a new tree at a freed address with the same build time to the bit would reuse them.
 pub fn of(tree: &Tree) -> Arc<Hide> {
+    slot(tree).get_or_init(|| Arc::new(make(tree))).clone()
+}
+
+/// The moves of `tree` are made (a level with `hide` then costs only their replay; R8late).
+pub fn ready(tree: &Tree) -> bool {
+    slot(tree).get().is_some()
+}
+
+fn slot(tree: &Tree) -> Slot {
     let key = tree as *const Tree as usize;
     let print = [tree.topo.nf as u64, tree.merges.len() as u64, tree.numbers[num::BUILD_MS].to_bits(), tree.start_uv.len() as u64];
-    let slot = {
+    {
         let mut kept = KEPT.lock().unwrap();
         match kept.iter().position(|(k, p, _)| *k == key && *p == print) {
             Some(i) => kept[i].2.clone(),
@@ -91,8 +100,7 @@ pub fn of(tree: &Tree) -> Arc<Hide> {
                 s
             }
         }
-    };
-    slot.get_or_init(|| Arc::new(make(tree))).clone()
+    }
 }
 
 /// Slide the borders of a level's charts (the one call from `Tree::level`).
@@ -1061,8 +1069,17 @@ fn evaluate(m: &Mesh, label: &[u32], q: &[[f64; 3]], bx: &[(f64, f64)], cur: &[f
             }
             Some(Some(l))
         };
-        let Some(la) = side(&cut.fa, a) else { continue };
-        let Some(lb) = side(&cut.fb, b) else { continue };
+        // the smaller side first: when it breaks a rule the larger one is never laid out (both must pass, so the
+        // order changes nothing else; R8late)
+        let (la, lb) = if cut.fa.len() <= cut.fb.len() {
+            let Some(la) = side(&cut.fa, a) else { continue };
+            let Some(lb) = side(&cut.fb, b) else { continue };
+            (la, lb)
+        } else {
+            let Some(lb) = side(&cut.fb, b) else { continue };
+            let Some(la) = side(&cut.fa, a) else { continue };
+            (la, lb)
+        };
         // the surface area stretched past `L2_WORST` does not grow (a stretched chart that grows would weigh more in the
         // whole mesh's worst 1 %)
         let over = la.iter().chain(lb.iter()).map(|l| l.q[2]).sum::<f64>();
