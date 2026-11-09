@@ -772,7 +772,6 @@ class NewUVs:
             if time.perf_counter() > until:
                 yield
                 until = time.perf_counter() + self.budget
-            cc = order[bounds[c] : bounds[c + 1]]
             if on[c]:
                 got = self._labels(c, face_order[fbounds[c] : fbounds[c + 1]], corner_uv)
                 if got is not None:
