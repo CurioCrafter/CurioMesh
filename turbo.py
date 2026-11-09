@@ -1222,6 +1222,18 @@ def uvchart_may_lie(tree, corner_uv, chart) -> "UvJob | None":
     return uv_job("uvchart_may_lie", tree, _uv_f64(corner_uv), _uv_i64(chart), name="CurioMeshUVCheck")
 
 
+def uvchart_lying(indptr, corner_uv, chart, eps_share: float) -> "UvJob | None":
+    """Per chart id, does this layout lie over itself (exact; faces of chart -1 skipped), as a job: `result()` = bool per chart."""
+
+    return uv_job("uvchart_lying", _uv_i64(indptr), _uv_f64(corner_uv), _uv_i64(chart), float(eps_share), name="CurioMeshUVCheck")
+
+
+def uvchart_box_angles(uv, order, bounds, which) -> "UvJob | None":
+    """The angle of each group's smallest box (`uvnew.min_area_angles`), as a job: `result()` = angle per group of `which`."""
+
+    return uv_job("uvchart_box_angles", _uv_f64(uv), _uv_i64(order), _uv_i64(bounds), _uv_i64(which), name="CurioMeshUVOrient")
+
+
 def uvchart_cuts(tree, x: float, rows: int = 3, stretch_allowed: float = 0.10, steps: int = 0, max_factor_bytes: float = 0.0,
                  texture_px: float = 1024.0) -> "UvJob | None":
     """Keep going state from level x as a job: `result()` = a `UvChartCuts` (`state()`)."""

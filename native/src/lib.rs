@@ -2061,6 +2061,31 @@ fn uvchart_may_lie<'py>(py: Python<'py>, tree: &UvChartTree, corner_uv: PyReadon
     Ok(flags.into_pyarray(py))
 }
 
+/// Per chart id: does the layout `corner_uv` (2 per corner) lie over itself, exactly (`uvchart::lying_charts`, the twin
+/// of `uvnew.overlapping_charts`)? Faces whose `chart` is -1 are not checked.
+#[pyfunction]
+fn uvchart_lying<'py>(py: Python<'py>, indptr: PyReadonlyArray1<'_, i64>, corner_uv: PyReadonlyArray1<'_, f64>, chart: PyReadonlyArray1<'_, i64>, eps_share: f64, stop: &StopFlag) -> PyResult<BoolArray<'py>> {
+    let (ip, uv, chart) = (slice(&indptr, "indptr")?, slice(&corner_uv, "corner_uv")?, slice(&chart, "chart")?);
+    let flags = py.detach(|| uvchart::lying_charts(ip, uv, chart, eps_share, &stop.0));
+    uvflat_stopped(stop)?;
+    Ok(flags.into_pyarray(py))
+}
+
+/// Per group in `which`: the angle of its smallest box (`uvchart::box_angles`, the twin of `uvnew.min_area_angles`).
+#[pyfunction]
+fn uvchart_box_angles<'py>(py: Python<'py>, uv: PyReadonlyArray1<'_, f64>, order: PyReadonlyArray1<'_, i64>, bounds: PyReadonlyArray1<'_, i64>, which: PyReadonlyArray1<'_, i64>, stop: &StopFlag) -> PyResult<F64Array<'py>> {
+    let (uv, order, bounds, which) = (slice(&uv, "uv")?, slice(&order, "order")?, slice(&bounds, "bounds")?, slice(&which, "which")?);
+    let n = uv.len() / 2;
+    let ok = which.iter().all(|&c| c >= 0 && (c as usize) + 1 < bounds.len() && bounds[c as usize] <= bounds[c as usize + 1] && bounds[c as usize] >= 0 && bounds[c as usize + 1] as usize <= order.len())
+        && order.iter().all(|&i| i >= 0 && (i as usize) < n);
+    if !ok {
+        return Err(PyValueError::new_err("box_angles: group bounds or point order out of range"));
+    }
+    let out = py.detach(|| uvchart::box_angles(uv, order, bounds, which, &stop.0));
+    uvflat_stopped(stop)?;
+    Ok(out.into_pyarray(py))
+}
+
 /// Keep going state for New UVs (`uvchart::Cuts`).
 #[pyclass(frozen)]
 struct UvChartCuts(std::sync::Mutex<uvchart::Cuts>);
@@ -2113,6 +2138,8 @@ fn register_uvchart(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvchart_uvs, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_uvs_only, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_may_lie, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_lying, m)?)?;
+    m.add_function(wrap_pyfunction!(uvchart_box_angles, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_cuts, m)?)?;
     m.add_function(wrap_pyfunction!(uvchart_pass, m)?)?;
     m.add_function(wrap_pyfunction!(uvhide_make, m)?)?;
