@@ -101,19 +101,40 @@ def after_apply_steps(mesh, source, res, gs):
     once; without one the per-side transfer runs first, a FitStage step per yield, and is kept for this result, so a
     second Apply of it writes at once. Closing the generator early writes nothing."""
 
-    if uvkeep.mode_of(gs) != "light":
+    got = yield from _fit_for(source, res, gs)
+    if got is None:
         return
+    c, fitted = got
+    uv_layers.apply_candidate(mesh, c.points, c.indptr, c.flat, c.material, c.layers, c.active)
+    _write_back(res, c)
+    LAST.clear()
+    LAST.update(hash=c.key, fitted=fitted, numbers=dict(c.numbers), messages=list(c.messages))
+
+
+def prepare_steps(source, res, gs):
+    """Generator: what Apply of `res` will write, worked out ahead in slices (a FitStage step per yield) and kept, so
+    the Apply writes at once. For a timer to run once a result is shown; writes nothing."""
+
+    yield from _fit_for(source, res, gs)
+
+
+def _fit_for(source, res, gs):
+    """Generator -> (candidate, fitted) for `res`, or None (Seam Fit not Light, or no UVs): the finished fit when there is
+    one, else the per-side transfer alone (geometry untouched), made in slices and kept in TRANSFERS."""
+
+    if uvkeep.mode_of(gs) != "light":
+        return None
     src = _source_data(source)
     sa, plan = uvkeep.plan_for(source, src, gs)
     if sa is None:
-        return
+        return None
     faces = FlatFaces.of(res["faces"])
     key = uvkeep.result_key(res["co"], faces.indptr, faces.flat)
     c = uvkeep.CANDIDATES.get(key)
-    fitted = c is not None
+    if c is not None:
+        return c, True
+    c = TRANSFERS.get(key)
     if c is None:
-        c = TRANSFERS.get(key)
-    if c is None:  # no finished fit for this result: the per-side transfer alone, geometry untouched
         stage = uvkeep.fit_stage(source, src, res, gs, only_transfer=True)
         try:
             while not stage.done:
@@ -126,7 +147,4 @@ def after_apply_steps(mesh, source, res, gs):
         c.messages.append("Seam Fit was not run on this result. Look runs it.")
         TRANSFERS.clear()  # one is enough: the result Apply writes next
         TRANSFERS[key] = c
-    uv_layers.apply_candidate(mesh, c.points, c.indptr, c.flat, c.material, c.layers, c.active)
-    _write_back(res, c)
-    LAST.clear()
-    LAST.update(hash=c.key, fitted=fitted, numbers=dict(c.numbers), messages=list(c.messages))
+    return c, False

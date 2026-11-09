@@ -255,6 +255,10 @@ class AfterApply(unittest.TestCase):
         again = list(self.hooks.after_apply_steps(FakeMesh(), self.source, self.result(), self.gs))
         self.assertEqual(again, [])  # the same result again: the kept transfer is written at once
         self.assertEqual(self.hooks.LAST["hash"], sliced)
+        self.hooks.TRANSFERS.clear()
+        self.assertGreater(len(list(self.hooks.prepare_steps(self.source, self.result(), self.gs))), 1)  # made ahead
+        self.assertEqual(list(self.hooks.after_apply_steps(FakeMesh(), self.source, self.result(), self.gs)), [])
+        self.assertEqual(self.hooks.LAST["hash"], sliced)
 
 
 class ViewLimit(unittest.TestCase):
