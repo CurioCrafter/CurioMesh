@@ -178,6 +178,11 @@ class UVOnly(unittest.TestCase):
         self.assertFalse(others & set(lab[cand.faces].tolist()))  # the new islands are their own
         cand, _, _ = run_sliced(UT.measure(trial, base, cand))
         self.assertLess(cand.numbers["overlap_pct"], 0.01 + base.cache["numbers"]["overlap_pct"])
+        # Auto Fix's spot counts only faces that show a texel, as the bake does: on a 1-pixel page none does
+        tiny = UT.make_uv_base(alone.points, alone.indptr, alone.flat, uv=alone.layers[0][1], texture_px=1, source=src)
+        fb = T.make_base(alone.points, faces_of(alone.indptr, alone.flat))
+        self.assertTrue(UT.finish(UT.straddlers(tiny)).any())
+        self.assertEqual(UT.finish(UT.BakeSpots(tiny).spots(fb)), [])
 
 
 class KindsAsIslands(unittest.TestCase):
