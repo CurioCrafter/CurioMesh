@@ -692,24 +692,22 @@ def _uv_islands(src: dict, uv: np.ndarray) -> np.ndarray:
 
 
 def _uv_islands_steps(src: dict, uv: np.ndarray):
-    """Generator: `_uv_islands`, yielding every fit.CHUNK faces."""
-    rows, owner = [], []
-    for i, (face, loops) in enumerate(zip(src["faces"], src["loops"])):
-        for k in range(len(face)):
-            n = (k + 1) % len(face)
-            a, b = (k, n) if face[k] < face[n] else (n, k)
-            rows.append((face[a], face[b], *uv[loops[a]], *uv[loops[b]]))
-            owner.append(i)
-        if i % fit.CHUNK == fit.CHUNK - 1:
-            yield
-    yield
-    rows = np.asarray(rows)
+    """Generator: `_uv_islands` in short steps (sliced). One row per face side: its two points, lower first, and their UVs."""
+    faces, loops = FlatFaces.of(src["faces"]), FlatFaces.of(src["loops"])
+    here = np.arange(len(faces.flat))
+    nxt = here + 1
+    nxt[faces.indptr[1:] - 1] = faces.indptr[:-1]
+    first = faces.flat < faces.flat[nxt]
+    a, b = np.where(first, here, nxt), np.where(first, nxt, here)
+    rows = np.column_stack((faces.flat[a], faces.flat[b], uv[loops.flat[a]], uv[loops.flat[b]])).astype(np.float64)
+    owner = np.repeat(np.arange(len(faces)), np.diff(faces.indptr))
     rows[:, 2:] = np.round(rows[:, 2:], 5)
-    _u, inv = np.unique(rows, axis=0, return_inverse=True)
-    inv = inv.reshape(-1)
-    owner = np.asarray(owner, dtype=np.int64)
-    order = np.argsort(inv, kind="stable")
-    twin = inv[order][1:] == inv[order][:-1]
+    yield
+    order = np.lexsort(rows.T[::-1])  # equal rows side by side, in their first order (as np.unique(axis=0) and a stable sort did)
+    yield
+    rows = rows[order]
+    twin = (rows[1:] == rows[:-1]).all(axis=1)
+    yield
     return patch._labels(len(src["faces"]), owner[order][:-1][twin], owner[order][1:][twin])
 
 
@@ -735,6 +733,7 @@ def _transfer_uvs_steps(mesh, source, src, res):
         layer.data.foreach_get("uv", uv)
         uv = uv.reshape(-1, 2)
         island = (yield from _uv_islands_steps(src, uv))[src["tri_face"]]
+        yield
         tri = corner_tri.copy()
         owner = island[owner_tri]
         if known is not None and layer.active:
@@ -744,6 +743,7 @@ def _transfer_uvs_steps(mesh, source, src, res):
             members = np.flatnonzero(island == chart)
             used, local = np.unique(src["tris"][members], return_inverse=True)
             chart_bvh = BVHTree.FromPolygons(src["co"][used].tolist(), local.reshape(-1, 3).tolist())
+            yield
             here = off[owner[off] == chart]
             tri[here] = members[(yield from _nearest_steps(chart_bvh, points[here], 2))]
         out = np.einsum("ijk,ij->ik", uv[src["tri_loops"][tri]], _barycentric(src["co"], src["tris"][tri], points))
