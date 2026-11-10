@@ -365,6 +365,35 @@ def restore(scene) -> list:
     return changed
 
 
+def bring_back(scene, step: int) -> list:
+    """A History jump to a step whose images had the states of counter `step`: a new counter step that holds those
+    states (the same arrays, no copies; images not remembered by then keep what they show), so Ctrl+Z and Ctrl+Shift+Z
+    of the jump move the pixels with it. Returns the names changed."""
+
+    import bpy
+
+    new = max([_step(scene)] + [s for history in _states.values() for s, _ in history]) + 1
+    scene[HISTORY_KEY] = new
+    changed = []
+    for name, history in _states.items():
+        older = [s for s, _ in history if s <= step]
+        want = max(older) if older else _applied.get(name)
+        pixels = next((p for s, p in history if s == want), None)
+        if pixels is None:
+            continue
+        history.append((new, pixels))
+        image = bpy.data.images.get(name)
+        if image is not None and _applied.get(name) != want and tuple(image.size) == (pixels.shape[1], pixels.shape[0]):
+            try:
+                image.pixels.foreach_set((pixels.astype(np.float32) / 255.0).reshape(-1))
+            except RuntimeError:  # an image with no pixel data now (unloaded): nothing to put back
+                continue
+            image.update()
+            changed.append(name)
+        _applied[name] = new
+    return changed
+
+
 def _on_undo(*_args) -> None:
     try:
         restore(_scene())

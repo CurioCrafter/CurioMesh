@@ -491,6 +491,7 @@ def bake_spots(context, obj, cand) -> str:
 def _apply(context, s: UVSession) -> str:
     """Keep the shown candidate on the mesh. "" or why not."""
     c = s.cand
+    history.keep_uvs(context, s.obj)  # the step before keeps the UVs and pixels it had, for a History jump
     if s.kind == "bake":
         c.extra["indptr"] = s.base.indptr
         err = bake_spots(context, s.obj, c)
@@ -501,6 +502,7 @@ def _apply(context, s: UVSession) -> str:
         s.obj.data.update()
     history.before(context)
     history.record(context, f"UVs: {s.trial.name}", numbers_text(s))
+    history.keep_uvs(context, s.obj)
     LAST.update(key=c.key, written=uv_layers_hash(s.obj.data), name=s.trial.name)
     return ""
 
