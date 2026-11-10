@@ -2198,8 +2198,10 @@ MESSAGES = {
     "Carrying the UVs over": "正在传递 UV",
     "Esc stops": "按 Esc 停止",
     "Making the bake UVs": "正在生成烘焙用 UV",
+    "Baking": "正在烘焙",
     "Stopped: Smart Project made the bake UVs": "已停止：烘焙用 UV 由智能 UV 投射生成",
     "Stopped: the UVs are a plain copy from your mesh": "已停止：UV 是从你的网格直接复制的",
     "Stopping...": "正在停止...",
     "Writing the result": "正在写入结果",
+    "Not baked, kept as they are: {0}": "未烘焙，保持原样：{0}",
 }

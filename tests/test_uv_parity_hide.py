@@ -53,6 +53,30 @@ class Twin(unittest.TestCase):
         self.assertGreater(uvhide._l2(pts, ip, fl, squeezed)[1], 5.0)  # the UV Check's L2: a flattened side reads large
         self.assertEqual(uvhide._min_box(pts[:, :2].ravel()), (1.0, 1.0))
 
+    def test_moves_yield_before_the_level_is_made(self):
+        # the moves' first step must not make the whole level (replay, outline smoothing, chart check) at once: on a
+        # 20k-face mesh that one step took 1.3 s with no compiled core (the bake unwrap froze Blender)
+        mesh = speckled(16, 7, 0.4)
+        tree = uvchart.build(*mesh, use_fast=False, seen_edge_px=seen_px(mesh), out_of_sight=True, px_per_unit=100.0, build_stretch=0.05)
+        tree._smooth, tree._cache = None, {}
+        gen = uvhide.moves(tree)
+        next(gen)
+        self.assertIsNone(tree._smooth)  # still being made, in later steps
+        whole = uvhide._drive(gen)
+        tree._smooth, tree._cache = None, {}
+        again = uvhide._drive(uvhide.moves(tree))
+        self.assertEqual(whole.moved, again.moved)
+        tree._hide, tree._cache = again, {}
+        level = tree.level_steps(5.0)  # the flatten's level, with the slides applied, is made in steps too
+        next(level)
+        self.assertEqual(tree._cache, {})
+        got = uvhide._drive(level)
+        tree._cache = {}
+        want = tree.level(5.0)
+        np.testing.assert_array_equal(got[0], want[0])
+        np.testing.assert_array_equal(got[1], want[1])
+        np.testing.assert_array_equal(got[2][:5], want[2][:5])  # the last number is the time it took
+
     def test_slides_lower_the_seen_cut_and_keep_disks(self):
         mesh = speckled(16, 7, 0.4)
         seen = seen_px(mesh)

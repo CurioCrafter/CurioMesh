@@ -204,6 +204,16 @@ class _Dsu:
             self.p[ra] = rb
 
 
+def _drive(gen):
+    """Run a sliced generator to its end; its return value."""
+
+    while True:
+        try:
+            next(gen)
+        except StopIteration as done:
+            return done.value
+
+
 class _Undo:
     """Union-find with undo (union by size, no path compression) over corners: the wedges of a cut state."""
 
@@ -271,8 +281,14 @@ def _glue_disk(t: Topo, dsu: _Undo, segments, order, chi: int) -> tuple:
 
 
 def _wedges(t: Topo, cut) -> list:
+    return _drive(_wedges_steps(t, cut))
+
+
+def _wedges_steps(t: Topo, cut):
     d = _Dsu(len(t.flat))
     for e in range(t.ne):
+        if e & 4095 == 4095:
+            yield
         if not cut[e] and not t.wall[e]:
             h0, h1 = t.euse[e]
             for v in (t.ea[e], t.eb[e]):
@@ -281,9 +297,16 @@ def _wedges(t: Topo, cut) -> list:
 
 
 def _chi_per(t: Topo, cut, patch, np_: int) -> list:
-    wr = _wedges(t, cut)
+    return _drive(_chi_per_steps(t, cut, patch, np_))
+
+
+def _chi_per_steps(t: Topo, cut, patch, np_: int):
+    wr = yield from _wedges_steps(t, cut)
+    yield
     chi, first = [0] * np_, set()
     for f in range(t.nf):
+        if f & 4095 == 4095:
+            yield
         p = patch[f]
         chi[p] += 1
         for h in t.face_corners(f):
@@ -292,6 +315,8 @@ def _chi_per(t: Topo, cut, patch, np_: int) -> list:
                 first.add(wr[h])
                 chi[p] += 1
     for e in range(t.ne):
+        if e & 8191 == 8191:
+            yield
         if not cut[e] and not t.wall[e]:
             chi[patch[t.cface[t.euse[e][0]]]] += 1
     return chi
@@ -603,40 +628,56 @@ class ChartTree:
         """(chart per face, cut per edge, numbers in `LEVEL_COLUMNS`), cached per (x, hide). `hide` False: the charts
         before their borders slide out of sight (the first result is shown from these while the moves are made)."""
 
+        return _drive(self.level_steps(x, hide))
+
+    def level_steps(self, x: float, hide: bool = True):
+        """`level` as a generator, yielding between short pieces."""
+
         key = (float(x), bool(hide))
         if key not in self._cache:
-            self._cache[key] = self._level(*key)
+            self._cache[key] = yield from self._level_steps(*key)
         chart, cut, numbers = self._cache[key]
         return chart.copy(), cut.copy(), numbers.copy()
 
     def _level(self, x: float, hide: bool = True):
+        return _drive(self._level_steps(x, hide))
+
+    def _level_steps(self, x: float, hide: bool = True):
+        """`_level` as a generator, yielding between short pieces (the hidden-parts moves run it in slices)."""
+
         started = time.perf_counter()
         t = self.topo
-        root, glued, chi, used, segs_glued = self._replay(1.0 + x / 100.0)
-        moves, _ = self._smoothing()
+        root, glued, chi, used, segs_glued = yield from self._replay_steps(1.0 + x / 100.0)
+        moves, _ = yield from self._smoothing_steps()
         if moves:
             pfaces, psegs = self._smooth_ctx()
+            yield
             members = _members(root)
             for p, q in moves:
+                yield  # one move a step: each checks its chart is still a disk
                 if root[p] != root[q]:
                     self._move_patch(pfaces, psegs, p, root[q], root, glued, members, [])
         cut = np.asarray(self.cut_base, bool) & ~glued
+        yield
         if moves:  # a chart that gave a patch away can fall apart below the full tree: one chart per piece
             d = _Dsu(t.nf)
             for e in range(t.ne):
+                if e & 4095 == 4095:
+                    yield
                 if not cut[e]:
                     f0, f1 = t.faces_of(e)
                     d.union(f0, f1)
             ids: dict = {}
             chart = np.array([ids.setdefault(d.find(f), len(ids)) for f in range(t.nf)], np.int64)
-            not_disk = sum(1 for c in _chi_per(t, cut.tolist(), chart.tolist(), len(ids)) if c != 1)
+            yield
+            not_disk = sum(1 for c in (yield from _chi_per_steps(t, cut.tolist(), chart.tolist(), len(ids))) if c != 1)
         else:
             ids = {}
             chart = np.array([ids.setdefault(root[self.patch[f]], len(ids)) for f in range(t.nf)], np.int64)
             not_disk = sum(1 for r in ids if chi[r] != 1)
         from . import uvhide  # R7hide: borders slid out of sight (imports this module)
 
-        slid = uvhide.apply(self, chart, cut) if hide else None
+        slid = (yield from uvhide.apply_steps(self, chart, cut)) if hide else None
         chart, cut, n_charts, not_disk = slid if slid is not None else (chart, cut, len(ids), not_disk)
         numbers = np.array([n_charts, not_disk, used, segs_glued, float(x / 100.0 > self.build_stretch), (time.perf_counter() - started) * 1e3])
         return chart, cut, numbers
@@ -645,17 +686,25 @@ class ChartTree:
         """The recorded merges with stretch <= thr, in order: (root per patch, glued per edge, chi per root, merges used,
         segments glued) (kernel: `replay`)."""
 
+        return _drive(self._replay_steps(thr))
+
+    def _replay_steps(self, thr: float):
         t = self.topo
         dsu = _Undo(len(t.flat))
         for e in range(t.ne):
+            if e & 2047 == 2047:
+                yield
             if not self.cut_base[e]:
                 _glue(t, dsu, [e])
         dsu.commit()
+        yield
         pd = _Dsu(self.n_patches)
         chi = list(self.patch_chi)
         glued = np.zeros(t.ne, bool)
         used = segs_glued = 0
-        for segs, stretch, _, _ in self.merges:
+        for i, (segs, stretch, _, _) in enumerate(self.merges):
+            if i & 255 == 255:
+                yield
             if not stretch <= thr:
                 continue
             used += 1
@@ -678,9 +727,12 @@ class ChartTree:
     def _smoothing(self):
         """(moves, start layout) of the outline smoothing of the full tree, made once (kernel: `smoothing`)."""
 
+        return _drive(self._smoothing_steps())
+
+    def _smoothing_steps(self):
         if self._smooth is None:
-            root, glued, chi, _, _ = self._replay(float("inf"))
-            self._smooth = self._smooth_full(root, glued, chi)
+            root, glued, chi, _, _ = yield from self._replay_steps(float("inf"))
+            self._smooth = yield from self._smooth_full_steps(root, glued, chi)
         return self._smooth
 
     def _smooth_ctx(self):
@@ -769,6 +821,9 @@ class ChartTree:
     def _smooth_full(self, root, glued, chi):
         """Smoother chart outlines on the full tree (kernel: `smooth`): (moves, start layout)."""
 
+        return _drive(self._smooth_full_steps(root, glued, chi))
+
+    def _smooth_full_steps(self, root, glued, chi):
         t = self.topo
         pts = np.asarray(self.points, float)
         pfaces, psegs = self._smooth_ctx()
@@ -780,6 +835,7 @@ class ChartTree:
         while True:
             before = len(moves)
             for p in range(self.n_patches):
+                yield  # one patch a step: a move is checked against its chart's outline and the corners around it
                 a = root[p]
                 if chi[a] != 1:
                     continue

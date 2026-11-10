@@ -659,7 +659,18 @@ def _centroids(co: np.ndarray, faces) -> np.ndarray:
 
 
 def _nearest_tris(bvh: BVHTree, points: np.ndarray) -> np.ndarray:
-    return np.asarray([bvh.find_nearest(p)[2] for p in points.tolist()], dtype=np.int64)
+    return sliced.finish(_nearest_steps(bvh, points, 2))
+
+
+def _nearest_steps(bvh: BVHTree, points: np.ndarray, field: int, dtype=np.int64):
+    """Generator -> field `field` of `bvh.find_nearest` for each point (2: the triangle, 3: the distance), yielding
+    every fit.CHUNK points so an Apply's timer slices stay short (sliced)."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    out = np.empty(len(points), dtype=dtype)
+    for i in range(0, len(points), fit.CHUNK):
+        out[i:i + fit.CHUNK] = [bvh.find_nearest(p)[field] for p in points[i:i + fit.CHUNK].tolist()]
+        yield
+    return out
 
 
 def _barycentric(co: np.ndarray, tris: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -677,39 +688,52 @@ def _barycentric(co: np.ndarray, tris: np.ndarray, points: np.ndarray) -> np.nda
 
 def _uv_islands(src: dict, uv: np.ndarray) -> np.ndarray:
     """UV island of each source face: faces that share an edge with the same UVs on both sides belong together."""
-    rows, owner = [], []
-    for i, (face, loops) in enumerate(zip(src["faces"], src["loops"])):
-        for k in range(len(face)):
-            n = (k + 1) % len(face)
-            a, b = (k, n) if face[k] < face[n] else (n, k)
-            rows.append((face[a], face[b], *uv[loops[a]], *uv[loops[b]]))
-            owner.append(i)
-    rows = np.asarray(rows)
+    return sliced.finish(_uv_islands_steps(src, uv))
+
+
+def _uv_islands_steps(src: dict, uv: np.ndarray):
+    """Generator: `_uv_islands` in short steps (sliced). One row per face side: its two points, lower first, and their UVs."""
+    faces, loops = FlatFaces.of(src["faces"]), FlatFaces.of(src["loops"])
+    here = np.arange(len(faces.flat))
+    nxt = here + 1
+    nxt[faces.indptr[1:] - 1] = faces.indptr[:-1]
+    first = faces.flat < faces.flat[nxt]
+    a, b = np.where(first, here, nxt), np.where(first, nxt, here)
+    rows = np.column_stack((faces.flat[a], faces.flat[b], uv[loops.flat[a]], uv[loops.flat[b]])).astype(np.float64)
+    owner = np.repeat(np.arange(len(faces)), np.diff(faces.indptr))
     rows[:, 2:] = np.round(rows[:, 2:], 5)
-    _u, inv = np.unique(rows, axis=0, return_inverse=True)
-    inv = inv.reshape(-1)
-    owner = np.asarray(owner, dtype=np.int64)
-    order = np.argsort(inv, kind="stable")
-    twin = inv[order][1:] == inv[order][:-1]
+    yield
+    order = np.lexsort(rows.T[::-1])  # equal rows side by side, in their first order (as np.unique(axis=0) and a stable sort did)
+    yield
+    rows = rows[order]
+    twin = (rows[1:] == rows[:-1]).all(axis=1)
+    yield
     return patch._labels(len(src["faces"]), owner[order][:-1][twin], owner[order][1:][twin])
 
 
 def _transfer_uvs(mesh, source, src, res) -> None:
     """Copy every UV layer: each corner reads the source at its nearest point on the UV island of its own face."""
+    sliced.finish(_transfer_uvs_steps(mesh, source, src, res))
+
+
+def _transfer_uvs_steps(mesh, source, src, res):
+    """Generator: `_transfer_uvs` in short steps (sliced)."""
     co, faces = res["co"], res["faces"]
     known = res.get("chart")  # Auto Segments remembers each face's island in the active layer
     if known is not None and len(known) != len(faces):
         known = None
     flat = np.fromiter((v for f in faces for v in f), dtype=np.int64)
     bvh = _bvh(src)
-    corner_tri = _nearest_tris(bvh, co)[flat]
-    owner_tri = np.repeat(_nearest_tris(bvh, _centroids(co, faces)), [len(f) for f in faces])
+    yield
+    corner_tri = (yield from _nearest_steps(bvh, co, 2))[flat]
+    owner_tri = np.repeat((yield from _nearest_steps(bvh, _centroids(co, faces), 2)), [len(f) for f in faces])
     points = co[flat]
     for layer in source.data.uv_layers:
         uv = np.empty(len(source.data.loops) * 2, dtype=np.float64)
         layer.data.foreach_get("uv", uv)
         uv = uv.reshape(-1, 2)
-        island = _uv_islands(src, uv)[src["tri_face"]]
+        island = (yield from _uv_islands_steps(src, uv))[src["tri_face"]]
+        yield
         tri = corner_tri.copy()
         owner = island[owner_tri]
         if known is not None and layer.active:
@@ -719,8 +743,9 @@ def _transfer_uvs(mesh, source, src, res) -> None:
             members = np.flatnonzero(island == chart)
             used, local = np.unique(src["tris"][members], return_inverse=True)
             chart_bvh = BVHTree.FromPolygons(src["co"][used].tolist(), local.reshape(-1, 3).tolist())
+            yield
             here = off[owner[off] == chart]
-            tri[here] = members[_nearest_tris(chart_bvh, points[here])]
+            tri[here] = members[(yield from _nearest_steps(chart_bvh, points[here], 2))]
         out = np.einsum("ijk,ij->ik", uv[src["tri_loops"][tri]], _barycentric(src["co"], src["tris"][tri], points))
         target = mesh.uv_layers.new(name=layer.name)
         target.data.foreach_set("uv", out.astype(np.float32).ravel())
@@ -731,17 +756,26 @@ def _transfer_uvs(mesh, source, src, res) -> None:
 
 def _transfer_normals(mesh, src, res) -> None:
     """Shade the result like the source: each face corner gets its normal from the source samples around it."""
+    sliced.finish(_transfer_normals_steps(mesh, src, res))
+
+
+def _transfer_normals_steps(mesh, src, res):
+    """Generator: `_transfer_normals` in short steps (sliced)."""
     points, faces = res["co"], res["faces"]
     keep = src["tri_area"] > 0.0
     tree = KDTree(int(keep.sum()))
     for index, point in enumerate(src["tri_cent"][keep].tolist()):
         tree.insert(point, index)
+        if index % (4 * fit.CHUNK) == 4 * fit.CHUNK - 1:
+            yield
     tree.balance()
+    yield
     normals, area = _tri_normals(src["co"], src["tris"])[keep], src["tri_area"][keep]
     fa, fb = patch.face_adjacency(src["faces"])
     sample_part = np.unique(patch._labels(len(src["faces"]), fa, fb), return_inverse=True)[1][src["tri_face"]][keep]
-    part, source_of = fit.vertex_parts(points, faces, sample_part, lambda at: np.fromiter((tree.find(p)[1] for p in at.tolist()), dtype=np.int64, count=len(at)))
-    out = fit.corner_normals(points, faces, normals, area, sample_part, source_of[part], tree.find_n)
+    yield
+    part, source_of = yield from fit.vertex_parts_steps(points, faces, sample_part, lambda at: np.fromiter((tree.find(p)[1] for p in at.tolist()), dtype=np.int64, count=len(at)))
+    out = yield from fit.corner_normals_steps(points, faces, normals, area, sample_part, source_of[part], tree.find_n)
     mesh.normals_split_custom_set(out.tolist())
 
 
@@ -1510,6 +1544,11 @@ def _mark_edges(mesh, edges, crease: bool, sharp: bool) -> None:
 
 
 def _make_mesh(name, source, res, uvs=True):
+    return sliced.finish(_make_mesh_steps(name, source, res, uvs))
+
+
+def _make_mesh_steps(name, source, res, uvs=True):
+    """Generator -> the result's new mesh (`_make_mesh` in short steps, sliced)."""
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(res["co"].tolist(), [], res["faces"])
     mesh.update()
@@ -1518,7 +1557,10 @@ def _make_mesh(name, source, res, uvs=True):
     if res.get("mat") is not None and len(mesh.polygons) == len(res["mat"]):
         mesh.polygons.foreach_set("material_index", np.asarray(res["mat"], dtype=np.int32))
     if uvs:
-        _transfer_uvs(mesh, source, _source_data(source), res)
+        yield
+        src = _source_data(source)
+        yield
+        yield from _transfer_uvs_steps(mesh, source, src, res)
     return mesh
 
 
@@ -2199,12 +2241,68 @@ def _start(context) -> None:
 def _stop() -> None:
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
+    drop_prepare()  # main-only: uv
     stop_work()
     ladder.cancel()  # and its spare preview meshes
     remove_preview()
     state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}), lod=None)
     segments.reset()
     overlay.tag_redraw()
+
+
+# main-only: uv begin prepare
+PREPARE = {"res": None, "sig": None, "steps": None}  # Seam Fit Light: what Apply of the result on show writes, worked out ahead
+
+
+def _prepare_sig(gs):
+    return (state["source"], repr(uv_hooks.uvkeep.settings_of(gs)))  # main-only: uv
+
+
+def drop_prepare() -> None:
+    """End the work-ahead (Apply came first, the result or a UV setting changed, the preview closed)."""
+    steps = PREPARE["steps"]
+    PREPARE.update(res=None, sig=None, steps=None)
+    if steps is not None:
+        steps.close()  # its FitStage stops; nothing is kept
+
+
+def _prepare_start(gs) -> None:
+    """A Seam Fit Light result is on show and the search is done: work out Apply's UVs for it in timer slices
+    (uv_hooks.prepare_steps), so Apply writes them at once. Once per result and settings."""
+    res, work = state["res"], state["work"]
+    if res is None or gs.scope != "AUTO" or (work is not None and work["runner"].busy) or uv_hooks.uvkeep.mode_of(gs) != "light":  # main-only: uv
+        return
+    sig = _prepare_sig(gs)
+    if PREPARE["res"] is res and PREPARE["sig"] == sig:
+        return  # started, or done, for this one
+    source = state_source()
+    if source is None:
+        return
+    drop_prepare()
+    PREPARE.update(res=res, sig=sig, steps=uv_hooks.prepare_steps(source, res, gs))  # main-only: uv
+    if not bpy.app.timers.is_registered(_prepare_tick):
+        bpy.app.timers.register(_prepare_tick, first_interval=sliced.GAP_S)
+
+
+def _prepare_tick():
+    """Timer: one slice (sliced.run_slice) of the work-ahead while its result is still the one on show."""
+    try:
+        gs = getattr(bpy.context.scene, "curiomesh_guided", None)
+        if PREPARE["steps"] is None or gs is None or not gs.enabled or state["res"] is not PREPARE["res"] or _prepare_sig(gs) != PREPARE["sig"]:
+            drop_prepare()
+            return None
+        if sliced.JOB is not None:  # another job's slices first
+            return POLL_SECONDS
+        done, _value = sliced.run_slice(PREPARE["steps"])
+        if done:
+            PREPARE["steps"] = None  # kept in uv_hooks.TRANSFERS for this result
+            return None
+        return sliced.GAP_S
+    except Exception as exc:
+        drop_prepare()
+        state["message"] = f"Guided error: {exc}"[:120]
+        return None
+# main-only: uv end prepare
 
 
 def _poll():
@@ -2226,6 +2324,7 @@ def _poll():
         if source is None or source.mode != "OBJECT" or (preview is not None and preview.mode != "OBJECT"):
             return POLL_SECONDS
         _collect_work(context)
+        _prepare_start(gs)  # main-only: uv
         if gs.scope != "AUTO":
             state["auto_base"] = None
         elif gs.auto_update and state["curve_sig"] is not None:  # a curve was moved, redrawn or deleted: the search starts again, quickly (what was measured is kept)
@@ -2988,8 +3087,10 @@ def _bake_result_steps(source, out, gs, new_uvs: bool):
     src = _source_data(source)
     co = np.empty(len(out.data.vertices) * 3, dtype=np.float64)
     out.data.vertices.foreach_get("co", co)
+    yield
     bvh = _bvh(src)
-    gaps = np.asarray([bvh.find_nearest(p)[3] for p in co.reshape(-1, 3).tolist()])
+    yield
+    gaps = yield from _nearest_steps(bvh, co, 3, np.float64)
     # The rays must start outside both surfaces: past the widest gap between them, measured on this mesh.
     cage = (1.5 * float(np.percentile(gaps, 99)) + 0.002 * src["diag"]) * max(source.matrix_world.to_scale())
     for slot in out.material_slots:  # baking works on the mesh's own material list
@@ -3002,7 +3103,7 @@ def _bake_result_steps(source, out, gs, new_uvs: bool):
         if color and gs.bake_sets > 1:
             piece = segments.seg["piece"]
             labels = piece if piece is not None and len(piece) == len(out.data.polygons) else None
-            images = textures.bake_texture_sets(source, out, count=gs.bake_sets, labels=labels, resolution=int(gs.bake_size), cage=cage)
+            images = yield from textures.bake_texture_sets_steps(source, out, count=gs.bake_sets, labels=labels, resolution=int(gs.bake_size), cage=cage)
         else:
             images = yield from textures.bake_detail_steps(source, out, with_color=color, resolution=int(gs.bake_size), cage=cage, new_uvs=new_uvs)
     except Exception as exc:  # the bake has its own rollback, and the quads are worth keeping
@@ -3046,11 +3147,13 @@ def _write_result(context, source, res, gs, name: str):
 def _write_result_steps(context, source, res, gs, name: str):
     """A new object from a result, with UVs, normals, shading and materials as your mesh has them, as timer steps
     (`sliced`). Returns (object, bake text)."""
-    mesh = _make_mesh(name, source, res)
+    mesh = yield from _make_mesh_steps(name, source, res)
+    yield
     yield from uv_hooks.after_apply_steps(mesh, source, res, gs)  # main-only: uv
     _shade_by_angle(mesh)
+    yield
     if not _blockout_result():
-        _transfer_normals(mesh, _source_data(source), res)
+        yield from _transfer_normals_steps(mesh, _source_data(source), res)
     if gs.bend_crease or gs.bend_sharp:
         _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
     hard_surface.finish(mesh, gs, context.scene.unit_settings.scale_length)
@@ -3203,6 +3306,7 @@ class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
     def steps(self, context):
         """Apply: the result is made at once, its UV work then runs in timer slices from a button (sliced.SlicedOp)."""
         self._remember()
+        drop_prepare()  # main-only: uv. What it worked out so far is not kept: Apply finishes the job itself
         gs = _gs(context)
         source = state_source()
         res = state["res"]
@@ -3230,12 +3334,15 @@ class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
         if gs.auto_instances and gs.scope == "AUTO" and instances is None:
             self.report({"INFO"}, tr("Keep Copies as Instances was not used: this result has no exact copies, or it is baked, mirrored, tidied or repaired"))
         written = instances["rest"] if instances else res
-        mesh = _make_mesh(source.name + "_Retopo", source, written)
+        mesh = yield from _make_mesh_steps(source.name + "_Retopo", source, written)
+        yield
         yield from uv_hooks.after_apply_steps(mesh, source, written, gs)  # main-only: uv
         uv_stop = " | Stopped: the UVs are a plain copy from your mesh" if sliced.stopped() else ""
         _shade_by_angle(mesh)
+        yield
         if not _blockout_result():
-            _transfer_normals(mesh, _source_data(source), written)
+            yield from _transfer_normals_steps(mesh, _source_data(source), written)
+        yield
         if gs.bend_crease or gs.bend_sharp:
             _mark_edges(mesh, _bend_edges(state["auto_base"], res), gs.bend_crease, gs.bend_sharp)
         if not (gs.multires_on and gs.scope == "AUTO"):  # Multires creases its own cage

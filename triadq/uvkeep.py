@@ -31,7 +31,7 @@ DEFAULT_ALLOWANCE = 0.15  # extra faces for seams, as a share of the faces with 
 MOVE_SHARE = 0.5  # the snap may move a vertex this share of its local edge, unless the caller gives a view check
 FALLBACK_TARGET_SHARE = 0.015  # faces the result is expected to have, as a share of the source's, when the aim is "keep detail"
 TEXTURE_PX = 1024.0
-CACHED_CANDIDATES = 8  # finished fits kept so Apply can write exactly what was previewed
+CACHED_CANDIDATES = 8  # finished try fits kept so Apply can write exactly what was previewed (applied fits are pinned)
 VIEW_PIXELS = 192  # a side of one source picture for the snap's camera check (higher can take longer)
 VIEW_TURNED_DEG = 20.0  # a drawn face turned further than this from the picture's normal counts as wrong (the camera check's rule)
 VIEW_BEHIND_PIXELS = 6.0  # a face this far behind the picture is hidden by something in front of it
@@ -689,10 +689,19 @@ def seam_check(sa: Source, src_uv, texture_px: float) -> SeamCheck:
     return hit
 
 
-def remember(candidate: Candidate) -> None:
-    CANDIDATES[candidate.result_key] = candidate
-    while len(CANDIDATES) > CACHED_CANDIDATES:
-        CANDIDATES.popitem(last=False)
+PINNED: set = set()  # result keys of fits the user applied: never evicted, so that result's Apply writes the fit
+
+
+def remember(candidate: Candidate, pin: bool = False) -> None:
+    """File the fit under its result key. `pin`: an applied fit, kept for good; the other (try) fits stay bounded to
+    CACHED_CANDIDATES as a memory guard, oldest out first."""
+    key = candidate.result_key
+    CANDIDATES[key] = candidate
+    if pin:
+        PINNED.add(key)
+    tries = [k for k in CANDIDATES if k not in PINNED]
+    for k in tries[:max(len(tries) - CACHED_CANDIDATES, 0)]:
+        del CANDIDATES[k]
 
 
 class FitStage:

@@ -30,7 +30,7 @@ from .atlasq import (
 )
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from . import sliced
-from .textures import bake_selected_to_active, ensure_target_uvs_steps
+from .textures import bake_selected_to_active_steps, ensure_target_uvs_steps
 from .triadq import uvclassic  # main-only: uv
 from .triadq.flatquad import FlatQuadOptions, flatten_regions, pair_and_close
 from .triadq import (
@@ -1633,7 +1633,7 @@ def _preserve_textures_steps(
     if mode == "BAKE" or (config.bake_fallback and not uv_mapping_is_valid(target)):
         try:
             yield from ensure_target_uvs_steps(target)
-            bake_selected_to_active(
+            yield from bake_selected_to_active_steps(
                 source,
                 target,
                 maps={"COLOR"},

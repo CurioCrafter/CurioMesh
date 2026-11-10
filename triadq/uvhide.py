@@ -94,6 +94,12 @@ def apply(tree, chart, cut):
     """Slide the borders of a level's charts: (chart per face, cut per edge, charts, charts that are not disks), or
     None when no move was made."""
 
+    return _drive(apply_steps(tree, chart, cut))
+
+
+def apply_steps(tree, chart, cut):
+    """`apply` as a generator, yielding between short pieces."""
+
     h = of(tree)
     if h.moved == 0:
         return None
@@ -103,33 +109,44 @@ def apply(tree, chart, cut):
     lab = [raw[f] if h.anchor[f] == NONE else raw[h.anchor[f]] for f in range(t.nf)]
     fixed = tree.fixed
     new_cut = list(cut0)
+    yield
     for e in range(t.ne):
+        if e & 4095 == 4095:
+            yield
         fs = _inner(t, e)
         if fs is not None:
             f0, f1 = fs
             slit = cut0[e] and raw[f0] == raw[f1]
             new_cut[e] = bool(fixed[e]) or slit or h.slit[e] or lab[f0] != lab[f1]
-    ch, n = _pieces(t, new_cut)
-    chi = _chi_all(t, new_cut, ch, n)
+    ch, n = yield from _pieces_steps(t, new_cut)
+    chi = yield from _chi_all_steps(t, new_cut, ch, n)
     if any(c != 1 for c in chi):
         # below the level the moves were made on, a chart can close round a hole: there it keeps this level's own
         # borders as well (still inside the charts above)
         for e in range(t.ne):
+            if e & 4095 == 4095:
+                yield
             fs = _inner(t, e)
             if fs is not None:
                 f0, f1 = fs
                 bad = chi[ch[f0]] != 1 or chi[ch[f1]] != 1
                 if bad and raw[f0] != raw[f1]:
                     new_cut[e] = True
-        ch, n = _pieces(t, new_cut)
-        chi = _chi_all(t, new_cut, ch, n)
+        ch, n = yield from _pieces_steps(t, new_cut)
+        chi = yield from _chi_all_steps(t, new_cut, ch, n)
     not_disk = sum(1 for c in chi if c != 1)
     return np.array(ch, np.int64), np.array(new_cut, bool), n, not_disk
 
 
 def _pieces(t, cut):
+    return _drive(_pieces_steps(t, cut))
+
+
+def _pieces_steps(t, cut):
     d = _Dsu(t.nf)
     for e in range(t.ne):
+        if e & 4095 == 4095:
+            yield
         fs = _inner(t, e)
         if fs is not None and not cut[e]:
             d.union(fs[0], fs[1])
@@ -146,15 +163,23 @@ def _inner(t, e):
 
 
 def _chi_all(t, cut, chart, n):
+    return _drive(_chi_all_steps(t, cut, chart, n))
+
+
+def _chi_all_steps(t, cut, chart, n):
     d = _Dsu(len(t.flat))
     chi = [0] * n
     for e in range(t.ne):
+        if e & 4095 == 4095:
+            yield
         if _inner(t, e) is not None and not cut[e]:
             h0, h1 = t.euse[e]
             for v in (t.ea[e], t.eb[e]):
                 d.union(t.at(h0, v), t.at(h1, v))
             chi[chart[t.cface[h0]]] += 1
     for f in range(t.nf):
+        if f & 4095 == 4095:
+            yield
         c = chart[f]
         chi[c] += 1
         for h in t.face_corners(f):
@@ -932,13 +957,21 @@ def moves(tree):
     """Generator: the moves of a tree, made on its level at the build stretch (returns a `Hide`)."""
 
     t = tree.topo
-    raw_chart, raw_cut, raw_numbers = tree._level(100.0 * tree.build_stretch, hide=False)
+    raw_chart, raw_cut, raw_numbers = yield from tree._level_steps(100.0 * tree.build_stretch, hide=False)
+    yield
     raw = [int(x) for x in raw_chart]
     rcut = [bool(x) for x in raw_cut]
     nf, ne = t.nf, t.ne
-    fedge = [[t.cedge[h] for h in t.face_corners(f) if _inner(t, t.cedge[h]) is not None] for f in range(nf)]
+    yield
+    fedge = []
+    for f in range(nf):
+        if f & 2047 == 2047:
+            yield
+        fedge.append([t.cedge[h] for h in t.face_corners(f) if _inner(t, t.cedge[h]) is not None])
     free, w = [True] * ne, [0] * ne
     for e in range(ne):
+        if e & 4095 == 4095:
+            yield
         fs = _inner(t, e)
         if fs is not None:
             slit = rcut[e] and raw[fs[0]] == raw[fs[1]]
@@ -952,7 +985,8 @@ def moves(tree):
     members: list = [[] for _ in range(nc)]
     for f in range(nf):
         members[label[f]].append(f)
-    _, sm_start = tree._smoothing()
+    yield
+    _, sm_start = yield from tree._smoothing_steps()
     cur = list(np.asarray(sm_start if sm_start is not None else tree.start_uv, np.float64).reshape(-1))
     changed = [False] * nf
     q, bx = [], []
@@ -970,12 +1004,16 @@ def moves(tree):
             over += x[2]
     area = 0.0
     for f in range(nf):
+        if f & 2047 == 2047:
+            yield
         area += _face_area(m.points, t, f)
     budget = OVER_SHARE * area
     dirty = [True] * nc
     while True:
         pairs = set()
         for e in range(ne):
+            if e & 4095 == 4095:
+                yield
             if m.free[e]:
                 continue
             fs = _inner(t, e)

@@ -1911,9 +1911,8 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
     for r in sorted(runs):
         members = runs[r]
         damage, cost = 0.0, 0
-        for i_, f in enumerate(members):
-            if i_ & 7 == 7:
-                yield
+        for f in members:
+            yield  # one face a step: its pieces run the quad check per piece, slow on the NumPy path
             pc = pieces_of(f)
             cost += len(pc) - 1
             p = plans.get(f)
@@ -2056,7 +2055,9 @@ def _split_steps(points, indptr, flat, seams, xyz, vchain, vparam, seen_face, bu
             quad = [a, apex, b, opp]
             p = [out_pts[v] for v in quad]
             want = _add(_newell([out_pts[v] for v in tri]), _newell([out_pts[v] for v in other]))
-            if _face_ok(p) and _dot(_newell(p), want) > 0.0:
+            ok = _face_ok(p) and _dot(_newell(p), want) > 0.0
+            yield  # one quad check a step
+            if ok:
                 polys[i][0] = quad
                 gone[j] = True
                 break

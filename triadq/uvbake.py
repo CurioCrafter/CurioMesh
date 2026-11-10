@@ -299,11 +299,57 @@ def after_bake(obj, images) -> dict | None:
     return out
 
 
+# What each image in the material holds, so Bake those spots bakes that data into it. Our own baked maps say it in their
+# node label (CurioMesh_Normal ...); other images say it by the socket they feed.
+_LABEL_BAKE = {"CurioMesh_BaseColor": "DIFFUSE", "CurioMesh_Normal": "NORMAL", "CurioMesh_Roughness": "ROUGHNESS",
+               "CurioMesh_Emit": "EMIT"}
+_SOCKET_BAKE = {"Normal": "NORMAL", "Roughness": "ROUGHNESS", "Emission": "EMIT", "Emission Color": "EMIT"}
+
+
+def _fed_sockets(node, seen=None):
+    """(node, socket) pairs an image node's Color output reaches, through reroutes."""
+    seen = set() if seen is None else seen
+    out = []
+    for socket in getattr(node, "outputs", ()):
+        if getattr(socket, "name", "") not in ("Color", "Output"):
+            continue
+        for link in getattr(socket, "links", ()):
+            to = link.to_node
+            if getattr(to, "type", "") == "REROUTE":
+                if id(to) not in seen:
+                    seen.add(id(to))
+                    out += _fed_sockets(to, seen)
+            else:
+                out.append((to, link.to_socket))
+    return out
+
+
+def bake_type(image, nodes) -> str | None:
+    """The bake type for `image` (one of its material's TEX_IMAGE nodes is among `nodes`): NORMAL only for a normal map
+    (feeds a Normal Map node's Color or a Normal input), ROUGHNESS, EMIT, DIFFUSE for colour images. None for a data
+    image no bake can make (metallic, AO, height, masks): it is left as it is."""
+
+    for node in nodes:
+        if getattr(node, "type", "") != "TEX_IMAGE" or node.image is not image:
+            continue
+        if getattr(node, "label", "") in _LABEL_BAKE:
+            return _LABEL_BAKE[node.label]
+        for to, socket in _fed_sockets(node):
+            if getattr(to, "type", "") == "NORMAL_MAP" and socket.name == "Color":
+                return "NORMAL"
+            if getattr(to, "type", "") not in ("NORMAL_MAP", "BUMP", "DISPLACEMENT") and socket.name in _SOCKET_BAKE:
+                return _SOCKET_BAKE[socket.name]
+    if image.colorspace_settings.name != "Non-Color":
+        return "DIFFUSE"
+    return None
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Baked images follow Ctrl+Z
 # ---------------------------------------------------------------------------------------------------------------------
 
-# image name -> [(step, uint8 pixels (h, w, 4))] states, ascending. The step is the scene's HISTORY_KEY counter, which
+# image name -> [(step, pixels (h, w, 4))] states, ascending: uint8 for 8-bit images, float32 for float (HDR) images so
+# Ctrl+Z gives back values above 1 and below 0 exactly. The step is the scene's HISTORY_KEY counter, which
 # Blender's own undo puts back; `restore()` then sets each image to the newest state whose step is not newer.
 _states: dict = {}
 _applied: dict = {}
@@ -317,6 +363,13 @@ def _scene():
 
 def _step(scene) -> int:
     return int(scene.get(HISTORY_KEY, 0))
+
+
+def _pixels_state(image) -> np.ndarray:
+    pixels = _image_array(image)
+    if getattr(image, "is_float", False):
+        return pixels.copy()
+    return np.rint(np.clip(pixels, 0, 1) * 255).astype(np.uint8)
 
 
 def remember_images(scene, images, before: bool = False) -> int:
@@ -333,7 +386,7 @@ def remember_images(scene, images, before: bool = False) -> int:
         if before and any(s == step for s, _ in history):
             continue
         history[:] = [(s, p) for s, p in history if s != step]
-        history.append((step, np.rint(np.clip(_image_array(image), 0, 1) * 255).astype(np.uint8)))
+        history.append((step, _pixels_state(image)))
         history.sort(key=lambda t: t[0])
         _applied[image.name] = step
     return step
@@ -358,10 +411,40 @@ def restore(scene) -> list:
         pixels = next(p for s, p in history if s == want)
         if tuple(image.size) != (pixels.shape[1], pixels.shape[0]):
             continue
-        image.pixels.foreach_set((pixels.astype(np.float32) / 255.0).reshape(-1))
+        values = pixels.astype(np.float32) / 255.0 if pixels.dtype == np.uint8 else pixels
+        image.pixels.foreach_set(values.reshape(-1))
         image.update()
         _applied[name] = want
         changed.append(name)
+    return changed
+
+
+def bring_back(scene, step: int) -> list:
+    """A History jump to a step whose images had the states of counter `step`: a new counter step that holds those
+    states (the same arrays, no copies; images not remembered by then keep what they show), so Ctrl+Z and Ctrl+Shift+Z
+    of the jump move the pixels with it. Returns the names changed."""
+
+    import bpy
+
+    new = max([_step(scene)] + [s for history in _states.values() for s, _ in history]) + 1
+    scene[HISTORY_KEY] = new
+    changed = []
+    for name, history in _states.items():
+        older = [s for s, _ in history if s <= step]
+        want = max(older) if older else _applied.get(name)
+        pixels = next((p for s, p in history if s == want), None)
+        if pixels is None:
+            continue
+        history.append((new, pixels))
+        image = bpy.data.images.get(name)
+        if image is not None and _applied.get(name) != want and tuple(image.size) == (pixels.shape[1], pixels.shape[0]):
+            try:
+                image.pixels.foreach_set((pixels.astype(np.float32) / 255.0).reshape(-1))
+            except RuntimeError:  # an image with no pixel data now (unloaded): nothing to put back
+                continue
+            image.update()
+            changed.append(name)
+        _applied[name] = new
     return changed
 
 

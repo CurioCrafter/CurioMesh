@@ -318,7 +318,7 @@ def remember_applied(cand) -> str:
     if c is None:
         return ""
     key = uvkeep.result_key(c.points, c.indptr, c.flat)
-    uvkeep.remember(replace(c, result_key=key))
+    uvkeep.remember(replace(c, result_key=key), pin=True)
     APPLIED_EXTRA[key] = int(getattr(cand, "fit_extra", 0))
     return key
 
@@ -526,10 +526,17 @@ class NewUVs(UVTrial):
     def value_text(self, settings: dict) -> str:
         return f"Stretch allowed {self.stretch(settings):.0f}%"
 
+    def gained(self, before: UVCand, after: UVCand) -> bool:
+        """Keep going gains while the space used on the page, measured on the UVs as they are now, rises."""
+        a, b = before.numbers.get("space_used_pct"), after.numbers.get("space_used_pct")
+        if a is None or b is None:
+            return super().gained(before, after)
+        return b > a + 1e-9
+
     def run(self, base, settings, prev=None):
         s = (settings.get("new") or uvnew.Settings()).copy(stretch_allowed=self.stretch(settings), texture_px=base.texture_px)
         if prev is not None and prev.uv is not None and settings.get("keep_going"):
-            return (yield from _more_packing(base, prev, s))  # Keep going: the charts stay, the page search goes on
+            return (yield from _more_nesting(prev))  # Keep going: the charts stay, the outline packing goes on
         forced = base.forced
         cuts = settings.get("cuts") or ()
         if cuts:
@@ -619,15 +626,19 @@ def _pack(base: UVBase, uv, k: int, budget: float, resume=None, passes: int = 0)
     return _layout(np.asarray(uv, np.float64), ci, fill, page, lo), fill
 
 
-def _more_packing(base, cand, s):
-    """Keep going for New: the page search continues from where it stopped; kept only when space used rises."""
-    fill = cand.extra.get("fill")
-    uv, more = yield from _pack(base, cand.uv, uvnew.mip_level(base.texture_px, s.clean_px), float(s.time_per_pass), fill, passes=-1)
-    if uv is None or more["used"] <= cand.gain + 1e-9:
-        cand.note = (cand.note + "; " if cand.note else "") + "Keep going found no fuller page."
+def _more_nesting(cand):
+    """Keep going for New: the run's own Keep going (the outline packing again with more effort, charts and pictures
+    reused). The same candidate back when there is no more effort to add or nothing to continue: Keep going ends."""
+    run = cand.extra.get("run")
+    nxt = run.keep_going() if run is not None and not run.exhausted else None
+    if nxt is None:
+        if "Keep going found no fuller page." not in cand.note:
+            cand.note = (cand.note + "; " if cand.note else "") + "Keep going found no fuller page."
         return cand
-    out = replace(cand, uv=uv, gain=float(more["used"]), budget_hit=bool(more.get("budget_hit")), extra=dict(cand.extra, fill=more))
-    return out
+    result, error = yield from _poll_new(nxt)
+    if error:
+        return UVCand(None, refusal=error)
+    return _new_cand(nxt, result)
 
 
 CLEAN = (2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4)  # "clean down to" sizes the Gap dial steps through

@@ -252,7 +252,7 @@ class UVSession:
 
     def _run(self):
         self.status = "working"
-        cand = yield from self.trial.run(self.base, dict(self.settings), self.prev)
+        cand = self._noted((yield from self.trial.run(self.base, dict(self.settings), self.prev)))
         self.cand = cand
         if cand.refusal:
             self.status = ""
@@ -262,7 +262,7 @@ class UVSession:
         self.status = "ready"
         while self.settings.get("keep_going") and not cand.refusal:  # Keep going: again from the shown one while it gains
             self.status = f"keep going, pass {self.passes + 1}"
-            nxt = yield from self.trial.run(self.base, dict(self.settings), cand)
+            nxt = self._noted((yield from self.trial.run(self.base, dict(self.settings), cand)))
             if nxt.refusal or nxt is cand:
                 break
             yield from uvtrial.measure(self.trial, self.base, nxt)
@@ -273,6 +273,14 @@ class UVSession:
         if self.settings.get("keep_going"):
             self.message = f"Keep going: {self.passes} more pass{'es' if self.passes != 1 else ''}, then nothing more to gain."
         self.status = "ready"
+
+    def _noted(self, cand):
+        """Bake those spots names on the card the images it leaves as they are."""
+        if self.kind == "bake" and not cand.refusal:
+            note = left_alone_note(bake_plan(self.obj, _images_of(self.obj)))
+            if note and note not in cand.note:
+                cand.note = " ".join(t for t in (cand.note, note) if t)
+        return cand
 
     def going(self) -> bool:
         return self.work is not None and bool(self.settings.get("keep_going")) and self.cand is not None and bool(self.cand.verdict)
@@ -417,6 +425,18 @@ def _raster_mask(uv, tris, w, h, grow: int) -> np.ndarray:
     return mask
 
 
+def bake_plan(obj, images) -> list:
+    """[(image, bake type or None)]: each image gets the data it holds; None is left as it is."""
+    nodes = [n for slot in obj.material_slots if slot.material is not None and slot.material.use_nodes
+             for n in slot.material.node_tree.nodes]
+    return [(im, uvbake.bake_type(im, nodes)) for im in images]
+
+
+def left_alone_note(plan) -> str:
+    left = [im.name for im, kind in plan if kind is None]
+    return tr("Not baked, kept as they are: {0}").format(", ".join(left)) if left else ""
+
+
 def bake_spots(context, obj, cand) -> str:
     """Write the candidate's UVs and bake your original mesh into just its new islands. "" or what went wrong."""
     from . import textures
@@ -426,6 +446,10 @@ def bake_spots(context, obj, cand) -> str:
     if source is None or not images:
         return "Bake those spots needs a baked texture on this mesh and your original mesh: bake on Apply first."
     scene = context.scene
+    plan = bake_plan(obj, images)
+    images = [im for im, kind in plan if kind is not None]
+    if not images:
+        return left_alone_note(plan)
     uvbake.remember_images(scene, images, before=True)
     old = {im.name: np.asarray(im.pixels[:], np.float32) for im in images}
     old_uv = uv_layers.read_uv(obj.data)  # put back when the bake fails: new islands over an unbaked texture show garbage
@@ -448,18 +472,19 @@ def bake_spots(context, obj, cand) -> str:
         scene.cycles.samples = 16
         scene.render.bake.use_selected_to_active = True
         scene.render.bake.margin = margin
-        for im in images:
-            normal = im.colorspace_settings.name == "Non-Color"
+        for im, kind in plan:
+            if kind is None:
+                continue  # a data image no bake makes (metallic, AO, masks): left as it is, named on the card
             for slot in obj.material_slots:
                 if slot.material is not None and slot.material.use_nodes:
                     for node in slot.material.node_tree.nodes:
                         if node.type == "TEX_IMAGE" and node.image == im:
                             slot.material.node_tree.nodes.active = node
-            if not normal:
+            if kind == "DIFFUSE":
                 scene.render.bake.use_pass_direct = False
                 scene.render.bake.use_pass_indirect = False
                 scene.render.bake.use_pass_color = True
-            r = bpy.ops.object.bake(type="NORMAL" if normal else "DIFFUSE")
+            r = bpy.ops.object.bake(type=kind)
             if "FINISHED" not in r:
                 raise RuntimeError(f"bake did not finish: {sorted(r)}")
             w, h = im.size
@@ -491,6 +516,7 @@ def bake_spots(context, obj, cand) -> str:
 def _apply(context, s: UVSession) -> str:
     """Keep the shown candidate on the mesh. "" or why not."""
     c = s.cand
+    history.keep_uvs(context, s.obj)  # the step before keeps the UVs and pixels it had, for a History jump
     if s.kind == "bake":
         c.extra["indptr"] = s.base.indptr
         err = bake_spots(context, s.obj, c)
@@ -501,6 +527,7 @@ def _apply(context, s: UVSession) -> str:
         s.obj.data.update()
     history.before(context)
     history.record(context, f"UVs: {s.trial.name}", numbers_text(s))
+    history.keep_uvs(context, s.obj)
     LAST.update(key=c.key, written=uv_layers_hash(s.obj.data), name=s.trial.name)
     return ""
 

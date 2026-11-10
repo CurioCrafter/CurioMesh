@@ -47,6 +47,7 @@ class SeamFitTrial(unittest.TestCase):
     def tearDown(self):
         UT.FIT["inputs"] = None
         keep.CANDIDATES.clear()
+        keep.PINNED.clear()
         UT.APPLIED_EXTRA.clear()
 
     def test_preview_then_apply_writes_the_same_fit(self):
@@ -75,6 +76,19 @@ class SeamFitTrial(unittest.TestCase):
         pts, iptr, flat, _uv, mat = layers.geometry(mesh)
         got = keep.candidate_hash(pts, iptr, flat, mat, [(x.name, layers.read_uv(mesh, x.name)) for x in mesh.uv_layers])
         self.assertEqual(got, cand.fit.key)
+
+    def test_many_tries_never_evict_the_applied_fit(self):
+        from dataclasses import replace
+
+        p, ip, fl = grid(5)
+        base = T.make_base(p, faces_of(ip, fl))
+        trial = UT.SeamFit()
+        cand, _, _ = run_sliced(trial.run(base, dict(trial.defaults, faces=1.0)))
+        key = UT.remember_applied(cand)
+        for i in range(3 * keep.CACHED_CANDIDATES):  # Auto Fix tries filed after the Apply
+            keep.remember(replace(cand.fit, result_key=f"try{i}"))
+        self.assertIs(keep.CANDIDATES[key].key, cand.fit.key)
+        self.assertEqual(len(keep.CANDIDATES), keep.CACHED_CANDIDATES + 1)  # the tries stay bounded
 
     def test_auto_fix_spot_is_found_and_fixed(self):
         """Auto Fix's pattern: SeamFit made with its inputs, one spot, own number to 0 after the fit."""
@@ -163,6 +177,27 @@ class UVOnly(unittest.TestCase):
         self.assertEqual(na, nb)
         more, _, _ = run_sliced(UT.measure(lt, lb, more))
         self.assertLess(more.numbers["overlap_pct"], 0.01)
+
+    def test_new_keep_going_continues_the_outline_packing(self):
+        fast = common.addon_module("uv_fast")
+        try:
+            if not fast.install():
+                self.skipTest("no outline packer: Keep going has nothing to continue")
+            p, ip, fl = cube_mesh(4)
+            base = UT.make_uv_base(p, ip, fl, texture_px=512)
+            trial = UT.NewUVs()
+            settings = dict(trial.defaults, new=uvnew.Settings(out_of_sight=False, hidden_pct=100.0, time_per_pass=0.5))
+            cand, _, _ = run_sliced(trial.run(base, settings))
+            cand, _, _ = run_sliced(UT.measure(trial, base, cand))
+            first = cand.extra["run"]
+            more, _, _ = run_sliced(trial.run(base, dict(settings, keep_going=True), cand))
+            self.assertFalse(more.refusal, more.refusal)
+            self.assertIs(more.extra["run"]._keep.get("nest_from"), first)  # NewUVs.keep_going(), not a box repack
+            self.assertEqual(more.extra["run"].settings.nest_effort, first.settings.nest_effort + 1)
+            more, _, _ = run_sliced(UT.measure(trial, base, more))
+            self.assertEqual(trial.gained(cand, more), more.numbers["space_used_pct"] > cand.numbers["space_used_pct"] + 1e-9)
+        finally:
+            fast.uninstall()
 
     def test_cut_toggle(self):
         cuts = UT.toggle_cut((), 5, 2)

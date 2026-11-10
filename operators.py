@@ -223,10 +223,8 @@ class CURIOMESH_OT_remesh(sliced.SlicedOp, bpy.types.Operator):
             return {"CANCELLED"}
 
         stopped = sliced.stopped()
-        self.report(
-            {"WARNING"} if stopped else {"INFO"},
-            result.message + (" Stopped: the UVs were carried over by Blender's quicker transfer." if stopped else ""),
-        )
+        how = " Stopped: Smart Project made the bake UVs, and the bake ran on them." if settings.metrics_uv_status == "BAKED" else " Stopped: the UVs were carried over by Blender's quicker transfer."
+        self.report({"WARNING"} if stopped else {"INFO"}, result.message + (how if stopped else ""))
         return {"FINISHED"}
 
 
