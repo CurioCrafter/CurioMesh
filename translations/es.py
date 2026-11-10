@@ -2198,6 +2198,7 @@ MESSAGES = {
     "Carrying the UVs over": "Pasando las UV",
     "Esc stops": "Esc detiene",
     "Making the bake UVs": "Creando las UV del procesado",
+    "Baking": "Procesando",
     "Stopped: Smart Project made the bake UVs": "Detenido: Proyección inteligente creó las UV del procesado",
     "Stopped: the UVs are a plain copy from your mesh": "Detenido: las UV son una copia simple de tu malla",
     "Stopping...": "Deteniendo...",

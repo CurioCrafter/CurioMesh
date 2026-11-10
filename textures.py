@@ -241,7 +241,7 @@ def bake_detail_steps(
     mesh.uv_layers.active.active_render = True
     _harden_uv_seams(mesh)
     _keep_triangles(target_obj)
-    images = bake_selected_to_active(
+    images = yield from bake_selected_to_active_steps(
         source_obj, target_obj, maps=("NORMAL", "COLOR") if with_color else ("NORMAL",),
         resolution=resolution, margin=margin, cage=cage, ray_limit=3.0 * cage,
     )
@@ -486,7 +486,11 @@ def _rollback_bake_data(
     return errors
 
 
-def bake_selected_to_active(
+def bake_selected_to_active(source_obj: bpy.types.Object, target_obj: bpy.types.Object, **kw) -> list[bpy.types.Image]:
+    return sliced.finish(bake_selected_to_active_steps(source_obj, target_obj, **kw))
+
+
+def bake_selected_to_active_steps(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
     *,
@@ -496,12 +500,15 @@ def bake_selected_to_active(
     uv_method: str = "CURIO",  # main-only: uv
     cage: float = 0.04,
     ray_limit: float = 0.0,
-) -> list[bpy.types.Image]:
+):
+    """`bake_selected_to_active` as timer steps (`sliced`): the unwrap of a mesh without UVs runs in short pieces
+    (Stop: Smart Project makes them); the bake itself is Blender's, in one piece."""
     jobs = _bake_jobs(maps)
     if not jobs:
         return []
 
-    ensure_target_uvs(target_obj, uv_method)
+    yield from ensure_target_uvs_steps(target_obj, uv_method)
+    sliced.tick("Baking")
     baked: list[bpy.types.Image] = []
     created_images: list[bpy.types.Image] = []
     created_materials: list[bpy.types.Material] = []
