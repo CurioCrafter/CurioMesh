@@ -146,6 +146,9 @@ class Twin(unittest.TestCase):
         self.assertAlmostEqual(min(w, h), np.hypot(0.1, 0.1), places=6)
 
     def test_slices_stay_short(self):
+        warm = uvchart.Charts(*cube(4), use_fast=False)  # the first run pays one-time start-up (imports, NumPy) in one slice
+        while not warm.done:
+            warm.step()
         stage = uvchart.Charts(*cube(4), use_fast=False)
         longest = 0.0
         while not stage.done:
