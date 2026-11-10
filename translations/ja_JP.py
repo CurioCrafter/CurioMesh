@@ -2198,6 +2198,7 @@ MESSAGES = {
     "Carrying the UVs over": "UV を移しています",
     "Esc stops": "Esc で停止",
     "Making the bake UVs": "ベイク用の UV を作成中",
+    "Baking": "ベイク中",
     "Stopped: Smart Project made the bake UVs": "停止しました: ベイク用の UV はスマート UV 投影で作成しました",
     "Stopped: the UVs are a plain copy from your mesh": "停止しました: UV は元のメッシュからの単純なコピーです",
     "Stopping...": "停止中...",

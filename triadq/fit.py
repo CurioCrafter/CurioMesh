@@ -119,11 +119,28 @@ def untangled(before: np.ndarray, after: np.ndarray, quads: np.ndarray, rounds: 
     return moved
 
 
+CHUNK = 2000  # corners per yield in the *_steps generators: a few ms each, so a timer slice stays short
+
+
+def _run(steps):
+    """Run a *_steps generator to the end and return its value."""
+    while True:
+        try:
+            next(steps)
+        except StopIteration as end:
+            return end.value
+
+
 def vertex_parts(points, faces, sample_part, nearest_samples) -> tuple[np.ndarray, np.ndarray]:
     """(result part of each vertex, source part of each result part): most vertices of a result part sit on the source part it came from.
 
     `nearest_samples(points)` gives the index of the source sample nearest to each point.
     """
+    return _run(vertex_parts_steps(points, faces, sample_part, nearest_samples))
+
+
+def vertex_parts_steps(points, faces, sample_part, nearest_samples):
+    """Generator: `vertex_parts`, yielding between lookups of CHUNK corners (the add-on's timer slices)."""
 
     fa, fb = face_adjacency(faces)
     face_part = np.unique(_labels(len(faces), fa, fb), return_inverse=True)[1]
@@ -136,13 +153,23 @@ def vertex_parts(points, faces, sample_part, nearest_samples) -> tuple[np.ndarra
     if source_parts == 1:
         return part, np.zeros(count, dtype=np.int64)
     votes = np.zeros((count, source_parts), dtype=np.int64)
-    nearest = nearest_samples(points[flat])
+    at = points[flat]
+    nearest = np.empty(len(at), dtype=np.int64)
+    for i in range(0, len(at), CHUNK):
+        nearest[i:i + CHUNK] = nearest_samples(at[i:i + CHUNK])
+        yield
     np.add.at(votes, (part[flat], sample_part[nearest]), 1)
     return part, votes.argmax(axis=1)
 
 
 def corner_normals(points, faces, sample_nrm, sample_area, sample_part, vertex_source, find_n, count: int = 12) -> np.ndarray:
-    """One smooth-shading normal per face corner, in face order, from source samples next to the corner.
+    """`corner_normals_steps` run to the end."""
+    return _run(corner_normals_steps(points, faces, sample_nrm, sample_area, sample_part, vertex_source, find_n, count))
+
+
+def corner_normals_steps(points, faces, sample_nrm, sample_area, sample_part, vertex_source, find_n, count: int = 12):
+    """Generator -> one smooth-shading normal per face corner, in face order, from source samples next to the corner.
+    Yields every CHUNK corners or vertices.
 
     Faces at a vertex split into sides at a hard edge, as smoothing by angle does, and that side's normal then picks
     which nearby samples may speak: not a bevel, not another loose part. `find_n(point, count)` gives
@@ -171,10 +198,12 @@ def corner_normals(points, faces, sample_nrm, sample_area, sample_part, vertex_s
     split = np.cos(np.radians(SPLIT_DEG))
     groups = np.split(order, breaks)
     near = []
-    for corners in groups:
+    for g, corners in enumerate(groups):
         n = face_normal[face[corners]]
         near.append((n @ n.T) >= split)
         side[corners] = near[-1] @ (n * turn[corners][:, None])
+        if g % CHUNK == CHUNK - 1:
+            yield
     side = _unit(side)
     asks = points[flat] + INSET * (middle[face] - points[flat])
     index = np.zeros((len(flat), count), dtype=np.int64)
@@ -182,6 +211,8 @@ def corner_normals(points, faces, sample_nrm, sample_area, sample_part, vertex_s
     for i, ask in enumerate(asks.tolist()):
         for j, (_position, sample, distance) in enumerate(find_n(ask, count)):
             index[i, j], away[i, j] = sample, distance
+        if i % CHUNK == CHUNK - 1:
+            yield
     n = sample_nrm[index]
     agree = np.einsum("nkj,nj->nk", n, side)
     found = np.isfinite(away)
@@ -192,6 +223,9 @@ def corner_normals(points, faces, sample_nrm, sample_area, sample_part, vertex_s
     heard = _unit(np.einsum("nk,nkj,nk->nj", weight, n, np.sign(agree)) + 1e-3 * np.maximum(weight.sum(axis=1, keepdims=True), 1e-30) * side)
     # Corners on one side of a vertex share their normal, or every soft edge shows as a seam.
     out = np.zeros_like(heard)
-    for corners, together in zip(groups, near):
+    yield
+    for g, (corners, together) in enumerate(zip(groups, near)):
         out[corners] = together @ (heard[corners] * turn[corners][:, None])
+        if g % CHUNK == CHUNK - 1:
+            yield
     return _unit(out)
