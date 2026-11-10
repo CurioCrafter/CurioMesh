@@ -163,8 +163,8 @@ def _skipped(node, parents) -> bool:
                 return True
             if name in {"prop", "prop_enum", "operator", "popover", "menu", "prop_menu_enum", "template_icon", "prop_search"} and child in parent.args:
                 return True  # layout.prop(data, "name"): the second argument is a property name
-        if isinstance(parent, ast.Attribute):
-            return True  # "x".join(...)
+        if isinstance(parent, ast.Attribute) and parent is parents[0]:
+            return True  # "x".join(...); tr("...").format(...) further up still counts
         child = parent
     return False
 
@@ -213,7 +213,8 @@ def collect(root: Path = ROOT) -> dict[str, list[str]]:
 
 def missing(table: dict, catalog: dict | None = None) -> list[str]:
     catalog = catalog or collect()
-    return [m for m in catalog if not table.get(m)]
+    # tr("... {0}").format(x) looks up the literal text, braces and all, so its escaped template counts as found too
+    return [m for m in catalog if not table.get(m) and not table.get(m.replace("{{", "{").replace("}}", "}"))]
 
 
 if __name__ == "__main__":
