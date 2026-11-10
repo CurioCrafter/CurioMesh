@@ -42,7 +42,16 @@ HOOKS = importlib.import_module(pkg.__name__ + ".uv_hooks")
 LAYERS = importlib.import_module(pkg.__name__ + ".uv_layers")
 FAILS = []
 REAL_FINISH = SL.finish
-RUN = {"stop_after": None, "times": [], "stopped": False}
+RUN = {"stop_after": None, "times": [], "stopped": False, "baking": False, "bake_slices": set()}
+_bake = pkg.textures._execute_bake
+
+
+def _timed_bake(kind):
+    RUN["baking"] = True  # this slice holds Blender's own bake: not ours to split
+    return _bake(kind)
+
+
+pkg.textures._execute_bake = _timed_bake
 
 
 def ok(cond, what):
@@ -51,17 +60,37 @@ def ok(cond, what):
         FAILS.append(what)
 
 
+def slice_watched(steps, budget=SL.SLICE_S):
+    """sliced.run_slice, noting every step over 80 ms and where it was (SLOW lines)."""
+    end = time.perf_counter() + budget
+    try:
+        while time.perf_counter() < end:
+            here, t = where(steps), time.perf_counter()
+            got = next(steps)
+            if time.perf_counter() - t > 0.08:
+                SLOW.append(("step", round(1000 * (time.perf_counter() - t)), here, where(steps), ""))
+            if got == SL.WAIT:
+                break
+    except StopIteration as done:
+        return True, done.value
+    return False, None
+
+
 def timed_finish(steps):
     """What the modal does, one timer event per slice, timed. Presses Stop once the UV slices passed `stop_after` s."""
     if SL.JOB is not None:
         return REAL_FINISH(steps)
     SL.JOB = SL.Job("test")
     times = []
+    RUN["bake_slices"] = set()
     try:
         while True:
             a = time.perf_counter()
-            done, value = SL.run_slice(steps)
+            RUN["baking"] = False
+            done, value = slice_watched(steps)
             times.append(time.perf_counter() - a)
+            if RUN["baking"]:
+                RUN["bake_slices"].add(len(times) - 1)
             if done:
                 return value
             if RUN["stop_after"] is not None and sum(times[1:]) > RUN["stop_after"]:
@@ -133,7 +162,9 @@ def report(label):
     SLOW.clear()
     t = RUN["times"]
     rest = max(t[1:-1]) if len(t) > 2 else 0.0
-    print(f"TIME {label}: {len(t)} slices, first {1000 * t[0]:.0f} ms, last {1000 * t[-1]:.0f} ms, longest UV slice between {1000 * rest:.1f} ms, total {sum(t):.1f} s", flush=True)
+    ours = max([x for i, x in enumerate(t) if i not in RUN["bake_slices"]] or [0.0])
+    print(f"TIME {label}: {len(t)} slices, first {1000 * t[0]:.0f} ms, last {1000 * t[-1]:.0f} ms, longest UV slice between {1000 * rest:.1f} ms, longest of all but the bake {1000 * ours:.0f} ms, total {sum(t):.1f} s", flush=True)
+    RUN["first"], RUN["ours"] = t[0], ours
     return rest
 
 
@@ -212,6 +243,7 @@ def ready(bake="OFF", chart=True):
     if not chart:
         res["chart"] = None  # the bake unwraps new UVs, as without kept seams
     guided.state.update(res=res, auto_base=SAVED["auto_base"], source="Model", work=None)
+    HOOKS.TRANSFERS.clear()  # every Apply here works its UVs out again
     gs["enabled"] = True
     gs.bake_detail, gs.bake_size = bake, "1024"
     model = bpy.data.objects["Model"]
@@ -238,6 +270,7 @@ def apply(label, stop_after=None):
 ready()
 name, longest = apply("1 transfer")
 ok(longest < 0.1, f"1 transfer: longest slice {1000 * longest:.0f} ms < 100 ms")
+ok(RUN["first"] < 0.15, f"1 transfer: Apply's first slice {1000 * RUN['first']:.0f} ms (mesh, UVs, normals)")
 mesh = bpy.data.objects[name].data
 ok(uv_ok(mesh) and HOOKS.LAST.get("hash") and not RUN["stopped"], f"1 transfer: finished with UVs ({HOOKS.LAST.get('messages')})")
 undo_redo("1 transfer", name)
@@ -247,16 +280,108 @@ name, longest = apply("1 transfer, Stop", stop_after=2.0)
 ok(longest < 0.1, f"1 transfer, Stop: longest slice {1000 * longest:.0f} ms")
 ok(RUN["stopped"] and name and uv_ok(bpy.data.objects[name].data) and "Stopped" in guided.state["applied"], f"1 transfer, Stop: a valid mesh with UVs, and it says so: {HOOKS.LAST.get('messages')}")
 
+# --- 5. Seam Fit Light result on show: its UVs are worked out ahead in timer slices, so Apply writes at once
+_after = HOOKS.after_apply_steps
+
+
+def _timed_after(*a):
+    gen, spent = _after(*a), 0.0
+    try:
+        while True:
+            t = time.perf_counter()
+            try:
+                got = next(gen)
+            except StopIteration as end:
+                return end.value
+            finally:
+                spent += time.perf_counter() - t
+                RUN["after_apply"] = spent
+            yield got
+    finally:
+        gen.close()
+
+
+ready()
+guided._prepare_start(bpy.context.scene.curiomesh_guided)
+ticks, t0 = [], time.perf_counter()
+while guided.PREPARE["steps"] is not None and time.perf_counter() - t0 < 600:
+    a = time.perf_counter()
+    guided._prepare_tick()
+    ticks.append(time.perf_counter() - a)
+print(f"TIME 5 prepare: {len(ticks)} ticks, longest {1000 * max(ticks or [0]):.0f} ms, total {sum(ticks):.1f} s", flush=True)
+ok(guided.PREPARE["res"] is guided.state["res"] and HOOKS.TRANSFERS, "5 prepare: done and kept for the result on show")
+HOOKS.after_apply_steps = _timed_after
+names0 = set(bpy.data.objects.keys())
+r = bpy.ops.curiomesh.guided_apply()
+HOOKS.after_apply_steps = _after
+made = [n for n in bpy.data.objects.keys() if n not in names0]
+ok(r == {"FINISHED"} and made and RUN.get("after_apply", 9) < 0.06, f"5 prepare: Apply wrote the UVs in {1000 * RUN.get('after_apply', 9):.0f} ms")
+bpy.ops.ed.undo_push(message="Apply")
+ready()  # the result changes: the work-ahead stops at once
+guided._prepare_start(bpy.context.scene.curiomesh_guided)
+guided._prepare_tick()
+guided.state["res"] = dict(guided.state["res"])
+ok(guided._prepare_tick() is None and guided.PREPARE["steps"] is None and not HOOKS.TRANSFERS, "5 prepare: a new result ends it, nothing kept")
+
 # --- 2. the bake unwrap (New UVs into the bake layer), sliced
 bpy.context.scene.curiomesh_uv.uvs = "NEW"  # no kept seams: the bake makes its own layer with New UVs
 UP.sync()
 ready("NORMAL", chart=False)
 name, longest = apply("2 bake unwrap")
 ok(longest < 0.1, f"2 bake unwrap: longest slice {1000 * longest:.0f} ms (the bake itself is Blender's, in the last slice)")
+ok(RUN["first"] < 0.15, f"2 bake unwrap: Apply's first slice {1000 * RUN['first']:.0f} ms (mesh, UVs, normals, bake cage)")
 mesh = bpy.data.objects[name].data
 ok(uv_ok(mesh) and pkg.textures.BAKE_LAYER in mesh.uv_layers and "Smart Project" not in BAKE.LAST.get("message", ""), f"2 bake unwrap: New UVs made the bake layer ({BAKE.LAST.get('message')}, {BAKE.LAST.get('seconds', 0):.1f} s)")
 undo_redo("2 bake unwrap", name)
 
+
+
+# --- 4. History jump on a UV step: the applied mesh's UVs and the baked pixels come back, and forward again
+def history_jump(name):
+    obj = bpy.data.objects[name]
+    images = [im for im in UP._images_of(obj) if im.name.startswith(name + "_CurioMesh")]  # the baked map, not a source texture never loaded here
+    ok(bool(images), f"4 jump: a baked map on {name}: {[im.name for im in UP._images_of(obj)]}")
+    uv0, px0 = LAYERS.read_uv(obj.data).copy(), np.asarray(images[0].pixels[:], np.float32)
+    s = UP.UVSession(bpy.context, obj, "new", {"new": UP.new_settings(bpy.context.scene.curiomesh_uv)})
+    t0 = time.perf_counter()
+    while not (s.ready() or (s.cand is not None and s.cand.refusal)) and time.perf_counter() - t0 < 600:
+        s.pump(UP.BUDGET)
+    err = UP._apply(bpy.context, s)
+    uv1 = LAYERS.read_uv(obj.data).copy()
+    ok(not err and not np.allclose(uv0, uv1), f"4 jump: UVs: New applied ({err})")
+    # a bake step, as Bake those spots makes it (uv_panel._apply's kind "bake"), without the Cycles time
+    H.keep_uvs(bpy.context, obj)
+    BAKE.remember_images(bpy.context.scene, images, before=True)
+    images[0].pixels.foreach_set(np.clip(px0 * 0.5 + 0.25, 0, 1))
+    BAKE.remember_images(bpy.context.scene, images)
+    H.record(bpy.context, "UVs: Bake those spots")
+    H.keep_uvs(bpy.context, obj)
+    px1 = np.asarray(images[0].pixels[:], np.float32)
+    rows = [e.name for e in H.steps.entries]
+    i_new, i_bake = rows.index("UVs: New"), rows.index("UVs: Bake those spots")
+
+    def at(label, uv, px):
+        o = bpy.data.objects[name]
+        ok(np.allclose(LAYERS.read_uv(o.data), uv) and np.allclose(np.asarray(images[0].pixels[:], np.float32), px, atol=1 / 255), f"4 jump: {label}")
+
+    H.jump(bpy.context, i_new - 1)
+    at("back before New: UVs and pixels as before", uv0, px0)
+    H.jump(bpy.context, i_new)
+    at("forward to New: New's UVs, old pixels", uv1, px0)
+    H.jump(bpy.context, i_bake)
+    at("forward to the bake: New's UVs, baked pixels", uv1, px1)
+    H.jump(bpy.context, i_new - 1)
+    at("back again before New", uv0, px0)
+    if CAN_UNDO:
+        step = H.current(bpy.context.scene)
+        bpy.ops.ed.undo()
+        at("Ctrl+Z takes the jump back (bake step)", uv1, px1)
+        bpy.ops.ed.redo()
+        at("Ctrl+Shift+Z jumps again", uv0, px0)
+        ok(H.current(bpy.context.scene) == step, f"4 jump: History step {H.current(bpy.context.scene)} == {step}")
+
+
+history_jump(name)
 BAKE._cache.clear()
 ready("NORMAL", chart=False)
 name, longest = apply("2 bake unwrap, Stop", stop_after=2.0)
@@ -271,13 +396,13 @@ model.select_set(True)
 bpy.context.view_layer.objects.active = model
 
 
-def remesh(label, stop_after=None):
+def remesh(label, stop_after=None, texture_mode="PROJECT", keep_attributes=True):
     global STEP0
     bpy.ops.ed.undo_push(message="before Remesh")
     STEP0 = H.current(bpy.context.scene)
     RUN["stop_after"] = stop_after
     names = set(bpy.data.objects.keys())
-    r = bpy.ops.curiomesh.remesh(texture_mode="PROJECT", output_mode="NEW", target_faces=2000)
+    r = bpy.ops.curiomesh.remesh(texture_mode=texture_mode, output_mode="NEW", target_faces=2000, bake_resolution=256, preserve_attributes=keep_attributes)
     bpy.ops.ed.undo_push(message="Remesh")
     made = [n for n in bpy.data.objects.keys() if n not in names]
     longest = report(label)
@@ -292,6 +417,28 @@ undo_redo("3 remesh transfer", name)
 bpy.context.view_layer.objects.active = bpy.data.objects["Model"]
 name, longest = remesh("3 remesh transfer, Stop", stop_after=2.0)
 ok(RUN["stopped"] and name and uv_ok(bpy.data.objects[name].data), f"3 remesh transfer, Stop: a valid mesh with Blender's transfer ({bpy.context.scene.curiomesh_settings.metrics_uv_status})")
+
+# --- 6. The plain bake (textures.bake_selected_to_active) on a mesh with no UVs: its unwrap in slices, then Blender's bake
+def plain_bake(label, stop_after=None):
+    base = bpy.data.objects["Model_Retopo"]
+    obj = base.copy()
+    obj.data = base.data.copy()
+    bpy.context.scene.collection.objects.link(obj)
+    while obj.data.uv_layers:
+        obj.data.uv_layers.remove(obj.data.uv_layers[0])
+    BAKE._cache.clear()
+    BAKE.LAST.clear()
+    RUN["stop_after"] = stop_after
+    images = timed_finish(pkg.textures.bake_selected_to_active_steps(bpy.data.objects["Model"], obj, maps=("NORMAL",), resolution=256))
+    longest = report(label)
+    ok(images and uv_ok(obj.data), f"{label}: baked {[im.name for im in images or ()]} on valid UVs ({BAKE.LAST.get('message')})")
+    return obj, longest
+
+
+obj, longest = plain_bake("6 plain bake")
+print(f"INFO 6 plain bake: longest slice but Blender's bake {1000 * RUN['ours']:.0f} ms (the SLOW lines say which steps)", flush=True)
+obj, longest = plain_bake("6 plain bake, Stop", stop_after=1.0)
+ok(RUN["stopped"] and "Smart Project" in BAKE.LAST.get("message", ""), f"6 plain bake, Stop: Smart Project made the UVs and it says so ({BAKE.LAST.get('message')})")
 
 SL.finish = REAL_FINISH
 pkg.unregister()
