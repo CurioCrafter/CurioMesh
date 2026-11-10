@@ -628,9 +628,14 @@ class ChartTree:
         """(chart per face, cut per edge, numbers in `LEVEL_COLUMNS`), cached per (x, hide). `hide` False: the charts
         before their borders slide out of sight (the first result is shown from these while the moves are made)."""
 
+        return _drive(self.level_steps(x, hide))
+
+    def level_steps(self, x: float, hide: bool = True):
+        """`level` as a generator, yielding between short pieces."""
+
         key = (float(x), bool(hide))
         if key not in self._cache:
-            self._cache[key] = self._level(*key)
+            self._cache[key] = yield from self._level_steps(*key)
         chart, cut, numbers = self._cache[key]
         return chart.copy(), cut.copy(), numbers.copy()
 
@@ -672,7 +677,7 @@ class ChartTree:
             not_disk = sum(1 for r in ids if chi[r] != 1)
         from . import uvhide  # R7hide: borders slid out of sight (imports this module)
 
-        slid = uvhide.apply(self, chart, cut) if hide else None
+        slid = (yield from uvhide.apply_steps(self, chart, cut)) if hide else None
         chart, cut, n_charts, not_disk = slid if slid is not None else (chart, cut, len(ids), not_disk)
         numbers = np.array([n_charts, not_disk, used, segs_glued, float(x / 100.0 > self.build_stretch), (time.perf_counter() - started) * 1e3])
         return chart, cut, numbers

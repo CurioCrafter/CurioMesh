@@ -1432,7 +1432,11 @@ class NewUVs:
             self._active = None
             return (yield from self._flatten_finish(job))
         # NumPy twin: chart by chart.
-        chart, cut, _ = tree.level(float(x), hide=bool(getattr(self, "_hidden", True)))
+        hide = bool(getattr(self, "_hidden", True))
+        if hasattr(tree, "level_steps"):
+            chart, cut, _ = yield from tree.level_steps(float(x), hide=hide)
+        else:
+            chart, cut, _ = tree.level(float(x), hide=hide)
         chart = np.asarray(chart, dtype=np.int64)
         corner_uv = np.zeros((len(self.flat), 2))
         rows = np.zeros(int(chart.max()) + 1 if len(chart) else 0, np.int64)

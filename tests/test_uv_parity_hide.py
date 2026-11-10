@@ -66,6 +66,16 @@ class Twin(unittest.TestCase):
         tree._smooth, tree._cache = None, {}
         again = uvhide._drive(uvhide.moves(tree))
         self.assertEqual(whole.moved, again.moved)
+        tree._hide, tree._cache = again, {}
+        level = tree.level_steps(5.0)  # the flatten's level, with the slides applied, is made in steps too
+        next(level)
+        self.assertEqual(tree._cache, {})
+        got = uvhide._drive(level)
+        tree._cache = {}
+        want = tree.level(5.0)
+        np.testing.assert_array_equal(got[0], want[0])
+        np.testing.assert_array_equal(got[1], want[1])
+        np.testing.assert_array_equal(got[2][:5], want[2][:5])  # the last number is the time it took
 
     def test_slides_lower_the_seen_cut_and_keep_disks(self):
         mesh = speckled(16, 7, 0.4)
