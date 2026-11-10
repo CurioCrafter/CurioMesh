@@ -932,13 +932,21 @@ def moves(tree):
     """Generator: the moves of a tree, made on its level at the build stretch (returns a `Hide`)."""
 
     t = tree.topo
-    raw_chart, raw_cut, raw_numbers = tree._level(100.0 * tree.build_stretch, hide=False)
+    raw_chart, raw_cut, raw_numbers = yield from tree._level_steps(100.0 * tree.build_stretch, hide=False)
+    yield
     raw = [int(x) for x in raw_chart]
     rcut = [bool(x) for x in raw_cut]
     nf, ne = t.nf, t.ne
-    fedge = [[t.cedge[h] for h in t.face_corners(f) if _inner(t, t.cedge[h]) is not None] for f in range(nf)]
+    yield
+    fedge = []
+    for f in range(nf):
+        if f & 2047 == 2047:
+            yield
+        fedge.append([t.cedge[h] for h in t.face_corners(f) if _inner(t, t.cedge[h]) is not None])
     free, w = [True] * ne, [0] * ne
     for e in range(ne):
+        if e & 4095 == 4095:
+            yield
         fs = _inner(t, e)
         if fs is not None:
             slit = rcut[e] and raw[fs[0]] == raw[fs[1]]
@@ -952,7 +960,8 @@ def moves(tree):
     members: list = [[] for _ in range(nc)]
     for f in range(nf):
         members[label[f]].append(f)
-    _, sm_start = tree._smoothing()
+    yield
+    _, sm_start = yield from tree._smoothing_steps()
     cur = list(np.asarray(sm_start if sm_start is not None else tree.start_uv, np.float64).reshape(-1))
     changed = [False] * nf
     q, bx = [], []
@@ -970,12 +979,16 @@ def moves(tree):
             over += x[2]
     area = 0.0
     for f in range(nf):
+        if f & 2047 == 2047:
+            yield
         area += _face_area(m.points, t, f)
     budget = OVER_SHARE * area
     dirty = [True] * nc
     while True:
         pairs = set()
         for e in range(ne):
+            if e & 4095 == 4095:
+                yield
             if m.free[e]:
                 continue
             fs = _inner(t, e)
