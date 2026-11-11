@@ -303,7 +303,7 @@ def _new_report(context) -> dict:
 def start(context, plan=None, force: bool = False, limit: float | None = None) -> bool:
     """Start Auto Fix on the result on screen. The result of a search starts it when Auto Fix is on (`guided`).
     `plan`: [(Trial class, kinds)] instead of the ticked groups (tests). `force`: also in a background Blender, which
-    has no timers (tests pump the job with `finish_now`)."""
+    has no timers (tests then step the job themselves)."""
     guided = _g()
     gs = context.scene.curiomesh_guided
     if busy() or guided.state["auto_base"] is None or guided.state["res"] is None:

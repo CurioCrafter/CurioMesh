@@ -103,8 +103,9 @@ CurioMesh contains Python code only and no compiled or third-party code.
   segments alone writes nothing on your object. Delete both to forget them.
 - The dashboard in the 3D view is off until you press **Show Dashboard**. Its timer runs only while the dashboard, the
   heatmap or Live is on.
-- History and Auto Fix follow Blender's undo: they keep `undo_post`, `redo_post` and `load_post` handlers that only
-  pick the matching stored result; they are removed when CurioMesh is disabled.
+- History, Auto Fix, hand-edited segments and the UV bake follow Blender's undo: they keep `undo_post`, `redo_post`
+  (and for History and Auto Fix `load_post`) handlers that only pick the matching stored result or saved pixels; they
+  are removed when CurioMesh is disabled.
 - Ideas credited: fitting each source point to its nearest vertex, shading read from the nearest source points, and
   the finite test cases come from ideas by cav3dw3ll3r (https://github.com/cav3dw3ll3r).
 - **Report a Problem (opens browser)** (Help Make It Better, and Advanced tab > Issue Reports) opens GitHub's new-issue form in your web browser, with your

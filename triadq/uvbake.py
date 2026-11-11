@@ -441,6 +441,7 @@ def _on_undo(*_args) -> None:
 def register() -> None:
     import bpy
 
+    bpy.app.handlers.persistent(_on_undo)  # kept when another .blend is opened, like the other undo handlers
     for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
         if _on_undo not in handlers:
             handlers.append(_on_undo)
