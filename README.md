@@ -9,6 +9,10 @@
 [![Blender 3.6 to 5.2](https://img.shields.io/badge/Blender-3.6%20to%205.2-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
+https://github.com/user-attachments/assets/c179d207-bdbc-4a29-8034-f48eb624de02
+
+*The 0.9.9 tutorial, 4:32, from install to export. [Watch it in HD on YouTube](https://youtu.be/44xpJT_bTnY) with captions in five languages, or [jump to a chapter](#video-tutorial).*
+
 <p align="center"><img src="docs/images/choice.webp" alt="A marble bust retopologised by CurioMesh: a slider moves from Keep Detail (2,508 quads, fewest faces) through Balanced (3,920) to Clean Rows (14,147 quads in even rows), all keeping the same shape" width="800"></p>
 
 *The same 17,456-face sculpt at every setting, about 6% of the view changed: Keep Detail makes the fewest faces (2,508 quads), Clean Rows makes even rows (14,147 quads). You choose what matters more for the job.*
@@ -30,9 +34,7 @@ model, a sculpt or a photogrammetry scan, and want to fix single parts instead o
 
 ## Video tutorial
 
-<p align="center"><a href="https://youtu.be/44xpJT_bTnY"><img src="https://img.youtube.com/vi/44xpJT_bTnY/maxresdefault.jpg" alt="CurioMesh 0.9.9 tutorial on YouTube: a marble bust being retopologised in Blender" width="800"></a></p>
-
-A 4:32 walkthrough of CurioMesh 0.9.9, from install to export. Captions in English, Spanish, Portuguese (Brazil), Japanese and Simplified Chinese. Jump to a chapter:
+The tutorial plays at the [top of this page](#curiomesh-free-automatic-retopology-add-on-for-blender). The [YouTube copy](https://youtu.be/44xpJT_bTnY) is in HD with captions in English, Spanish, Portuguese (Brazil), Japanese and Simplified Chinese. Each chapter below opens there:
 
 | Time | Chapter |
 |---|---|
