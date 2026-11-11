@@ -69,7 +69,7 @@ The GitHub add-on is the fastest build inside Blender and has every feature. The
 | | |
 |---|---|
 | **Get started** | [Video tutorial](#video-tutorial) · [Install](#install) · [Quick start](#quick-start) · [Choose a use and a style](#choose-a-use-and-a-style) |
-| **The panel, in order** | [Adjust](#adjust) · [Fix](#fix) · [UVs](#uvs) · [Finish](#finish) |
+| **The panel, in order** | [Adjust](#adjust) · [Tidy Tools, Auto Fix and History](#tidy-tools-auto-fix-and-history) · [Fix](#fix) · [UVs](#uvs) · [Finish](#finish) |
 | **Going further** | [Hard Surface](#hard-surface) · [Shape the flow](#shape-the-flow) · [Parts](#parts) · [Blockout and Hulls](#blockout-and-hulls) · [Pro tab and classic tools](#pro-tab-and-classic-tools) |
 | **Trust and speed** | [How it checks results](#how-it-checks-results) · [Results](#results) · [Big scans and small PCs](#big-scans-and-small-pcs) |
 | **Around the add-on** | [Which CurioMesh?](#which-curiomesh) · [Agent skills](#agent-skills) · [FAQ](#faq) · [Known limits](#known-limits) · [Contributing](#contributing) · [Credits](#credits) · [License](#license) |
@@ -120,10 +120,9 @@ The CurioMesh panel shows only what your current step needs: pick a mesh, say wh
 3. Select a mesh and open `3D View > N-panel > CurioMesh`.
 4. Under **What is it for?** click a tile (**Game** for most models, or **Auto** to let CurioMesh pick), then press **Start**.
 
-![The CurioMesh panel after a run: the verdict, then Adjust, Fix and Finish](docs/images/releases/v098_panel_result.jpg)
+![The CurioMesh panel after a run: the step strip with a ? on each step, the verdict and the red Fix Bad Spots button](docs/images/releases/v099_panel.jpg)
 
-The panel then says how the result turned out and what to do next. A coloured verdict shows whether the result is ready ("Good for game asset", "Check 2 spots" or "5 spots with bad faces left"), with the numbers in grey under it. Drag the sliders under [Adjust](#adjust), fix any bad
-spots under [Fix](#fix), and press **Apply** under [Finish](#finish). Nothing changes in your scene until Apply. Every other
+The panel then says how the result turned out and what to do next. A step strip at the top shows where you are, and the small **?** next to each step explains it in plain words. A coloured verdict shows whether the result is ready ("Good for game asset", "Check 2 spots" or "5 spots with bad faces left"), with the numbers in grey under it. Drag the sliders under [Adjust](#adjust), press the red **Fix Bad Spots** button when it shows a count ([Fix](#fix)), and press **Apply** under [Finish](#finish). Nothing changes in your scene until Apply. Every other
 setting and the older tools are in the [CurioMesh Pro tab](#pro-tab-and-classic-tools) (the **Pro** button in the panel header).
 
 | Feature | What it does |
@@ -132,6 +131,13 @@ setting and the older tools are in the [CurioMesh Pro tab](#pro-tab-and-classic-
 | **Presets by use** | Low Poly, Game Asset, Animation, Subdivision, Scan Cleanup, Sculpt Base. |
 | **Three layout styles** | Keep Detail (fewest faces), Balanced, Clean Rows (even quads in rows). |
 | **Know the cost first** | The time on your PC before you press Start, Slow/Heavy tags on heavy options, and a question before long jobs. |
+| **Go back any time** | Every step is one Ctrl+Z, and the [History](#tidy-tools-auto-fix-and-history) list jumps back to any earlier step of the result. |
+
+### Your language
+
+CurioMesh comes in **Spanish, Portuguese (Brazil), Japanese and Simplified Chinese** as well as English. It follows Blender's interface language; the switch is in the add-on preferences and the Options popover, and it changes all of Blender. The classic Pro tools, and a few lines worked out while it runs, are still in English.
+
+![The CurioMesh panel with Blender set to Spanish](docs/images/releases/v099_language.jpg)
 
 [Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
@@ -214,8 +220,9 @@ Dragging one is a live preview: the mesh on screen changes at once and Blender s
 |---|---|
 | **Quad Size** | Smaller quads to the left, bigger to the right. Each step is a full result of the search at another Detail, so it keeps the shape and puts its faces where the shape needs them. The other sizes are worked out in the background while you look; until one is ready, the nearest finished size is shown. |
 | **Rows** (called Organization before 0.9.8) | Fewest faces (Keep Detail) to the left, Balanced in the middle, even rows (Clean Rows) to the right. On models of many loose pieces, the pieces change over one at a time, so the change is gradual. |
-| **Tidy Up** | About the same faces, laid out tidier: messy spots round poles redrawn as grids, then the quads settled into straighter, more even rows. A line under it shows Tidiness, Loop Quality, poles and how much more of the view changed. |
-| **Loop Flow** | A view switch that draws each edge loop in its own colour, and its poles as dots (blue: three edges, red: five or more). |
+| **Tidy Up** | About the same faces, laid out tidier: messy spots round poles redrawn as grids, then the quads settled into straighter, more even rows. A line under it shows Tidiness, Loop Quality, poles and how much more of the view changed. **Again** tidies the result once more, and **Keep Tidying** repeats until a pass gains nothing. |
+| **Loop Flow** | A view switch that draws each strip of quads as a line in its own colour, and the poles as dots (blue: three edges, red: five or more). A strip stops where it meets a pole. |
+| **Face Loops** | Under Tidy Up. **Pick a Strip** lights the strip under the mouse and says how many faces it has, whether it closes and how even its width is. |
 | **Bigger Quads / Smaller Quads** | Change only the parts you select in [Review Segments](#parts). |
 | **Fine-tune...** | The three Tweak sliders and Most Detail Loss. Rows on Round Areas (how readily round, smooth areas become rows), Flat Area Size (how big the quads inside flat areas may get) and Avoid Poles (Keep Detail). Each reruns the search with Auto-Update and takes seconds on a bust. |
 
@@ -252,15 +259,30 @@ with 11.2% of the view changed.
 
 [Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
+## Tidy Tools, Auto Fix and History
+
+New in 0.9.9 (GitHub add-on). Between Adjust and Fix, the **Tools** section holds hand tools for the result, and Auto Fix runs the same tools for you.
+
+- **Look first.** Every tool draws its change on the mesh before anything is kept: the new edges over the old wire, a tint for how far corners move, and a card with the numbers. Drag the ring for strength. Enter applies, Esc cancels, B shows before and after. Each Apply is one Ctrl+Z.
+- **The tools.** Relax (Source Relax, Keep Lines Relax, Square Up, Relax Toward Detail), Loops & Strips (Even the Band), Poles (Cancel Pole Pair, Open Up Poles), Cleanup (Preview Tidy, Seal the Middle) and Hard Surface (True Up Edges, Press Panels Flat). Pick **Work on**: Selection, Part or Whole Result.
+- **Again and Keep going.** A tool can run again on its own result, and Keep going repeats it until a pass gains nothing. Stop works any time. **Most Detail Loss** holds every tool back when it would change the look too much.
+- **Auto Fix** (on by default; Cleanup Quick turns it off). After the search, each tool finds the spots it is made for and fixes them, in rounds that stop by themselves. A fix is kept only when its spots get better, no bad face is added, and Tidiness, Loop Quality and poles are no worse. A readout says what was fixed and what was left, and why. **Undo Auto Fix** takes it all back in one step.
+- **History.** A list under the result shows every step with its numbers. Click one to go back to it; Ctrl+Z takes the jump back again.
+
+On the marble bust, Tidy Up at full strength now leaves 525 poles where 0.9.8 left 722, with Tidiness up from 56 to 65. The full list of tools and measurements is in the [CHANGELOG](CHANGELOG.md).
+
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
+
 ## Fix
 
-The result can have bad spots: faces turned inward, folded over or crossing. Fix walks through them one at a time. Use it when the verdict says "Check 2 spots" or similar.
+The result can have bad spots: faces turned inward, folded over or crossing. **Fix Bad Spots** is the main button after a result: red with the count when there are bad spots, greyed out when there are none. It walks through them worst first.
 
 ![The Issue Finder: bad faces counted and shown in red on the result](docs/images/releases/v093_issue_finder.jpg)
 
 - **Issue Finder** counts faces turned inward, folded over or crossing, and shows them in red. Bad faces are not rare on hard-surface models: on the drill press 203 inward, 180 folded and 14 crossing among 16,809 faces. Models of many small parts have about 6 to 22 such faces per 1,000, smooth sculpts 0.1 to 0.8.
-- **Redo this spot** remakes the part under the spot with smaller quads.
-- **Keep original here** puts the original faces back at that spot. It shows the faces it adds and asks first. **Put reduced back** undoes it. Keep Original on all parts also shows its cost and asks.
+- **Redo this spot** remakes the part under the spot with smaller quads. The new faces are drawn over the old ones first, with the face count and look change on a card; Enter keeps it.
+- **Keep original here** puts the original faces back at that spot. The card shows the faces it adds before you keep it. **Put reduced back** undoes it. Keep Original on all parts also shows its cost and asks.
+- **Try Every Method** runs every method on a part, as one Ctrl+Z step.
 - The part list, a short part card, and the hand tools and part finder are in two popovers.
 
 ![Keep Original Where Bad: the original faces kept at a bad spot, with the face cost shown](docs/images/releases/v093_keep_original.jpg)
@@ -483,7 +505,7 @@ are in [docs/ATLAS_Q_REFERENCE.md](docs/ATLAS_Q_REFERENCE.md). Release notes are
 | **Flat Quads** | Flat areas become one big quad each. [More.](docs/OLDER_FEATURES.md) |
 | **Guided points and Work Live** | Click where detail matters, and retopo area by area in the background. [More.](docs/OLDER_FEATURES.md) |
 | **Classic Remesh** | The older whole-mesh remesher (Atlas-Q, Fill Loop, Fit to Surface), folded away under the Guided panel. [More.](docs/ATLAS_Q_REFERENCE.md) |
-| **HUD and heatmap** | Quad percentage, leftover triangles and poles, shown in the viewport. |
+| **Dashboard and heatmap** | Quad count, quality, live progress and Stop, shown in the viewport. Off until you press Show Dashboard. |
 | **Native core** | Rust code on all cores for the slow steps, with a Python fallback. |
 
 </details>
@@ -752,7 +774,7 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Install](#install) for which versions 
 
 Found a spot CurioMesh got wrong, or made a better version of it yourself? Send it in. It becomes a test case, and the owner works on it in later versions.
 
-1. In the panel, mark the bad parts and press **Save for a Report** (agents: `parts.report`). CurioMesh writes one zip next to your .blend, or where you choose. The zip holds the part files, a `report.md` (CurioMesh, Blender and OS versions, the Use and changed settings, the part numbers, the issue list for those parts and your note) and `settings.json`.
+1. In the **Help Make It Better** panel, pick the bad spots and press **Send as a Problem** (or **Share a Fix** when you made a better version). It opens the issue form with your versions filled in. **Save for a Report** only writes the zip (agents: `parts.report`). CurioMesh writes one zip next to your .blend, or where you choose. The zip holds the part files, a `report.md` (CurioMesh, Blender and OS versions, the Use and changed settings, the part numbers, the issue list for those parts and your note) and `settings.json`.
 2. Open a [Bad spot or fixed part](https://github.com/CurioCrafter/CurioMesh/issues/new?template=bad-spot.yml) issue and drag the zip into it.
 3. Fixed it yourself, or had your AI do it through the [parts exchange](docs/PARTS_EXCHANGE.md) (**Send to Agent**, then **Bring Back**)? Say so in the form and tell us how. A better part is as welcome as a bad one. Code is welcome too, as a pull request.
 
@@ -788,6 +810,7 @@ If CurioMesh saved you time, a [star on GitHub](https://github.com/CurioCrafter/
 ## Credits
 
 - Test models are free CC0 models from [Poly Haven](https://polyhaven.com); thank you to Poly Haven for making them free for everyone. Models by: Marble bust: Rico Cilliers; Concrete road barrier: Amal Kumar; Old military compressor: Brian Speight; Fire hydrant: Goncalo Felicio; Treasure chest: Rico Cilliers; Gothic statue: Benny Weimer; Lion head: Tina; Horse statue: Rico Cilliers; Chess set: Riley Queen; Spinning wheel: Sofia Pahaoja; Sofa: Kirill Sannikov; Drill press: Viktor; Overhead crane: Timothy3D; Modular wooden pier: Rico Cilliers; Moss rocks: Kless Gyzen; Namaqualand boulder: Greg Zaal, Rico Cilliers; Ship pinnace: James Ray Cock, Rico Cilliers, Nicolo Zubbini, Yann Kervran; Dutch ship: James Ray Cock, Rico Cilliers, Nicolo Zubbini; Coast rocks: Rob Tuytel, Rico Cilliers; Coastal cliff: Rob Tuytel, Rico Cilliers.
+- HUD On as a live switch for every open scene: idea and first version by [xan2622](https://github.com/xan2622) ([pull request 6](https://github.com/CurioCrafter/CurioMesh/pull/6)).
 - Idea from [cav3dw3ll3r](https://github.com/cav3dw3ll3r): fitting each source point to its nearest vertex, shading read from the nearest source points, and the finite test cases.
 - The tidiness score is based on statistics measured from hand-made meshes. It holds no geometry. Sources and licenses are in
   [docs/PATTERN_SOURCES.md](docs/PATTERN_SOURCES.md).

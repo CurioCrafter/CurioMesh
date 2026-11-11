@@ -3,7 +3,7 @@
 ## 1.0.0 - unreleased
 
 - **HUD On** in the add-on preferences shows or hides the dashboard live in every open scene, and sets it for files you open (off by
-  default). Show Dashboard and Hide still work in one scene.
+  default). Show Dashboard and Hide still work in one scene. Idea and first version by xan2622 (pull request 6).
 
 ## 0.9.9 - 2026-11-11
 
