@@ -1876,8 +1876,6 @@ MESSAGES = {
     "turned inward": "向内翻转",
     "under 1 s": "不到 1 秒",
     "verdict: {0}": "结论：{0}",
-    "void main() {{ float c = mod(floor(vUV.x * squares) + floor(vUV.y * squares), 2.0); vec3 base = mix(vec3(0.25), vec3(0.8), c); fragColor = vec4(base * vTint.rgb, vTint.a); }}": "void main() {{ float c = mod(floor(vUV.x * squares) + floor(vUV.y * squares), 2.0); vec3 base = mix(vec3(0.25), vec3(0.8), c); fragColor = vec4(base * vTint.rgb, vTint.a); }}",
-    "void main() {{ vUV = uv; vTint = tint; gl_Position = viewProjectionMatrix * vec4(pos, 1.0); }}": "void main() {{ vUV = uv; vTint = tint; gl_Position = viewProjectionMatrix * vec4(pos, 1.0); }}",
     "wavy edges, edges off the crease, bumpy flat panels": "起伏的边、偏离折痕的边、凹凸不平的平面板",
     "wiggly strips, uneven widths, bunched bands": "弯曲的条带、宽度不均、挤在一起的条带",
     "working {0}%": "处理中 {0}%",

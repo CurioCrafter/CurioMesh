@@ -54,7 +54,7 @@ def texty(text: str) -> bool:
     bare = re.sub(r"\{\d+\}", "", text).strip()
     if sum(c.isalpha() for c in bare) < 2:
         return False
-    if any(s in text for s in ("\\", "://", ".py", ".json", ".blend", ".zip", ".npz", "%s", "%d", "__", "{}", "\n\n\n")):
+    if any(s in text for s in ("\\", "://", ".py", ".json", ".blend", ".zip", ".npz", "%s", "%d", "__", "{}", "\n\n\n", "void main(")):  # last: GLSL source
         return False
     if re.search(r"[a-z0-9]_[a-z0-9]|[A-Z]_[A-Z]", bare):  # snake_case and ICON_NAMES
         return False

@@ -1876,8 +1876,6 @@ MESSAGES = {
     "turned inward": "girado hacia dentro",
     "under 1 s": "menos de 1 s",
     "verdict: {0}": "veredicto: {0}",
-    "void main() {{ float c = mod(floor(vUV.x * squares) + floor(vUV.y * squares), 2.0); vec3 base = mix(vec3(0.25), vec3(0.8), c); fragColor = vec4(base * vTint.rgb, vTint.a); }}": "void main() {{ float c = mod(floor(vUV.x * squares) + floor(vUV.y * squares), 2.0); vec3 base = mix(vec3(0.25), vec3(0.8), c); fragColor = vec4(base * vTint.rgb, vTint.a); }}",
-    "void main() {{ vUV = uv; vTint = tint; gl_Position = viewProjectionMatrix * vec4(pos, 1.0); }}": "void main() {{ vUV = uv; vTint = tint; gl_Position = viewProjectionMatrix * vec4(pos, 1.0); }}",
     "wavy edges, edges off the crease, bumpy flat panels": "aristas onduladas, aristas fuera del pliegue, paneles planos abultados",
     "wiggly strips, uneven widths, bunched bands": "tiras onduladas, anchos desiguales, bandas apiñadas",
     "working {0}%": "trabajando {0}%",

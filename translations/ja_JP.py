@@ -1876,8 +1876,6 @@ MESSAGES = {
     "turned inward": "内向きになっています",
     "under 1 s": "1 秒未満",
     "verdict: {0}": "判定: {0}",
-    "void main() {{ float c = mod(floor(vUV.x * squares) + floor(vUV.y * squares), 2.0); vec3 base = mix(vec3(0.25), vec3(0.8), c); fragColor = vec4(base * vTint.rgb, vTint.a); }}": "void main() {{ float c = mod(floor(vUV.x * squares) + floor(vUV.y * squares), 2.0); vec3 base = mix(vec3(0.25), vec3(0.8), c); fragColor = vec4(base * vTint.rgb, vTint.a); }}",
-    "void main() {{ vUV = uv; vTint = tint; gl_Position = viewProjectionMatrix * vec4(pos, 1.0); }}": "void main() {{ vUV = uv; vTint = tint; gl_Position = viewProjectionMatrix * vec4(pos, 1.0); }}",
     "wavy edges, edges off the crease, bumpy flat panels": "波打った辺、クリースからずれた辺、デコボコした平らなパネル",
     "wiggly strips, uneven widths, bunched bands": "うねったストリップ、不均等な幅、寄り集まった帯",
     "working {0}%": "処理中 {0}%",
