@@ -3,8 +3,8 @@
 ## 0.9.9 - unreleased
 
 Merged into main: `v0981-tidytools` (Look First, History and the Tidy Tools sets), `v0981-faceloops2` (Face Loops,
-Ring Round This, Redraw in Rows) and `v0981-sitefixes` (the fixes below, ported from the Blender-site build). Symmetrize
-and the experiment branches are not in this release.
+Ring Round This, Redraw in Rows) and `v0981-sitefixes` (the fixes below, ported from the Blender-site build) and
+`v099-uv-hooks` (the UVs below). Symmetrize and the experiment branches are not in this release.
 
 ### Fixes from the Blender-site review
 - Previews are found by the add-on's own mark, never by name, so an object of yours called like a preview is never
@@ -271,6 +271,62 @@ and the experiment branches are not in this release.
 - Docs: `docs/AGENTS.md`, `docs/PARTS_EXCHANGE.md` and the `curiomesh-agent` skill.
 - Fix (all builds): Ctrl+Z back to "New result" showed the mesh from before the parts were found, not the one
   on screen. That step now keeps the result with its parts.
+
+### UVs
+- **New UVs** (UVs row: **New**, or **Auto** when your mesh has no UVs). It makes a fresh unwrap for the active mesh:
+  few cuts, put where the camera check sees least, with the quad rows kept straight. It opens in Look First, so
+  you see the result before Apply; Enter keeps it, Esc cancels, B shows before and after. The dial is **Stretch
+  allowed**; **Again** reruns from your changed setting and keeps what the camera check and the cutting already
+  worked out, and **Keep going** repeats while the page fills better.
+- Measured on 13 test models at a 1024 px page, against Blender's Smart UV Project: 0 overlaps, 0 flipped faces,
+  straight rows 9 of 9, and never more than half as many pieces. Space used is at least 10 points above Smart UV
+  Project on 12 of 13 (43.9 % on the pier up to 70.4 % on the horse). The road barrier reaches 95 % of the best
+  packing its own pieces allow. The cuts you can see from the camera are at or under half the length of Smart UV
+  Project's on 12 of 13; the road barrier is the one over, by 4 px.
+
+  | Model | Space used | Seen cuts, as a share of Smart UV Project's |
+  |---|---|---|
+  | Chess set | 52.5 % | 0.415 |
+  | Road barrier | 67.3 % | 0.505 |
+  | Drill press | 56.6 % | 0.312 |
+  | Fire hydrant | 55.4 % | 0.412 |
+  | Gothic piece | 53.3 % | 0.270 |
+  | Horse | 70.4 % | 0.196 |
+  | Lion head | 68.3 % | 0.295 |
+  | Marble bust | 64.4 % | 0.305 |
+  | Pier | 43.9 % | 0.330 |
+  | Compressor | 59.6 % | 0.308 |
+  | Crane | 52.3 % | 0.480 |
+  | Sofa | 66.9 % | 0.306 |
+  | Spinning wheel | 55.8 % | 0.255 |
+- **The page layout and packing.** Pieces are packed onto the page in whole pixels, with a gap that keeps them apart
+  down to a mip size you choose (**Texture size**, **Gap: clean down to**). **Fill the page** gives the pieces as
+  many pixels as fit; turn it off to set a **Pixel density** instead. **Hidden parts get** gives surfaces the camera
+  never sees fewer pixels (50 % by default), and **Seen from all sides** off counts the underside less.
+  **New page layout** packs the islands you already have again; its Keep going tries other orders and keeps the best.
+- **Cut here / Join here.** Click an edge to cut the UVs there, click it again to join it back, then New UVs run
+  with your cuts.
+- **Bake those spots.** Faces that still cross a UV seam each get a small island of their own in the page's free
+  space, and the bake fills just those from your original mesh. The rest of the texture is untouched. Keep going
+  bakes the new islands of every pass; a failed bake puts the UVs back, your Cycles render device comes back after
+  the bake, and Ctrl+Z gives the old pixels back (HDR textures exactly). Normal data goes only into normal maps.
+- **Seam Fit: Light / Exact / Look.** For a result that keeps your mesh's UVs. **Light** follows the seams that
+  matter and adds few faces (**Extra faces for seams**, **Split faces on seams**); the card says what it could not
+  fit. **Exact** keeps every seam as a border, which can cost several times the faces (the old Keep UV Seams is
+  this). **Look** opens the tool the UVs choice implies: Seam Fit on a result, New UVs on an applied mesh. Seam Fit
+  shows its moves and splits first, and a fit you applied is the one the result's Apply writes. Known limit: on the
+  9 test models with source UVs, Light passes its own check on 4 (road barrier, marble bust, lion head, spinning
+  wheel).
+- **Apply's fit and work-ahead.** With Light on, Apply writes the fit that was shown; if none was run, it makes the
+  fit itself, in short steps so Blender stays usable. Once a result is on screen, that fit is worked out ahead in
+  short steps, so Apply can write at once; changing a seam setting or the mesh's UVs makes it again.
+- **Auto Fix has a UV seams group** (one more tick in its popover): it moves edges onto your mesh's UV seams where
+  the look allows, runs Seam Fit and, on a mesh that already has UVs and a texture, runs Bake those spots. Auto also
+  snaps edges onto the seams after its own repairs, within Most Detail Loss.
+- **Undo and History.** A History jump on a UV step brings back the mesh's UVs and the baked pixels, forward too.
+- **Without the fast core.** Every UV feature runs in plain Python as well, in steps short enough that Blender stays
+  usable. The page is then packed in boxes instead of outlines.
+- <!-- TODO no-core speed numbers -->
 
 ## 0.9.8 - 2026-11-06
 
