@@ -284,14 +284,26 @@ def wrap_label(layout, text: str, icon: str = "NONE", width: int = 38, limit: in
 
 
 def apply_hud_default(scene=None) -> None:
-    """Switch each scene's dashboard off once (new scenes and files saved when it was on by default). Only the user turns it on."""
+    """Set each scene's dashboard once (new scenes and files you open) to the HUD On preference, off by default."""
     scenes = [scene] if scene is not None else list(bpy.data.scenes)
     for sc in scenes:
         settings = getattr(sc, "curiomesh_settings", None)
         if settings is None or sc.get("curiomesh_hud_init"):
             continue
         sc["curiomesh_hud_init"] = True
-        settings.hud_enabled = False  # the dashboard never turns itself on, not even in files saved while it was on by default
+        prefs = get_prefs()
+        settings.hud_enabled = bool(getattr(prefs, "hud_on", False))  # on only when the user turned HUD On in the preferences
+
+
+def set_hud_everywhere(on: bool) -> None:
+    """HUD On / off in the preferences: show or hide the dashboard in every open scene now."""
+    for sc in bpy.data.scenes:
+        settings = getattr(sc, "curiomesh_settings", None)
+        if settings is not None:
+            settings.hud_enabled = bool(on)
+    if not on:
+        HUD_RECTS.clear()
+    tag_redraw()
 
 
 def tag_redraw() -> None:

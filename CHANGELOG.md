@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.0 - unreleased
+
+- **HUD On** in the add-on preferences shows or hides the dashboard live in every open scene, and sets it for new
+  scenes and files you open (off by default). Show Dashboard and Hide still work in one scene.
+
 ## 0.9.9 - 2026-11-11
 
 New UVs and Seam Fit, a calmer panel with a "?" on every step, CurioMesh in four more languages, a Help Make It Better

@@ -367,6 +367,8 @@ MESSAGES = {
     "Cuts where the surface turns become sharp edges": "Cortes onde a superfície vira se tornam arestas agudas",
     "Cutting the guide curves in, try {0}": "Cortando as curvas-guia, tentativa {0}",
     "Dashboard": "Dashboard",
+    "HUD On": "HUD ligado",
+    "Shows the dashboard in every open scene at once, and in new scenes and files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene": "Mostra o dashboard em todas as cenas abertas de uma vez, e em novas cenas e arquivos que você abrir. Desligado o esconde em todas. Mostrar Dashboard e Ocultar ainda funcionam em uma cena",
     "Dashboard (HUD)": "Dashboard (HUD)",
     "Dashboard Button": "Botão do Dashboard",
     "Debug": "Depuração",

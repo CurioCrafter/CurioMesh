@@ -367,6 +367,8 @@ MESSAGES = {
     "Cuts where the surface turns become sharp edges": "表面转折处的切口会变成锐边",
     "Cutting the guide curves in, try {0}": "正在切入引导曲线，第 {0} 次尝试",
     "Dashboard": "仪表盘",
+    "HUD On": "HUD 开启",
+    "Shows the dashboard in every open scene at once, and in new scenes and files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene": "在所有打开的场景中同时显示仪表盘，新场景和打开的文件中也会显示。关闭则在所有场景中隐藏。显示仪表盘和隐藏仍可在单个场景中使用",
     "Dashboard (HUD)": "仪表盘 (HUD)",
     "Dashboard Button": "仪表盘按钮",
     "Debug": "调试",

@@ -124,6 +124,12 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         default=D["flow_editor"],
     )
 
+    hud_on: bpy.props.BoolProperty(
+        name="HUD On",
+        description="Shows the dashboard in every open scene at once, and in new scenes and files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene",
+        default=False,
+        update=lambda self, _context: overlay.set_hud_everywhere(self.hud_on),
+    )
     hud_corner: bpy.props.EnumProperty(
         name="Corner",
         description="Which corner of the viewport the dashboard sits in",
@@ -224,6 +230,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
         box = layout.box()
         box.label(text="Dashboard (HUD)", icon="OVERLAY")
         col = box.column()
+        col.prop(self, "hud_on")
         col.prop(self, "hud_corner")
         offsets = col.row(align=True)
         offsets.use_property_split = False
