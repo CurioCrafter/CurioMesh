@@ -593,33 +593,42 @@ def triage(seams: dict, points, indptr, flat, f_target: float, allowance: float,
     indptr, flat = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
     ni, nf = seams["n_islands"], len(indptr) - 1
     island = seams["island"]
-    area, seen_area, perim = np.zeros(ni), np.zeros(ni), np.zeros(ni)
-    lo, hi = np.full((ni, 3), np.inf), np.full((ni, 3), -np.inf)
-    total = 0.0
-    for f in range(nf):
-        face = flat[indptr[f]:indptr[f + 1]]
-        i = island[f]
-        n = _newell(P, face)
-        a = 0.5 * math.sqrt(_dot(n, n))
-        area[i] += a
-        seen_area[i] += a * (1.0 if seen_face is None or len(seen_face) == 0 else float(seen_face[f]))
-        total += a
-        lo[i] = np.minimum(lo[i], P[face].min(0))
-        hi[i] = np.maximum(hi[i], P[face].max(0))
-    weld = seams["weld"]
-    wflat = weld[flat]
+    island = np.asarray(island, np.int64)
     nxt = _next_corners(indptr)
     cface = _face_of_corner(indptr)
+    # Per-face areas by `_newell`'s float operations in its order (corner k of every face at once), then summed per
+    # island in face order (bincount and ufunc.at add in index order): the same numbers as one face at a time, without
+    # a Python loop over every face (1.2 s on a 60,000-face source, one step that froze Blender).
+    sizes = np.diff(indptr)
+    n0, n1, n2 = np.zeros(nf), np.zeros(nf), np.zeros(nf)
+    for k in range(int(sizes.max()) if nf else 0):
+        has = sizes > k
+        c = indptr[:-1][has] + k
+        a, b = P[flat[c]], P[flat[nxt[c]]]
+        n0[has] += (a[:, 1] - b[:, 1]) * (a[:, 2] + b[:, 2])
+        n1[has] += (a[:, 2] - b[:, 2]) * (a[:, 0] + b[:, 0])
+        n2[has] += (a[:, 0] - b[:, 0]) * (a[:, 1] + b[:, 1])
+    face_area = 0.5 * np.sqrt((n0 * n0 + n1 * n1) + n2 * n2)
+    area = np.bincount(island[:nf], face_area, minlength=ni).astype(np.float64)[:ni] if nf else np.zeros(ni)
+    seen_w = face_area if seen_face is None or len(seen_face) == 0 else face_area * np.asarray(seen_face, np.float64)[:nf]
+    seen_area = np.bincount(island[:nf], seen_w, minlength=ni).astype(np.float64)[:ni] if nf else np.zeros(ni)
+    total = 0.0
+    for a in face_area.tolist():
+        total += a
+    lo, hi = np.full((ni, 3), np.inf), np.full((ni, 3), -np.inf)
+    np.minimum.at(lo, island[cface], P[flat])
+    np.maximum.at(hi, island[cface], P[flat])
+    perim = np.zeros(ni)
+    weld = seams["weld"]
+    wflat = weld[flat]
     ea, eb, estart, occ = _edges(wflat, nxt)
     wpos = np.zeros((seams["n_welded"], 3))
     wpos[weld] = P
-    for e in np.flatnonzero(np.diff(estart) == 1):
-        perim[island[cface[occ[estart[e]]]]] += _dist(wpos[ea[e]], wpos[eb[e]])
-    ef = seams["edge_face"].reshape(-1, 2)
-    for k in range(len(seams["edge_a"])):
-        ln = _dist(wpos[seams["edge_a"][k]], wpos[seams["edge_b"][k]])
-        for f in ef[k]:
-            perim[island[f]] += ln
+    e = np.flatnonzero(np.diff(estart) == 1)
+    np.add.at(perim, island[cface[occ[estart[e]]]], _dist_many(wpos[ea[e]], wpos[eb[e]]))
+    ef = np.asarray(seams["edge_face"], np.int64).reshape(-1, 2)
+    ln = _dist_many(wpos[np.asarray(seams["edge_a"], np.int64)], wpos[np.asarray(seams["edge_b"], np.int64)])
+    np.add.at(perim, island[ef.reshape(-1)], np.repeat(ln, ef.shape[1]))
     gap, soft = np.zeros(ni), np.zeros(ni, bool)
     ptr, isl = seams["run_indptr"], seams["chain_island"].reshape(-1, 2)
     for c in range(len(ptr) - 1):
