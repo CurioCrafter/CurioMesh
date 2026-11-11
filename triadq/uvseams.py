@@ -1,0 +1,2072 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
+
+"""Seams (package K1): source islands, side regions, seam chains, classes, per-side transfer
+and the fold fix (SPEC 4.1, 4.2, 4.8).
+
+NumPy only, no bpy. Long work runs as a sliceable stage (`Transfer.step()` does about 4 ms).
+
+Our own design and code. Textbook pieces: closest point on a triangle (Ericson, "Real-Time Collision Detection",
+2005, 5.1.5); a harmonic fill by Gauss-Seidel sweeps (convex-combination fill after Tutte 1963 and Floater 1997, here
+with inverse-length weights). The side rules are ours.
+
+Data: `_extract_steps` fills a dict with the keys (weld, island, region, edge_a, edge_b,
+edge_chain, edge_face, corner, run_indptr, run_vertex, uv_a, uv_b, gap_px, class, chain_island, chain_material,
+chain_length, island_tile, n_welded, n_islands, n_regions, texture_px); pairs are flattened (2 values per row).
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+import hashlib
+import math
+import time
+
+import numpy as np
+
+UV_TOL_PX = 0.01
+TEXTURE_PX_DEFAULT = 1024.0
+IGNORE_PX = 1.0
+SHIFT_TOL_PX = 1.0
+WALK_REACH = 2.0
+WALK_UV_SLACK = 2.0
+SLIDE_EDGE = 0.02
+CENTRE_WEIGHT = 0.5
+DEGENERATE_SHARE = 1e-6  # a fan triangle with 2 x area <= this x its summed squared edges has no area (no say in the vote)
+EDGE_ON_COS = 1e-4  # normals this close to 90 deg are edge-on to rounding: no say in the winding vote
+F32_TURN = 8.0 / 16777216.0  # cosine noise per unit rounding scale (largest coordinate / shortest edge): 8 float32 ulps
+WIND_BALL_EDGE = 0.25  # the winding vote's reach: nearest distance plus this share of a fan triangle's shortest edge
+REF_ALIGN_COS = 0.5  # cos 60 deg: a reference face turned further from the result face is swapped (see _read_face)
+STOP_TEXEL_SHARE = 0.02
+STALL_WINDOW = 50
+STALL_DROP = 0.01
+UNTANGLE_STALL = 3
+UNTANGLE_CLEAR_PX = 0.25  # an untangling move goes only to the nearest spot this many px clear (or half the most possible)
+BORDER_MOVE_PX = 1.0  # a corner on its side region's border moves at most this far from its read UV in one untangling
+GIVE_BACK_PX = 0.01  # the give-back stops once the step left back toward the read UVs is at most this many px
+
+IGNORE, SHIFT, SOFT, HARD = 0, 1, 2, 3
+SLICE_S = 0.004  # one step() of a stage does about this much work
+NEAREST_GROUPS = 8  # result faces whose nearest source faces are looked up in one step
+LOOKUP_BATCH = 64  # result faces read side by side (their walks and votes a ring at a time; the same reads as one by one)
+
+# ---------------------------------------------------------------- small helpers (scalar, same order as the reference)
+def _whole(x: float) -> float:
+    """Round half away from zero."""
+
+    return math.copysign(math.floor(abs(x) + 0.5), x) if x == x else x
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _dist(a, b):
+    d = _sub(a, b)
+    return math.sqrt(_dot(d, d))
+
+
+def _closest_bary_many(p, a, b, c):
+    """Closest-point barycentrics for one point against many triangles (a, b, c: (m, 3)); returns (m, 3) weights."""
+
+    m = len(a)
+    ab, ac, ap = b - a, c - a, p - a
+    d1, d2 = (ab[:, 0] * ap[:, 0] + ab[:, 1] * ap[:, 1]) + ab[:, 2] * ap[:, 2], (ac[:, 0] * ap[:, 0] + ac[:, 1] * ap[:, 1]) + ac[:, 2] * ap[:, 2]
+    bp = p - b
+    d3, d4 = (ab[:, 0] * bp[:, 0] + ab[:, 1] * bp[:, 1]) + ab[:, 2] * bp[:, 2], (ac[:, 0] * bp[:, 0] + ac[:, 1] * bp[:, 1]) + ac[:, 2] * bp[:, 2]
+    cp = p - c
+    d5, d6 = (ab[:, 0] * cp[:, 0] + ab[:, 1] * cp[:, 1]) + ab[:, 2] * cp[:, 2], (ac[:, 0] * cp[:, 0] + ac[:, 1] * cp[:, 1]) + ac[:, 2] * cp[:, 2]
+    vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
+    w = np.empty((m, 3))
+    left = np.ones(m, bool)
+
+    def take(mask, w0, w1, w2):
+        nonlocal left
+        mask = mask & left
+        w[mask, 0], w[mask, 1], w[mask, 2] = w0[mask], w1[mask], w2[mask]
+        left = left & ~mask
+
+    def q(x, y):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(y == 0.0, 0.0, x / np.where(y == 0.0, 1.0, y))
+
+    one, zero = np.ones(m), np.zeros(m)
+    take((d1 <= 0) & (d2 <= 0), one, zero, zero)
+    take((d3 >= 0) & (d4 <= d3), zero, one, zero)
+    v = q(d1, d1 - d3)
+    take((vc <= 0) & (d1 >= 0) & (d3 <= 0), 1.0 - v, v, zero)
+    take((d6 >= 0) & (d5 <= d6), zero, zero, one)
+    t = q(d2, d2 - d6)
+    take((vb <= 0) & (d2 >= 0) & (d6 <= 0), 1.0 - t, zero, t)
+    t = q(d4 - d3, (d4 - d3) + (d5 - d6))
+    take((va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0), zero, 1.0 - t, t)
+    under = (va + vb) + vc
+    v, t = q(vb, under), q(vc, under)
+    take(left, (1.0 - v) - t, v, t)
+    return w
+
+
+def _closest_point_many(p, a, b, c):
+    """The closest point of each triangle to p, the way the face tree computes it (for the global lookup)."""
+
+    m = len(a)
+    ab, ac, ap = b - a, c - a, p - a
+    dot = lambda x, y: (x[:, 0] * y[:, 0] + x[:, 1] * y[:, 1]) + x[:, 2] * y[:, 2]  # noqa: E731
+    d1, d2 = dot(ab, ap), dot(ac, ap)
+    bp = p - b
+    d3, d4 = dot(ab, bp), dot(ac, bp)
+    cp = p - c
+    d5, d6 = dot(ab, cp), dot(ac, cp)
+    vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
+    out = np.empty((m, 3))
+    left = np.ones(m, bool)
+
+    def take(mask, pts):
+        nonlocal left
+        mask = mask & left
+        out[mask] = pts[mask]
+        left = left & ~mask
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        take((d1 <= 0) & (d2 <= 0), a)
+        take((d3 >= 0) & (d4 <= d3), b)
+        take((vc <= 0) & (d1 >= 0) & (d3 <= 0), a + (d1 / (d1 - d3))[:, None] * ab)
+        take((d6 >= 0) & (d5 <= d6), c)
+        take((vb <= 0) & (d2 >= 0) & (d6 <= 0), a + (d2 / (d2 - d6))[:, None] * ac)
+        bc = c - b
+        take((va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0), b + ((d4 - d3) / ((d4 - d3) + (d5 - d6)))[:, None] * bc)
+        under = (va + vb) + vc
+        take(under == 0.0, a)
+        v, w = vb / under, vc / under
+        take(left, (a + ab * v[:, None]) + ac * w[:, None])
+    return out
+
+
+def _plane_bary(p, a, b, c):
+    e1, e2, d = _sub(b, a), _sub(c, a), _sub(p, a)
+    g11, g12, g22 = _dot(e1, e1), _dot(e1, e2), _dot(e2, e2)
+    det = g11 * g22 - g12 * g12
+    if det <= 1e-30 * max(g11 * g22, 1e-300):
+        return None
+    r1, r2 = _dot(d, e1), _dot(d, e2)
+    s = (g22 * r1 - g12 * r2) / det
+    t = (g11 * r2 - g12 * r1) / det
+    return (1.0 - s - t, s, t)
+
+
+def _mix(w, a, b, c):
+    return tuple(w[0] * a[k] + w[1] * b[k] + w[2] * c[k] for k in range(3))
+
+
+def _newell(P, face):
+    n0 = n1 = n2 = 0.0
+    m = len(face)
+    for i in range(m):
+        a, b = P[face[i]], P[face[(i + 1) % m]]
+        n0 += (a[1] - b[1]) * (a[2] + b[2])
+        n1 += (a[2] - b[2]) * (a[0] + b[0])
+        n2 += (a[0] - b[0]) * (a[1] + b[1])
+    return (n0, n1, n2)
+
+
+def _min_labels(n: int, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Connected components of n items joined by pairs (a[k], b[k]): each item's label = the lowest item in its group."""
+
+    label = np.arange(n, dtype=np.int64)
+    if len(a) == 0:
+        return label
+    a, b = np.asarray(a, np.int64), np.asarray(b, np.int64)
+    while True:
+        low = np.minimum(label[a], label[b])
+        new = label.copy()
+        np.minimum.at(new, a, low)
+        np.minimum.at(new, b, low)
+        new = new[new]
+        while True:
+            jump = new[new]
+            if np.array_equal(jump, new):
+                break
+            new = jump
+        if np.array_equal(new, label):
+            return label
+        label = new
+
+
+def _first_order(keys: np.ndarray) -> tuple:
+    """Ids by first appearance of each key: (id per item, count)."""
+
+    _, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    rank = np.empty(len(first), np.int64)
+    rank[np.argsort(first, kind="stable")] = np.arange(len(first))
+    return rank[inverse.ravel()], len(first)
+
+
+def _weld(points: np.ndarray) -> tuple:
+    p = np.ascontiguousarray(points.reshape(-1, 3) + 0.0)
+    if len(p) == 0:
+        return np.zeros(0, np.int64), 0
+    keys = p.view(np.dtype((np.void, 24))).ravel()
+    return _first_order(keys)
+
+
+def _next_corners(indptr: np.ndarray) -> np.ndarray:
+    n = int(indptr[-1])
+    nxt = np.arange(1, n + 1, dtype=np.int64)
+    ends = indptr[1:][indptr[1:] > indptr[:-1]]
+    starts = indptr[:-1][indptr[1:] > indptr[:-1]]
+    nxt[ends - 1] = starts
+    return nxt
+
+
+def _face_of_corner(indptr: np.ndarray) -> np.ndarray:
+    return np.repeat(np.arange(len(indptr) - 1, dtype=np.int64), np.diff(indptr))
+
+
+def _edges(wflat: np.ndarray, nxt: np.ndarray) -> tuple:
+    """Undirected edges in order of first corner: (a, b, start, occ) with occ[start[e]:start[e+1]] the corners (in
+    corner order) that use edge e."""
+
+    frm, to = wflat, wflat[nxt]
+    lo, hi = np.minimum(frm, to), np.maximum(frm, to)
+    corner = np.arange(len(wflat), dtype=np.int64)
+    order = np.lexsort((corner, hi, lo))
+    slo, shi = lo[order], hi[order]
+    new = np.ones(len(order), bool)
+    new[1:] = (slo[1:] != slo[:-1]) | (shi[1:] != shi[:-1])
+    gstart = np.flatnonzero(new)
+    gend = np.r_[gstart[1:], len(order)]
+    first = order[gstart]
+    rank = np.argsort(first, kind="stable")
+    a, b = slo[gstart][rank], shi[gstart][rank]
+    sizes = (gend - gstart)[rank]
+    start = np.r_[0, np.cumsum(sizes)]
+    occ = np.concatenate([order[gstart[g]:gend[g]] for g in rank]) if len(rank) else np.zeros(0, np.int64)
+    return a, b, start, occ
+
+
+# ---------------------------------------------------------------- seams, classes, regions
+def _extract_steps(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px, cut_here, seams: dict):
+    """Generator: the source's seams, classes and side regions into `seams`, yielding between pieces of work."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    indptr, flat = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    uv = np.asarray(corner_uv, np.float64).reshape(-1, 2)
+    nf = len(indptr) - 1
+    mat = np.zeros(nf, np.int64) if material is None or len(material) == 0 else np.asarray(material, np.int64)
+    tex = float(texture_px) if texture_px > 0 else TEXTURE_PX_DEFAULT
+    tol = max(float(uv_tol_px), 0.0) / tex
+    weld, n_welded = _weld(P)
+    yield
+    wflat = weld[flat]
+    nxt = _next_corners(indptr)
+    cface = _face_of_corner(indptr)
+    ea, eb, estart, occ = _edges(wflat, nxt)
+    ne_all = len(ea)
+    yield
+
+    def uv_at(h, w):
+        return uv[h] if wflat[h] == w else uv[nxt[h]]
+
+    def same(x, y):
+        d0, d1 = x[0] - y[0], x[1] - y[1]
+        return math.sqrt(d0 * d0 + d1 * d1) <= tol
+
+    def joined(h, g, a, b):
+        return mat[cface[h]] == mat[cface[g]] and same(uv_at(h, a), uv_at(g, a)) and same(uv_at(h, b), uv_at(g, b))
+
+    # Vectorised for the common case (two uses), then the rest one by one.
+    counts = np.diff(estart)
+    two = np.flatnonzero(counts == 2)
+    h2, g2 = occ[estart[two]], occ[estart[two] + 1]
+    a2, b2 = ea[two], eb[two]
+    diff_face = cface[h2] != cface[g2]
+
+    def at_many(h, w):
+        return np.where((wflat[h] == w)[:, None], uv[h], uv[nxt[h]])
+
+    def same_many(x, y):
+        d = x - y
+        return np.sqrt(d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1]) <= tol
+
+    ok2 = diff_face & (mat[cface[h2]] == mat[cface[g2]]) & same_many(at_many(h2, a2), at_many(g2, a2)) & same_many(at_many(h2, b2), at_many(g2, b2))
+    join_a, join_b = [cface[h2[ok2]]], [cface[g2[ok2]]]
+    is_seam = np.zeros(ne_all, bool)
+    is_seam[two[diff_face & ~ok2]] = True
+    odd = np.zeros(n_welded, bool)
+    other = np.flatnonzero((counts != 2) | np.isin(np.arange(ne_all), two[~diff_face]))
+    yield
+    for count, e in enumerate(other):
+        if count % 256 == 255:
+            yield
+        uses = occ[estart[e]:estart[e + 1]]
+        a, b = ea[e], eb[e]
+        odd[a] = odd[b] = True
+        for k in range(1, len(uses)):
+            h, g = uses[k - 1], uses[k]
+            if cface[h] != cface[g] and joined(h, g, a, b):
+                join_a.append(np.array([cface[h]]))
+                join_b.append(np.array([cface[g]]))
+    root = _min_labels(nf, np.concatenate(join_a), np.concatenate(join_b))
+    island, n_islands = _first_order(root)
+
+    seam_edges = np.flatnonzero(is_seam)
+    ne = len(seam_edges)
+    sa, sb = ea[seam_edges], eb[seam_edges]
+    valence = np.bincount(np.r_[sa, sb], minlength=n_welded).astype(np.int64)
+    yield
+    adj = [[] for _ in range(n_welded)]
+    for k in range(ne):
+        adj[sa[k]].append((int(sb[k]), k))
+        adj[sb[k]].append((int(sa[k]), k))
+    for lst in adj:
+        lst.sort()
+    su = occ[estart[seam_edges]]
+    sg = occ[estart[seam_edges] + 1]
+
+    def key_of(k):
+        f, g = cface[su[k]], cface[sg[k]]
+        i0, i1 = island[f], island[g]
+        m0, m1 = mat[f], mat[g]
+        return (min(i0, i1), max(i0, i1), min(m0, m1), max(m0, m1))
+
+    corner = odd | ((valence != 2) & (valence > 0))
+    for v in np.flatnonzero((valence == 2) & ~corner):
+        if key_of(adj[v][0][1]) != key_of(adj[v][1][1]):
+            corner[v] = True
+
+    visited = np.zeros(ne, bool)
+    runs = []
+
+    def walk(start, first):
+        run, used = [start], []
+        cur, k = start, first
+        while True:
+            visited[k] = True
+            used.append(k)
+            nxt_v = int(sb[k]) if sa[k] == cur else int(sa[k])
+            run.append(nxt_v)
+            if corner[nxt_v] or nxt_v == start:
+                break
+            found = next((j for _, j in adj[nxt_v] if j != k and not visited[j]), None)
+            if found is None:
+                break
+            cur, k = nxt_v, found
+        return run, used
+
+    for v in np.flatnonzero(corner):
+        for _, k in adj[v]:
+            if not visited[k]:
+                runs.append(walk(int(v), k))
+                yield
+    for v in range(n_welded):
+        for _, k in adj[v]:
+            if not visited[k]:
+                runs.append(walk(v, k))
+                yield
+
+    wpos = np.zeros((n_welded, 3))
+    wpos[weld] = P  # the last point of each welded id, as the reference
+    edge_face = np.zeros((ne, 2), np.int64)
+    edge_chain = np.full(ne, -1, np.int64)
+    run_indptr, run_vertex, uv_a, uv_b, gap_px = [0], [], [], [], []
+    chain_island, chain_material, chain_length = [], [], []
+    for c, (run, used) in enumerate(runs):
+        yield
+        side_a = None
+        faces_ab = []
+        for j, k in enumerate(used):
+            h, g = int(su[k]), int(sg[k])
+            frm, to = run[j], run[j + 1]
+
+            def along(x):
+                return wflat[x] == frm and wflat[nxt[x]] == to
+
+            fh, fg = cface[h], cface[g]
+            ah, ag = along(h), along(g)
+            if ah and not ag:
+                pick_h = True
+            elif ag and not ah:
+                pick_h = False
+            elif side_a is not None and island[fh] != island[fg]:
+                pick_h = island[fh] == side_a
+            else:
+                pick_h = fh <= fg
+            ha, hb = (h, g) if pick_h else (g, h)
+            if side_a is None:
+                side_a = island[cface[ha]]
+            faces_ab.append((ha, hb))
+            edge_chain[k] = c
+            edge_face[k] = (cface[ha], cface[hb])
+        length = 0.0
+        for j, w in enumerate(run):
+            ha, hb = faces_ab[min(j, len(used) - 1)]
+            x, y = uv_at(ha, w), uv_at(hb, w)
+            run_vertex.append(w)
+            uv_a.extend((float(x[0]), float(x[1])))
+            uv_b.extend((float(y[0]), float(y[1])))
+            d0, d1 = x[0] - y[0], x[1] - y[1]
+            gap_px.append(math.sqrt(d0 * d0 + d1 * d1) * tex)
+            if j > 0:
+                length += _dist(wpos[run[j - 1]], wpos[w])
+        run_indptr.append(len(run_vertex))
+        fa, fb = edge_face[used[0]]
+        chain_island.append((island[fa], island[fb]))
+        chain_material.append((mat[fa], mat[fb]))
+        chain_length.append(length)
+    lo = np.full((n_islands, 2), np.inf)
+    hi = np.full((n_islands, 2), -np.inf)
+    ci = island[cface]
+    np.minimum.at(lo, ci, uv)
+    np.maximum.at(hi, ci, uv)
+    tile = np.floor(0.5 * (lo + hi)).astype(np.int64) if n_islands else np.zeros((0, 2), np.int64)
+    seams.update(
+        texture_px=tex, weld=weld, n_welded=n_welded, island=island, n_islands=n_islands,
+        edge_a=sa.astype(np.int64), edge_b=sb.astype(np.int64), edge_chain=edge_chain, edge_face=edge_face.ravel(), corner=corner,
+        run_indptr=np.array(run_indptr, np.int64), run_vertex=np.array(run_vertex, np.int64),
+        uv_a=np.array(uv_a, np.float64), uv_b=np.array(uv_b, np.float64), gap_px=np.array(gap_px, np.float64),
+        chain_island=np.array(chain_island, np.int64).ravel(), chain_material=np.array(chain_material, np.int64).ravel(),
+        chain_length=np.array(chain_length, np.float64), island_tile=tile.ravel(),
+    )
+    classify(seams, repeat, cut_here)
+
+
+def classify(seams: dict, repeat=(), cut_here=()) -> None:
+    """Chain classes (SPEC 4.1) and the side regions they give, in place. `cut_here` lists chains the user made Hard."""
+
+    tex = seams["texture_px"]
+    repeat = [bool(x) for x in repeat]
+    cut = {int(c) for c in cut_here}
+
+    def repeats(m):
+        return m < 0 or m >= len(repeat) or repeat[m]
+
+    ptr, ua, ub, gap = seams["run_indptr"], seams["uv_a"], seams["uv_b"], seams["gap_px"]
+    isl, mats, tile = seams["chain_island"].reshape(-1, 2), seams["chain_material"].reshape(-1, 2), seams["island_tile"].reshape(-1, 2)
+    out = []
+    for c in range(len(ptr) - 1):
+        s, e = ptr[c], ptr[c + 1]
+        ma, mb = mats[c]
+        ia, ib = isl[c]
+        g = max([0.0] + [float(x) for x in gap[s:e]])
+        if ma != mb or c in cut:
+            cls = HARD
+        elif g <= IGNORE_PX:
+            cls = IGNORE
+        else:
+            n = float(e - s)
+            du = np.cumsum(ub[2 * s:2 * e:2] - ua[2 * s:2 * e:2])[-1] / n
+            dv = np.cumsum(ub[2 * s + 1:2 * e:2] - ua[2 * s + 1:2 * e:2])[-1] / n
+            shift = (_whole(float(du)), _whole(float(dv)))
+            fits = True
+            for j in range(s, e):
+                x = ub[2 * j] - ua[2 * j] - shift[0]
+                y = ub[2 * j + 1] - ua[2 * j + 1] - shift[1]
+                if math.sqrt(x * x + y * y) * tex > SHIFT_TOL_PX:
+                    fits = False
+                    break
+            other_tile = tuple(tile[ia]) != tuple(tile[ib])
+            if fits and shift != (0.0, 0.0) and repeats(ma):
+                cls = SHIFT
+            elif other_tile and not repeats(ma):
+                cls = HARD
+            else:
+                cls = SOFT
+        out.append(cls)
+    seams["class"] = np.array(out, np.int64)
+    regions(seams)
+
+
+def regions(seams: dict) -> None:
+    """Side regions (islands joined across Ignore and Shift chains), in place."""
+
+    isl = seams["chain_island"].reshape(-1, 2)
+    keep = (seams["class"] == IGNORE) | (seams["class"] == SHIFT)
+    root = _min_labels(seams["n_islands"], isl[keep, 0], isl[keep, 1])
+    seams["region"], seams["n_regions"] = _first_order(root[seams["island"]]) if len(seams["island"]) else (np.zeros(0, np.int64), 0)
+
+
+def set_classes(seams: dict, classes) -> None:
+    seams["class"] = np.asarray(classes, np.int64).copy()
+    regions(seams)
+
+
+def join_tolerance(seams: dict) -> np.ndarray:
+    """Per side region: half the smallest median gap of its self-seams (UV units), infinite without one."""
+
+    join = np.full(seams["n_regions"], np.inf)
+    roi = np.zeros(seams["n_islands"], np.int64)
+    roi[seams["island"]] = seams["region"]
+    isl, ptr = seams["chain_island"].reshape(-1, 2), seams["run_indptr"]
+    for c in range(len(ptr) - 1):
+        ra, rb = roi[isl[c, 0]], roi[isl[c, 1]]
+        if ra != rb or seams["class"][c] < SOFT:
+            continue
+        gaps = np.sort(seams["gap_px"][ptr[c]:ptr[c + 1]])
+        tol = max(0.5 * float(gaps[len(gaps) // 2]), IGNORE_PX) / seams["texture_px"]
+        join[ra] = min(join[ra], tol)
+    return join
+
+
+# ---------------------------------------------------------------- lookup (per-side transfer)
+class _Grid:
+    """Uniform grid over triangles for the global nearest-face lookup (single-precision corners, like the face tree;
+    ties go to the lowest face). Cells are kept as sorted keys with their triangles (lowest first), so a lookup of many
+    cells is a few array operations."""
+
+    _NEXT = np.array([(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)], np.int64)
+
+    def __init__(self, a, b, c, owner):
+        self.a, self.b, self.c, self.owner = a, b, c, owner
+        lo = np.minimum(np.minimum(a, b), c)
+        hi = np.maximum(np.maximum(a, b), c)
+        self.origin = lo.min(0) if len(a) else np.zeros(3)
+        ext = (hi - lo).max(1) if len(a) else np.ones(1)
+        span = float((hi.max(0) - self.origin).max()) if len(a) else 1.0
+        self.h = max(float(np.median(ext)) * 2.0, span * 1e-6, 1e-12)
+        il = np.floor((lo - self.origin) / self.h).astype(np.int64)
+        ih = np.floor((hi - self.origin) / self.h).astype(np.int64)
+        self.empty = True
+        self._span = (il, ih - il + 1)
+        self.lo_cell = il.min(0) if len(a) else np.zeros(3, np.int64)
+        self.hi_cell = ih.max(0) if len(a) else np.zeros(3, np.int64)
+        self._dims = self.hi_cell - self.lo_cell + 1
+        # Bounding balls (radius grown a little past rounding): a triangle whose ball lies further than the farthest
+        # point of another cannot be the nearest, so the exact pass skips it. A triangle with a near-zero edge or area,
+        # where the exact pass divides by almost nothing, is always measured.
+        self.centre = (a + b + c) / 3.0
+        self.radius = np.max([np.linalg.norm(x - self.centre, axis=1) for x in (a, b, c)], axis=0) * (1.0 + 1e-9) if len(a) else np.zeros(0)
+        e2 = np.min([((y - x) ** 2).sum(1) for x, y in ((a, b), (b, c), (c, a))], axis=0) if len(a) else np.zeros(0)
+        area2 = (np.cross(b - a, c - a) ** 2).sum(1) if len(a) else np.zeros(0)
+        tiny = (1e-9 * span) ** 2
+        self.risky = (e2 <= tiny) | (area2 <= tiny * tiny)
+
+    def fill(self):
+        """Generator: puts the triangles into their cells (a step per cell offset)."""
+
+        il, n = self._span
+        cells, tris = [], []
+        for dx in range(int(n[:, 0].max()) if len(il) else 0):
+            for dy in range(int(n[:, 1].max())):
+                for dz in range(int(n[:, 2].max())):
+                    m = (dx < n[:, 0]) & (dy < n[:, 1]) & (dz < n[:, 2])
+                    t = np.flatnonzero(m)
+                    cells.append(il[t] + (dx, dy, dz))
+                    tris.append(t)
+                    yield
+        if not cells:
+            return
+        cells, tris = np.concatenate(cells), np.concatenate(tris)
+        yield
+        key = self._key(cells)
+        order = np.lexsort((tris, key))
+        key, self.tris = key[order], tris[order]
+        self.keys, start = np.unique(key, return_index=True)
+        self.ptr = np.r_[start, len(key)].astype(np.int64)
+        self.empty = not len(self.keys)
+
+    def _key(self, cells):
+        d, c = self._dims, cells - self.lo_cell
+        return (c[:, 0] * d[1] + c[:, 1]) * d[2] + c[:, 2]
+
+    def _gather(self, cells):
+        """The triangles of the given cells (cells outside the grid hold none), unsorted with repeats."""
+
+        inside = np.all((cells >= self.lo_cell) & (cells <= self.hi_cell), axis=1)
+        key = self._key(cells[inside])
+        at = np.minimum(np.searchsorted(self.keys, key), len(self.keys) - 1)
+        at = at[self.keys[at] == key]
+        k, _pos = _corners_of(self.ptr, at)
+        return self.tris[k]
+
+    def nearest_groups(self, groups) -> list:
+        """`nearest_many` for each group of points (a list per group), the groups side by side: each point is measured
+        against the triangles of the cells next to any point of its own group, as `nearest_many` of that group does."""
+
+        if self.empty or not len(groups):
+            return [[-1] * len(g) for g in groups]
+        sizes = np.fromiter((len(g) for g in groups), np.int64, len(groups))
+        qs = np.array([q for g in groups for q in g], np.float64).reshape(-1, 3)
+        qg = np.repeat(np.arange(len(groups)), sizes)
+        qc = np.floor((qs - self.origin) / self.h).astype(np.int64)
+        cells = (qc[:, None, :] + self._NEXT[None, :, :]).reshape(-1, 3)
+        cg = np.repeat(qg, len(self._NEXT))
+        inside = np.all((cells >= self.lo_cell) & (cells <= self.hi_cell), axis=1)
+        key, cg = self._key(cells[inside]), cg[inside]
+        at = np.minimum(np.searchsorted(self.keys, key), len(self.keys) - 1)
+        hit = self.keys[at] == key
+        k, pos = _corners_of(self.ptr, at[hit])
+        n = len(self.a)
+        both = np.unique(cg[hit][pos] * n + self.tris[k])  # per group its triangles, lowest first
+        fg, ft = both // n, both % n
+        gptr = np.searchsorted(fg, np.arange(len(groups) + 1))
+        idx, qi = _corners_of(gptr, qg)  # every point against its group's triangles
+        t = ft[idx]
+        has = np.diff(gptr)[qg] > 0
+        best = np.full(len(qs), np.inf)
+        low = np.full(len(qs), np.iinfo(np.int64).max, np.int64)
+        if len(t):
+            # every triangle that could hold a point's smallest distance (the ball test), measured exactly
+            d = qs[qi] - self.centre[t]
+            D = np.sqrt((d * d).sum(1))
+            r = self.radius[t]
+            starts = np.searchsorted(qi, np.flatnonzero(has))
+            ub = np.full(len(qs), np.inf)
+            ub[has] = np.minimum.reduceat(D + r, starts)
+            keep = (D - r <= ub[qi] * (1.0 + 1e-9) + 1e-300) | self.risky[t]
+            qi, t = qi[keep], t[keep]
+            p = _closest_point_many(qs[qi], self.a[t], self.b[t], self.c[t])
+            e = p - qs[qi]
+            d2 = (e[:, 0] * e[:, 0] + e[:, 1] * e[:, 1]) + e[:, 2] * e[:, 2]
+            best[has] = np.minimum.reduceat(d2, np.searchsorted(qi, np.flatnonzero(has)))
+            tie = d2 == best[qi]
+            np.minimum.at(low, qi[tie], self.owner[t][tie])
+        out, at = [], 0
+        for size in sizes.tolist():
+            got = []
+            for m in range(at, at + size):
+                ok = bool(has[m]) and math.sqrt(best[m]) < self.h  # nothing outside the searched cells can be closer
+                got.append(int(low[m]) if ok else self.nearest(qs[m]))
+            out.append(got)
+            at += size
+        return out
+
+    @staticmethod
+    def _shell(r: int) -> np.ndarray:
+        """Cell offsets at Chebyshev distance exactly r."""
+
+        x = np.arange(-r, r + 1)
+        g = np.stack(np.meshgrid(x, x, x, indexing="ij"), -1).reshape(-1, 3)
+        return g[np.abs(g).max(1) == r]
+
+    def nearest(self, q) -> int:
+        """Face of the nearest triangle to q (lowest face on ties), or -1 when empty."""
+
+        if self.empty:
+            return -1
+        qc = np.floor((np.asarray(q) - self.origin) / self.h).astype(np.int64)
+        best_d, best_f = math.inf, -1
+        r = 0
+        reach = int(max(np.max(np.abs(qc - self.lo_cell)), np.max(np.abs(qc - self.hi_cell)))) + 1
+        while r <= reach:
+            found = self._gather(qc + self._shell(r))
+            if len(found):
+                t = np.unique(found)
+                p = _closest_point_many(np.asarray(q, np.float64), self.a[t], self.b[t], self.c[t])
+                d = p - q
+                d2 = (d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1]) + d[:, 2] * d[:, 2]
+                for k in np.flatnonzero(d2 <= best_d):
+                    if d2[k] < best_d or (d2[k] == best_d and self.owner[t[k]] < best_f):
+                        best_d, best_f = float(d2[k]), int(self.owner[t[k]])
+            if best_f >= 0 and math.sqrt(best_d) < r * self.h:
+                break
+            r += 1
+        return best_f
+
+
+def _cut(P, face):
+    """Triangles of a polygon the way the face tree cuts it (3 and 4 corners; a fan above that)."""
+
+    n = len(face)
+    if n == 3:
+        return [(0, 1, 2)]
+    if n == 4:
+        a, b, c, d = (P[v] for v in face)
+
+        def cross(x, y):
+            return (x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0])
+
+        facing = cross(_sub(c, a), _sub(d, b))
+        inward = _dot(cross(_sub(a, d), _sub(b, a)), facing) < 0.0 or _dot(cross(_sub(c, b), _sub(d, c)), facing) < 0.0
+        return [(0, 1, 2), (2, 3, 0)] if inward else [(3, 0, 1), (1, 2, 3)]
+    return [(0, k, k + 1) for k in range(1, n - 1)]
+
+
+class _Source:
+    def __init__(self, P, indptr, flat, seams, uv=None):
+        self.P, self.indptr, self.flat, self.seams = P, indptr, flat, seams
+        self.uv = None if uv is None or len(uv) == 0 else np.asarray(uv, np.float64).reshape(-1, 2)
+
+    def build(self):
+        """Generator: the fan triangles, centres, normals, crossings and the global lookup grid."""
+
+        P, indptr, flat, seams = self.P, self.indptr, self.flat, self.seams
+        nf = len(indptr) - 1
+        tri, tri_ptr = [], [0]
+        for f in range(nf):
+            s, e = int(indptr[f]), int(indptr[f + 1])
+            tri.extend((s, k, k + 1) for k in range(s + 1, e - 1))
+            tri_ptr.append(len(tri))
+            if f % 512 == 511:
+                yield
+        self.tri = np.array(tri, np.int64).reshape(-1, 3)
+        self.tri_ptr = np.array(tri_ptr, np.int64)
+        self.centre, self.normal = [], []
+        Pl = P.tolist()
+        for f in range(nf):
+            face = flat[indptr[f]:indptr[f + 1]].tolist()
+            c0 = c1 = c2 = 0.0
+            for v in face:
+                c0 += Pl[v][0] / len(face)
+                c1 += Pl[v][1] / len(face)
+                c2 += Pl[v][2] / len(face)
+            self.centre.append((c0, c1, c2))
+            self.normal.append(_newell(Pl, face))
+            if f % 256 == 255:
+                yield
+        self.cp = P[flat]  # corner points
+        if self.uv is not None:  # per face: UV centre and 3D radius, for the walk's UV check
+            self.uv_centre, self.radius = [], []
+            Ul = self.uv.tolist()
+            for f in range(nf):
+                s, e = int(indptr[f]), int(indptr[f + 1])
+                u0 = u1 = 0.0
+                for h in range(s, e):
+                    u0 += Ul[h][0] / (e - s)
+                    u1 += Ul[h][1] / (e - s)
+                self.uv_centre.append((u0, u1))
+                c = self.centre[f]
+                r = 0.0
+                for v in flat[s:e].tolist():
+                    r = max(r, _dist(Pl[v], c))
+                self.radius.append(r)
+                if f % 256 == 255:
+                    yield
+            self.uv_centre_a, self.radius_a = np.array(self.uv_centre, np.float64).reshape(-1, 2), np.array(self.radius, np.float64)
+        # The same per-face numbers as arrays, for the walks done a ring at a time (each value from the scalar helpers,
+        # so the vectorised rings compare exactly what the face-by-face code did).
+        self.centre_a, self.normal_a = np.array(self.centre, np.float64).reshape(-1, 3), np.array(self.normal, np.float64).reshape(-1, 3)
+        has_area, wind, rscale = np.zeros(nf, bool), np.ones(nf), np.zeros(nf)
+        for f in range(nf):
+            has_area[f] = _has_area(self, f)
+            if self.uv is not None:
+                wind[f] = _sign(_uv_area(self.uv, indptr, f))
+            rscale[f] = _rounding_scale([Pl[v] for v in flat[indptr[f]:indptr[f + 1]].tolist()])
+            if f % 128 == 127:
+                yield
+        self.has_area_a, self.wind_a, self.rscale_a = has_area, wind, rscale
+        weld = seams["weld"]
+        wflat = weld[flat]
+        # faces at each welded vertex, in face order (the winding vote's ball grows through them)
+        self.wflat = wflat
+        order = np.argsort(wflat, kind="stable")
+        self.vf = _face_of_corner(indptr)[order]
+        self.vf_ptr = np.concatenate([[0], np.cumsum(np.bincount(wflat, minlength=int(seams["n_welded"])))])
+        nxt = _next_corners(indptr)
+        cface = _face_of_corner(indptr)
+        ea, eb, estart, occ = _edges(wflat, nxt)
+        yield
+        cls_of = {}
+        cls = seams["class"]
+        for k in range(len(seams["edge_a"])):
+            if k % 4096 == 4095:
+                yield
+            a, b = int(seams["edge_a"][k]), int(seams["edge_b"][k])
+            cls_of[(min(a, b), max(a, b))] = int(cls[seams["edge_chain"][k]])
+        self.across = np.full(len(flat), -1, np.int64)
+        self.crossing = np.full(len(flat), 2, np.int64)
+        two = np.flatnonzero(np.diff(estart) == 2)
+        yield
+        for count, e in enumerate(two):
+            if count % 1024 == 1023:
+                yield
+            h, g = int(occ[estart[e]]), int(occ[estart[e] + 1])
+            if cface[h] == cface[g]:
+                continue
+            c = cls_of.get((int(ea[e]), int(eb[e])))
+            kind = 0 if c is None or c == IGNORE else (1 if c == SHIFT else 2)
+            self.across[h], self.across[g] = cface[g], cface[h]
+            self.crossing[h] = self.crossing[g] = kind
+        # per face, the edges a walk may cross (to a face, not across a Soft or Hard chain) in corner order
+        valid = (self.across >= 0) & (self.crossing != 2)
+        self.nb_ptr = np.concatenate([[0], np.cumsum(np.bincount(cface[valid], minlength=nf))]).astype(np.int64)
+        self.nb_g, self.nb_shift = self.across[valid], self.crossing[valid] == 1
+        # Global lookup: the tree's triangles, single-precision corners.
+        P32 = P.astype(np.float32).astype(np.float64)
+        ga, gb, gc, go = [], [], [], []
+        for f in range(nf):
+            face = flat[indptr[f]:indptr[f + 1]]
+            for t in _cut(P, face):
+                ga.append(P32[face[t[0]]])
+                gb.append(P32[face[t[1]]])
+                gc.append(P32[face[t[2]]])
+                go.append(f)
+            if f % 256 == 255:
+                yield
+        self.grid = _Grid(np.array(ga).reshape(-1, 3), np.array(gb).reshape(-1, 3), np.array(gc).reshape(-1, 3), np.array(go, np.int64))
+        yield
+        yield from self.grid.fill()
+        self.tri_a, self.tri_b, self.tri_c = self.cp[self.tri[:, 0]], self.cp[self.tri[:, 1]], self.cp[self.tri[:, 2]]
+        # bounding balls of the fan triangles (radius grown a little past rounding), to skip far ones in `on_same`
+        self.tri_centre = (self.tri_a + self.tri_b + self.tri_c) / 3.0
+        self.tri_radius = np.max([np.linalg.norm(x - self.tri_centre, axis=1) for x in (self.tri_a, self.tri_b, self.tri_c)], axis=0) * (1.0 + 1e-9) if len(self.tri) else np.zeros(0)
+
+    def on_each(self, face_lists, qs):
+        """`on_faces` for several points at once (point i against `face_lists[i]`), in one vectorised pass."""
+
+        lens = np.fromiter((len(x) for x in face_lists), np.int64, len(face_lists))
+        faces = np.fromiter((f for x in face_lists for f in x), np.int64, int(lens.sum()))
+        t, pos = _corners_of(self.tri_ptr, faces)
+        list_of = np.repeat(np.arange(len(face_lists)), lens)
+        row = list_of[pos]
+        which = pos - (np.cumsum(lens) - lens)[row]
+        q = np.asarray(qs, np.float64)[row]
+        pa, pb, pc = self.tri_a[t], self.tri_b[t], self.tri_c[t]
+        w = _closest_bary_many(q, pa, pb, pc)
+        pt = (w[:, 0:1] * pa + w[:, 1:2] * pb) + w[:, 2:3] * pc
+        d = pt - q
+        d2 = (d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1]) + d[:, 2] * d[:, 2]
+        # per row the first smallest (np.argmin's pick: the first NaN when there is one)
+        starts = np.searchsorted(row, np.arange(len(face_lists)))
+        low = np.minimum.reduceat(d2, starts)[row]
+        hit = np.flatnonzero((d2 == low) | ((low != low) & (d2 != d2)))
+        _, first = np.unique(row[hit], return_index=True)
+        k = hit[first]
+        W = w[k].tolist()
+        return [(x, y, tuple(z), v) for x, y, z, v in zip(d2[k].tolist(), t[k].tolist(), W, which[k].tolist())]
+
+    def nearest_d2_rows(self, faces, qs):
+        """Per row: the squared distance from qs[i] to the closest fan triangle of faces[i] (`on_each` per face, the
+        same float operations)."""
+
+        t, pos = _corners_of(self.tri_ptr, np.asarray(faces, np.int64))
+        q = np.asarray(qs, np.float64).reshape(-1, 3)[pos]
+        pa, pb, pc = self.tri_a[t], self.tri_b[t], self.tri_c[t]
+        w = _closest_bary_many(q, pa, pb, pc)
+        d = ((w[:, 0:1] * pa + w[:, 1:2] * pb) + w[:, 2:3] * pc) - q
+        d2 = (d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1]) + d[:, 2] * d[:, 2]
+        out = np.full(len(faces), np.inf)
+        np.minimum.at(out, pos, d2)
+        return out
+
+    def on_same(self, faces, qs):
+        """`on_each([faces] * len(qs), qs)`: every point against the same faces. Triangles that cannot be the closest
+        (their bounding ball lies further than another triangle's farthest point, with a wide margin for rounding)
+        are left out before the exact pass, which then sees every triangle that could tie: the same picks."""
+
+        faces = np.asarray(faces, np.int64)
+        t, which = _corners_of(self.tri_ptr, faces)
+        qs = np.asarray(qs, np.float64).reshape(-1, 3)
+        tc, tr = self.tri_centre[t], self.tri_radius[t]
+        d = qs[:, None, :] - tc[None, :, :]
+        D = np.sqrt((d * d).sum(2))
+        ub = (D + tr).min(1)
+        i, j = np.nonzero(D - tr <= ub[:, None] * (1.0 + 1e-9) + 1e-300)  # row by row, triangles in order
+        q, k = qs[i], t[j]
+        pa, pb, pc = self.tri_a[k], self.tri_b[k], self.tri_c[k]
+        w = _closest_bary_many(q, pa, pb, pc)
+        e = ((w[:, 0:1] * pa + w[:, 1:2] * pb) + w[:, 2:3] * pc) - q
+        d2 = (e[:, 0] * e[:, 0] + e[:, 1] * e[:, 1]) + e[:, 2] * e[:, 2]
+        starts = np.searchsorted(i, np.arange(len(qs)))
+        low = np.minimum.reduceat(d2, starts)[i]
+        hit = np.flatnonzero((d2 == low) | ((low != low) & (d2 != d2)))
+        _, first = np.unique(i[hit], return_index=True)
+        x = hit[first]
+        return [(a, b, tuple(c), v) for a, b, c, v in zip(d2[x].tolist(), k[x].tolist(), w[x].tolist(), which[j[x]].tolist())]
+
+    def on_faces(self, faces, q):
+        """Closest point over the fan triangles of `faces` (in order): (squared distance, triangle, weights, index in
+        `faces`), first minimum wins."""
+
+        lens = self.tri_ptr[np.asarray(faces) + 1] - self.tri_ptr[np.asarray(faces)]
+        t = np.concatenate([np.arange(self.tri_ptr[f], self.tri_ptr[f + 1]) for f in faces])
+        w = _closest_bary_many(np.asarray(q, np.float64), self.tri_a[t], self.tri_b[t], self.tri_c[t])
+        pa, pb, pc = self.tri_a[t], self.tri_b[t], self.tri_c[t]
+        pt = (w[:, 0:1] * pa + w[:, 1:2] * pb) + w[:, 2:3] * pc
+        d = pt - q
+        d2 = (d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1]) + d[:, 2] * d[:, 2]
+        k = int(np.argmin(d2))
+        which = int(np.searchsorted(np.cumsum(lens), k, side="right"))
+        return float(d2[k]), int(t[k]), tuple(float(x) for x in w[k]), which
+
+
+def _uv_reach(src, rt, rw):
+    """The walk's UV check of a reference hit (triangle `rt`, weights `rw`): (UV there, point there, UV-to-3D map), or
+    None (no layer, or a triangle without area on either side). A face whose UV offset from the reference UV, taken back
+    to 3D through the reference triangle's map, is much longer than its 3D distance lies on the far side of a seam
+    reached the long way round (a thin tube or plate inside one island); it is not walked."""
+
+    if src.uv is None:
+        return None
+    tri = src.tri[rt]
+    p0, p1, p2 = (tuple(src.cp[tri[k]]) for k in range(3))
+    q0, q1, q2 = (tuple(src.uv[tri[k]]) for k in range(3))
+    u_ref = (rw[0] * q0[0] + rw[1] * q1[0] + rw[2] * q2[0], rw[0] * q0[1] + rw[1] * q1[1] + rw[2] * q2[1])
+    p_ref = _mix(rw, p0, p1, p2)
+    inverse = _uv_to_3d(p0, p1, p2, q0, q1, q2)
+    return None if inverse is None else (u_ref, p_ref, inverse)
+
+
+def _batch_size(src, wanted: int) -> int:
+    """How many walks run side by side: their marks take one byte per source face each (at most about 4 MB)."""
+
+    return max(1, min(wanted, 4_000_000 // max(len(src.indptr) - 1, 1)))
+
+
+def _walks(src: _Source, tasks, out: list):
+    """Generator (a step per ring): the source faces each result face reads from. Task = (reference face rf, hit
+    triangle rt, weights rw, face centre c, reach). From rf across free and Shift edges only, within `reach` of c,
+    passing the walk's UV check (with a layer); breadth-first, each face with whether a Shift chain was crossed on the
+    way. Appends one [(face, shifted)] per task to `out`.
+
+    The walks run side by side a ring at a time: the next ring of a walk is every crossable edge of its ring's faces in
+    queue order, kept when it passes the per-edge tests, each face at its first passing edge: the order a face-by-face
+    queue gives, so the result is the face-by-face walk's."""
+
+    nf = len(src.indptr) - 1
+    step = _batch_size(src, len(tasks))
+    for lo in range(0, len(tasks), step):
+        part = tasks[lo:lo + step]
+        m = len(part)
+        C = np.array([t[3] for t in part], np.float64).reshape(-1, 3)
+        R = np.array([t[4] for t in part], np.float64)
+        uvr = [_uv_reach(src, t[1], t[2]) for t in part]
+        has = np.array([u is not None for u in uvr], bool)
+        U = np.array([u[0] if u is not None else (0.0, 0.0) for u in uvr], np.float64).reshape(-1, 2)
+        PR = np.array([u[1] if u is not None else (0.0, 0.0, 0.0) for u in uvr], np.float64).reshape(-1, 3)
+        K = np.array([u[2] if u is not None else (0.0, 0.0, 0.0, 0.0) for u in uvr], np.float64).reshape(-1, 4)
+        seen = np.zeros(m * nf, bool)
+        ft = np.arange(m, dtype=np.int64)
+        ff = np.array([t[0] for t in part], np.int64)
+        fs = np.zeros(m, bool)
+        seen[ft * nf + ff] = True
+        rings = [(ft, ff, fs)]
+        while len(ff):
+            k, parent = _corners_of(src.nb_ptr, ff)
+            g, t = src.nb_g[k], ft[parent]
+            key = t * nf + g
+            keep = ~seen[key]
+            k, g, t, key, parent = k[keep], g[keep], t[keep], key[keep], parent[keep]
+            keep = ~(_dist_many(src.centre_a[g], C[t]) > R[t])
+            k, g, t, key, parent = k[keep], g[keep], t[keep], key[keep], parent[keep]
+            sh = fs[parent] | src.nb_shift[k]
+            check = has[t]
+            if check.any():
+                keep = ~check
+                keep[check] = _uv_near_rows(src, g[check], sh[check], U[t[check]], PR[t[check]], K[t[check]])
+                g, t, key, sh = g[keep], t[keep], key[keep], sh[keep]
+            _, first = np.unique(key, return_index=True)
+            first.sort()
+            ft, ff, fs = t[first], g[first], sh[first]
+            seen[key[first]] = True
+            rings.append((ft, ff, fs))
+            yield
+        T = np.concatenate([r[0] for r in rings])
+        order = np.argsort(T, kind="stable")  # walk by walk, rings in order
+        T = T[order]
+        F = np.concatenate([r[1] for r in rings])[order].tolist()
+        S = np.concatenate([r[2] for r in rings])[order].tolist()
+        cut = np.searchsorted(T, np.arange(m + 1)).tolist()
+        for i in range(m):
+            out.append(list(zip(F[cut[i]:cut[i + 1]], S[cut[i]:cut[i + 1]])))
+
+
+def _corners_of(indptr, faces):
+    """The corners of `faces` in order, and for each the position of its face in `faces`."""
+
+    start = indptr[faces]
+    count = indptr[faces + 1] - start
+    pos = np.repeat(np.arange(len(faces)), count)
+    return np.arange(int(count.sum())) - np.repeat(np.cumsum(count) - count, count) + np.repeat(start, count), pos
+
+
+def _dist_many(a, p):
+    """`_dist` of each row of a (m, 3) to the point p (or to the matching row of p), the same float operations."""
+
+    d0, d1, d2 = a[:, 0] - p[..., 0], a[:, 1] - p[..., 1], a[:, 2] - p[..., 2]
+    return np.sqrt((d0 * d0 + d1 * d1) + d2 * d2)
+
+
+def _whole_many(x):
+    return np.copysign(np.floor(np.abs(x) + 0.5), x)
+
+
+def _uv_near_rows(src, g, shifted, u_ref, p_ref, k):
+    """The walk's UV check for faces g, each with its own shifted flag and reference (rows of u_ref, p_ref, k): the UV
+    offset of the face's UV centre from the reference UV (less whole tiles across a Shift chain), taken to 3D through
+    the reference triangle's map, is at most WALK_UV_SLACK x (3D distance of the centres + the face's radius)."""
+
+    u = src.uv_centre_a[g]
+    du, dv = u[:, 0] - u_ref[:, 0], u[:, 1] - u_ref[:, 1]
+    du = np.where(shifted, du + _whole_many(-du), du)
+    dv = np.where(shifted, dv + _whole_many(-dv), dv)
+    lx, ly = k[:, 0] * du + k[:, 1] * dv, k[:, 2] * du + k[:, 3] * dv
+    return np.sqrt(lx * lx + ly * ly) <= WALK_UV_SLACK * (_dist_many(src.centre_a[g], p_ref) + src.radius_a[g])
+
+
+def _sign(x: float) -> float:
+    return 1.0 if x > 0.0 else (-1.0 if x < 0.0 else (x if x != x else 0.0))
+
+
+def _uv_area(uv, indptr, f) -> float:
+    """Twice the signed UV area of source face f (shoelace over its corners; `uv` is 2 per source corner)."""
+
+    s, e = int(indptr[f]), int(indptr[f + 1])
+    area = 0.0
+    for i in range(s, e):
+        j = s if i + 1 == e else i + 1
+        area += float(uv[i][0]) * float(uv[j][1]) - float(uv[j][0]) * float(uv[i][1])
+    return area
+
+
+def _rounding_scale(pts) -> float:
+    """How far single-precision rounding of a face's corners (`pts`) can turn its normal: largest coordinate over
+    shortest edge."""
+
+    big, short = 0.0, math.inf
+    for i, p in enumerate(pts):
+        big = max(big, abs(p[0]), abs(p[1]), abs(p[2]))
+        short = min(short, _dist(p, pts[(i + 1) % len(pts)]))
+    return big / short if short > 0.0 else math.inf
+
+
+def _facing_rows(a, b, scale):
+    """-1, 0 or 1 per row: whether normals a and b ((m, 3) both) face the same way, 0 when edge-on to rounding (cosine at
+    most EDGE_ON_COS or F32_TURN times the two faces' rounding scales)."""
+
+    d = (a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1]) + a[:, 2] * b[:, 2]
+    turn = F32_TURN * scale
+    na = np.sqrt((a[:, 0] * a[:, 0] + a[:, 1] * a[:, 1]) + a[:, 2] * a[:, 2])
+    nb = np.sqrt((b[:, 0] * b[:, 0] + b[:, 1] * b[:, 1]) + b[:, 2] * b[:, 2])
+    sign = np.where(d > 0.0, 1.0, np.where(d < 0.0, -1.0, np.where(d != d, d, 0.0)))
+    return np.where(np.abs(d) <= (np.where(turn > EDGE_ON_COS, turn, EDGE_ON_COS) * na) * nb, 0.0, sign)
+
+
+def _has_area(src, g) -> bool:
+    """True when source face g has area (twice-area above DEGENERATE_SHARE of its summed squared edges)."""
+
+    s, e = int(src.indptr[g]), int(src.indptr[g + 1])
+    pts = [tuple(src.P[v]) for v in src.flat[s:e]]
+    e2 = 0.0
+    for i in range(len(pts)):
+        d = _sub(pts[(i + 1) % len(pts)], pts[i])
+        e2 += _dot(d, d)
+    n = src.normal[g]
+    return math.sqrt(_dot(n, n)) > DEGENERATE_SHARE * e2
+
+
+def _balls(src: _Source, tasks, allowed: list):
+    """Generator (a step per ring): the winding vote of each fan-triangle task [nearest face g0, centre q, reach, the
+    triangle's normal nt, its rounding scale, the reference's UV winding], ORed into allowed[task] (bit 0: +1 allowed,
+    bit 1: -1 allowed). A task gathers the source faces within reach of q, grown from g0 through shared vertices a ring
+    at a time (the set is what counts); each face with area votes its UV winding times whether it faces the triangle,
+    relative to the reference's (no UV area: both; edge-on to rounding: neither). The tasks grow side by side."""
+
+    nf = len(src.indptr) - 1
+    step = _batch_size(src, len(tasks))
+    for lo in range(0, len(tasks), step):
+        part = tasks[lo:lo + step]
+        m = len(part)
+        Q = np.array([t[1] for t in part], np.float64).reshape(-1, 3)
+        R = np.array([t[2] for t in part], np.float64)
+        tested = np.zeros(m * nf, bool)  # in the ball, or tried and too far (never tried again)
+        rt = np.arange(m, dtype=np.int64)
+        rf = np.array([t[0] for t in part], np.int64)
+        tested[rt * nf + rf] = True
+        ball_t, ball_f = [rt], [rf]
+        while len(rf):
+            h, parent = _corners_of(src.indptr, rf)
+            v, t = src.wflat[h], rt[parent]
+            k, at = _corners_of(src.vf_ptr, v)
+            g, t = src.vf[k], t[at]
+            key = t * nf + g
+            keep = ~tested[key]
+            g, t, key = g[keep], t[keep], key[keep]
+            _, first = np.unique(key, return_index=True)
+            first.sort()
+            g, t, key = g[first], t[first], key[first]
+            tested[key] = True
+            keep = np.sqrt(src.nearest_d2_rows(g, Q[t])) <= R[t]
+            rt, rf = t[keep], g[keep]
+            ball_t.append(rt)
+            ball_f.append(rf)
+            yield
+        t, f = np.concatenate(ball_t), np.concatenate(ball_f)
+        keep = src.has_area_a[f]
+        t, f = t[keep], f[keep]
+        if not len(f):
+            continue
+        NT = np.array([x[3] for x in part], np.float64).reshape(-1, 3)[t]
+        scale = np.array([x[4] for x in part], np.float64)[t] + src.rscale_a[f]
+        wind = src.wind_a[f]
+        w = (_facing_rows(NT, src.normal_a[f], scale) * wind) * np.array([x[5] for x in part], np.float64)[t]
+        bits = np.where(wind == 0.0, 3, np.where(w > 0.0, 1, np.where(w < 0.0, 2, 0))).astype(np.int64)
+        got = np.zeros(m, np.int64)
+        np.bitwise_or.at(got, t, bits)
+        for i in range(m):
+            allowed[lo + i] |= int(got[i])
+
+
+def _nearest_groups(grid, groups, out: list):
+    """Generator: `grid.nearest_groups` a few groups per step, appended to `out`."""
+
+    for lo in range(0, len(groups), NEAREST_GROUPS):
+        out += grid.nearest_groups(groups[lo:lo + NEAREST_GROUPS])
+        yield
+
+
+def _read_faces(src: _Source, region, Pr, faces, out: list):
+    """Generator: what each result face of `faces` reads (appended to `out` in order), the faces worked side by side.
+
+    Per face: its corners and centre find their nearest source faces; the side region most of them land on (the centre
+    counts CENTRE_WEIGHT) picks the reference hit. A reference turned away from the face (REF_ALIGN_COS): a coarse face
+    across a crease often has its centre nearest a wall turned away from it, whose winding would make the fold fix fold
+    it. The nearest source face within the walk's reach turned at most 60 deg from it, found across every edge (seams
+    too: the vote may have picked the wall's side on a tie of the corners on the crease), becomes the reference and
+    gives the face its side region when it is nearer the centre. Then the walk (`_walks`), the orientation sign and each
+    corner's closest point on the walked faces (slid when much further than its own nearest).
+
+    The orientation sign against the reference: each fan triangle (0, i, i+1) gathers the source faces within reach of
+    its centre (the nearest one's distance plus WIND_BALL_EDGE of its shortest edge) and the windings they would show
+    (`_balls`). The face takes the winding every triangle allows; both throughout: the reference's 3D facing. No common
+    winding (folded in 3D, or across a crease with one half leaning into a wall): 0 (Seam Fit cuts it into its fan
+    triangles); no area at all (DEGENERATE_SHARE): 0 too, so the fold fix leaves its reads alone."""
+
+    pre = []
+    for face in faces:
+        n = len(face)
+        corners = [tuple(Pr[v]) for v in face]
+        c0 = c1 = c2 = 0.0
+        for p in corners:
+            c0 += p[0] / n
+            c1 += p[1] / n
+            c2 += p[2] / n
+        c = (c0, c1, c2)
+        diameter, edge = 0.0, 0.0
+        for i in range(n):
+            edge += _dist(corners[i], corners[(i + 1) % n]) / n
+            for j in range(i + 1, n):
+                diameter = max(diameter, _dist(corners[i], corners[j]))
+        samples = corners + [c]
+        pre.append([face, n, corners, c, diameter, edge, samples, None])
+        if len(pre) % 16 == 0:
+            yield
+    near = []
+    yield from _nearest_groups(src.grid, [p[6] for p in pre], near)
+    for p, x in zip(pre, near):
+        p[7] = [max(f, 0) for f in x]
+    allhits = src.on_each([[f] for p in pre for f in p[7]], [s for p in pre for s in p[6]])
+    yield
+    reads, at = [], 0
+    for face, n, corners, c, diameter, edge, samples, near in pre:
+        hits = [(f, math.sqrt(d2), t, w) for f, (d2, t, w, _) in zip(near, allhits[at:at + n + 1])]
+        at += n + 1
+        weight = [(1.0 - CENTRE_WEIGHT) / n] * n + [CENTRE_WEIGHT]
+        votes = []
+        for s, hit in enumerate(hits):
+            r = region[hit[0]]
+            for x in votes:
+                if x[0] == r:
+                    x[1] += weight[s]
+                    break
+            else:
+                votes.append([r, weight[s]])
+        win = votes[0]
+        for v in votes[1:]:
+            if v[1] > win[1] or (v[1] == win[1] and v[0] < win[0]):
+                win = v
+        ref = n if region[hits[n][0]] == win[0] else next((s for s in range(n) if region[hits[s][0]] == win[0]), n)
+        rf, rd, rt, rw = hits[ref]
+        reg = win[0]
+        nr = _newell(Pr, face)
+        na = math.sqrt(_dot(nr, nr))
+
+        def aligned(g):
+            ng = src.normal[g]
+            nb = math.sqrt(_dot(ng, ng))
+            return na > 0.0 and nb > 0.0 and _dot(nr, ng) >= REF_ALIGN_COS * na * nb
+        if not aligned(rf):
+            reach = WALK_REACH * diameter + rd
+            near2, seen = [], set()
+            for f in [rf] + [h[0] for h in hits]:
+                if f not in seen:
+                    seen.add(f)
+                    near2.append(f)
+            k = 0
+            while k < len(near2):
+                f = near2[k]
+                k += 1
+                for h in range(int(src.indptr[f]), int(src.indptr[f + 1])):
+                    g = int(src.across[h])
+                    if g >= 0 and g not in seen and _dist(src.centre[g], c) <= reach:
+                        seen.add(g)
+                        near2.append(g)
+            cands = [g for g in near2 if aligned(g)]
+            # Only a face nearer the centre than the reference: a reference that is the nearest face is the surface
+            # the face lies on, however it is turned (a thin part's far side seen from a coarse face).
+            if cands:
+                d2, t2, w2, which = src.on_faces(cands, c)
+                if d2 < src.on_faces([rf], c)[0]:
+                    rf, rd, rt, rw = cands[which], math.sqrt(d2), t2, w2
+                    reg = int(region[rf])
+            yield
+        reads.append(dict(hits=hits, rf=rf, rd=rd, rt=rt, rw=rw, reg=reg, nr=nr))
+        if len(reads) % 16 == 0:
+            yield
+    orders = []
+    yield from _walks(src, [(r["rf"], r["rt"], r["rw"], p[3], WALK_REACH * p[4] + r["rd"]) for p, r in zip(pre, reads)], orders)
+    tasks, owner = [], []  # one winding vote per fan triangle with area and a nearest face
+    fans = []
+    for p, r in zip(pre, reads):
+        face, rf = p[0], r["rf"]
+        r["fallback"] = -1.0 if _dot(r["nr"], src.normal[rf]) < 0.0 else 1.0
+        r["ref_wind"] = ref_wind = 1.0 if src.uv is None else _sign(_uv_area(src.uv, src.indptr, rf))
+        tris, qs = [], []
+        if ref_wind != 0.0:
+            tris = [[face[0], face[j], face[j + 1]] for j in range(1, len(face) - 1)]
+            for t in tris:
+                a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
+                qs.append(((a[0] + b[0] + cc[0]) / 3.0, (a[1] + b[1] + cc[1]) / 3.0, (a[2] + b[2] + cc[2]) / 3.0))
+        fans.append((tris, qs))
+    nearest = []
+    yield from _nearest_groups(src.grid, [qs for _tris, qs in fans], nearest)
+    for i, ((tris, qs), near, r) in enumerate(zip(fans, nearest, reads)):
+        ref_wind = r["ref_wind"]
+        for t, q, g0 in zip(tris, qs, near):
+            a, b, cc = Pr[t[0]], Pr[t[1]], Pr[t[2]]
+            nt = _newell(Pr, t)
+            ab, bc, ca = _sub(b, a), _sub(cc, b), _sub(a, cc)
+            if math.sqrt(_dot(nt, nt)) <= DEGENERATE_SHARE * (_dot(ab, ab) + _dot(bc, bc) + _dot(ca, ca)):
+                continue  # a zero-area triangle: its normal, and so the winding it shows, is rounding
+            if g0 < 0:
+                continue
+            shortest = min(_dist(a, b), _dist(b, cc), _dist(cc, a))
+            tasks.append([g0, q, WIND_BALL_EDGE * shortest, nt, _rounding_scale([a, b, cc]), ref_wind])
+            owner.append(i)
+        if i % 4 == 3:
+            yield
+    yield
+    if tasks:
+        d2 = src.nearest_d2_rows(np.array([t[0] for t in tasks], np.int64), np.array([t[1] for t in tasks], np.float64))
+        for t, x in zip(tasks, d2.tolist()):
+            t[2] = math.sqrt(x) + t[2]
+    allowed = [0] * len(tasks)
+    yield from _balls(src, tasks, allowed)
+    common, said = [3] * len(pre), [False] * len(pre)  # bit 0: +1 allowed, bit 1: -1 allowed
+    for i, a in zip(owner, allowed):
+        if a:
+            common[i] &= a
+            said[i] = True
+    for i, (p, r, order) in enumerate(zip(pre, reads, orders)):
+        corners, edge = p[2], p[5]
+        hits, rf, rt, rw = r["hits"], r["rf"], r["rt"], r["rw"]
+        if r["ref_wind"] == 0.0:
+            orient = r["fallback"]
+        elif not said[i]:
+            orient = 0.0
+        else:
+            orient = {1: 1.0, 2: -1.0, 0: 0.0}.get(common[i], r["fallback"])
+        reached = [f for f, _ in order]
+        o = dict(ids=[], w=[], shift=[], slid=[], ref_ids=[int(x) for x in src.tri[rt]], ref_w=list(rw), ref_face=rf, orient=orient, region=r["reg"])
+        for j, (q, (d2, t, w, which)) in enumerate(zip(corners, src.on_same(reached, corners))):
+            tri = src.tri[t]
+            slid = math.sqrt(d2) > hits[j][1] + SLIDE_EDGE * edge
+            if slid:
+                x = _plane_bary(q, tuple(src.cp[tri[0]]), tuple(src.cp[tri[1]]), tuple(src.cp[tri[2]]))
+                if x is not None:
+                    w = x
+            o["ids"].extend(int(x) for x in tri)
+            o["w"].extend(w)
+            o["shift"].append(order[which][1])
+            o["slid"].append(slid)
+        out.append(o)
+        yield
+
+
+def _uv_to_3d(p0, p1, p2, q0, q1, q2):
+    """The inverse of a triangle's 3D-to-UV map as (k00, k01, k10, k11): UV offsets to 3D lengths in the triangle's
+    plane. None when either side has no area."""
+
+    e1, e2 = _sub(p1, p0), _sub(p2, p0)
+    l1 = math.sqrt(_dot(e1, e1))
+    if l1 <= 0.0:
+        return None
+    x = (e1[0] / l1, e1[1] / l1, e1[2] / l1)
+    bx = _dot(e2, x)
+    y3 = (e2[0] - bx * x[0], e2[1] - bx * x[1], e2[2] - bx * x[2])
+    by = math.sqrt(_dot(y3, y3))
+    if by <= 0.0:
+        return None
+    du1, dv1, du2, dv2 = q1[0] - q0[0], q1[1] - q0[1], q2[0] - q0[0], q2[1] - q0[1]
+    # J = [du1 du2; dv1 dv2] * inverse([l1 bx; 0 by])
+    j00, j10 = du1 / l1, dv1 / l1
+    j01, j11 = (du2 - j00 * bx) / by, (dv2 - j10 * bx) / by
+    det = j00 * j11 - j01 * j10
+    if det == 0.0:
+        return None
+    return (j11 / det, -j01 / det, -j10 / det, j00 / det)
+
+
+def _lookup_steps(seams, src_points, src_indptr, src_flat, res_points, res_indptr, res_flat, look: dict, uv=None, src=None):
+    """Generator: fills `look`, LOOKUP_BATCH faces at a time (yields inside their walks and votes, a ring at a time). `uv` (the active
+    layer, per source corner) turns on the walk's UV check. `src`: an already built `_Source` of the same source."""
+
+    si = np.asarray(src_indptr, np.int64)
+    Pr = np.asarray(res_points, np.float64).reshape(-1, 3).tolist()
+    ri, rf = np.asarray(res_indptr, np.int64), np.asarray(res_flat, np.int64)
+    if src is None:
+        src = _Source(np.asarray(src_points, np.float64).reshape(-1, 3), si, np.asarray(src_flat, np.int64), seams, uv)
+        yield from src.build()
+    region = seams["region"]
+    todo = [] if len(si) <= 1 else [f for f in range(len(ri) - 1) if ri[f + 1] - ri[f] >= 3]
+    for lo in range(0, len(todo), LOOKUP_BATCH):
+        part = todo[lo:lo + LOOKUP_BATCH]
+        got = []
+        yield from _read_faces(src, region, Pr, [rf[ri[f]:ri[f + 1]].tolist() for f in part], got)
+        for f, r in zip(part, got):
+            _put(look, ri, f, r)
+        yield
+
+
+def _put(look, ri, f, r):
+    s, e = int(ri[f]), int(ri[f + 1])
+    look["ids"][3 * s:3 * e] = r["ids"]
+    look["w"][3 * s:3 * e] = r["w"]
+    look["shift"][s:e] = r["shift"]
+    look["slid"][s:e] = r["slid"]
+    look["ref_ids"][3 * f:3 * f + 3] = r["ref_ids"]
+    look["ref_w"][3 * f:3 * f + 3] = r["ref_w"]
+    look["ref_face"][f] = r["ref_face"]
+    look["orient"][f] = r["orient"]
+    look["region"][f] = r["region"]
+
+
+def _empty_lookup(seams, res_indptr, n_corners):
+    nf = len(res_indptr) - 1
+    return dict(ids=np.zeros(3 * n_corners, np.int64), w=np.zeros(3 * n_corners), shift=np.zeros(n_corners, bool), slid=np.zeros(n_corners, bool),
+                ref_ids=np.zeros(3 * nf, np.int64), ref_w=np.zeros(3 * nf), ref_face=np.full(nf, -1, np.int64), orient=np.ones(nf),
+                region=np.full(nf, -1, np.int64), join=join_tolerance(seams), done=False)
+
+
+def evaluate(look: dict, src_indptr, src_flat, layer, res_indptr) -> tuple:
+    """UVs per result corner for one source layer (2 per source corner) and the expected winding per result face.
+    Vectorised with the face-by-face sums' order (each starts from 0.0 and adds in corner order)."""
+
+    si = np.asarray(src_indptr, np.int64)
+    L = np.asarray(layer, np.float64).ravel()
+    ri = np.asarray(res_indptr, np.int64)
+    nf = len(ri) - 1
+    uv = np.full(2 * int(ri[-1]), np.nan)
+    expected = np.zeros(nf)
+    ref_face = np.asarray(look["ref_face"], np.int64)
+    faces = np.flatnonzero(ref_face >= 0)
+    if not len(faces):
+        return uv, expected
+    ids, w = np.asarray(look["ids"], np.int64).reshape(-1, 3), np.asarray(look["w"], np.float64).reshape(-1, 3)
+    ref_ids, ref_w = np.asarray(look["ref_ids"], np.int64).reshape(-1, 3), np.asarray(look["ref_w"], np.float64).reshape(-1, 3)
+
+    def at(i3, w3, k):
+        out = np.zeros(len(i3))
+        for c in range(3):
+            out = out + w3[:, c] * L[2 * i3[:, c] + k]
+        return out
+
+    ru, rv = at(ref_ids[faces], ref_w[faces], 0), at(ref_ids[faces], ref_w[faces], 1)
+    h, pos = _corners_of(ri, faces)
+    xu, xv = at(ids[h], w[h], 0), at(ids[h], w[h], 1)
+    sh = np.asarray(look["shift"], bool)[h]
+    xu = np.where(sh, xu + _whole_many(ru[pos] - xu), xu)
+    xv = np.where(sh, xv + _whole_many(rv[pos] - xv), xv)
+    uv[2 * h], uv[2 * h + 1] = xu, xv
+    rf = ref_face[faces]
+    s, m = si[rf], si[rf + 1] - si[rf]
+    area = np.zeros(len(faces))
+    for i in range(int(m.max())):
+        on = i < m
+        a, b = s + i, s + (i + 1) % np.maximum(m, 1)
+        term = L[2 * a[on]] * L[2 * b[on] + 1] - L[2 * b[on]] * L[2 * a[on] + 1]
+        area[on] = area[on] + term
+    o = np.asarray(look["orient"], np.float64)[faces]
+    expected[faces] = np.where(area > 0, o, np.where(area < 0, -o, 0.0))
+    return uv, expected
+
+
+# ---------------------------------------------------------------- fold fix
+def folded(res_indptr, uv, expected, f) -> bool:
+    if expected[f] == 0.0:
+        return False
+    s, n = int(res_indptr[f]), int(res_indptr[f + 1] - res_indptr[f])
+    if uv[2 * s] != uv[2 * s]:
+        return False
+    a = (uv[2 * s], uv[2 * s + 1])
+    for i in range(1, n - 1):
+        b = (uv[2 * (s + i)], uv[2 * (s + i) + 1])
+        c = (uv[2 * (s + i + 1)], uv[2 * (s + i + 1) + 1])
+        area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+        if area * expected[f] <= 0.0:
+            return True
+    return False
+
+
+def _uv_gap(uv, h, g):
+    return max(abs(uv[2 * h] - uv[2 * g]), abs(uv[2 * h + 1] - uv[2 * g + 1]))
+
+
+def _fold_fix_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report: dict):
+    """Generator: the fold fix: untangling, the ring fills for what is left, untangling again. Changes
+    `uv` (a NumPy array) in place, fills `report`."""
+
+    ri = [int(x) for x in res_indptr]
+    nf = len(ri) - 1
+    ex = [float(x) for x in expected]
+    before = sum(folded(ri, uv, ex, f) for f in range(nf))
+    report.update(before=before, after=before, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False, untangled=0)
+    if before == 0:
+        report["after"] = 0
+        return
+    moves = [0]
+    read = np.array(uv, np.float64, copy=True)
+    yield from _untangle_steps(res_indptr, res_flat, uv, read, region, ex, join, texture_px, BORDER_MOVE_PX, moves)
+    yield from _ring_fill_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report)
+    if report["after"] > 0:
+        yield from _untangle_steps(res_indptr, res_flat, uv, read, region, ex, join, texture_px, BORDER_MOVE_PX, moves)
+        report["after"] = sum(folded(ri, uv, ex, f) for f in range(nf))
+    if report["after"] > 0:  # what still folds may move its border corners further
+        yield from _untangle_steps(res_indptr, res_flat, uv, read, region, ex, join, texture_px, math.inf, moves)
+        report["after"] = sum(folded(ri, uv, ex, f) for f in range(nf))
+    yield from _give_back_steps(res_indptr, res_flat, uv, read, region, ex, texture_px)
+    report["after"] = sum(folded(ri, uv, ex, f) for f in range(nf))
+    report["before"] = before
+    report["untangled"] = moves[0]
+
+
+def _det3(m):
+    return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+
+
+def _chebyshev(g, h):
+    """Largest t with g_l . x + h_l >= t for every row (unit rows): (x, t) by trying every triple as the active set."""
+
+    n = len(g)
+    best = None
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(j + 1, n):
+                m = [[g[i][0], g[i][1], -1.0], [g[j][0], g[j][1], -1.0], [g[k][0], g[k][1], -1.0]]
+                det = _det3(m)
+                if abs(det) < 1e-12:
+                    continue
+                r = [-h[i], -h[j], -h[k]]
+                sol = []
+                for c in range(3):
+                    a = [row[:] for row in m]
+                    for row in range(3):
+                        a[row][c] = r[row]
+                    sol.append(_det3(a) / det)
+                x0, x1, t = sol
+                tol = 1e-12 * (1.0 + abs(t))
+                if all(g[li][0] * x0 + g[li][1] * x1 + h[li] >= t - tol for li in range(n)) and (best is None or t > best[1]):
+                    best = ((x0, x1), t)
+    return best
+
+
+def _nearest_within(g, h, want, x0):
+    """The point nearest x0 meeting g_l . x + h_l >= want_l for every row."""
+
+    n = len(g)
+
+    def meets(x):
+        return all(g[li][0] * x[0] + g[li][1] * x[1] + h[li] >= want[li] - 1e-12 * (1.0 + abs(want[li])) for li in range(n))
+
+    best = None
+
+    def take(x):
+        nonlocal best
+        d = (x[0] - x0[0]) ** 2 + (x[1] - x0[1]) ** 2
+        if meets(x) and (best is None or d < best[1]):
+            best = (x, d)
+
+    take(x0)
+    for li in range(n):
+        s = want[li] - (g[li][0] * x0[0] + g[li][1] * x0[1] + h[li])
+        take((x0[0] + s * g[li][0], x0[1] + s * g[li][1]))
+    for li in range(n):
+        for m in range(li + 1, n):
+            det = g[li][0] * g[m][1] - g[li][1] * g[m][0]
+            if abs(det) < 1e-12:
+                continue
+            a, b = want[li] - h[li], want[m] - h[m]
+            take(((a * g[m][1] - b * g[li][1]) / det, (g[li][0] * b - g[m][0] * a) / det))
+    return None if best is None else best[0]
+
+
+def _untangle_steps(res_indptr, res_flat, uv, read, region, expected, join, texture_px, border_px, moves: list):
+    """Generator: the untangling (moves[0] counts the vertex moves)."""
+
+    tex = texture_px if texture_px > 0.0 else TEXTURE_PX_DEFAULT
+
+    ri = [int(x) for x in res_indptr]
+    rf = [int(x) for x in res_flat]
+    nf = len(ri) - 1
+    region = [int(x) for x in region]
+    join = [float(x) for x in join]
+    n_points = max(rf) + 1 if rf else 0
+    vc = [[] for _ in range(n_points)]
+    for h, v in enumerate(rf):
+        vc[v].append(h)
+    face_of = [0] * len(rf)
+    for f in range(nf):
+        for h in range(ri[f], ri[f + 1]):
+            face_of[h] = f
+    edge_use = {}
+    for f in range(nf):
+        face = rf[ri[f]:ri[f + 1]]
+        for i in range(len(face)):
+            a, b = face[i], face[(i + 1) % len(face)]
+            key = (min(a, b), max(a, b))
+            edge_use[key] = edge_use.get(key, 0) + 1
+
+    def join_of(r):
+        return join[r] if 0 <= r < len(join) else math.inf
+
+    best, stall = None, 0
+    while True:
+        bad = [f for f in range(nf) if folded(ri, uv, expected, f)]
+        if not bad:
+            break
+        if best is None or len(bad) < best:
+            best, stall = len(bad), 0
+        else:
+            stall += 1
+            if stall >= UNTANGLE_STALL:
+                break
+        verts = sorted({rf[h] for f in bad for h in range(ri[f], ri[f + 1])})
+        moved = 0
+        for count, v in enumerate(verts):
+            if count % 32 == 31:
+                yield
+            alls = vc[v]
+            wedges = []  # the vertex's corners grouped by side region and shared UV (within join)
+            for h in alls:
+                r = region[face_of[h]]
+                if r < 0:
+                    continue
+                w = next((w for w in wedges if region[face_of[w[0]]] == r and _uv_gap(uv, h, w[0]) <= join_of(r)), None)
+                if w is None:
+                    wedges.append([h])
+                else:
+                    w.append(h)
+
+            def closed(h):
+                f = face_of[h]
+                s, e = ri[f], ri[f + 1]
+                n, i = e - s, h - s
+                me = rf[h]
+                return all(edge_use.get((min(me, o), max(me, o))) == 2 for o in (rf[s + (i + n - 1) % n], rf[s + (i + 1) % n]))
+
+            whole = len(wedges) == 1 and len(wedges[0]) == len(alls) and all(closed(h) for h in alls)
+            for cs in wedges:
+                if not whole and not any(folded(ri, uv, expected, face_of[h]) for h in cs):
+                    continue
+                g, hh = [], []
+                shortest = math.inf
+                for h in cs:
+                    f = face_of[h]
+                    s, e = ri[f], ri[f + 1]
+                    n, i = e - s, h - s
+                    for o in (s + (i + n - 1) % n, s + (i + 1) % n):
+                        shortest = min(shortest, math.sqrt((float(uv[2 * o]) - float(uv[2 * h])) ** 2 + (float(uv[2 * o + 1]) - float(uv[2 * h + 1])) ** 2))
+                    if expected[f] == 0.0:
+                        continue
+                    for k in range(1, n - 1):
+                        tri = (0, k, k + 1)
+                        if i not in tri:
+                            continue
+                        p = tri.index(i)
+                        a, b = s + tri[(p + 1) % 3], s + tri[(p + 2) % 3]
+                        a0, a1, b0, b1 = float(uv[2 * a]), float(uv[2 * a + 1]), float(uv[2 * b]), float(uv[2 * b + 1])
+                        d0, d1 = a0 - b0, a1 - b1
+                        g0, g1, h0 = expected[f] * d1, expected[f] * -d0, expected[f] * (a0 * b1 - a1 * b0)
+                        norm = math.sqrt(g0 * g0 + g1 * g1)
+                        if norm < 1e-15:
+                            continue
+                        g.append((g0 / norm, g1 / norm))
+                        hh.append(h0 / norm)
+                x = (float(uv[2 * cs[0]]), float(uv[2 * cs[0] + 1]))
+                m0 = [g[li][0] * x[0] + g[li][1] * x[1] + hh[li] for li in range(len(g))]
+                if not whole:
+                    if not (0.0 < shortest < math.inf) or not g:
+                        continue
+                    g += [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
+                    hh += [shortest - x[0], shortest + x[0], shortest - x[1], shortest + x[1]]
+                    if border_px < math.inf:
+                        r, y = border_px / tex, (float(read[2 * cs[0]]), float(read[2 * cs[0] + 1]))
+                        g += [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
+                        hh += [r - y[0], r + y[0], r - y[1], r + y[1]]
+                elif len(g) < 3:
+                    continue
+                worst = min(m0)
+                sol = _chebyshev(g, hh)
+                if sol is None:
+                    continue
+                t = sol[1]
+                if t <= max(worst, 0.0):
+                    continue
+                goal = min(0.5 * t, UNTANGLE_CLEAR_PX / tex)
+                xn = _nearest_within(g, hh, [goal if li < len(m0) else 0.0 for li in range(len(g))], x)
+                if xn is None:
+                    continue
+                for h in cs:
+                    uv[2 * h], uv[2 * h + 1] = xn
+                moved += 1
+        moves[0] += moved
+        yield
+        if moved == 0:
+            break
+
+
+def _clearance(res_indptr, uv, expected, f) -> float:
+    """Clearance: the thinnest fan triangle's twice UV area, signed by expected, over its longest edge."""
+
+    s, n = int(res_indptr[f]), int(res_indptr[f + 1] - res_indptr[f])
+    if expected[f] == 0.0 or uv[2 * s] != uv[2 * s]:
+        return math.inf
+    a = (float(uv[2 * s]), float(uv[2 * s + 1]))
+    out = math.inf
+    for i in range(1, n - 1):
+        b = (float(uv[2 * (s + i)]), float(uv[2 * (s + i) + 1]))
+        c = (float(uv[2 * (s + i + 1)]), float(uv[2 * (s + i + 1) + 1]))
+        area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+        l2 = max((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2, (c[0] - b[0]) ** 2 + (c[1] - b[1]) ** 2, (a[0] - c[0]) ** 2 + (a[1] - c[1]) ** 2)
+        out = min(out, area * expected[f] / math.sqrt(l2) if l2 > 0.0 else 0.0)
+    return out
+
+
+def _give_back_steps(res_indptr, res_flat, uv, read, region, expected, texture_px):
+    """Generator: the give-back: moved (vertex, region) groups go back toward `read` as far as that folds
+    none of their faces left unfolded (whole way, half, a quarter... down to GIVE_BACK_PX). Returns the groups moved."""
+
+    ri = [int(x) for x in res_indptr]
+    rf = [int(x) for x in res_flat]
+    region = [int(x) for x in region]
+    nf = len(ri) - 1
+    tex = texture_px if texture_px > 0.0 else TEXTURE_PX_DEFAULT
+    least, clear = GIVE_BACK_PX / tex, UNTANGLE_CLEAR_PX / tex
+
+    def off(h):
+        return uv[2 * h] != read[2 * h] or uv[2 * h + 1] != read[2 * h + 1]
+
+    moved = {(rf[h], region[f]) for f in range(nf) for h in range(ri[f], ri[f + 1]) if off(h)}
+    if not moved:
+        return 0
+    groups = sorted((rf[h], region[f], f, h) for f in range(nf) for h in range(ri[f], ri[f + 1]) if (rf[h], region[f]) in moved)
+    runs, i = [], 0
+    while i < len(groups):
+        j = i + 1
+        while j < len(groups) and groups[j][:2] == groups[i][:2]:
+            j += 1
+        runs.append(groups[i:j])
+        i = j
+    total = 0
+    while True:
+        back = 0
+        for count, run in enumerate(runs):
+            if count % 64 == 63:
+                yield
+            if not any(off(g[3]) for g in run) or any(read[2 * g[3]] != read[2 * g[3]] for g in run):
+                continue
+            was = [folded(ri, uv, expected, g[2]) for g in run]
+            room = [min(_clearance(ri, uv, expected, g[2]), clear) for g in run]
+            kept = [(float(uv[2 * g[3]]), float(uv[2 * g[3] + 1])) for g in run]
+            far = max(max(abs(k[0] - read[2 * g[3]]), abs(k[1] - read[2 * g[3] + 1])) for g, k in zip(run, kept))
+            share, ok = 1.0, False
+            while share * far > least:
+                for g, k in zip(run, kept):
+                    for c in range(2):
+                        uv[2 * g[3] + c] = read[2 * g[3] + c] if share == 1.0 else k[c] + share * (read[2 * g[3] + c] - k[c])
+                if any(not w and (folded(ri, uv, expected, g[2]) or _clearance(ri, uv, expected, g[2]) < r) for g, w, r in zip(run, was, room)):
+                    share *= 0.5
+                else:
+                    ok = True
+                    break
+            if ok:
+                back += 1
+            else:
+                for g, k in zip(run, kept):
+                    uv[2 * g[3]], uv[2 * g[3] + 1] = k
+        total += back
+        yield
+        if back == 0:
+            break
+    return total
+
+
+def _ring_fill_steps(res_points, res_indptr, res_flat, uv, region, expected, join, texture_px, report: dict):
+    """Generator: the ring fills (the fold fix's second layer)."""
+
+    Pr = np.asarray(res_points, np.float64).reshape(-1, 3).tolist()
+    ri = [int(x) for x in res_indptr]
+    rf = [int(x) for x in res_flat]
+    nf = len(ri) - 1
+    region = [int(x) for x in region]
+    expected = [float(x) for x in expected]
+    bad = [folded(ri, uv, expected, f) for f in range(nf)]
+    report.update(before=sum(bad), after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False)
+    if report["before"] == 0:
+        return
+    tex = texture_px if texture_px > 0 else TEXTURE_PX_DEFAULT
+    original = uv.copy()
+    vf = [[] for _ in range(len(Pr))]
+    for f in range(nf):
+        for v in rf[ri[f]:ri[f + 1]]:
+            vf[v].append(f)
+    join = [float(x) for x in join]
+
+    def join_of(r):
+        return join[r] if 0 <= r < len(join) else math.inf
+
+    def ring(sel):
+        out = list(sel)
+        for f in range(nf):
+            if sel[f]:
+                for v in rf[ri[f]:ri[f + 1]]:
+                    for g in vf[v]:
+                        if region[g] == region[f] and region[g] >= 0:
+                            out[g] = True
+        return out
+
+    open_edge = {}
+    for f in range(nf):
+        face = rf[ri[f]:ri[f + 1]]
+        for i in range(len(face)):
+            a, b = face[i], face[(i + 1) % len(face)]
+            key = (min(a, b), max(a, b))
+            open_edge[key] = open_edge.get(key, 0) + 1
+
+    def fixed(f, i):
+        face = rf[ri[f]:ri[f + 1]]
+        v, h = face[i], ri[f] + i
+        prev, nxt = face[(i + len(face) - 1) % len(face)], face[(i + 1) % len(face)]
+
+        def on_open(a, b):
+            return open_edge.get((min(a, b), max(a, b)), 1) == 1
+
+        if on_open(prev, v) or on_open(v, nxt):
+            return True
+        for g in vf[v]:
+            if region[g] != region[f]:
+                return True
+            if any(rf[c] == v and _uv_gap(uv, c, h) > join_of(region[f]) for c in range(ri[g], ri[g + 1])):
+                return True
+        return False
+
+    stuck = []
+    for f in range(nf):
+        st = False
+        if bad[f]:
+            s, n = ri[f], ri[f + 1] - ri[f]
+            q = lambda i: (uv[2 * (s + i)], uv[2 * (s + i) + 1])  # noqa: E731
+            for i in range(1, n - 1):
+                a, b, c = q(0), q(i), q(i + 1)
+                area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+                if area * expected[f] <= 0.0 and fixed(f, 0) and fixed(f, i) and fixed(f, i + 1):
+                    st = True
+                    break
+        stuck.append(st)
+    report["stuck"] = sum(stuck)
+    if report["stuck"] == report["before"]:
+        report["after"] = report["before"]
+        return
+    active = ring([bad[f] and not stuck[f] for f in range(nf)])
+    touched = list(active)
+    rings = 1
+    while True:
+        report["rings"] = max(report["rings"], rings)
+        fill = {}
+        yield from _harmonic_fill_steps(Pr, ri, rf, uv, region, active, vf, join_of, tex, fill)
+        report["sweeps"] += fill["sweeps"]
+        report["stalled"] = report["stalled"] or fill["stalled"]
+        spot = _spots(ri, rf, region, active, vf)
+        still = [False] * nf
+        for f in range(nf):
+            if active[f] and not stuck[f] and folded(ri, uv, expected, f):
+                still[spot[f]] = True
+        keep = [active[f] and still[spot[f]] for f in range(nf)]
+        if not any(keep):
+            break
+        grown = ring(keep)
+        if grown == keep:
+            break
+        touched = [t or g for t, g in zip(touched, grown)]
+        active = grown
+        rings += 1
+    spot = _spots(ri, rf, region, touched, vf)
+    was, now = [0] * nf, [0] * nf
+    for f in range(nf):
+        if touched[f]:
+            was[spot[f]] += int(bad[f])
+            now[spot[f]] += int(folded(ri, uv, expected, f))
+    for f in range(nf):
+        if touched[f] and now[spot[f]] >= was[spot[f]]:
+            uv[2 * ri[f]:2 * ri[f + 1]] = original[2 * ri[f]:2 * ri[f + 1]]
+    report["after"] = sum(folded(ri, uv, expected, f) for f in range(nf))
+
+
+def _spots(ri, rf, region, active, vf):
+    nf = len(ri) - 1
+    a, b = [], []
+    for f in range(nf):
+        if active[f]:
+            for v in rf[ri[f]:ri[f + 1]]:
+                for g in vf[v]:
+                    if active[g] and region[g] == region[f]:
+                        a.append(f)
+                        b.append(g)
+    return _min_labels(nf, np.array(a, np.int64), np.array(b, np.int64)).tolist()
+
+
+def _harmonic_fill_steps(Pr, ri, rf, uv, region, active, vf, join_of, tex, out: dict):
+    nf = len(ri) - 1
+    groups = {}
+    value, vertex, free, first = [], [], [], []
+    corner_node = {}
+    for f in range(nf):
+        if not active[f]:
+            continue
+        for h in range(ri[f], ri[f + 1]):
+            v = rf[h]
+            tol = join_of(region[f])
+            lst = groups.setdefault((v, region[f]), [])
+            node = next((n for n in lst if _uv_gap(uv, first[n], h) <= tol), None)
+            if node is None:
+                value.append([float(uv[2 * h]), float(uv[2 * h + 1])])
+                vertex.append(v)
+                first.append(h)
+                pinned = False
+                for g in vf[v]:
+                    if not active[g] and region[g] == region[f]:
+                        c = next((c for c in range(ri[g], ri[g + 1]) if rf[c] == v), None)
+                        if c is not None and _uv_gap(uv, c, h) <= tol:
+                            pinned = True
+                            break
+                free.append(not pinned)
+                lst.append(len(value) - 1)
+                node = len(value) - 1
+            corner_node[h] = node
+    pairs = []
+    for f in range(nf):
+        if active[f]:
+            s, e = ri[f], ri[f + 1]
+            for h in range(s, e):
+                g = s if h + 1 == e else h + 1
+                a, b = corner_node[h], corner_node[g]
+                if a != b:
+                    pairs.append((min(a, b), max(a, b)))
+    pairs.sort()
+    i = 0
+    while i < len(pairs):
+        j = i + 1
+        while j < len(pairs) and pairs[j] == pairs[i]:
+            j += 1
+        if j - i == 1:
+            free[pairs[i][0]] = free[pairs[i][1]] = False
+        i = j
+    uniq = []
+    for p in pairs:
+        if not uniq or uniq[-1] != p:
+            uniq.append(p)
+    nbr = [[] for _ in value]
+    for a, b in uniq:
+        w = 1.0 / max(_dist(Pr[vertex[a]], Pr[vertex[b]]), 1e-12)
+        nbr[a].append((b, w))
+        nbr[b].append((a, w))
+    goal = STOP_TEXEL_SHARE / tex
+    history, stalled = [], False
+    order = [k for k in range(len(value)) if free[k]]
+    while True:
+        most = 0.0
+        for count, k in enumerate(order):
+            su = sv = sw = 0.0
+            for j, w in nbr[k]:
+                su += w * value[j][0]
+                sv += w * value[j][1]
+                sw += w
+            if sw > 0.0:
+                nu, nv = su / sw, sv / sw
+                most = max(most, max(abs(nu - value[k][0]), abs(nv - value[k][1])))
+                value[k][0], value[k][1] = nu, nv
+            if count % 512 == 511:
+                yield
+        history.append(most)
+        yield
+        if most <= goal:
+            break
+        it = len(history)
+        if it > STALL_WINDOW and most > (1.0 - STALL_DROP) * history[it - 1 - STALL_WINDOW]:
+            stalled = True
+            break
+    for h, node in corner_node.items():
+        if free[node]:
+            uv[2 * h], uv[2 * h + 1] = value[node]
+    out.update(sweeps=len(history), stalled=stalled)
+
+
+def reread_folded(src_points, src_flat, layer_uv, look: dict, res_points, res_indptr, res_flat, uv, expected) -> int:
+    """The last fold-fix layer: a face that still folds reads its corners again through its reference
+    triangle's own (affine) map; kept only when that unfolds it. Changes `uv` in place; returns the faces read again."""
+
+    if src_points is None or len(src_points) == 0:
+        return 0
+    SP = np.asarray(src_points, np.float64).reshape(-1, 3)
+    sf = np.asarray(src_flat, np.int64)
+    L = np.asarray(layer_uv, np.float64).ravel()
+    RP = np.asarray(res_points, np.float64).reshape(-1, 3)
+    ri, rf = np.asarray(res_indptr, np.int64), np.asarray(res_flat, np.int64)
+    done = 0
+    for f in range(len(ri) - 1):
+        if look["ref_face"][f] < 0 or not folded(ri, uv, expected, f):
+            continue
+        c = [int(x) for x in look["ref_ids"][3 * f:3 * f + 3]]
+        p = [tuple(SP[sf[h]]) for h in c]
+        q = [(L[2 * h], L[2 * h + 1]) for h in c]
+        e1, e2 = _sub(p[1], p[0]), _sub(p[2], p[0])
+        g11, g12, g22 = _dot(e1, e1), _dot(e1, e2), _dot(e2, e2)
+        det = g11 * g22 - g12 * g12
+        if not abs(det) > 1e-30:
+            continue
+        s, e = int(ri[f]), int(ri[f + 1])
+        old = uv[2 * s:2 * e].copy()
+        for h in range(s, e):
+            x = _sub(tuple(RP[rf[h]]), p[0])
+            r1, r2 = _dot(x, e1), _dot(x, e2)
+            b1, b2 = (g22 * r1 - g12 * r2) / det, (g11 * r2 - g12 * r1) / det
+            for k in range(2):
+                uv[2 * h + k] = q[0][k] + b1 * (q[1][k] - q[0][k]) + b2 * (q[2][k] - q[0][k])
+        if folded(ri, uv, expected, f):
+            uv[2 * s:2 * e] = old
+        else:
+            done += 1
+    return done
+
+
+# ---------------------------------------------------------------- the sliced stage
+KEPT_SOURCES = 2  # built sources kept (seams and lookup structures); a fit reads the same source many times
+_SOURCES: OrderedDict = OrderedDict()
+
+
+def _source_key(sp, si, sf, suv, material, repeat, texture_px, uv_tol_px, classes) -> str:
+    h = hashlib.sha1()
+    for a, dt in ((sp, np.float64), (si, np.int64), (sf, np.int64), (suv, np.float64), (() if material is None else material, np.int64),
+                  (repeat, bool), (classes, np.int64)):
+        x = np.ascontiguousarray(np.asarray(a, dt).ravel())
+        h.update(str(x.shape).encode())
+        h.update(x.tobytes())
+    h.update(repr((float(texture_px), float(uv_tol_px), material is None)).encode())
+    return h.hexdigest()
+
+class Transfer:
+    """Per-side transfer as a sliced stage: `step()` does about 4 ms of work, `done` turns True at the end, `result` then
+    holds its dict (uv, expected, lookup arrays, fold report). `stop()` ends it early with what was read (`result["done"]` False)."""
+
+    def __init__(self, src_points, src_indptr, src_flat, corner_uv, res_points, res_indptr, res_flat, material=None, repeat=(),
+                 texture_px: float = TEXTURE_PX_DEFAULT, uv_tol_px: float = UV_TOL_PX, classes=(), fix_folds: bool = True):
+        self.args = (src_points, src_indptr, src_flat, corner_uv, res_points, res_indptr, res_flat)
+        self.material, self.repeat, self.texture_px, self.uv_tol_px = material, repeat, texture_px, uv_tol_px
+        self.classes, self.fix_folds = classes, fix_folds
+        self.done, self.result, self.numbers = False, None, {"estimate": True}
+        self._stopped = False
+        self._steps = self._run()
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    def step(self) -> None:
+        if self.done:
+            return
+        end = time.perf_counter() + SLICE_S
+        while time.perf_counter() < end:
+            try:
+                next(self._steps)
+            except StopIteration:
+                self._finish()
+                return
+
+    def _finish(self) -> None:
+        self.done = True
+        r = self.result
+        self.numbers = dict(estimate=False, done=bool(r["done"]), slid=int(np.sum(r["slid"])), folded_before=r["folded_before"],
+                            folded_after=r["folded_after"], fold_stuck=r["fold_stuck"])
+
+    def _run(self):
+        sp, si, sf, suv, rp, ri, rf = self.args
+        key = _source_key(sp, si, sf, suv, self.material, self.repeat, self.texture_px, self.uv_tol_px, self.classes)
+        hit = _SOURCES.get(key)
+        if hit is None:  # the source's seams and lookup structures, built once for every transfer from it
+            seams = {}
+            yield from _extract_steps(sp, si, sf, suv, self.material, self.repeat, self.texture_px, self.uv_tol_px, (), seams)
+            if len(self.classes):
+                set_classes(seams, self.classes)
+            yield
+            src = _Source(np.asarray(sp, np.float64).reshape(-1, 3), np.asarray(si, np.int64), np.asarray(sf, np.int64), seams, suv)
+            yield from src.build()
+            if self._stopped:
+                return
+            _SOURCES[key] = hit = (seams, src)
+            while len(_SOURCES) > KEPT_SOURCES:
+                _SOURCES.popitem(last=False)
+        seams, src = hit
+        ri = np.asarray(ri, np.int64)
+        n_corners = int(ri[-1])
+        look = _empty_lookup(seams, ri, n_corners)
+        for _ in _lookup_steps(seams, sp, si, sf, rp, ri, rf, look, suv, src):
+            if self._stopped:
+                break
+            yield
+        look["done"] = not self._stopped
+        uv, expected = evaluate(look, si, sf, np.asarray(suv, np.float64).ravel(), ri)
+        report = dict(before=0, after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False, untangled=0, reread=0)
+        if self.fix_folds and look["done"]:
+            for _ in _fold_fix_steps(rp, ri, rf, uv, look["region"], expected, look["join"], seams["texture_px"], report):
+                if self._stopped:
+                    report["stopped"] = True
+                    break
+                yield
+            if report["after"] > 0 and not self._stopped:
+                report["reread"] = reread_folded(sp, sf, suv, look, rp, ri, rf, uv, expected)
+                report["after"] -= report["reread"]
+        self.result = dict(uv=uv, expected=expected, **look, **{f"fold_{k}" if k not in ("before", "after") else f"folded_{k}": v for k, v in report.items()})
+
+
+def transfer(src_points, src_indptr, src_flat, corner_uv, res_points, res_indptr, res_flat, material=None, repeat=(),
+             texture_px: float = TEXTURE_PX_DEFAULT, uv_tol_px: float = UV_TOL_PX, classes=(), fix_folds: bool = True) -> dict:
+    """Per-side transfer run to the end (see `Transfer`)."""
+
+    stage = Transfer(src_points, src_indptr, src_flat, corner_uv, res_points, res_indptr, res_flat, material, repeat, texture_px, uv_tol_px,
+                     classes, fix_folds)
+    while not stage.done:
+        stage.step()
+    return stage.result
+
+
+def layer(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look: dict, texture_px: float = TEXTURE_PX_DEFAULT,
+          fix_folds: bool = True, src_points=()) -> tuple:
+    """Another UV layer through a transfer's lookup: (uv, expected, fold report). `src_points` (empty =
+    none) turns on the fold fix's last layer (`reread_folded`)."""
+
+    got = {}
+    for _ in layer_steps(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look, texture_px, fix_folds, src_points, got):
+        pass
+    return got["uv"], got["expected"], got["fold"]
+
+
+def layer_steps(src_indptr, src_flat, layer_uv, res_points, res_indptr, res_flat, look: dict, texture_px: float = TEXTURE_PX_DEFAULT,
+                fix_folds: bool = True, src_points=(), got: dict | None = None):
+    """Generator: `layer`'s work in slices (the fold fix a step at a time).
+    Fills got["uv"], got["expected"], got["fold"] and returns (uv, expected, fold)."""
+
+    uv, expected = evaluate(look, src_indptr, src_flat, layer_uv, res_indptr)
+    yield
+    report = dict(before=0, after=0, rings=0, sweeps=0, stuck=0, stalled=False, stopped=False, untangled=0, reread=0)
+    yield
+    if fix_folds:
+        yield from _fold_fix_steps(res_points, res_indptr, res_flat, uv, look["region"], expected, look["join"], texture_px, report)
+        if report["after"] > 0:
+            report["reread"] = reread_folded(src_points, src_flat, layer_uv, look, res_points, res_indptr, res_flat, uv, expected)
+            report["after"] -= report["reread"]
+    fold = {f"fold_{k}" if k not in ("before", "after") else f"folded_{k}": v for k, v in report.items()}
+    if got is not None:
+        got.update(uv=uv, expected=expected, fold=fold)
+    return uv, expected, fold

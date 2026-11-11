@@ -24,6 +24,7 @@ from bpy.app.handlers import persistent
 
 from . import overlay, profiles
 from .triadq import history as H
+from .triadq import uvbake
 from .translations import tr
 
 LOW_GB = 1.5  # free memory under this: the oldest half of the steps is let go, and the panel says so
@@ -313,6 +314,7 @@ def jump(context, index: int) -> bool:
         mesh = bpy.data.meshes.get(name)
         if mesh is not None:
             _write_uvs(mesh, kept)
+    uvbake.bring_back(context.scene, snap.get("bake_step", 0))
     record(context, f"Back to: {entry.name}", entry.numbers, push=True)
     if uvs:
         new = steps.entries[-1]

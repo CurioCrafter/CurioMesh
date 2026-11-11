@@ -23,9 +23,11 @@ def tree(files):
 
 class GuardTests(unittest.TestCase):
     def test_clean_and_dirty_trees(self):
-        self.assertEqual(check_no_uv.check(tree({"triadq/uvs.py": "x", "bridge.py": "curiomesh_uv_status"})), [])
-        for rel, text in [("uv_fast.py", ""), ("native/src/uvpack.rs", ""), ("a.py", "x  # " + MARK + "\n"),
-                          ("b.md", "<!-- " + MARK + " begin -->"), ("c.py", "curiomesh" + "_uv = 1")]:
+        kept = {"triadq/uvs.py": "x", "triadq/uvnew.py": "x", "uv_panel.py": "curiomesh_uv = 1", "bridge.py": "curiomesh_uv_status"}
+        self.assertEqual(check_no_uv.check(tree(kept)), [])
+        for rel, text in [("uv_fast.py", ""), ("triadq/uvkeep.py", ""), ("native/src/uvpack.rs", ""), ("a.py", "x  # " + MARK + "\n"),
+                          ("b.md", "<!-- " + MARK + " begin -->"), ("c.py", "from .triadq import uv" + "keep"),
+                          ("d.py", "bpy.ops.curiomesh.uv" + "_seam_fit()"), ("e.py", "Seam Fit: " + "Light")]:
             self.assertEqual(len(check_no_uv.check(tree({rel: text}))), 1, rel)
 
     def test_passes_on_itself(self):

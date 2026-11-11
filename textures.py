@@ -11,6 +11,7 @@ import numpy as np
 
 from . import sliced
 from .triadq import tasks, texsets
+from .triadq import uvbake
 from .triadq.uvs import is_see_through, uv_overlap
 
 BAKE_LAYER = "CurioMesh_Bake"
@@ -22,6 +23,8 @@ def ensure_target_uvs_steps(obj: bpy.types.Object, method: str = "SMART", new_la
     """Unwrap a mesh with no UVs. With new_layer, always unwrap, into a new layer that becomes the active one. Timer steps
     (`sliced`): a long unwrap yields between short pieces; Stop falls back to Smart Project."""
     yield from ()
+    if (yield from uvbake.ensure_target_uvs_steps(obj, method, new_layer, island_margin, sliced.stopped, lambda f: sliced.tick("Making the bake UVs", f))):
+        return  # CurioMesh's own unwrap made the layer (or there was nothing to do)
     if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
         return
     if new_layer:
@@ -221,7 +224,7 @@ def bake_detail_steps(
     """
     mesh = target_obj.data
     glass = {i: m for i, m in enumerate(mesh.materials) if with_color and is_see_through(m)}
-    margin = max(4, int(resolution) // 128)  # padding that survives the texture's smaller mip levels
+    margin = uvbake.gap_px(resolution)
     if new_uvs or not _uv_layer_can_hold_bake(mesh):
         while True:
             yield from ensure_target_uvs_steps(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
@@ -239,6 +242,7 @@ def bake_detail_steps(
         source_obj, target_obj, maps=("NORMAL", "COLOR") if with_color else ("NORMAL",),
         resolution=resolution, margin=margin, cage=cage, ray_limit=3.0 * cage,
     )
+    uvbake.after_bake(target_obj, images)
     normal = images[0]
     if with_color:
         private = [m for m in mesh.materials if m is not None]
@@ -483,7 +487,7 @@ def bake_selected_to_active_steps(
     maps: Iterable[str],
     resolution: int = 2048,
     margin: int = 8,
-    uv_method: str = "SMART",
+    uv_method: str = "CURIO",
     cage: float = 0.04,
     ray_limit: float = 0.0,
 ):

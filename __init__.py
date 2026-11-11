@@ -24,6 +24,7 @@ from .operators import (
 )
 from . import batch, fix_select, game_export, guided, hardware, help, history, live, overlay, panel, region, tidytools
 from .ui import CURIOMESH_PG_settings, PANEL_CLASSES, apply_category
+from . import uv_panel
 from . import translations
 from .translations import tr
 
@@ -340,6 +341,7 @@ def register():
     tidytools.register()
     fix_select.register()
     game_export.register()
+    uv_panel.register()
     help.register()
     panel.register()
     apply_category()
@@ -352,6 +354,7 @@ def unregister():
     _registered = False
     panel.unregister()
     help.unregister()
+    uv_panel.unregister()
     game_export.unregister()
     fix_select.unregister()
     tidytools.unregister()

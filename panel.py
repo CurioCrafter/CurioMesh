@@ -17,6 +17,7 @@ import bpy
 from . import guided as G
 from . import autofix_live, faceloops, flowedit, hard_surface, hardware, icons, issue_panel, ladder, organize, overlay, parallel, profiles, segment_goals, segments, symmetry, tidylive, tidytools
 from . import verdict as V
+from . import uv_panel
 from . import help as helpmod
 from .translations import tip, tr
 
@@ -848,6 +849,7 @@ def draw_finish(layout, context, gs) -> None:
     if not done and G.state["applied"]:
         overlay.wrap_label(layout, f"Applied: {G.state['applied']}", icon="CHECKMARK", width=30, limit=4)
         layout.operator("curiomesh.export_game", text="Export for game...", **icons.kw("export", "EXPORT"))
+        uv_panel.draw_row(layout, context)
         return
     _help(layout, "finish")
     row = layout.row()
@@ -859,6 +861,7 @@ def draw_finish(layout, context, gs) -> None:
     row.prop(gs, "bake_detail", text="Bake", **icons.kw("bake", "IMAGE_DATA"))
     row.popover(panel="CURIOMESH_PT_pop_bake", text="", icon="PREFERENCES")
     helpmod.help_button(row, "bake")
+    uv_panel.draw_row(layout, context)
     row = layout.row(align=True)
     row.popover(panel="CURIOMESH_PT_pop_lod", text="LOD set...", **icons.kw("lod", "MOD_DECIM"))
     helpmod.help_button(row, "lod")

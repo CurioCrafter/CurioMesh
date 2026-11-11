@@ -36,6 +36,7 @@ from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
 from .triadq.types import FlatFaces, MeshData
 from .triadq.uvs import chart_codes
+from . import uv_panel
 from . import translations
 from .translations import tip, tr
 
@@ -1870,7 +1871,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     drawn = {kind: _guide_lines(context, gs, src, kind) for kind in ("LOOP", "BEND")}
     paint = _painted(state_source(), gs, src)
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
-    charts = _uv_charts(state_source(), src) if gs.keep_uvs and gs.bake_detail != "NORMAL_COLOR" else None
+    charts = _uv_charts(state_source(), src) if uv_panel.keep_mode(uv_panel.settings(), gs) == "exact" and gs.bake_detail != "NORMAL_COLOR" else None
     codes = src["mat"] if charts is None else charts[0]
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
@@ -2252,8 +2253,6 @@ def _stop() -> None:
     state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}), lod=None)
     segments.reset()
     overlay.tag_redraw()
-
-
 
 
 def _poll():
@@ -3288,7 +3287,6 @@ class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
         written = instances["rest"] if instances else res
         mesh = yield from _make_mesh_steps(source.name + "_Retopo", source, written)
         yield
-        uv_stop = " | Stopped: the UVs are a plain copy from your mesh" if sliced.stopped() else ""
         _shade_by_angle(mesh)
         yield
         if not _blockout_result():
@@ -3340,7 +3338,6 @@ class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
             count += sum(len(group["faces"]) for group in instances["groups"])
             baked = f", in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes"
         state["applied"] = f"{count:,} faces written to {out.name}{baked}{levels}"
-        state["applied"] += uv_stop
         self.report({"WARNING"} if baked.startswith("Bake failed") or sliced.stopped() else {"INFO"}, tr(state["applied"]))
         return {"FINISHED"}
 

@@ -30,6 +30,7 @@ from .atlasq import (
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
 from . import sliced
 from .textures import bake_selected_to_active_steps, ensure_target_uvs_steps
+from .triadq import uvclassic
 from .triadq.flatquad import FlatQuadOptions, flatten_regions, pair_and_close
 from .triadq import (
     MeshData,
@@ -1548,6 +1549,9 @@ def _preserve_textures_steps(
     """The UVs of the result, as timer steps (`sliced`). Stop falls back to Blender's transfer below."""
     yield from ()
     sliced.tick("Carrying the UVs over")
+    uv_status = yield from uvclassic.preserve_textures_steps(source, target, config, sliced.stopped)
+    if uv_status is not None and uv_mapping_is_valid(target):
+        return uv_status  # the per-side transfer; else (or after Stop) Blender's transfer below
     mode = str(config.texture_mode or "PROJECT").upper()
     if mode == "NONE":
         return "SKIPPED"

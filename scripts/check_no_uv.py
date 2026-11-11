@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
-"""Fail when a tree carries the GitHub-only UV features (the Blender-site build must not).
+"""Fail when a tree carries UV parts this Blender-site build leaves out (exit 1 on any hit).
 
 Usage: python scripts/check_no_uv.py [ROOT]   (ROOT defaults to the repo root)
-Checks: any UV file, any marker line or marked block, a UV property group, the UV popover.
+
+The site build includes New UVs, New page layout, Cut here, Bake those spots, the bake's own unwrap, Classic Remesh's
+per-side UV transfer and the UVs popover with Seam Fit Exact / Off. It leaves out Seam Fit Light (the fit after the
+search, its Look First tool, its Auto Fix passes and its Apply work-ahead) and the compiled UV kernels.
+Checks: a left-out UV file, any marker line or marked block, the names of the left-out parts.
 Search strings are built from parts and this file is skipped, so it passes on itself.
 """
 import fnmatch
@@ -15,17 +19,18 @@ from pathlib import Path
 MARK = "main-only" + ": uv"
 PATTERNS = [
     re.compile(re.escape(MARK).encode()),
-    re.compile(rb"\bcuriomesh" + rb"_uv\b"),
-    re.compile(rb"\bCURIOMESH_PT_pop" + rb"_uv\b"),
+    re.compile(rb"\buv" + rb"keep\b|\buv" + rb"snap\b|\buv" + rb"auto\b|\buv" + rb"_hooks\b|\buv" + rb"_fast\b"),
+    re.compile(rb"\buv" + rb"_seam_fit\b|\bSeam" + rb"Fit\b|\bSeam" + rb"Snap\b"),
+    re.compile(rb"Seam Fit: " + rb"Light"),
 ]
-# Paths relative to the root; triadq/uvs.py is the old, shipped module and is allowed.
+# Paths relative to the root: the left-out modules and the compiled kernels.
 UV_FILES = [
     "native/src/uv*.rs", "standalone/src/uv*.rs", "standalone/src/gui_uv.rs", "standalone/src/unwrap.rs",
-    "triadq/uv*.py", "uv_layers.py", "uv_panel.py", "uv_draw.py", "uv_fast.py", "uv_hooks.py",
-    "tests/test_uv_*.py", "tests/uv_*.py", "tests/blender_uv_*.py",
+    *(f"triadq/uv{name}.py" for name in ("keep", "snap", "auto")), *(f"uv_{name}.py" for name in ("fast", "hooks")),
+    "tests/test_uv_parity_*.py", "tests/uv_parity_common.py", *(f"tests/test_uv_{name}.py" for name in ("keep", "auto", "scaffold")),
+    "tests/uv_hooks_fake.py",
 ]
-ALLOWED = {"triadq/uvs.py", "tests/test_uvs.py"}
-SKIP_DIRS = {".git", "__pycache__", ".claude", "target"}
+SKIP_DIRS = {".git", "__pycache__", ".claude", ".ruff_cache", "target", "dist"}
 
 
 def check(root):
@@ -37,11 +42,13 @@ def check(root):
         for name in files:
             path = Path(dirpath) / name
             rel = path.relative_to(root).as_posix()
-            if path.resolve() == me or rel in ALLOWED:
+            if path.resolve() == me or rel == "tests/test_check_no_uv.py":
                 continue
             if any(fnmatch.fnmatchcase(rel, p) for p in UV_FILES):
-                problems.append(f"{rel}: UV file")
+                problems.append(f"{rel}: UV file left out of this build")
                 continue
+            if rel.startswith(("native/", "standalone/")):
+                continue  # the GitHub build's compiled sources: never in the zip, not this build's code
             try:
                 data = path.read_bytes()
             except OSError:
@@ -50,7 +57,7 @@ def check(root):
                 m = pat.search(data)
                 if m:
                     line = data.count(b"\n", 0, m.start()) + 1
-                    problems.append(f"{rel}:{line}: {m.group().decode()}")
+                    problems.append(f"{rel}:{line}: {m.group().decode(errors='replace')}")
                     break
     return problems
 
