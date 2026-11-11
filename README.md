@@ -41,7 +41,7 @@ There are three builds. They share the same ideas, but not the same features.
 | Agent tools | ✓ new in 0.9.9 | ✗ | ✗ command line only (`curiomesh batch`, `curiomesh measure`) |
 | History and Tidy Tools | ✓ new in 0.9.9 | ✗ not in 0.9.8 | ✗ (Redo this spot and Put back only) |
 | Parts exchange | ✓ new in 0.9.9 | ✗ | ✗ |
-| Released | ✓ 0.9.8 is out; 0.9.9 is not | each version goes through the site's review | ✓ 0.4.1 |
+| Released | ✓ 0.9.9 | each version goes through the site's review | ✓ 0.4.1 |
 
 The GitHub add-on is the fastest build inside Blender and has every feature. The Blender Extensions build follows that site's rules, so it is the most limited. Standalone has no Blender in the loop, so it can be faster; that is not measured yet. It has fewer tools.
 
@@ -50,7 +50,7 @@ The GitHub add-on is the fastest build inside Blender and has every feature. The
 | | |
 |---|---|
 | **Get started** | [Install](#install) · [Quick start](#quick-start) · [Choose a use and a style](#choose-a-use-and-a-style) |
-| **The panel, in order** | [Adjust](#adjust) · [Fix](#fix) · [Finish](#finish) |
+| **The panel, in order** | [Adjust](#adjust) · [Fix](#fix) · [UVs](#uvs) · [Finish](#finish) |
 | **Going further** | [Hard Surface](#hard-surface) · [Shape the flow](#shape-the-flow) · [Parts](#parts) · [Blockout and Hulls](#blockout-and-hulls) · [Pro tab and classic tools](#pro-tab-and-classic-tools) |
 | **Trust and speed** | [How it checks results](#how-it-checks-results) · [Results](#results) · [Big scans and small PCs](#big-scans-and-small-pcs) |
 | **Around the add-on** | [Which CurioMesh?](#which-curiomesh) · [Agent skills](#agent-skills) · [FAQ](#faq) · [Known limits](#known-limits) · [Contributing](#contributing) · [Credits](#credits) · [License](#license) |
@@ -260,6 +260,20 @@ Fix a spot by hand, press **Remember This Fix**, and CurioMesh can find the same
 
 [Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
 
+## UVs
+
+The **UVs** row (beside Bake in Finish) says where the result's UVs come from: **Auto** keeps your mesh's UVs, or makes new ones when it has none; **Keep source** puts the result's UVs where your mesh's were; **New** makes a fresh unwrap; **Off** leaves things as they were before 0.9.9 (a bake unwraps with Blender's Smart UV Project). **Look** opens the tool that fits, and the dots open the settings. Every UV tool shows its change on the mesh first: Enter keeps it, Esc cancels, B shows before and after, and Ctrl+Z undoes it. A History jump back over a UV step also brings back the UVs and the baked pixels.
+
+- **New UVs** makes few cuts, puts them where the camera check sees least, and keeps the quad rows straight. **Stretch allowed** is its dial, and Keep going repeats while the page fills better. On the 13 test models at a 1024 px page it made 0 overlaps and 0 flipped faces, never more than half as many pieces as Blender's Smart UV Project, and used the page better than Smart UV Project by at least 10 points on 12 of 13 (44 % to 70 % of the page used). The cuts you can see from the camera were at or under half as long on 12 of 13.
+- **Page layout.** Pieces are packed in whole pixels with a gap that keeps them apart down to the mip size you pick (**Texture size**, **Gap: clean down to**). **Fill the page** gives them as many pixels as fit, or set a **Pixel density**. **Hidden parts get** gives surfaces the camera never sees fewer pixels. **New page layout** packs the islands you already have again.
+- **Cut here / Join here.** Click an edge to cut the UVs there, click it again to join it back. New UVs follow your cuts.
+- **Seam Fit** (when the result keeps your mesh's UVs): **Light** follows the seams that matter within an extra-faces allowance and says what it could not fit; Keep going or a higher allowance fixes more. Apply writes the fit you saw, and it works the fit out ahead while the result is on screen.
+- **Seam Fit Exact** keeps every seam as a border and can cost several times the faces. **Keep UV Seams** under Finish is the old name for it.
+- **Bake those spots** gives each face that still crosses a seam a small island of its own and bakes just those from your original mesh. The rest of the texture is untouched, and Ctrl+Z gives the old pixels back.
+- **Auto Fix** has a **UV seams** group that moves edges onto your mesh's UV seams, and runs Seam Fit. Auto itself also snaps edges onto the seams after its repairs.
+
+[Back to top](#curiomesh-free-automatic-retopology-add-on-for-blender)
+
 ## Finish
 
 Apply writes the result to your scene. Bake, LOD sets and export are here too, for game assets. The Finish section has one big **Apply**, **New Object / Replace Mesh**, the only **Bake** row (its size and texture sets behind the gear), **LOD set...** and **Discard**. Export for game and the star and report buttons appear after Apply. Nothing changes in your scene until Apply.
@@ -269,7 +283,7 @@ Apply writes the result to your scene. Bake, LOD sets and export are here too, f
 - **Bake Detail** sits next to Apply. Choose Off, **Normal Map** or **Normal + Color**, at 512 to 4096 pixels. Your mesh is only read. Normal + Color makes one new material with new UVs and is the recommended route for textured game assets.
 - **Texture Sets** (next to Bake Size, with Normal + Color): bake onto 1 to 16 sets of maps, each its own material, so a big model keeps its detail. Whole parts go together, in sets of about equal area. Faces on a set's border are split, as on any UV seam.
 - **Make LOD Set** makes three new objects named `_LOD0`, `_LOD1` and `_LOD2` for game engines, each a Reduce To of your mesh at percents you choose (50, 25 and 12.5% by default). Only the first runs the full search.
-- **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces.
+- **Keep UV Seams** keeps each quad inside one UV island. It is off by default, because a model cut into many islands can need up to about twice the faces. See [UVs](#uvs) for Seam Fit Light, which adds far fewer faces.
 - **Hard edges.** Apply marks edges sharper than 60 degrees as hard, and the result takes its shading from the nearest source points, so flat sides stay flat. Under Options, **Hard Edges** can instead be Leave, **Mark Sharp + Crease** (no extra faces, a Subdivision Surface keeps the edge) or **Holding Edges** (a loop on both sides of every hard edge, at a % of the next face or in millimetres).
 - **Export for Game Engine** (File > Export > CurioMesh Game Asset, or the button after Apply) writes the selected meshes and their maps for the engine you pick. It keeps the bake's triangles, and your objects and images in Blender are not changed.
 
@@ -434,7 +448,7 @@ are in [docs/ATLAS_Q_REFERENCE.md](docs/ATLAS_Q_REFERENCE.md). Release notes are
 | **Texture Sets, Export for Game Engine** | Bake big models onto several sets of maps; write FBX, .glb or OBJ for your engine with meshes split under its triangle limit. |
 | **Show it how** | Fix a spot by hand once, and CurioMesh finds the same pattern in later results. |
 | **Redo inside shapes (Live Boolean)** | Union, Subtract or Intersect boxes and spheres, and only what is inside is redone, live. |
-| **UV and shading care** | Keep UV Seams, hard edges past 60 degrees, shading read from your source. |
+| **UV and shading care** | Seam Fit, New UVs, hard edges past 60 degrees, shading read from your source. |
 | **Checks and repair** | Non-manifold edges, flipped faces, duplicates, holes, crossing faces. What cannot be fixed is selected. |
 | **Tidiness score** | A 0 to 100 number for how close the quad layout is to hand-made meshes. |
 | **Part cases** | Each part is named (tube, flat plate, rough scan and so on) so the search starts at sensible sizes. |
@@ -658,7 +672,7 @@ Yes. Multires Detail makes the cage and puts your mesh's shape in the levels abo
 <details>
 <summary><b>Does it keep my UVs?</b></summary>
 
-Turn on Keep UV Seams and each quad stays inside one UV island, at the cost of more faces on models with many islands. Or bake with Normal + Color, which makes new UVs and does not need the old seams.
+With UVs on Auto or Keep source, Seam Fit Light follows the seams that matter and adds few faces. Turn on Keep UV Seams and each quad stays inside one UV island, at the cost of more faces on models with many islands. Or bake with Normal + Color, which makes new UVs and does not need the old seams.
 
 </details>
 
@@ -682,7 +696,7 @@ Yes, from Blender 3.6 LTS up to 5.2. See [Install](#install) for which versions 
 
 - **Keep Detail quads are not always tidy.** It spends everything Detail allows, so on smooth surfaces quads can look slanted or scattered instead of running in rows. Spinning edges at poles helps (Tidiness about 28 to 39 on smooth busts), but it is still far from hand-made. Use Balanced or Clean Rows for that, at the cost of more faces. Clean Rows also loses small sharp detail.
 - **Soft faces and fine detail go first.** At 6%, cloth folds, small rounded ends and fine ornaments are simplified. Lower Detail to keep more. CurioMesh does not give you a hand-made low poly yet.
-- **UV seams.** By default quads may span several UV islands, so textures can smear there. Turn on Keep UV Seams (up to about twice the faces) or bake with Normal + Color.
+- **UV seams.** By default quads may span several UV islands, so textures can smear there. Use Seam Fit Light (few extra faces), Keep UV Seams (up to about twice the faces) or bake with Normal + Color.
 - **Big scans are slow.** A scan of over a million faces can take a long time on a busy PC, and Blender can pause for a few seconds at a time. Use Effort, or Export Job.
 - **No global patch layout.** CurioMesh has none, and it does not promise exact loops round eyes, mouths or joints without your help. An optional script, `scripts/flowtool.py`, can use QuadWild if you install it separately. It is not in the panel, it covers organic parts only, and it is untested on Linux and macOS.
 

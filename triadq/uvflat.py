@@ -48,17 +48,36 @@ class Elements:
     """ARAP terms (one rotation per face) and the test triangles (quads: both diagonals) of a chart."""
 
     def __init__(self, points, indptr, flat):
+        for _ in self._fill(points, indptr, flat, 0):
+            pass
+
+    @classmethod
+    def steps(cls, points, indptr, flat, chunk: int = 2048):
+        """Generator: the same terms made `chunk` faces at a time, yielding between; returns the Elements."""
+
+        el = cls.__new__(cls)
+        yield from el._fill(points, indptr, flat, chunk)
+        return el
+
+    def _fill(self, points, indptr, flat, chunk):
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         indptr, flat = np.asarray(indptr, dtype=np.int64), np.asarray(flat, dtype=np.int64)
         sizes = np.diff(indptr)
         self.nfaces = len(sizes)
         a, b, w, e, elem = [], [], [], [], []
         tv, tr, tf = [], [], []
+        pieces = []
         for k in np.unique(sizes):
             k = int(k)
             ids = np.flatnonzero(sizes == k)
             if k < 3 or len(ids) == 0:
                 continue
+            step = chunk if chunk > 0 else len(ids)
+            pieces += [(k, ids[i : i + step]) for i in range(0, len(ids), step)]
+        tri_parts: dict = {}  # (size, test triangle) -> pieces, put back in the order one piece per size gives
+        for k, ids in pieces:
+            if chunk > 0:
+                yield
             corner = indptr[ids][:, None] + np.arange(k)
             verts = flat[corner]
             q = _flat_polygons(points[verts])
@@ -82,10 +101,14 @@ class Elements:
             e.append(side.reshape(-1, 2))
             elem.append(np.repeat(ids, k))
             tris = [[0, 1, 2]] if k == 3 else ([[0, 1, 2], [0, 2, 3], [0, 1, 3], [1, 2, 3]] if k == 4 else [[0, i, i + 1] for i in range(1, k - 1)])
-            for t in tris:
-                tv.append(verts[:, t])
-                tr.append(q[:, t])
-                tf.append(ids)
+            for n, t in enumerate(tris):
+                tri_parts.setdefault((k, n), []).append((verts[:, t], q[:, t], ids))
+        for key in sorted(tri_parts):
+            for x, y, z in tri_parts[key]:
+                tv.append(x)
+                tr.append(y)
+                tf.append(z)
+
         def cat(parts, shape, dtype):
             return np.concatenate(parts) if parts else np.zeros(shape, dtype=dtype)
 
@@ -215,9 +238,19 @@ def grid_layout(points, indptr, flat):
 
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     n = len(points)
-    faces = _faces(indptr, flat)
-    if any(len(f) != 4 for f in faces):
+    indptr, flat = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    if (np.diff(indptr) != 4).any():
         return None
+    if len(flat) and n:  # a pole (an inner vertex without exactly four quads) can never unfold onto the grid: said at once
+        a, b = flat, flat[_next_corners(indptr, flat)]
+        key, uses = np.unique(np.minimum(a, b) * n + np.maximum(a, b), return_counts=True)
+        edge_v = key[uses != 2]  # border sides (and over-used ones): their vertices are not checked
+        outer = np.zeros(n, bool)
+        outer[edge_v // n] = outer[edge_v % n] = True
+        quads = np.bincount(flat, minlength=n)
+        if ((quads > 0) & (quads != 4) & ~outer).any():
+            return None
+    faces = _faces(indptr, flat)
     edge_faces: dict = {}
     for f, poly in enumerate(faces):
         for i in range(4):
@@ -281,32 +314,55 @@ def grid_layout(points, indptr, flat):
 
 def loop_triples(indptr, flat, n: int) -> np.ndarray:
     """(a, v, b) where a - v - b continues one quad row through v (interior vertices with four quads, border vertices
-    with two quads); poles end rows. Label-free."""
+    with two quads); poles end rows. Label-free. In vertex order; at a vertex with four quads, the pairs of its sorted
+    neighbours that share no quad, in pair order."""
 
-    fans: list = [[] for _ in range(n)]
-    for poly in _faces(indptr, flat):
-        k = len(poly)
-        for c in range(k):
-            fans[int(poly[c])].append((int(poly[c - 1]), int(poly[(c + 1) % k]), k == 4))
-    out = []
-    for v, fan in enumerate(fans):
-        if not fan or not all(x[2] for x in fan):
+    indptr, flat = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    empty = np.zeros((0, 3), np.int64)
+    if len(flat) == 0 or n == 0:
+        return empty
+    sizes = np.diff(indptr)
+    face = np.repeat(np.arange(len(sizes)), sizes)
+    base, k = indptr[face], sizes[face]
+    pos = np.arange(len(flat)) - base
+    prv, nxt = flat[base + (pos - 1) % k], flat[base + (pos + 1) % k]
+    cnt = np.bincount(flat, minlength=n)
+    quad_only = np.bincount(flat, weights=(k != 4).astype(np.float64), minlength=n) == 0
+    by_v = np.argsort(flat, kind="stable")  # each vertex's corners in face order
+    start = np.cumsum(cnt) - cnt
+    keys, rows = [], []
+    for fan, want in ((4, 4), (2, 3)):
+        vs = np.flatnonzero((cnt == fan) & quad_only)
+        if len(vs) == 0:
             continue
-        nb = sorted({w for x in fan for w in x[:2]})
-        def shares(p, q):
-            return any((x[0] == p and x[1] == q) or (x[0] == q and x[1] == p) for x in fan)
-
-        if len(fan) == 4 and len(nb) == 4:
-            for i in range(4):
-                for j in range(i + 1, 4):
-                    if not shares(nb[i], nb[j]):
-                        out.append((nb[i], v, nb[j]))
-        elif len(fan) == 2 and len(nb) == 3:
-            inner = next((w for w in nb if all(x[0] == w or x[1] == w for x in fan)), None)
-            if inner is not None:
-                ends = [w for w in nb if w != inner]
-                out.append((ends[0], v, ends[1]))
-    return np.array(out, dtype=np.int64).reshape(-1, 3)
+        corners = by_v[start[vs][:, None] + np.arange(fan)]
+        P, N = prv[corners], nxt[corners]
+        srt = np.sort(np.concatenate([P, N], axis=1), axis=1)
+        new = np.ones(srt.shape, bool)
+        new[:, 1:] = srt[:, 1:] != srt[:, :-1]
+        ok = new.sum(1) == want
+        vs, P, N = vs[ok], P[ok], N[ok]
+        nb = srt[ok][new[ok]].reshape(-1, want)
+        if fan == 4:
+            for slot, (i, j) in enumerate(((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))):
+                a, b = nb[:, i : i + 1], nb[:, j : j + 1]
+                shares = (((P == a) & (N == b)) | ((P == b) & (N == a))).any(1)
+                sel = ~shares
+                rows.append(np.stack([nb[sel, i], vs[sel], nb[sel, j]], 1))
+                keys.append(vs[sel] * 8 + slot)
+        else:
+            on_all = np.stack([((P == nb[:, w : w + 1]) | (N == nb[:, w : w + 1])).all(1) for w in range(3)], 1)
+            has = on_all.any(1)
+            inner = np.argmax(on_all, 1)[has]
+            nb, vs = nb[has], vs[has]
+            ends = np.array([[1, 2], [0, 2], [0, 1]])[inner]
+            r = np.arange(len(vs))
+            rows.append(np.stack([nb[r, ends[:, 0]], vs, nb[r, ends[:, 1]]], 1))
+            keys.append(vs * 8 + 6)
+    if not rows:
+        return empty
+    rows, keys = np.concatenate(rows), np.concatenate(keys)
+    return rows[np.argsort(keys, kind="stable")].astype(np.int64).reshape(-1, 3)
 
 
 def bend_p95(triples: np.ndarray, uv) -> float:
@@ -427,7 +483,41 @@ class _System:
 # ---------------------------------------------------------------------------------------------------------------------
 
 
+def _next_corners(indptr, flat) -> np.ndarray:
+    """The corner after each corner in its face (wrapping)."""
+
+    indptr = np.asarray(indptr, np.int64)
+    sizes = np.diff(indptr)
+    nxt = np.arange(1, len(flat) + 1)
+    ends = indptr[1:] - 1
+    nxt[ends[sizes > 0]] = indptr[:-1][sizes > 0]
+    return nxt
+
+
 def _border_loop(indptr, flat, n: int) -> list:
+    flat = np.asarray(flat, np.int64)
+    if len(flat):
+        a, b = flat, flat[_next_corners(indptr, flat)]
+        key = np.unique(a * n + b)
+        side = key[~np.isin((key % n) * n + key // n, key)]  # sides whose reverse is not used: the border
+        start = side // n
+        if len(np.unique(start)) == len(start):  # one border side leaves each border vertex: walked on arrays
+            nxt = np.full(n, -1, np.int64)
+            nxt[start] = side % n
+            nxt = nxt.tolist()
+            seen = [False] * n
+            loops = []
+            for v0 in start.tolist():  # ascending
+                if seen[v0]:
+                    continue
+                loop, v = [], v0
+                while v >= 0 and not seen[v]:
+                    seen[v] = True
+                    loop.append(v)
+                    v = nxt[v]
+                loops.append(loop)
+            loops.sort(key=len, reverse=True)
+            return loops[0] if loops else []
     sides = set()
     for poly in _faces(indptr, flat):
         k = len(poly)
@@ -494,7 +584,7 @@ class Flatten:
     def _run(self):
         n = self.n
         yield 0.0
-        el = Elements(self.points, self.indptr, self.flat)
+        el = yield from Elements.steps(self.points, self.indptr, self.flat)
         yield 0.02
         given = self.start
         if given is not None and given.shape == (n, 2) and np.isfinite(given).all() and self.start_mode != "free" and count_flips(self.indptr, self.flat, given) == 0:
@@ -552,12 +642,7 @@ class Flatten:
         border = _border_loop(self.indptr, self.flat, n)
         if not border:
             raise ValueError("chart has no border (closed): it needs a cut")
-        a, b = [], []
-        for poly in _faces(self.indptr, self.flat):
-            k = len(poly)
-            a.extend(int(poly[i]) for i in range(k))
-            b.extend(int(poly[(i + 1) % k]) for i in range(k))
-        a, b = np.array(a), np.array(b)
+        a, b = self.flat, self.flat[_next_corners(self.indptr, self.flat)]
         half = np.full(len(a), 0.5)
         rows = np.concatenate([a, b, a, b])
         cols = np.concatenate([a, b, b, a])

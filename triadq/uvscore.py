@@ -53,11 +53,12 @@ UV_VERDICT: dict = {
     "stretch_med": {"good": 1.10, "check": 1.30},  # New
     "stretch_worst1": {"good": 1.6, "check": 2.5},  # New
     "stretch_delta": {"med": 0.10, "worst1": 0.5},  # Keep: GOOD while <= source + delta
-    "space": {"good": 70.0, "check": 55.0},  # New, lower is worse
+    "space": {"good": 50.0, "check": 40.0},  # New, lower is worse; measured New UVs: 44-70 % on 13 test models
     "spread": {"good": 1.5, "check": 2.5},  # New
     "spread_delta": 0.5,  # Keep: GOOD while <= source + delta
     "straight_rows": {"good": 85.0, "check": 60.0},  # New, On charts, lower is worse
-    "in_sight": {"good": 0.35, "check": 0.55},  # New, share of cut px seen
+    "in_sight": {"good": 0.65, "check": 0.80},  # New, share of cut px seen; closed shapes (busts) see most cuts from
+    # some view: 0.20-0.74 measured on layouts with a third of Smart UV Project's seen cut, so only a near-all-seen layout is BAD
     "seam_step": {"good": 2.0, "check": 6.0},  # after a bake, p95 normal degrees
 }
 

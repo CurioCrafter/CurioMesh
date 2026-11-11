@@ -180,6 +180,29 @@ class _Dsu:
             self.p[ra] = rb
 
 
+def _components(n, a, b):
+    """Connected parts of n nodes joined by the pairs (a, b): per node the smallest node of its part (what a union-find
+    whose root is the smallest id gives). Minimum labels hooked over the pairs, then pointer jumping (Shiloach, Vishkin
+    1982), until nothing changes."""
+
+    lab = np.arange(n)
+    if len(a) == 0:
+        return lab
+    while True:
+        old = lab
+        low = np.minimum(lab[a], lab[b])
+        lab = lab.copy()
+        np.minimum.at(lab, old[a], low)
+        np.minimum.at(lab, old[b], low)
+        while True:
+            nxt = lab[lab]
+            if np.array_equal(nxt, lab):
+                break
+            lab = nxt
+        if np.array_equal(lab, old):
+            return lab
+
+
 def _drive(gen):
     """Run a sliced generator to its end; its return value."""
 
@@ -263,7 +286,7 @@ def _wedges(t: Topo, cut) -> list:
 def _wedges_steps(t: Topo, cut):
     d = _Dsu(len(t.flat))
     for e in range(t.ne):
-        if e & 4095 == 4095:
+        if e & 1023 == 1023:
             yield
         if not cut[e] and not t.wall[e]:
             h0, h1 = t.euse[e]
@@ -662,7 +685,7 @@ class ChartTree:
         t = self.topo
         dsu = _Undo(len(t.flat))
         for e in range(t.ne):
-            if e & 2047 == 2047:
+            if e & 1023 == 1023:
                 yield
             if not self.cut_base[e]:
                 _glue(t, dsu, [e])
@@ -673,7 +696,7 @@ class ChartTree:
         glued = np.zeros(t.ne, bool)
         used = segs_glued = 0
         for i, (segs, stretch, _, _) in enumerate(self.merges):
-            if i & 255 == 255:
+            if i & 63 == 63:
                 yield
             if not stretch <= thr:
                 continue
@@ -746,42 +769,51 @@ class ChartTree:
         ok, wedge = self._is_disk(members[b], pfaces, root, glued, b)
         return self.segments[best].weight, ok, wedge
 
+    def _disk_arrays(self):
+        """The topology arrays `_is_disk` works on, made once per tree."""
+
+        got = getattr(self, "_disk_np", None)
+        if got is None:
+            t = self.topo
+            ip = np.asarray(t.indptr, np.int64)
+            flat = np.asarray(t.flat, np.int64)
+            sizes = np.diff(ip)
+            nxt = np.arange(len(flat)) + 1
+            nxt[(ip[1:] - 1)[sizes > 0]] = ip[:-1][sizes > 0]
+            use = np.asarray(t.euse, np.int64).reshape(-1, 2)
+            got = self._disk_np = (ip, flat, nxt, np.repeat(np.arange(t.nf), sizes), np.asarray(t.cedge, np.int64), use[:, 0], use[:, 1],
+                                   np.asarray(t.wall, bool), np.asarray(t.ea, np.int64), np.asarray(t.eb, np.int64),
+                                   np.asarray(self.patch, np.int64), np.asarray(self.cut_base, bool))
+        return got
+
     def _is_disk(self, patches, pfaces, root, glued, r: int):
-        """Are these patches' faces (root r) one disk under the glue? (bool, wedge find over their corners)."""
+        """Are these patches' faces (root r) one disk under the glue? (bool, wedge find over their corners). On arrays:
+        chi = faces + glued edges - corner joins, parts = faces - face joins, joins counted as nodes minus parts."""
 
-        t = self.topo
-        cpar: dict = {}
-        fpar: dict = {}
-
-        def find(par, x):
-            while par.get(x, x) != x:
-                par[x] = par.get(par[x], par[x])
-                x = par[x]
-            return x
-
-        def join(par, a, b):
-            ra, rb = find(par, a), find(par, b)
-            if ra == rb:
-                return False
-            par[max(ra, rb)] = min(ra, rb)
-            return True
-
-        chi = comps = sum(len(pfaces[p]) for p in patches)
-        for p in patches:
-            for f in pfaces[p]:
-                for h in t.face_corners(f):
-                    e = t.cedge[h]
-                    h0, h1 = t.euse[e]
-                    if h != h0 or h1 < 0 or t.wall[e] or (self.cut_base[e] and not glued[e]):
-                        continue
-                    g = t.cface[h1]
-                    if root[self.patch[g]] != r:
-                        continue
-                    chi += 1
-                    for v in (t.ea[e], t.eb[e]):
-                        chi -= int(join(cpar, t.at(h0, v), t.at(h1, v)))
-                    comps -= int(join(fpar, f, g))
-        return comps == 1 and chi == 1, (lambda x: find(cpar, x))
+        ip, flat, nxt, cface, cedge, h0a, h1a, wall, ea, eb, patch, cut_base = self._disk_arrays()
+        faces = np.asarray([f for p in patches for f in pfaces[p]], np.int64)
+        nfc = len(faces)
+        sizes = ip[faces + 1] - ip[faces]
+        h = np.repeat(ip[faces] - (np.cumsum(sizes) - sizes), sizes) + np.arange(int(sizes.sum()))
+        e = cedge[h]
+        h0, h1 = h0a[e], h1a[e]
+        g = cface[np.maximum(h1, 0)]
+        glued = np.asarray(glued, bool)
+        ok = (h == h0) & (h1 >= 0) & ~wall[e] & ~(cut_base[e] & ~glued[e])
+        ok &= np.asarray(root, np.int64)[patch[g]] == r
+        e, h0, h1, f, g = e[ok], h0[ok], h1[ok], cface[h[ok]], g[ok]
+        ca = np.concatenate([np.where(flat[h0] == v, h0, nxt[h0]) for v in (ea[e], eb[e])])
+        cb = np.concatenate([np.where(flat[h1] == v, h1, nxt[h1]) for v in (ea[e], eb[e])])
+        nodes = np.unique(np.concatenate([ca, cb]))
+        lab = _components(len(nodes), np.searchsorted(nodes, ca), np.searchsorted(nodes, cb))
+        corner_parts = int((lab == np.arange(len(nodes))).sum())
+        chi = nfc + len(e) - (len(nodes) - corner_parts)
+        order = np.argsort(faces)
+        fs = faces[order]
+        flab = _components(nfc, order[np.searchsorted(fs, f)], order[np.searchsorted(fs, g)])
+        comps = int((flab == np.arange(nfc)).sum())
+        root_of = dict(zip(nodes.tolist(), nodes[lab].tolist()))  # each corner's smallest corner (the find's root)
+        return comps == 1 and chi == 1, (lambda x: root_of.get(x, x))
 
     def _smooth_full_steps(self, root, glued, chi):
         t = self.topo

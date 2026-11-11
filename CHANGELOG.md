@@ -1,10 +1,33 @@
 # Changelog
 
-## 0.9.9 - unreleased
+## 0.9.9 - 2026-11-11
 
-Merged into main: `v0981-tidytools` (Look First, History and the Tidy Tools sets), `v0981-faceloops2` (Face Loops,
-Ring Round This, Redraw in Rows) and `v0981-sitefixes` (the fixes below, ported from the Blender-site build). Symmetrize
-and the experiment branches are not in this release.
+New UVs and Seam Fit, a calmer panel with a "?" on every step, CurioMesh in four more languages, a Help Make It Better
+panel, agent tools, Auto Fix, History and the Tidy Tools. Symmetrize and the experiment branches are not in this
+release.
+
+### A calmer panel
+- **Nothing jumps while it works.** Status lines, Auto Fix progress, the part-edit warning, the ladder and Tidy Up
+  notes and the verdict's lines each sit in a fixed slot, so sliders and buttons stay where they are.
+- **Fix Bad Spots** is the main action after a result: big, red with the count when there are bad spots, greyed out in
+  the same place when there are none. It walks the spots worst first; mark parts and redo them, or keep the original
+  there. **Try Every Method** runs every method on a part, one job at a time, as one Ctrl+Z step.
+- The clicked part's card sits in the sidebar, with progress, status and Stop in a fixed three-row slot; Back to How
+  It Was stays in place, greyed out, after use.
+- A **step strip** shows where you are, and a small **?** next to each step explains it in plain words.
+- The **Dashboard** in the 3D view (quad count, quality, live progress, Stop, Hide, Collapse) is off until you press
+  Show Dashboard.
+
+### Your language
+- CurioMesh in **Spanish, Portuguese (Brazil), Japanese and Simplified Chinese**: labels, buttons, tooltips, status
+  lines, reports and the dashboard follow Blender's interface language. The language switch in the add-on preferences
+  and the Options popover changes all of Blender, and its tooltip says so. The classic Pro tools stay in English.
+
+### Help make it better
+- A **Help Make It Better** panel: pick the bad spots, **Send as a Problem** (a zip with the parts, your settings and
+  a report, and the issue form opened with your versions filled in), **Share a Fix**, **Report a Bug** and **How to
+  Help**. Nothing is uploaded; you attach the zip yourself.
+- **Write a Prompt for My AI** copies a ready prompt with your model and settings filled in. Nothing is sent anywhere.
 
 ### Fixes from the Blender-site review
 - Previews are found by the add-on's own mark, never by name, so an object of yours called like a preview is never
@@ -271,6 +294,67 @@ and the experiment branches are not in this release.
 - Docs: `docs/AGENTS.md`, `docs/PARTS_EXCHANGE.md` and the `curiomesh-agent` skill.
 - Fix (all builds): Ctrl+Z back to "New result" showed the mesh from before the parts were found, not the one
   on screen. That step now keeps the result with its parts.
+
+### UVs
+- **New UVs** (UVs row: **New**, or **Auto** when your mesh has no UVs). It makes a fresh unwrap for the active mesh:
+  few cuts, put where the camera check sees least, with the quad rows kept straight. It opens in Look First, so
+  you see the result before Apply; Enter keeps it, Esc cancels, B shows before and after. The dial is **Stretch
+  allowed**; **Again** reruns from your changed setting and keeps what the camera check and the cutting already
+  worked out, and **Keep going** repeats while the page fills better.
+- Measured on 13 test models at a 1024 px page, against Blender's Smart UV Project: 0 overlaps, 0 flipped faces,
+  straight rows 9 of 9, and never more than half as many pieces. Space used is at least 10 points above Smart UV
+  Project on 12 of 13 (43.9 % on the pier up to 70.4 % on the horse). The road barrier reaches 95 % of the best
+  packing its own pieces allow. The cuts you can see from the camera are at or under half the length of Smart UV
+  Project's on 12 of 13; the road barrier is the one over, by 4 px.
+
+  | Model | Space used | Seen cuts, as a share of Smart UV Project's |
+  |---|---|---|
+  | Chess set | 52.5 % | 0.415 |
+  | Road barrier | 67.3 % | 0.505 |
+  | Drill press | 56.6 % | 0.312 |
+  | Fire hydrant | 55.4 % | 0.412 |
+  | Gothic piece | 53.3 % | 0.270 |
+  | Horse | 70.4 % | 0.196 |
+  | Lion head | 68.3 % | 0.295 |
+  | Marble bust | 64.4 % | 0.305 |
+  | Pier | 43.9 % | 0.330 |
+  | Compressor | 59.6 % | 0.308 |
+  | Crane | 52.3 % | 0.480 |
+  | Sofa | 66.9 % | 0.306 |
+  | Spinning wheel | 55.8 % | 0.255 |
+- **The page layout and packing.** Pieces are packed onto the page in whole pixels, with a gap that keeps them apart
+  down to a mip size you choose (**Texture size**, **Gap: clean down to**). **Fill the page** gives the pieces as
+  many pixels as fit; turn it off to set a **Pixel density** instead. **Hidden parts get** gives surfaces the camera
+  never sees fewer pixels (50 % by default), and **Seen from all sides** off counts the underside less.
+  **New page layout** packs the islands you already have again; its Keep going tries other orders and keeps the best.
+- **Cut here / Join here.** Click an edge to cut the UVs there, click it again to join it back, then New UVs run
+  with your cuts.
+- **Bake those spots.** Faces that still cross a UV seam each get a small island of their own in the page's free
+  space, and the bake fills just those from your original mesh. The rest of the texture is untouched. Keep going
+  bakes the new islands of every pass; a failed bake puts the UVs back, your Cycles render device comes back after
+  the bake, and Ctrl+Z gives the old pixels back (HDR textures exactly). Normal data goes only into normal maps.
+- **Seam Fit: Light / Exact / Look.** For a result that keeps your mesh's UVs. **Light** follows the seams that
+  matter and adds few faces (**Extra faces for seams**, **Split faces on seams**); the card says what it could not
+  fit. **Exact** keeps every seam as a border, which can cost several times the faces (the old Keep UV Seams is
+  this). **Look** opens the tool the UVs choice implies: Seam Fit on a result, New UVs on an applied mesh. Seam Fit
+  shows its moves and splits first, and a fit you applied is the one the result's Apply writes. Known limit: on the
+  9 test models with source UVs, Light passes its own check on 4 (road barrier, marble bust, lion head, spinning
+  wheel).
+- **Apply's fit and work-ahead.** With Light on, Apply writes the fit that was shown; if none was run, it makes the
+  fit itself, in short steps so Blender stays usable. Once a result is on screen, that fit is worked out ahead in
+  short steps, so Apply can write at once; changing a seam setting or the mesh's UVs makes it again.
+- **Auto Fix has a UV seams group** (one more tick in its popover): it moves edges onto your mesh's UV seams where
+  the look allows, runs Seam Fit and, on a mesh that already has UVs and a texture, runs Bake those spots. Auto also
+  snaps edges onto the seams after its own repairs, within Most Detail Loss.
+- **Undo and History.** A History jump on a UV step brings back the mesh's UVs and the baked pixels, forward too.
+- **Without the fast core.** Every UV feature runs in plain Python as well, in steps short enough that Blender stays
+  usable. The page is then packed in boxes instead of outlines.
+- Hiding the cuts without the fast core is faster, with exactly the same result: on the lion head that step went
+  from about 27 to about 18 minutes, on the marble bust from 457 to 230 s of CPU time, and its longest single step
+  from 368 to 41 ms, so Blender stays responsive.
+- The UV verdict's limits match what New UVs measures, so a good layout is not called Bad. A layout is Bad
+  below 40 % of the page used or with over 80 % of its cuts in sight (most cuts on a closed shape, such as a bust,
+  are seen from some side).
 
 ## 0.9.8 - 2026-11-06
 
