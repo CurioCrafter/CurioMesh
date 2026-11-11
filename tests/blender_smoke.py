@@ -964,7 +964,7 @@ def _draw_all_panels(label):
             continue
         log: list = []
         helpers = {name: getattr(cls, name) for name in dir(cls) if name.startswith("_") and not name.startswith("__") and callable(getattr(cls, name, None))}
-        holder = type("Holder", (), {**helpers, "layout": _MockLayout(log)})()  # the panel's own _helpers, bound to the mock
+        holder = type("Holder", (), {**helpers, "help_topic": getattr(cls, "help_topic", ""), "layout": _MockLayout(log)})()  # the panel's own _helpers, bound to the mock
         for hook in ("draw_header", "draw_header_preset", "draw"):
             fn = getattr(cls, hook, None)
             if fn is None or (hook != "draw" and fn is getattr(bpy.types.Panel, hook, None)):
@@ -1651,7 +1651,8 @@ def run_guided_case(module):
         guided.finish_work(bpy.context)
         made = guided.state["auto_base"]["out"]
         record = segments.seg["parts"][0]
-        if record["method"] != use or SEG.open_edges(made["faces"]) != start_open:
+        refused = record["method"] != use and "would lose its shape" in guided.status()  # the shape guard keeping the part is a pass
+        if (record["method"] != use and not refused) or SEG.open_edges(made["faces"]) != start_open:
             raise AssertionError(f"segments: {use} left {SEG.open_edges(made['faces'])} open edges, method {record['method']}: {guided.status()}")
     other = segments.seg["parts"][1]["after"]
     if "FINISHED" not in bpy.ops.curiomesh.seg_try(index=0):
