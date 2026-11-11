@@ -22,11 +22,30 @@ model, a sculpt or a photogrammetry scan, and want to fix single parts instead o
 
 **Why this one:** most retopology tools remesh the whole model in one go and leave you to judge it. CurioMesh splits the model into parts, measures every part against your original by camera, and lets you (or your AI agent) redo just the parts that came out wrong. **Help it get better everywhere:** send the spots it gets wrong, or your fixes, with one button in the add-on ([how](CONTRIBUTING.md)). Each one becomes a test case that agentic AI such as Claude Opus 5.5 helps turn into a fix for everyone.
 
-**[Download the add-on](https://github.com/CurioCrafter/CurioMesh/releases/latest)** · [Install it](#install) · [Try it in four steps](#quick-start)
+**[Download the add-on](https://github.com/CurioCrafter/CurioMesh/releases/latest)** · [Install it](#install) · [Watch the tutorial (4:32)](#video-tutorial) · [Try it in four steps](#quick-start)
 
 **If CurioMesh saved you time, please [star it on GitHub](https://github.com/CurioCrafter/CurioMesh/stargazers).** It is free and made by one person, and stars are how other artists find it. Something broke? [Open an issue](https://github.com/CurioCrafter/CurioMesh/issues/new) (the add-on's **Report a Problem** button fills in your versions).
 
 <p align="center"><img src="docs/trailer/trailer.webp" alt="CurioMesh trailer: Clean Rows retopology of a bust and a scan, the three layout styles, a game asset with a baked normal map lit in Godot, and export to Unreal, Unity, Godot and Roblox" width="800"></p>
+
+## Video tutorial
+
+<p align="center"><a href="https://youtu.be/44xpJT_bTnY"><img src="https://img.youtube.com/vi/44xpJT_bTnY/maxresdefault.jpg" alt="CurioMesh 0.9.9 tutorial on YouTube: a marble bust being retopologised in Blender" width="800"></a></p>
+
+A 4:32 walkthrough of CurioMesh 0.9.9, from install to export. Captions in English, Spanish, Portuguese (Brazil), Japanese and Simplified Chinese. Jump to a chapter:
+
+| Time | Chapter |
+|---|---|
+| [0:00](https://youtu.be/44xpJT_bTnY?t=0) | What it does |
+| [0:22](https://youtu.be/44xpJT_bTnY?t=22) | Install and first click |
+| [0:46](https://youtu.be/44xpJT_bTnY?t=46) | What is it for, and Start |
+| [1:15](https://youtu.be/44xpJT_bTnY?t=75) | Reading the result |
+| [1:39](https://youtu.be/44xpJT_bTnY?t=99) | Fixing only the bad spots |
+| [2:26](https://youtu.be/44xpJT_bTnY?t=146) | Tidy Up, Auto Fix and History |
+| [2:56](https://youtu.be/44xpJT_bTnY?t=176) | UVs |
+| [3:25](https://youtu.be/44xpJT_bTnY?t=205) | Bake, LODs and export |
+| [3:46](https://youtu.be/44xpJT_bTnY?t=226) | Let your AI do it |
+| [4:10](https://youtu.be/44xpJT_bTnY?t=250) | Help make it better |
 
 ## Which CurioMesh?
 
@@ -49,7 +68,7 @@ The GitHub add-on is the fastest build inside Blender and has every feature. The
 
 | | |
 |---|---|
-| **Get started** | [Install](#install) · [Quick start](#quick-start) · [Choose a use and a style](#choose-a-use-and-a-style) |
+| **Get started** | [Video tutorial](#video-tutorial) · [Install](#install) · [Quick start](#quick-start) · [Choose a use and a style](#choose-a-use-and-a-style) |
 | **The panel, in order** | [Adjust](#adjust) · [Fix](#fix) · [UVs](#uvs) · [Finish](#finish) |
 | **Going further** | [Hard Surface](#hard-surface) · [Shape the flow](#shape-the-flow) · [Parts](#parts) · [Blockout and Hulls](#blockout-and-hulls) · [Pro tab and classic tools](#pro-tab-and-classic-tools) |
 | **Trust and speed** | [How it checks results](#how-it-checks-results) · [Results](#results) · [Big scans and small PCs](#big-scans-and-small-pcs) |
