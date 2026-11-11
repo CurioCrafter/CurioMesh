@@ -67,6 +67,19 @@ class Twin(unittest.TestCase):
         self.assertIsNone(uvflat.grid_layout(points, [0, 4, 8, 12], [0, 1, 2, 3, 0, 3, 4, 5, 0, 5, 6, 1]))
 
 
+    def test_elements_in_chunks_match_one_piece(self):
+        pts, ip, fl = curved()
+        one = uvflat.Elements(pts, ip, fl)
+        gen = uvflat.Elements.steps(pts, ip, fl, 7)
+        try:
+            while True:
+                next(gen)
+        except StopIteration as done:
+            some = done.value
+        for k in ("a", "b", "w", "e", "elem", "tri_v", "tri_r", "tri_face"):
+            np.testing.assert_array_equal(getattr(one, k), getattr(some, k))
+
+
 @needs_native
 class Parity(unittest.TestCase):
     def run_job(self, job):
