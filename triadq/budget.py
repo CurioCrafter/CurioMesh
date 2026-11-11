@@ -120,8 +120,9 @@ def best_levels(levels: list[Level]) -> list[int]:
     return kept
 
 
-def vertex_heat(vertices: np.ndarray, spots: np.ndarray, cell: float) -> np.ndarray:
-    """For each vertex, how many of the `spots` lie in its grid cell or a neighboring one."""
+def vertex_heat_steps(vertices: np.ndarray, spots: np.ndarray, cell: float):
+    """Generator: for each vertex, how many of the `spots` lie in its grid cell or a neighbouring one. Yields between its
+    27 neighbour passes, so Blender stays usable. Returns the heat."""
 
     heat = np.zeros(len(vertices), dtype=np.int64)
     if not len(spots) or not len(vertices):
@@ -130,8 +131,10 @@ def vertex_heat(vertices: np.ndarray, spots: np.ndarray, cell: float) -> np.ndar
     wide = 3 + int(np.ceil((np.maximum(vertices.max(axis=0), spots.max(axis=0)) - low).max() / cell))
     stride = np.asarray((1, wide, wide * wide), dtype=np.int64)
     filled, counts = np.unique(((spots - low) / cell).astype(np.int64) @ stride, return_counts=True)
+    yield
     at = ((vertices - low) / cell).astype(np.int64) @ stride
     for step in product((-1, 0, 1), repeat=3):
+        yield
         key = at + int(np.asarray(step) @ stride)
         slot = np.minimum(np.searchsorted(filled, key), len(filled) - 1)
         match = filled[slot] == key

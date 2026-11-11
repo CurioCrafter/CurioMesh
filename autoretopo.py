@@ -33,7 +33,7 @@ from mathutils.kdtree import KDTree
 from .triadq import tasks
 from .triadq import bakescore, cases, checks, detail, hardsurf, issues, parts, patch, patterns, redo, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
-from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
+from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat_steps
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import FlatQuadOptions, _close_piece_steps, _face_frames, flat_quad_remesh_steps, flatten_region_steps, pair_and_close_steps
 from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_face_steps, unfold_steps
@@ -44,7 +44,7 @@ from .triadq.fieldmesh import MOST_TARGET, field_quad_steps, is_clean
 from .triadq.smoothgrid import GridOptions, GridReport, crease_area_steps, grid_area_steps, smooth_area_steps
 from . import guides, hardware, loops, parallel, symmetry
 from .triadq.types import Cancelled, FlatFaces, MeshData, cancel_steps, corners_of
-from .triadq.uvs import simplify_borders
+from .triadq.uvs import simplify_borders_steps
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
@@ -477,7 +477,7 @@ def _decimate_steps(points, polys, kinds, ratio, drop=None, keep=None):
         triangles = sum(len(p) - 2 for p in polys)
         wanted = max(ratio * triangles, 1.0)
         triangle = float(_face_areas(points, polys).sum()) / wanted
-        points, polys, kinds, unbound, used = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle), () if keep is None else np.flatnonzero(keep).tolist())
+        points, polys, kinds, unbound, used = yield from simplify_borders_steps(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle), () if keep is None else np.flatnonzero(keep).tolist())
         drop = None if drop is None else drop[used]
         unbound = np.asarray(unbound, dtype=np.int64)
         free = unbound if keep is None else np.intersect1d(unbound, np.flatnonzero(~keep[used]))
@@ -1184,7 +1184,8 @@ class AutoJob:
                 # Density where the camera saw it go wrong: hold those spots while the rest goes further, then let go.
                 for k in () if painted else (upper - 1, upper, len(levels) - 1):
                     yield
-                    keep = yield from self._slice(lambda: hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0))
+                    heat = yield from vertex_heat_steps(points, spots[k], 3.0 * pixel)  # in short steps
+                    keep = hottest(heat, LOCKED_SHARE * levels[k].faces / 2.0)
                     held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep if lock is None else keep | lock, one_off=True)
                     border = None if lock is None else (yield from self._slice(lambda: _same_points(held[0], points[lock])))  # a region's border never moved
                     reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), keep=border, one_off=True)

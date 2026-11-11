@@ -9,7 +9,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat  # noqa: E402
+from triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat_steps  # noqa: E402
+from triadq.types import drain  # noqa: E402
 
 
 class AllocateTests(unittest.TestCase):
@@ -26,7 +27,7 @@ class AllocateTests(unittest.TestCase):
 
     def test_heat_finds_the_vertices_near_the_spots(self):
         vertices = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [9.0, 9.0, 9.0]])
-        heat = vertex_heat(vertices, np.array([[0.1, 0.0, 0.0], [0.2, 0.0, 0.0]]), 1.0)
+        heat = drain(vertex_heat_steps(vertices, np.array([[0.1, 0.0, 0.0], [0.2, 0.0, 0.0]]), 1.0))
         self.assertEqual(heat.tolist(), [2, 2, 0])
         self.assertEqual(hottest(heat, 5).tolist(), [True, True, False])
 

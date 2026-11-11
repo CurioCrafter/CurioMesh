@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from triadq.uvs import chart_codes, is_see_through, simplify_borders, uv_overlap
+from triadq.types import drain
+from triadq.uvs import chart_codes, is_see_through, simplify_borders_steps, uv_overlap
 
 
 class UvHelpersTest(unittest.TestCase):
@@ -24,7 +25,7 @@ class UvHelpersTest(unittest.TestCase):
             points = np.array([[x, y, bend * (y == 1) * (1 - abs(x - 2) / 2)] for y in range(3) for x in range(5)], dtype=float)
             polys = [(y * 5 + x, y * 5 + x + 1, (y + 1) * 5 + x + 1, (y + 1) * 5 + x) for y in range(2) for x in range(4)]
             kinds = ["a"] * 4 + ["b"] * 4
-            out_points, out_polys, out_kinds, free, _used = simplify_borders(points, polys, kinds, 0.01)
+            out_points, out_polys, out_kinds, free, _used = drain(simplify_borders_steps(points, polys, kinds, 0.01))
             self.assertLess(len(out_points), len(points) + 1)
             on_border = set(range(len(out_points))) - set(free)
             self.assertEqual(len(on_border), expected)
@@ -36,7 +37,7 @@ class UvHelpersTest(unittest.TestCase):
         # A region's border vertex sits on the straight UV border: it must survive, or the neighbour region gets a gap.
         points = np.array([[x, y, 0.0] for y in range(3) for x in range(5)], dtype=float)
         polys = [(y * 5 + x, y * 5 + x + 1, (y + 1) * 5 + x + 1, (y + 1) * 5 + x) for y in range(2) for x in range(4)]
-        out_points, _polys, _kinds, free, _used = simplify_borders(points, polys, ["a"] * 4 + ["b"] * 4, 0.01, fixed=[6])
+        out_points, _polys, _kinds, free, _used = drain(simplify_borders_steps(points, polys, ["a"] * 4 + ["b"] * 4, 0.01, fixed=[6]))
         self.assertIn([1.0, 1.0, 0.0], out_points.tolist())
         self.assertEqual(len(set(range(len(out_points))) - set(free)), 3)
 
