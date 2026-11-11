@@ -36,7 +36,7 @@ from .triadq.engine import RemeshOptions, remesh_mesh
 from .triadq.shading import sharp_edges
 from .triadq.types import FlatFaces, MeshData
 from .triadq.uvs import chart_codes
-from . import uv_panel
+from . import uv_hooks
 from . import translations
 from .translations import tip, tr
 
@@ -1871,7 +1871,7 @@ def _start_segments(context, gs, src, target: int | None = None) -> bool:
     drawn = {kind: _guide_lines(context, gs, src, kind) for kind in ("LOOP", "BEND")}
     paint = _painted(state_source(), gs, src)
     # Each kind of face is one material and UV island: quads don't cross between kinds, and borders are reduced last.
-    charts = _uv_charts(state_source(), src) if uv_panel.keep_mode(uv_panel.settings(), gs) == "exact" and gs.bake_detail != "NORMAL_COLOR" else None
+    charts = uv_hooks.kinds(_uv_charts, state_source(), src, gs)
     codes = src["mat"] if charts is None else charts[0]
     settings = effort_settings(gs)
     baked = gs.auto_baked and gs.auto_profile == "LOW_POLY"
@@ -2247,12 +2247,66 @@ def _start(context) -> None:
 def _stop() -> None:
     if bpy.app.timers.is_registered(_poll):
         bpy.app.timers.unregister(_poll)
+    drop_prepare()
     stop_work()
     ladder.cancel()  # and its spare preview meshes
     remove_preview()
     state.update(sig=None, message="", lock=None, hover=None, auto_base=None, auto_cache=(None, {}), lod=None)
     segments.reset()
     overlay.tag_redraw()
+
+
+PREPARE = {"res": None, "sig": None, "steps": None}  # Seam Fit Light: what Apply of the result on show writes, worked out ahead
+
+
+def _prepare_sig(gs):
+    return (state["source"], repr(uv_hooks.uvkeep.settings_of(gs)))
+
+
+def drop_prepare() -> None:
+    """End the work-ahead (Apply came first, the result or a UV setting changed, the preview closed)."""
+    steps = PREPARE["steps"]
+    PREPARE.update(res=None, sig=None, steps=None)
+    if steps is not None:
+        steps.close()  # its FitStage stops; nothing is kept
+
+
+def _prepare_start(gs) -> None:
+    """A Seam Fit Light result is on show and the search is done: work out Apply's UVs for it in timer slices
+    (uv_hooks.prepare_steps), so Apply writes them at once. Once per result and settings."""
+    res, work = state["res"], state["work"]
+    if res is None or gs.scope != "AUTO" or (work is not None and work["runner"].busy) or uv_hooks.uvkeep.mode_of(gs) != "light":
+        return
+    sig = _prepare_sig(gs)
+    if PREPARE["res"] is res and PREPARE["sig"] == sig:
+        return  # started, or done, for this one
+    source = state_source()
+    if source is None:
+        return
+    drop_prepare()
+    PREPARE.update(res=res, sig=sig, steps=uv_hooks.prepare_steps(source, res, gs))
+    if not bpy.app.timers.is_registered(_prepare_tick):
+        bpy.app.timers.register(_prepare_tick, first_interval=sliced.GAP_S)
+
+
+def _prepare_tick():
+    """Timer: one slice (sliced.run_slice) of the work-ahead while its result is still the one on show."""
+    try:
+        gs = getattr(bpy.context.scene, "curiomesh_guided", None)
+        if PREPARE["steps"] is None or gs is None or not gs.enabled or state["res"] is not PREPARE["res"] or _prepare_sig(gs) != PREPARE["sig"]:
+            drop_prepare()
+            return None
+        if sliced.JOB is not None:  # another job's slices first
+            return POLL_SECONDS
+        done, _value = sliced.run_slice(PREPARE["steps"])
+        if done:
+            PREPARE["steps"] = None  # kept in uv_hooks.TRANSFERS for this result
+            return None
+        return sliced.GAP_S
+    except Exception as exc:
+        drop_prepare()
+        state["message"] = f"Guided error: {exc}"[:120]
+        return None
 
 
 def _poll():
@@ -2274,6 +2328,7 @@ def _poll():
         if source is None or source.mode != "OBJECT" or (preview is not None and preview.mode != "OBJECT"):
             return POLL_SECONDS
         _collect_work(context)
+        _prepare_start(gs)
         if gs.scope != "AUTO":
             state["auto_base"] = None
         elif gs.auto_update and state["curve_sig"] is not None:  # a curve was moved, redrawn or deleted: the search starts again, quickly (what was measured is kept)
@@ -3099,6 +3154,7 @@ def _write_result_steps(context, source, res, gs, name: str):
     (`sliced`). Returns (object, bake text)."""
     mesh = yield from _make_mesh_steps(name, source, res)
     yield
+    yield from uv_hooks.after_apply_steps(mesh, source, res, gs)
     _shade_by_angle(mesh)
     yield
     if not _blockout_result():
@@ -3257,6 +3313,7 @@ class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
     def steps(self, context):
         """Apply: the result is made at once, its UV work then runs in timer slices from a button (sliced.SlicedOp)."""
         self._remember()
+        drop_prepare()  # what it worked out so far is not kept: Apply finishes the job itself
         gs = _gs(context)
         source = state_source()
         if context.object is not None and context.object.mode != "OBJECT":
@@ -3287,6 +3344,8 @@ class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
         written = instances["rest"] if instances else res
         mesh = yield from _make_mesh_steps(source.name + "_Retopo", source, written)
         yield
+        yield from uv_hooks.after_apply_steps(mesh, source, written, gs)
+        uv_stop = " | Stopped: the UVs are a plain copy from your mesh" if sliced.stopped() else ""
         _shade_by_angle(mesh)
         yield
         if not _blockout_result():
@@ -3338,6 +3397,7 @@ class CURIOMESH_OT_guided_apply(_AskFirst, sliced.SlicedOp, bpy.types.Operator):
             count += sum(len(group["faces"]) for group in instances["groups"])
             baked = f", in {placed + 1} objects sharing {len(instances['groups']) + 1} meshes"
         state["applied"] = f"{count:,} faces written to {out.name}{baked}{levels}"
+        state["applied"] += uv_stop
         self.report({"WARNING"} if baked.startswith("Bake failed") or sliced.stopped() else {"INFO"}, tr(state["applied"]))
         return {"FINISHED"}
 

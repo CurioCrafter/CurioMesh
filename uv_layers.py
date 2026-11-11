@@ -11,6 +11,10 @@ from __future__ import annotations
 import numpy as np
 
 
+def layer_names(mesh) -> list[str]:
+    return [layer.name for layer in mesh.uv_layers]
+
+
 def read_uv(mesh, name: str | None = None) -> np.ndarray | None:
     """UV of every corner as float64 (corners, 2), from layer `name` or the active one; None when there is no such layer."""
 
@@ -59,3 +63,19 @@ def geometry(mesh):
     return points.reshape(-1, 3), np.r_[0, np.cumsum(sizes)].astype(np.int64), flat, uv, material
 
 
+def apply_candidate(mesh, points, indptr, flat, material, layers, active: int = 0) -> None:
+    """Rebuild `mesh` as a fit candidate: new positions and faces, the material of every face, and one UV layer per
+    `(name, uv)` in `layers` (corners in face order), the `active`-th one active. Material slots are kept."""
+
+    for layer in list(mesh.uv_layers):
+        mesh.uv_layers.remove(layer)
+    mesh.clear_geometry()
+    faces = [tuple(int(v) for v in flat[indptr[i]:indptr[i + 1]]) for i in range(len(indptr) - 1)]
+    mesh.from_pydata(np.asarray(points, np.float64).reshape(-1, 3).tolist(), [], faces)
+    mesh.update()
+    if len(mesh.polygons) == len(material):
+        mesh.polygons.foreach_set("material_index", np.asarray(material, dtype=np.int32))
+    for name, uv in layers:
+        write_uv(mesh, uv, name, create=True)
+    if 0 <= active < len(mesh.uv_layers):
+        mesh.uv_layers.active_index = active

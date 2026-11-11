@@ -6,11 +6,13 @@
     | UVs   [ Auto ▾ ]   GOOD  2 % across seams   [ Look ]  [ ⋯ ] |
 
 - `CurioUVSettings` (`scene.curiomesh_uv`) holds the popover's values and hands them to the cores (`sync`).
-- Seam Fit: Exact keeps every seam of your mesh as a border during the search (the Keep UV Seams switch); Off carries
-  the UVs over side by side.
+- Seam Fit is a Look First tool on the result (`tidylive.LiveTool`): preview, Apply = one Ctrl+Z step and one History
+  entry; the result's own Apply then writes exactly the fit that was shown (`uvtrial.remember_applied`).
 - New, New page layout, Cut here / Join here and Bake those spots change the UVs of a mesh that has been applied (the
-  active mesh). They open in Look First's shape: a card with the verdict and numbers before -> after, Enter / Esc / B,
-  Again (A), Keep going (K, Esc stops), one Ctrl+Z step and one History entry per Apply. Nothing runs from draw().
+  active mesh). They open the same way: a card with the verdict and numbers before -> after, Enter / Esc / B, Again (A),
+  Keep going (K, Esc stops), one Ctrl+Z step and one History entry per Apply.
+- Auto: Seam Snap and Seam Fit are Auto Fix passes (`triadq/uvauto.py`, `triadq/uvtrial.py`), so a kept pass is a History step and
+  Apply writes its fit. Nothing runs from draw().
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import bpy
 import numpy as np
 
 from . import history, overlay, tidylive, uv_draw, uv_layers
-from .triadq import uvbake, uvnew, uvscore, uvtrial
+from .triadq import uvbake, uvkeep, uvnew, uvscore, uvtrial
 from .translations import tip, tr
 
 BUDGET = 0.008  # seconds of work per modal tick, like Look First
@@ -33,7 +35,8 @@ MODES = (("AUTO", "Auto", "Keeps the UVs your mesh came with, or makes new ones 
          ("KEEP", "Keep source", "The result's UVs sit where your mesh's UVs were. Seam Fit says how closely seams are followed"),
          ("NEW", "New", "Makes new UVs for the result: few seams, out of sight, straight rows"),
          ("OFF", "Off", "As before: no Seam Fit, and a bake unwraps with Smart Project"))
-FITS = (("EXACT", "Exact", "Keeps every seam as a border. Can cost several times the faces"),
+FITS = (("LIGHT", "Light", "Follows the seams that matter and adds few faces"),
+        ("EXACT", "Exact", "Keeps every seam as a border. Can cost several times the faces"),
         ("OFF", "Off", "Seams are not followed; UVs are carried over side by side"))
 ROWS = (("AUTO", "Auto", "Straight where it costs no stretch, else Soft"), ("ON", "On", "Every quad row on one line in the UVs"),
         ("SOFT", "Soft", "Curved parts may bend a little"), ("OFF", "Off", "Rows are not kept straight"))
@@ -41,6 +44,7 @@ SHARPEN = (("OFF", "Off", "No cut becomes a sharp edge"), ("CREASED", "Only crea
            ("ALL", "All", "Every cut becomes a sharp edge"))
 
 live: dict = {"session": None, "handles": []}
+_FIT_CACHE: dict = {"key": None, "value": None}
 
 
 def _g():
@@ -68,8 +72,8 @@ def _source_has_uvs() -> bool:
 
 
 def keep_mode(us, gs) -> str:
-    """"exact" or "off": what the search does with your mesh's UVs. The old Keep UV Seams switch still means what it
-    meant: on = Exact."""
+    """"light", "exact" or "off": what the search and Apply do with your mesh's UVs. The old Keep UV Seams switch still
+    means what it meant: on = Exact."""
     if us is None:
         return "exact" if getattr(gs, "keep_uvs", False) else "off"
     if us.uvs in ("NEW", "OFF"):
@@ -78,14 +82,15 @@ def keep_mode(us, gs) -> str:
         return "exact"
     if us.uvs == "AUTO" and not _source_has_uvs():
         return "off"
-    return {"EXACT": "exact", "OFF": "off"}[us.seam_fit]
+    return {"LIGHT": "light", "EXACT": "exact", "OFF": "off"}[us.seam_fit]
 
 
 def sync(scene=None) -> None:
     """Hand the popover's values to the cores. Cheap; called on every change and by the Auto timer."""
-    us = settings(scene)
+    us, gs = settings(scene), _gs(scene)
     if us is None:
         return
+    uvkeep.OVERRIDE.update(mode=keep_mode(us, gs), allowance=float(us.extra_faces) / 100.0, split=bool(us.split_seams), texture_px=float(us.texture_size))
     uvbake.MODE = "SMART" if us.uvs == "OFF" else "CURIO"
     uvbake.SHARPEN = us.sharpen_cuts.lower()
 
@@ -104,8 +109,11 @@ def new_settings(us) -> uvnew.Settings:
 class CurioUVSettings(bpy.types.PropertyGroup):
     uvs: bpy.props.EnumProperty(name="UVs", items=MODES, default="AUTO", update=_sync,
                                 description="Auto keeps the UVs your mesh came with, or makes new ones when it has none")
-    seam_fit: bpy.props.EnumProperty(name="Seam Fit", items=FITS, default="OFF",
-                                     description="Exact keeps every seam as a border and can cost several times the faces. Off carries the UVs over side by side")
+    seam_fit: bpy.props.EnumProperty(name="Seam Fit", items=FITS, default="LIGHT", update=_sync,
+                                     description="Light follows the seams that matter and adds few faces. Exact keeps every seam as a border and can cost several times the faces")
+    extra_faces: bpy.props.FloatProperty(name="Extra faces for seams", default=100.0 * uvkeep.DEFAULT_ALLOWANCE, min=0.0, soft_max=100.0, precision=0, subtype="PERCENTAGE", update=_sync,
+                                         description="Faces Seam Fit may add, compared with not fitting seams. What it can't fit is listed")
+    split_seams: bpy.props.BoolProperty(name="Split faces on seams", default=True, update=_sync, description="Cuts a face along a seam when nothing else fits it")
     stretch_allowed: bpy.props.FloatProperty(name="Stretch allowed", default=10.0, min=0.1, soft_min=1.0, soft_max=25.0, precision=0, subtype="PERCENTAGE",
                                              description="How far the texture may stretch inside an island, in percent")
     straight_rows: bpy.props.EnumProperty(name="Straight rows", items=ROWS, default="AUTO",
@@ -125,6 +133,54 @@ class CurioUVSettings(bpy.types.PropertyGroup):
                                          description="The gap keeps islands apart down to this mip size")
     sharpen_cuts: bpy.props.EnumProperty(name="Sharp edges at cuts", items=SHARPEN, default="CREASED", update=_sync,
                                          description="Which cuts become sharp edges for the normal map")
+
+
+# --------------------------------------------------------------------------- Seam Fit's inputs (from the result)
+
+
+def _fit_inputs():
+    """What Seam Fit works with on the result on screen, worked out once per result and source."""
+    guided = _g()
+    source, res = guided.state_source(), guided.state["res"]
+    if source is None or res is None:
+        return None
+    gs = _gs()
+    sync()
+    s = uvkeep.settings_of(gs)
+    key = (id(res), len(res["faces"]), source.name, repr(s))  # every setting the fit reads (Texture size too: Auto calls this without a reset)
+    if _FIT_CACHE["key"] == key:
+        return _FIT_CACHE["value"]
+    if not source.data.uv_layers:
+        value = None
+    elif s.mode != "light":
+        value = {"refusal": uvtrial.NOT_LIGHT}
+    else:
+        sa, plan = uvkeep.plan_for(source, guided._source_data(source), gs)
+        value = None if sa is None else dict(source=sa, plan=plan, settings=s, material=res.get("mat"))
+    _FIT_CACHE.update(key=key, value=value)
+    return value
+
+
+class CURIOMESH_OT_uv_seam_fit(tidylive.LiveTool, bpy.types.Operator):
+    bl_idname = "curiomesh.uv_seam_fit"
+    bl_label = "Seam Fit"
+    bl_description = "Moves points onto your mesh's UV seams and splits faces along the seams that are left, previewed first. Use it when textures must stay where they were"
+    bl_options = {"REGISTER", "UNDO"}
+    trial = uvtrial.SeamFit
+    faces: bpy.props.FloatProperty(name="Extra faces for seams", description="0..1 is 0..100 % extra faces; 1 splits every face on a seam", default=uvkeep.DEFAULT_ALLOWANCE, min=0.0, max=1.0)
+    split: bpy.props.BoolProperty(name="Split faces on seams", default=True)
+    keep_going: bpy.props.BoolProperty(name="Keep going", description="Passes repeat while fewer faces are left for baking", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        return _g().state["res"] is not None and not tidylive.busy()
+
+    def invoke(self, context, event):
+        us = settings(context.scene)
+        if us is not None and not self.properties.is_property_set("faces"):
+            self.faces = min(1.0, float(us.extra_faces) / 100.0)
+        _FIT_CACHE["key"] = None
+        return super().invoke(context, event)
 
 
 # --------------------------------------------------------------------------- the UV-only tools on a mesh
@@ -732,7 +788,7 @@ class CURIOMESH_OT_uv_tool(bpy.types.Operator):
 class CURIOMESH_OT_uv_look(bpy.types.Operator):
     bl_idname = "curiomesh.uv_look"
     bl_label = "Look"
-    bl_description = "Opens the UV tool the UVs choice implies on an applied mesh: New when it has no UVs, else New page layout"
+    bl_description = "Opens the UV tool the UVs choice implies: Seam Fit on the result while UVs keep your mesh's, New on an applied mesh"
 
     @classmethod
     def poll(cls, context):
@@ -741,14 +797,17 @@ class CURIOMESH_OT_uv_look(bpy.types.Operator):
     def invoke(self, context, event):
         us, gs = settings(context.scene), _gs(context.scene)
         sync(context.scene)
+        mode = keep_mode(us, gs)
         if _g().state["res"] is not None:
+            if mode == "light":
+                return bpy.ops.curiomesh.uv_seam_fit("INVOKE_DEFAULT")
             if us is not None and (us.uvs == "NEW" or (us.uvs == "AUTO" and not _source_has_uvs())):
                 self.report({"INFO"}, tr("New UVs are made on Apply. After Apply, Look shows them on the mesh."))
                 return {"CANCELLED"}
-            if keep_mode(us, gs) == "exact":
+            if mode == "exact":
                 self.report({"INFO"}, tr("Seam Fit: Exact keeps every seam as a border during the search, so there is nothing to fit after it."))
                 return {"CANCELLED"}
-            self.report({"INFO"}, tr("Your mesh's UVs are carried over on Apply. After Apply, Look opens the UV tools on the mesh."))
+            self.report({"INFO"}, tr("UVs are Off: nothing to look at."))
             return {"CANCELLED"}
         if target(context) is None:
             self.report({"WARNING"}, tr("Make a result first with Start, or select a mesh."))
@@ -787,6 +846,15 @@ class CURIOMESH_PT_pop_uv(bpy.types.Panel):
             col.prop(us, "seam_fit", expand=True)
             if getattr(gs, "keep_uvs", False) and us.uvs == "AUTO":
                 overlay.wrap_label(col, "Keep UV Seams is on, so Auto keeps every seam (Exact).", icon="INFO", width=36, limit=2)
+            sub = col.column(align=True)
+            sub.active = us.seam_fit == "LIGHT"
+            sub.prop(us, "extra_faces")
+            sub.prop(us, "split_seams")
+            r = col.row(align=True)
+            r.enabled = _g().state["res"] is not None
+            r.operator("curiomesh.uv_seam_fit", text="Seam Fit", icon="HIDE_OFF")
+            op = r.operator("curiomesh.uv_seam_fit", text="", icon="SHADERFX")  # fix every spot like this: no face budget
+            op.faces = 1.0
         if new or us.uvs == "NEW":
             col = layout.column(align=True)
             col.prop(us, "stretch_allowed")
@@ -817,13 +885,14 @@ class CURIOMESH_PT_pop_uv(bpy.types.Panel):
 
 
 
-CLASSES = (CurioUVSettings, CURIOMESH_OT_uv_tool, CURIOMESH_OT_uv_look, CURIOMESH_PT_pop_uv)
+CLASSES = (CurioUVSettings, CURIOMESH_OT_uv_seam_fit, CURIOMESH_OT_uv_tool, CURIOMESH_OT_uv_look, CURIOMESH_PT_pop_uv)
 
 
 def register() -> None:
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curiomesh_uv = bpy.props.PointerProperty(type=CurioUVSettings)
+    uvtrial.FIT["inputs"] = _fit_inputs
     uvbake.register()
 
 
@@ -831,6 +900,7 @@ def unregister() -> None:
     close()
     _remove_handlers()
     uvbake.unregister()
+    uvtrial.FIT["inputs"] = None
     if hasattr(bpy.types.Scene, "curiomesh_uv"):
         del bpy.types.Scene.curiomesh_uv
     for cls in reversed(CLASSES):

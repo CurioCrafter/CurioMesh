@@ -4,9 +4,10 @@
 
 Usage: python scripts/check_no_uv.py [ROOT]   (ROOT defaults to the repo root)
 
-The site build includes New UVs, New page layout, Cut here, Bake those spots, the bake's own unwrap, Classic Remesh's
-per-side UV transfer and the UVs popover with Seam Fit Exact / Off. It leaves out Seam Fit Light (the fit after the
-search, its Look First tool, its Auto Fix passes and its Apply work-ahead) and the compiled UV kernels.
+The site build includes every UV feature on the pure-Python path: Seam Fit Light / Exact / Off with its Look First tool,
+Apply's fit and work-ahead and Auto Fix's Seam Snap / Seam Fit passes, New UVs, New page layout, Cut here, Bake those
+spots, the bake's own unwrap and Classic Remesh's per-side transfer. It leaves out the compiled UV kernels and their
+adapter, and Bake those spots as an Auto Fix pass (it needs a tool payload hook this build does not have).
 Checks: a left-out UV file, any marker line or marked block, the names of the left-out parts.
 Search strings are built from parts and this file is skipped, so it passes on itself.
 """
@@ -19,16 +20,13 @@ from pathlib import Path
 MARK = "main-only" + ": uv"
 PATTERNS = [
     re.compile(re.escape(MARK).encode()),
-    re.compile(rb"\buv" + rb"keep\b|\buv" + rb"snap\b|\buv" + rb"auto\b|\buv" + rb"_hooks\b|\buv" + rb"_fast\b"),
-    re.compile(rb"\buv" + rb"_seam_fit\b|\bSeam" + rb"Fit\b|\bSeam" + rb"Snap\b"),
-    re.compile(rb"Seam Fit: " + rb"Light"),
+    re.compile(rb"\buv" + rb"_fast\b|\bturbo\.uv"),
+    re.compile(rb"\bBake" + rb"Spots\b|\bafter" + rb"_commit\b"),
 ]
 # Paths relative to the root: the left-out modules and the compiled kernels.
 UV_FILES = [
     "native/src/uv*.rs", "standalone/src/uv*.rs", "standalone/src/gui_uv.rs", "standalone/src/unwrap.rs",
-    *(f"triadq/uv{name}.py" for name in ("keep", "snap", "auto")), *(f"uv_{name}.py" for name in ("fast", "hooks")),
-    "tests/test_uv_parity_*.py", "tests/uv_parity_common.py", *(f"tests/test_uv_{name}.py" for name in ("keep", "auto", "scaffold")),
-    "tests/uv_hooks_fake.py",
+    "uv" + "_fast.py", "tests/test_uv_parity_*.py", "tests/uv_parity_common.py", "tests/test_uv_scaffold.py",
 ]
 SKIP_DIRS = {".git", "__pycache__", ".claude", ".ruff_cache", "target", "dist"}
 

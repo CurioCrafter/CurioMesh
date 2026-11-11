@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
-"""Seams (package K1): source islands, side regions, seam chains, classes, per-side transfer
+"""Seams (package K1): source islands, side regions, seam chains, classes, Hard triage, per-side transfer
 and the fold fix (SPEC 4.1, 4.2, 4.8).
 
 NumPy only, no bpy. Long work runs as a sliceable stage (`Transfer.step()` does about 4 ms).
@@ -10,7 +10,7 @@ Our own design and code. Textbook pieces: closest point on a triangle (Ericson, 
 2005, 5.1.5); a harmonic fill by Gauss-Seidel sweeps (convex-combination fill after Tutte 1963 and Floater 1997, here
 with inverse-length weights). The side rules are ours.
 
-Data: `_extract_steps` fills a dict with the keys (weld, island, region, edge_a, edge_b,
+Data: `extract` returns a dict with the keys (weld, island, region, edge_a, edge_b,
 edge_chain, edge_face, corner, run_indptr, run_vertex, uv_a, uv_b, gap_px, class, chain_island, chain_material,
 chain_length, island_tile, n_welded, n_islands, n_regions, texture_px); pairs are flattened (2 values per row).
 """
@@ -28,6 +28,10 @@ UV_TOL_PX = 0.01
 TEXTURE_PX_DEFAULT = 1024.0
 IGNORE_PX = 1.0
 SHIFT_TOL_PX = 1.0
+HARD_ACROSS_EDGES = 3.0
+COST_A = 1.0
+COST_B = 4.0
+HARD_BUDGET_SHARE = 0.5
 WALK_REACH = 2.0
 WALK_UV_SLACK = 2.0
 SLIDE_EDGE = 0.02
@@ -70,8 +74,44 @@ def _dist(a, b):
     return math.sqrt(_dot(d, d))
 
 
+def _quotient(a, b):
+    return 0.0 if b == 0.0 else a / b
+
+
+def closest_bary(p, a, b, c):
+    """Closest point on triangle abc to p as barycentric weights (Ericson 2005; zero divisors give 0)."""
+
+    ab, ac, ap = _sub(b, a), _sub(c, a), _sub(p, a)
+    d1, d2 = _dot(ab, ap), _dot(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return (1.0, 0.0, 0.0)
+    bp = _sub(p, b)
+    d3, d4 = _dot(ab, bp), _dot(ac, bp)
+    if d3 >= 0.0 and d4 <= d3:
+        return (0.0, 1.0, 0.0)
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = _quotient(d1, d1 - d3)
+        return (1.0 - v, v, 0.0)
+    cp = _sub(p, c)
+    d5, d6 = _dot(ab, cp), _dot(ac, cp)
+    if d6 >= 0.0 and d5 <= d6:
+        return (0.0, 0.0, 1.0)
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = _quotient(d2, d2 - d6)
+        return (1.0 - w, 0.0, w)
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and d4 - d3 >= 0.0 and d5 - d6 >= 0.0:
+        w = _quotient(d4 - d3, (d4 - d3) + (d5 - d6))
+        return (0.0, 1.0 - w, w)
+    under = va + vb + vc
+    v, w = _quotient(vb, under), _quotient(vc, under)
+    return (1.0 - v - w, v, w)
+
+
 def _closest_bary_many(p, a, b, c):
-    """Closest-point barycentrics for one point against many triangles (a, b, c: (m, 3)); returns (m, 3) weights."""
+    """`closest_bary` for one point against many triangles (a, b, c: (m, 3)); returns (m, 3) weights."""
 
     m = len(a)
     ab, ac, ap = b - a, c - a, p - a
@@ -248,9 +288,19 @@ def _edges(wflat: np.ndarray, nxt: np.ndarray) -> tuple:
     return a, b, start, occ
 
 
-# ---------------------------------------------------------------- seams, classes, regions
+# ---------------------------------------------------------------- extract, classify, regions
+def extract(points, indptr, flat, corner_uv, material=None, repeat=(), texture_px: float = TEXTURE_PX_DEFAULT, uv_tol_px: float = UV_TOL_PX,
+            cut_here=()) -> dict:
+    """Islands, seam edges, chains, classes and side regions of a source mesh. See the module docstring for the keys."""
+
+    seams = {}
+    for _ in _extract_steps(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px, cut_here, seams):
+        pass
+    return seams
+
+
 def _extract_steps(points, indptr, flat, corner_uv, material, repeat, texture_px, uv_tol_px, cut_here, seams: dict):
-    """Generator: the source's seams, classes and side regions into `seams`, yielding between pieces of work."""
+    """Generator behind `extract`: fills `seams`, yielding between pieces of work."""
 
     P = np.asarray(points, np.float64).reshape(-1, 3)
     indptr, flat = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
@@ -509,6 +559,79 @@ def join_tolerance(seams: dict) -> np.ndarray:
         tol = max(0.5 * float(gaps[len(gaps) // 2]), IGNORE_PX) / seams["texture_px"]
         join[ra] = min(join[ra], tol)
     return join
+
+
+# ---------------------------------------------------------------- triage
+def triage(seams: dict, points, indptr, flat, f_target: float, allowance: float, seen_face=None, cost_a: float = COST_A, cost_b: float = COST_B) -> dict:
+    """Pre-search Hard choice (SPEC 4.2 step 1), in place on `seams` (Soft chains of chosen islands become Hard)."""
+
+    P = np.asarray(points, np.float64).reshape(-1, 3)
+    indptr, flat = np.asarray(indptr, np.int64), np.asarray(flat, np.int64)
+    ni, nf = seams["n_islands"], len(indptr) - 1
+    island = seams["island"]
+    area, seen_area, perim = np.zeros(ni), np.zeros(ni), np.zeros(ni)
+    lo, hi = np.full((ni, 3), np.inf), np.full((ni, 3), -np.inf)
+    total = 0.0
+    for f in range(nf):
+        face = flat[indptr[f]:indptr[f + 1]]
+        i = island[f]
+        n = _newell(P, face)
+        a = 0.5 * math.sqrt(_dot(n, n))
+        area[i] += a
+        seen_area[i] += a * (1.0 if seen_face is None or len(seen_face) == 0 else float(seen_face[f]))
+        total += a
+        lo[i] = np.minimum(lo[i], P[face].min(0))
+        hi[i] = np.maximum(hi[i], P[face].max(0))
+    weld = seams["weld"]
+    wflat = weld[flat]
+    nxt = _next_corners(indptr)
+    cface = _face_of_corner(indptr)
+    ea, eb, estart, occ = _edges(wflat, nxt)
+    wpos = np.zeros((seams["n_welded"], 3))
+    wpos[weld] = P
+    for e in np.flatnonzero(np.diff(estart) == 1):
+        perim[island[cface[occ[estart[e]]]]] += _dist(wpos[ea[e]], wpos[eb[e]])
+    ef = seams["edge_face"].reshape(-1, 2)
+    for k in range(len(seams["edge_a"])):
+        ln = _dist(wpos[seams["edge_a"][k]], wpos[seams["edge_b"][k]])
+        for f in ef[k]:
+            perim[island[f]] += ln
+    gap, soft = np.zeros(ni), np.zeros(ni, bool)
+    ptr, isl = seams["run_indptr"], seams["chain_island"].reshape(-1, 2)
+    for c in range(len(ptr) - 1):
+        if seams["class"][c] == SOFT:
+            g = max([0.0] + [float(x) for x in seams["gap_px"][ptr[c]:ptr[c + 1]]])
+            for i in isl[c]:
+                gap[i] = max(gap[i], g)
+                soft[i] = True
+    edge_est = math.sqrt(total / f_target) if f_target > 0 else 0.0
+    ranked = []
+    for i in range(ni):
+        if not soft[i] or perim[i] <= 0.0 or edge_est <= 0.0:
+            continue
+        diag = _dist(lo[i], hi[i])
+        across = min(diag, 4.0 * area[i] / perim[i])
+        if across / edge_est < HARD_ACROSS_EDGES:
+            seen = seen_area[i] / area[i] if area[i] > 0 else 1.0
+            ranked.append((area[i] * gap[i] * seen, i, cost_a * perim[i] / edge_est + cost_b))
+    ranked.sort(key=lambda r: (-r[0], r[1]))
+    budget = HARD_BUDGET_SHARE * max(allowance, 0.0) * max(f_target, 0.0)
+    out = dict(hard_islands=[], hard_cost=[], left_islands=[], left_cost=[], spent=0.0, budget=budget, edge_est=edge_est)
+    hard = np.zeros(ni, bool)
+    for _, i, cost in ranked:
+        if out["spent"] + cost <= budget:
+            out["spent"] += cost
+            hard[i] = True
+            out["hard_islands"].append(i)
+            out["hard_cost"].append(cost)
+        else:
+            out["left_islands"].append(i)
+            out["left_cost"].append(cost)
+    cls = seams["class"]
+    for c in range(len(cls)):
+        if cls[c] == SOFT and (hard[isl[c, 0]] or hard[isl[c, 1]]):
+            cls[c] = HARD
+    return {k: (np.array(v) if isinstance(v, list) else v) for k, v in out.items()}
 
 
 # ---------------------------------------------------------------- lookup (per-side transfer)

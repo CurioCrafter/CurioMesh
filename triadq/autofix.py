@@ -419,9 +419,11 @@ PASSES = (  # AUTO_FIX.md 3.2: (group switch, module, class, kinds or None for a
     ("shape", "relax", "RelaxTowardDetail", None),
     ("shape", "relax", "SourceRelax", None),
     ("shape", "relax", "KeepLinesRelax", None),
+    ("uv", "uvauto", "SeamSnap", None),
+    ("uv", "uvtrial", "SeamFit", None),
     ("leftovers", "tidytools", "PreviewTidy", ("slivers",)),
 )
-GROUPS = ("leftovers", "seam", "poles", "patches", "hard", "rows", "shape")
+GROUPS = ("leftovers", "seam", "poles", "patches", "hard", "rows", "shape", "uv")
 
 
 def plan(on) -> list:

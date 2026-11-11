@@ -45,6 +45,7 @@ from .triadq.smoothgrid import GridOptions, GridReport, crease_area_steps, grid_
 from . import guides, hardware, loops, parallel, symmetry
 from .triadq.types import Cancelled, FlatFaces, MeshData, cancel_steps, corners_of
 from .triadq.uvs import simplify_borders_steps
+from .triadq import uvauto
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
 MAX_PIXELS = 192  # a side of one picture, so one huge piece can't take minutes per look
@@ -808,6 +809,7 @@ class AutoJob:
         self.looks = 0  # sizes of pieces the camera looked at
         self.part_cases: dict[int, tuple] = {}  # piece -> (case, sizes skipped, sizes looked at), for `explain_piece`
         self.table = cases.load_table() if USE_CASES else None
+        self.uv = uvauto.attach(self)
         self._search = self._run_rows() if style == "ROWS" else self._run()
 
     def seconds_left(self) -> float | None:
@@ -2779,6 +2781,7 @@ class AutoJob:
                 break
         piece = yield from self._slice(lambda: self._vote(points, out_faces))
         points, out_faces, materials, (loss, shading, soft), check = yield from self._check(points, out_faces, materials, piece, (loss, shading, soft))
+        points, (loss, shading, soft) = yield from uvauto.fix(self, points, out_faces, (loss, shading, soft))
         if out_faces is not plain_faces:  # tidied or repaired: copies are no longer alike
             self.instances = None
         self.stage = "Scoring the quads"

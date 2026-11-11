@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Andrew Rainsberger and CurioMesh contributors
 
-"""Look First Trials for UVs (package A3, SPEC 10.1): New, New page layout, Cut here / Join here and Bake those spots.
+"""Look First Trials for UVs (package A3, SPEC 10.1): Seam Fit, New, New page layout, Cut here / Join here and Bake
+those spots.
 
-They change only the UVs of a mesh that has them. They are `UVTrial`s on a `UVBase`, with the same shape: `check`, a
-sliced `run` that returns a `UVCand`, `measure` for the card, Again from the candidate, Keep going while a pass gains.
+Seam Fit changes the result's faces, so it is a `trial.Trial` and opens in Look First like every Tidy Tool; Apply
+keeps it as one Undo step and one History entry, and the result's Apply writes exactly the fit that was shown
+(`remember_applied`: `uv_hooks.after_apply` finds it by the result's hash). The other four change only the UVs of a
+mesh that has them. They are `UVTrial`s on a `UVBase`, with the same shape: `check`, a sliced `run` that returns a
+`UVCand`, `measure` for the card, Again from the candidate, Keep going while a pass gains.
 
-NumPy only, no bpy. Every `run` yields after a few milliseconds of work.
+NumPy only, no bpy. Every `run` yields after a few milliseconds of work; long core stages are polled.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import math
 import time
@@ -19,10 +23,304 @@ import time
 import numpy as np
 
 from . import trial as T
-from . import uvnew, uvpack, uvscore
+from . import uvkeep, uvnew, uvpack, uvscore, uvseams, uvsnap
+from .types import FlatFaces
 
+# What the panel hands Seam Fit before it opens: a callable returning dict(source, plan, settings, material, extra) or None.
+FIT: dict = {"inputs": None}
+APPLIED_EXTRA: dict = {}  # result key -> extra faces Seam Fit already spent on it (Again counts them against the allowance)
+
+SEAM_STEP = 0.25  # Soft chains are sampled every this many edges for Seam Fit's own number
+OWN_CHUNK = 128  # seam samples measured per slice
+_OWN: dict = {}  # own numbers already worked out (keyed by the mesh's fingerprint and the faces)
+SEAM_LEAST = 0.05  # the smallest drop of that number (in quads) that counts as better: a tolerance, not a cap
+NO_UVS = "Your mesh has no UVs to keep. New will make some."
+NOT_LIGHT = "Seam Fit runs when UVs are set to keep the source's (Seam Fit: Light)."
 CHECK_PX = 1024.0
 TIME_WORDS = "Stopped after {t:g} s with {what} still improving. Keep going continues, or raise Time per pass."
+
+
+def _faces_of(indptr, flat) -> list:
+    return list(FlatFaces(indptr, flat))
+
+
+def _edge_keys(faces, n: int) -> np.ndarray:
+    f = FlatFaces.of(faces)
+    ip, fl = f.indptr, f.flat
+    nxt = np.arange(1, len(fl) + 1)
+    nxt[ip[1:] - 1] = ip[:-1]
+    lo, hi = np.minimum(fl, fl[nxt]), np.maximum(fl, fl[nxt])
+    return np.unique(lo * n + hi)
+
+
+def new_edges(old_faces, new_faces, n: int) -> np.ndarray:
+    """(k, 2) corner pairs of edges of `new_faces` that `old_faces` did not have: the split lines. `n`: corner count."""
+    new = _edge_keys(new_faces, n)
+    new = new[~np.isin(new, _edge_keys(old_faces, n))]
+    return np.stack([new // n, new % n], axis=1)
+
+
+def allowance_of(value: float):
+    """The dial's value as the allowance: 0..1 is 0..100 % extra faces, the end of the dial is "any" (split everything)."""
+    return None if value >= 1.0 - 1e-9 else max(0.0, float(value))
+
+
+class SeamFit(T.Trial):
+    """Snap, split faces on seams and per-side transfer on the result (`uvkeep.FitStage`), previewed before Apply."""
+
+    name = "Seam Fit"
+    group = "CLEANUP"
+    handles = ("faces",)
+    words = ("0%", "any")
+    defaults = {"faces": uvkeep.DEFAULT_ALLOWANCE, "split": True, "keep_going": False}
+    blendable = False
+    changes_faces = True
+    splits_faces = True  # split pieces are expected: Auto Fix counts bad faces per parent and reads poles, Tidiness and Loop Quality off them
+    layers = ("scope", "ghost", "wash", "arrows", "held")
+    stages = ("split", "faces", "left")
+    toggles = (("split", "Split faces on seams"), ("keep_going", "Keep going"))
+    legend = ""
+    # Auto Fix (AUTO_FIX.md 2.1): one spot holds every face the fit changes; its own number is the seams' length off
+    # the spot's edges, in quads (0 when every seam runs along edges)
+    auto = True
+    kinds = (("across", "face across a UV seam", "faces across UV seams"),)
+    own = "seam_off"
+    least = SEAM_LEAST
+
+    def __init__(self, inputs: dict | None = None):
+        self._inputs = inputs  # dict(source, plan, settings, material); None: the panel's provider (FIT["inputs"])
+
+    def inputs(self):
+        if self._inputs is not None:
+            return self._inputs
+        get = FIT.get("inputs")
+        return get() if get is not None else None
+
+    def value_text(self, value: float) -> str:
+        a = allowance_of(value)
+        return "Extra faces any" if a is None else f"Extra faces {100 * a:.0f}%"
+
+    def check(self, base: T.Base) -> str:
+        got = self.inputs()
+        if got is None:
+            return NO_UVS
+        if got.get("refusal"):
+            return got["refusal"]
+        mat = got.get("material")
+        if mat is not None and len(mat) != len(base.faces):
+            return "The result changed since Seam Fit was set up. Open it again."
+        return ""
+
+    def _edge(self, base: T.Base) -> float:
+        """One length scale for every own number of this trial: the first result it saw (spots and run work on sub-scopes
+        whose mean edge differs, and a split shortens edges; the before and after numbers must use the same quad)."""
+        if getattr(self, "_scale", None) is None:
+            self._scale = float(base.edge)
+        return self._scale
+
+    def _samples(self, base: T.Base):
+        """(k, 3) points along the Soft chains, SEAM_STEP quads apart, worked out once per inputs."""
+        got = self.inputs()
+        key = (id(got["plan"]), self._edge(base))
+        if getattr(self, "_sample_key", None) != key:
+            seams = got["plan"].seams
+            xyz = uvsnap.chain_xyz(seams, got["source"].points).reshape(-1, 3)
+            ptr, run = np.asarray(seams["run_indptr"], np.int64), np.asarray(seams["run_vertex"], np.int64)
+            out = []
+            for c in np.flatnonzero(np.asarray(seams["class"]) == uvseams.SOFT).tolist():
+                line = xyz[run[ptr[c]:ptr[c + 1]]]
+                if len(line) < 2:
+                    continue
+                seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
+                at = np.concatenate([[0.0], np.cumsum(seg)])
+                t = np.linspace(0.0, at[-1], max(2, int(np.ceil(at[-1] / (SEAM_STEP * key[1]))) + 1))
+                out.append(np.stack([np.interp(t, at, line[:, k]) for k in range(3)], axis=1))
+            self._sample_key, self._sample_pts = key, (np.vstack(out) if out else np.zeros((0, 3)))
+        return self._sample_pts
+
+    def own_steps(self, base: T.Base, co, faces, ids):
+        """Generator: the own number of faces `ids` of (co, faces), worked out in slices of OWN_CHUNK samples and kept,
+        so `own_number` (which Auto Fix calls in one go) only looks it up."""
+        ids = np.asarray(ids, np.int64)
+        co = np.asarray(co, np.float64)
+        key = (co.shape, float(co.sum()), len(faces), hashlib.sha1(ids.tobytes()).hexdigest(), self._edge(base))
+        if key in _OWN:
+            return _OWN[key]
+        edge = self._edge(base)
+        value = 0.0
+        if len(ids):
+            sub = [faces[f] for f in ids.tolist()]
+            corners = co[np.unique(np.fromiter((v for f in sub for v in f), np.int64))]
+            q = self._samples(base)
+            lo, hi = corners.min(0) - edge, corners.max(0) + edge
+            q = q[np.all((q >= lo) & (q <= hi), axis=1)]
+            if len(q):
+                e = T.edges_of(sub)
+                a, b = co[e[:, 0]], co[e[:, 1]]
+                yield
+                for k in range(0, len(q), OWN_CHUNK):
+                    value += float(_to_segments(q[k:k + OWN_CHUNK], a, b, near_only=True).sum())
+                    yield
+                value *= SEAM_STEP / edge
+        _OWN[key] = value
+        while len(_OWN) > 32:
+            _OWN.pop(next(iter(_OWN)))
+        return value
+
+    def own_number(self, base: T.Base, co, faces, spot) -> float:
+        """Seam length off the edges of the spot's faces, in quads: the samples within one quad of the spot's corners,
+        each counted by how far it lies from the nearest edge, up to about a quad (lower is better)."""
+        if not len(spot.faces):
+            return float(spot.bad)
+        return T.finish(self.own_steps(base, co, faces, spot.faces))
+
+    def spots(self, base: T.Base):
+        """One spot: every face the fit at any allowance changes (moved corners, split faces)."""
+        if self.check(base):
+            return []
+        allowance = self.inputs()["settings"].allowance
+        faces = 1.0 if allowance is None else min(1.0, float(allowance))  # the popover's Extra faces for seams
+        cand = yield from self.run(base, dict(self.defaults, faces=faces))
+        if cand.refusal or cand.co is None:
+            return []
+        moved = np.zeros(len(base.co), bool)
+        n = min(len(base.co), len(cand.co))
+        moved[:n] = np.linalg.norm(np.asarray(cand.co[:n]) - base.co[:n], axis=1) > 1e-9 * base.edge
+        f = FlatFaces.of(base.faces)
+        owner = np.repeat(np.arange(len(base.faces)), np.diff(f.indptr))
+        changed = np.zeros(len(base.faces), bool)
+        changed[owner[moved[f.flat]]] = True
+        changed |= np.bincount(np.asarray(cand.parent, np.int64), minlength=len(base.faces)) > 1
+        ids = np.flatnonzero(changed & base.scope)
+        if not len(ids):
+            return []
+        at = base.co[np.unique(f.flat[np.isin(owner, ids)])].mean(axis=0)
+        sp = T.Spot("across", ids, at, 0.0, pick={"faces": faces})  # its run uses the same allowance
+        sp.bad = yield from self.own_steps(base, base.co, base.faces, ids)
+        return [sp] if sp.bad > self.least else []
+
+    def run(self, base: T.Base, settings: dict, rough: bool = False):
+        got = self.inputs()
+        sa, plan = got["source"], got["plan"]
+        s = replace(got["settings"], mode="light", allowance=allowance_of(float(settings.get("faces", uvkeep.DEFAULT_ALLOWANCE))), split=bool(settings.get("split", True)))
+        faces = FlatFaces.of(base.faces)
+        key = uvkeep.result_key(base.co, faces.indptr, faces.flat)
+        extra = int(got.get("extra", APPLIED_EXTRA.get(key, 0)))
+        stage = uvkeep.FitStage(sa, plan, base.co, faces.indptr, faces.flat, got.get("material"), s, extra_so_far=extra, file=False)  # only an applied fit is filed
+        passes, best = 0, None
+        try:
+            while True:
+                t = 0
+                while not stage.done:
+                    stage.step()
+                    t += 1
+                    yield min(0.95, 0.02 * t / (1 + passes))
+                c = stage.candidate
+                if c is None:
+                    break
+                left = int(c.numbers.get("faces_left", 0)) + int(c.numbers.get("faces_for_baking", 0))
+                if best is not None and left >= best[1]:
+                    break  # this pass made nothing better: keep the last one (Keep going stops by itself)
+                best, passes = (c, left), passes + 1
+                if not settings.get("keep_going") or left == 0:
+                    break
+                stage = uvkeep.again(c, sa, plan, s, file=False)
+        finally:
+            stage.stop()
+        if best is None:
+            return T.Candidate(None, refusal="Seam Fit stopped before it finished.")
+        c = best[0]
+        n = c.numbers
+        yield 0.96
+        new_faces = _faces_of(c.indptr, c.flat)
+        cand = T.Candidate(np.asarray(c.points, np.float64), faces=new_faces, parent=np.asarray(c.origin, np.int64), exact=True)
+        yield 0.97
+        cand.lines = new_edges(base.faces, FlatFaces(c.indptr, c.flat), len(c.points))
+        yield 0.98
+        cand.fit = c
+        cand.fit_extra = extra + int(n.get("extra_faces", 0))
+        split, left = int(n.get("faces_split", 0)), int(n.get("faces_left", 0)) + int(n.get("faces_for_baking", 0))
+        moved = int(n.get("moved", 0)) + int(n.get("side_moved", 0))  # side_moved: the side-line snap's moves
+        cand.numbers["split"] = (f"{split} faces split, {moved} points moved", 1 if split or moved else 0)
+        cand.numbers["left"] = (f"{left} left for baking" if left else "every seam fitted", -1 if left else 1)
+        notes = list(c.messages)
+        if int(n.get("held", 0)):
+            notes.append(f"{int(n['held'])} points held by the camera check")
+        if passes > 1:
+            notes.append(f"{passes} passes")
+        cand.note = "; ".join(notes)
+        remember_applied(cand)  # filed now, so whichever path keeps it (the modal, F9, a script) is written by Apply
+        if not base.scope.all():  # a spot of Auto Fix: its number after the fit, worked out here in slices
+            yield from self.own_steps(base, cand.co, new_faces, np.flatnonzero(np.isin(cand.parent, np.flatnonzero(base.scope))))
+        return cand
+
+
+def _point_seg(q, a, b):
+    """Distance of each point q[i] to the segment a[i]-b[i] (rows paired)."""
+    ab = b - a
+    t = np.clip(((q - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-30), 0.0, 1.0)
+    return np.linalg.norm(q - (a + t[:, None] * ab), axis=1)
+
+
+def _to_segments(q, a, b, near_only: bool = False):
+    """Distance of each point of `q` (m, 3) to the nearest segment a[i]-b[i]. Segments are binned in a grid of cells as
+    big as the longest one; a point checks the 27 cells round it, which is exact whenever the nearest segment is
+    within half a cell (any segment outside lies further). Points with none that near are checked against all, or,
+    with `near_only`, count as one cell away (a seam's own number only needs "off by about a quad or more")."""
+    q, a, b = np.asarray(q, np.float64), np.asarray(a, np.float64), np.asarray(b, np.float64)
+    if not len(q) or not len(a):
+        return np.full(len(q), np.inf)
+    h = max(float(np.linalg.norm(b - a, axis=1).max()), 1e-12)
+    origin = np.minimum(a.min(0), q.min(0))
+    cell = np.floor(((a + b) / 2 - origin) / h).astype(np.int64)
+    span = cell.max(0) + 3
+    key = (cell[:, 0] * span[1] + cell[:, 1]) * span[2] + cell[:, 2]
+    order = np.argsort(key, kind="stable")
+    skey = key[order]
+    qc = np.floor((q - origin) / h).astype(np.int64)
+    best = np.full(len(q), np.inf)
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                c = qc + (dx, dy, dz)
+                k = (c[:, 0] * span[1] + c[:, 1]) * span[2] + c[:, 2]
+                lo, hi = np.searchsorted(skey, k), np.searchsorted(skey, k, side="right")
+                n = hi - lo
+                if not n.any():
+                    continue
+                pi = np.repeat(np.arange(len(q)), n)
+                si = order[np.repeat(lo, n) + (np.arange(int(n.sum())) - np.repeat(np.cumsum(n) - n, n))]
+                np.minimum.at(best, pi, _point_seg(q[pi], a[si], b[si]))
+    far = np.flatnonzero(best > h / 2)
+    if near_only:
+        best[far] = np.minimum(best[far], h)
+    elif len(far):
+        best[far] = _to_segments_all(q[far], a, b)
+    return best
+
+
+def _to_segments_all(q, a, b):
+    """Distance of each point of `q` (m, 3) to the nearest segment a[i]-b[i] (closest point on a segment), in blocks."""
+    ab = b - a
+    l2 = np.maximum((ab * ab).sum(1), 1e-30)
+    best = np.full(len(q), np.inf)
+    for s in range(0, len(a), 256):
+        A, AB = a[None, s:s + 256], ab[None, s:s + 256]
+        t = np.clip(((q[:, None, :] - A) * AB).sum(2) / l2[None, s:s + 256], 0.0, 1.0)
+        best = np.minimum(best, np.linalg.norm(q[:, None, :] - (A + t[..., None] * AB), axis=2).min(1))
+    return best
+
+
+def remember_applied(cand) -> str:
+    """After Seam Fit's Apply the result IS the fitted mesh: file the fit under that result's key, so the result's own
+    Apply (`uv_hooks.after_apply`) writes exactly this candidate. Returns the key."""
+    c = getattr(cand, "fit", None)
+    if c is None:
+        return ""
+    key = uvkeep.result_key(c.points, c.indptr, c.flat)
+    uvkeep.remember(replace(c, result_key=key), pin=True)
+    APPLIED_EXTRA[key] = int(getattr(cand, "fit_extra", 0))
+    return key
 
 
 # --------------------------------------------------------------------------- UV-only Trials
@@ -449,7 +747,7 @@ def shows_texture(base: UVBase) -> np.ndarray:
 
 
 def _pack_into(page, k, seed, tris, tri_chart, charts):
-    """Generator: `uvpack.pack_into_steps`. [(ok, dx, dy, quarter)] per chart."""
+    """Generator: `uvpack.pack_into` in slices. [(ok, dx, dy, quarter)] per chart."""
     return (yield from uvpack.pack_into_steps(page, k, seed, tris, tri_chart, charts, turn_ok=[True] * charts))
 
 
@@ -514,7 +812,7 @@ class BakeSpotsUV(UVTrial):
                 missed += len(group)
                 continue
             x, y = local[:, 0].copy(), local[:, 1].copy()
-            for _ in range(q):  # (x, y) -> (-y, x), as pack_into_steps reports it
+            for _ in range(q):  # (x, y) -> (-y, x), as pack_into reports it
                 x, y = -y, x
             uv[corners, 0] = (x + dx) / page[0]
             uv[corners, 1] = (y + dy) / page[1]
