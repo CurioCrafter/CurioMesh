@@ -40,6 +40,22 @@ class Translations(unittest.TestCase):
             gaps = catalog.missing(table, self.catalog)
             self.assertEqual(gaps, [], f"{lang} misses {len(gaps)} msgids, e.g. {gaps[:5]}")
 
+    def test_no_entry_for_text_this_build_lacks(self):
+        # An entry neither in the catalog nor (as its literal pieces) in the code is text of a feature this build does
+        # not have (agent commands, parts exchange, the speed-up module): the site review reads these files too.
+        import re
+
+        found = set(self.catalog) | {m.replace("{{", "{").replace("}}", "}") for m in self.catalog}
+        code = "\n".join(p.read_text(encoding="utf-8") for p in [*ROOT.glob("*.py"), *(ROOT / "triadq").glob("*.py")])
+
+        def in_code(key):
+            pieces = [f for f in re.split(r"\{\{?\w*\}?\}", key) if len(f.strip()) >= 4]
+            return key in code or (bool(pieces) and all(f in code for f in pieces))
+
+        for lang, table in T.MESSAGES.items():
+            stale = [k for k in table if k not in found and not in_code(k)]
+            self.assertEqual(stale, [], f"{lang}: {len(stale)} entries for text the code never shows, e.g. {stale[:5]}")
+
     def test_blender_dict(self):
         d = T.blender_dict()
         self.assertEqual(d["es"][("*", "Start")], T.MESSAGES["es"]["Start"])
