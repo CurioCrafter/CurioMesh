@@ -1613,7 +1613,7 @@ def _preserve_textures_steps(
     """The UVs of the result, as timer steps (`sliced`). Stop falls back to Blender's transfer below."""
     yield from ()
     sliced.tick("Carrying the UVs over")
-    if (_uv := (yield from uvclassic.preserve_textures_steps(source, target, config, sliced.stopped))) is not None and uv_mapping_is_valid(target): return _uv  # main-only: uv
+    if (_uv := (yield from uvclassic.preserve_textures_steps(source, target, config, sliced.stopped))) is not None and uv_mapping_is_valid(target): return _uv  # main-only: uv  # noqa: E701
     mode = str(config.texture_mode or "PROJECT").upper()
     if mode == "NONE":
         return "SKIPPED"

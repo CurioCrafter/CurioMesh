@@ -27,7 +27,7 @@ def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: s
 def ensure_target_uvs_steps(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02):
     """`ensure_target_uvs` as timer steps (`sliced`): a long unwrap yields between short pieces; Stop falls back to Smart Project."""
     yield from ()
-    if (yield from uvbake.ensure_target_uvs_steps(obj, method, new_layer, island_margin, sliced.stopped, lambda f: sliced.tick("Making the bake UVs", f))): return  # main-only: uv
+    if (yield from uvbake.ensure_target_uvs_steps(obj, method, new_layer, island_margin, sliced.stopped, lambda f: sliced.tick("Making the bake UVs", f))): return  # main-only: uv  # noqa: E701
     if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
         return
     if new_layer:

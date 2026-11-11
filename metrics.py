@@ -11,7 +11,7 @@ from mathutils import Vector
 import numpy as np
 
 from .triadq import MeshData, topology_summary
-from . import uv_layers; from .triadq import uvscore  # main-only: uv
+from . import uv_layers; from .triadq import uvscore  # main-only: uv  # noqa: E702
 
 
 @dataclass(slots=True)
