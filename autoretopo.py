@@ -34,7 +34,7 @@ from mathutils.kdtree import KDTree
 from .triadq import tasks
 from .triadq import bakescore, cases, checks, detail, hardsurf, issues, parts, patch, patterns, redo, repair, special, views
 from .triadq.chords import ChordReducer, PictureJudge
-from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, vertex_heat
+from .triadq.budget import Level, allocate, allocate_to_faces, best_levels, hottest, next_ask, run_steps, vertex_heat, vertex_heat_steps
 from .triadq.fit import fit_vertices, vertex_parts
 from .triadq.flatquad import FlatQuadOptions, _close_pieces, _face_frames, flat_quad_remesh, flatten_regions, pair_and_close
 from .triadq.flow import faces_that_gain, seek_features, snap_new_vertices, snap_rows, split_faces, unfold
@@ -45,7 +45,7 @@ from .triadq.fieldmesh import MOST_TARGET, field_quads, is_clean
 from .triadq.smoothgrid import GridOptions, GridReport, crease_areas, grid_areas, smooth_areas
 from . import guides, hardware, loops, parallel, symmetry, turbo
 from .triadq.types import Cancelled, FlatFaces, MeshData
-from .triadq.uvs import simplify_borders
+from .triadq.uvs import simplify_borders_steps
 from .triadq import uvauto  # main-only: uv
 
 VIEW_PIXELS = 2048  # the whole object's size in the camera's pixels: sets the smallest detail that counts
@@ -436,7 +436,13 @@ DENSITY_STEPS = 24  # painted weights are rounded to this many levels, so a vert
 
 
 def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tuple[np.ndarray, list[tuple[int, ...]], list[str]]:
-    """Reduce to `ratio`. `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders."""
+    """`_decimate_steps` in one go."""
+    return run_steps(_decimate_steps(context, points, polys, kinds, ratio, drop, keep))
+
+
+def _decimate_steps(context, points, polys, kinds, ratio, drop=None, keep=None):
+    """Generator: reduce to `ratio`. `drop` is the painted density per vertex; vertices in the mask `keep` are locked, as are UV borders.
+    Straightening the UV borders yields as it goes; Blender's own Decimate is one call."""
     context = bpy.context  # read at slice time: the operator's context a job was made with does not outlive the operator
 
     free = None if keep is None else np.flatnonzero(~keep)
@@ -444,7 +450,7 @@ def _decimate(context, points, polys, kinds, ratio, drop=None, keep=None) -> tup
         triangles = sum(len(p) - 2 for p in polys)
         wanted = max(ratio * triangles, 1.0)
         triangle = float(_face_areas(points, polys).sum()) / wanted
-        points, polys, kinds, unbound, used = simplify_borders(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle), () if keep is None else np.flatnonzero(keep).tolist())
+        points, polys, kinds, unbound, used = yield from simplify_borders_steps(points, polys, kinds, BORDER_TOLERANCE * math.sqrt(triangle), () if keep is None else np.flatnonzero(keep).tolist())
         drop = None if drop is None else drop[used]
         unbound = np.asarray(unbound, dtype=np.int64)
         free = unbound if keep is None else np.intersect1d(unbound, np.flatnonzero(~keep[used]))
@@ -914,7 +920,7 @@ class AutoJob:
 
                 out = yield from self._background(level)
         if out is None:
-            out = _decimate(self.context, points, polys, kinds, ratio, drop, keep)
+            out = yield from _decimate_steps(self.context, points, polys, kinds, ratio, drop, keep)
         self.timings["decimate"] = self.timings.get("decimate", 0.0) + time.perf_counter() - started
         return out
 
@@ -1199,7 +1205,11 @@ class AutoJob:
                 # Density where the camera saw it go wrong: hold those spots while the rest goes further, then let go.
                 for k in () if painted else (upper - 1, upper, len(levels) - 1):
                     yield
-                    keep = yield from self._off(lambda: hottest(vertex_heat(points, spots[k], 3.0 * pixel), LOCKED_SHARE * levels[k].faces / 2.0))
+                    if len(self.faces) < OFF_MAIN_FROM and not self.threaded:  # in steps here; a big job does it on its worker thread
+                        heat = yield from vertex_heat_steps(points, spots[k], 3.0 * pixel)
+                    else:
+                        heat = yield from self._off(lambda: vertex_heat(points, spots[k], 3.0 * pixel))
+                    keep = hottest(heat, LOCKED_SHARE * levels[k].faces / 2.0)
                     held = yield from self._reduced(points, polys, kinds, HELD_SIZE * levels[k].faces / triangles, keep=keep if lock is None else keep | lock, one_off=True)
                     border = None if lock is None else (yield from self._off(lambda: _same_points(held[0], points[lock])))  # a region's border never moved
                     reduced = yield from self._reduced(held[0], held[1], held[2], levels[k].faces / max(len(held[1]), 1), keep=border, one_off=True)

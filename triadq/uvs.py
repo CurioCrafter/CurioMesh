@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 MOST_CHARTS = 30000  # Blender keeps a face's material index in 16 bits while reducing
@@ -40,7 +42,18 @@ def _straighten(points: np.ndarray, chain: list[int], tolerance: float) -> list[
 
 
 def simplify_borders(points: np.ndarray, polys, kinds, tolerance: float, fixed=()):
-    """Straighten the borders between kinds of face, along themselves, so each side still shares the same vertices.
+    """`simplify_borders_steps` in one go."""
+
+    from .budget import run_steps
+
+    return run_steps(simplify_borders_steps(points, polys, kinds, tolerance, fixed))
+
+
+SLICE = 0.05  # seconds of work between yields in the step generators below
+
+
+def simplify_borders_steps(points: np.ndarray, polys, kinds, tolerance: float, fixed=()):
+    """Generator, yields about every SLICE seconds so Blender stays usable. Straighten the borders between kinds of face, along themselves, so each side still shares the same vertices.
     Vertices in `fixed` (a region's border) are never merged away.
 
     Returns (points, polys, kinds, free, used): free lists the vertices not on a border, which are the ones allowed to
@@ -51,7 +64,11 @@ def simplify_borders(points: np.ndarray, polys, kinds, tolerance: float, fixed=(
     seen: dict[int, object] = {}
     corner = set()
     links: dict[int, set[int]] = {}
-    for poly, kind in zip(polys, kinds):
+    clock = time.perf_counter() + SLICE
+    for n, (poly, kind) in enumerate(zip(polys, kinds)):
+        if not n & 1023 and time.perf_counter() > clock:
+            yield
+            clock = time.perf_counter() + SLICE
         for at, v in enumerate(poly):
             w = poly[(at + 1) % len(poly)]
             edge = (v, w) if v < w else (w, v)
@@ -79,12 +96,18 @@ def simplify_borders(points: np.ndarray, polys, kinds, tolerance: float, fixed=(
             target[chain[middle + 1 : b]] = chain[b]
 
     for start in sorted(stops):
+        if time.perf_counter() > clock:
+            yield
+            clock = time.perf_counter() + SLICE
         for step in sorted(links.get(start, ())):
             if step not in done:
                 walk(start, step)
     for start in sorted(links):  # closed loops have no ends: start at one vertex and the one furthest from it
         if start in done or start in stops:
             continue
+        if time.perf_counter() > clock:
+            yield
+            clock = time.perf_counter() + SLICE
         loop = [start]
         while True:
             ahead = [n for n in links[loop[-1]] if n not in loop[-2:]]
@@ -99,7 +122,10 @@ def simplify_borders(points: np.ndarray, polys, kinds, tolerance: float, fixed=(
                 walk(start, step)
 
     out_polys, out_kinds, faces_seen = [], [], set()
-    for poly, kind in zip(polys, kinds):
+    for n, (poly, kind) in enumerate(zip(polys, kinds)):
+        if not n & 1023 and time.perf_counter() > clock:
+            yield
+            clock = time.perf_counter() + SLICE
         mapped = [int(target[v]) for v in poly]
         mapped = [v for at, v in enumerate(mapped) if v != mapped[at - 1]]
         key = tuple(sorted(mapped))
