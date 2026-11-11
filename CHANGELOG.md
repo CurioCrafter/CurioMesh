@@ -349,7 +349,12 @@ release.
 - **Undo and History.** A History jump on a UV step brings back the mesh's UVs and the baked pixels, forward too.
 - **Without the fast core.** Every UV feature runs in plain Python as well, in steps short enough that Blender stays
   usable. The page is then packed in boxes instead of outlines.
-- <!-- TODO no-core speed numbers -->
+- Hiding the cuts without the fast core is faster, with exactly the same result: on the lion head that step went
+  from about 27 to about 18 minutes, on the marble bust from 457 to 230 s of CPU time, and its longest single step
+  from 368 to 41 ms, so Blender stays responsive.
+- The UV verdict's limits match what New UVs measures, so a good layout is not called Bad. A layout is Bad
+  below 40 % of the page used or with over 80 % of its cuts in sight (most cuts on a closed shape, such as a bust,
+  are seen from some side).
 
 ## 0.9.8 - 2026-11-06
 
