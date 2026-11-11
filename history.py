@@ -19,6 +19,7 @@ How a change records itself:
 from __future__ import annotations
 
 import bpy
+import numpy as np
 from bpy.app.handlers import persistent
 
 from . import overlay, profiles
@@ -30,6 +31,7 @@ ORG_KEYS = ("base", "origin", "report", "levels", "shown", "seg_piece", "passes"
 LAD_KEYS = ("key", "base", "rungs", "plan", "job", "doing", "shown", "failed", "want", "settings")
 SEG_KEYS = ("base", "piece", "parts", "sel", "ref", "whole", "src", "tree", "tree_job", "res_src", "history")
 SLIDERS = ("quad_size", "quad_order", "organize")
+BAKE_KEY = "curio_uv_step"  # triadq.uvbake.HISTORY_KEY: its image states follow this scene counter
 
 steps = H.Steps()
 
@@ -76,6 +78,7 @@ def snapshot(context=None) -> dict:
         "sliders": None if gs is None else {k: float(getattr(gs, k)) for k in SLIDERS},
         "curve_sig": guided.state.get("curve_sig"),  # the search's inputs for this result: an undone Tweak does not restart it
         "strip_sel": faceloops.fl["sel"],  # (result, element): only shown while that result is on screen
+        "bake_step": int((context or bpy.context).scene.get(BAKE_KEY, 0)),  # which pixels baked images had (triadq.uvbake)
     }
 
 
@@ -243,8 +246,60 @@ def sync(context) -> bool:
     return True
 
 
+def _read_uvs(mesh) -> dict:
+    """Every UV layer of `mesh` as float32 corner arrays, and which one is active: what a History jump writes back."""
+    layers = {}
+    for layer in mesh.uv_layers:
+        uv = np.empty(len(mesh.loops) * 2, dtype=np.float32)
+        layer.data.foreach_get("uv", uv)
+        layers[layer.name] = uv
+    return {"loops": len(mesh.loops), "active": mesh.uv_layers.active_index, "layers": layers}
+
+
+def _write_uvs(mesh, kept: dict) -> bool:
+    """Put `_read_uvs`'s layers back on `mesh` (made, removed or overwritten to match). False when the mesh changed shape."""
+    if len(mesh.loops) != kept["loops"]:
+        return False
+    for name in [layer.name for layer in mesh.uv_layers if layer.name not in kept["layers"]]:
+        mesh.uv_layers.remove(mesh.uv_layers[name])
+    for name, uv in kept["layers"].items():
+        layer = mesh.uv_layers.get(name) or mesh.uv_layers.new(name=name)
+        layer.data.foreach_set("uv", uv)
+    if 0 <= kept["active"] < len(mesh.uv_layers):
+        mesh.uv_layers.active_index = kept["active"]
+    mesh.update()
+    return True
+
+
+def keep_uvs(context, obj) -> None:
+    """A UV tool writes `obj`'s UVs (or bakes into its images): the step on screen keeps what the mesh and images have
+    now, so a History jump to it brings them back. Call it before the write, and again after `record`."""
+    before(context)
+    entry = steps.at(current(context.scene))
+    if entry is None or not isinstance(entry.state, dict) or obj is None or obj.type != "MESH":
+        return
+    uvs = dict(entry.state.get("uvs") or {})
+    if obj.data.name not in uvs:
+        uvs[obj.data.name] = _read_uvs(obj.data)
+    entry.state = dict(entry.state, uvs=uvs, bake_step=int(context.scene.get(BAKE_KEY, 0)))
+    entry.size += H.size_of(uvs, steps._seen)
+
+
+def _uvs_at(index: int) -> dict:
+    """The UVs each tracked mesh had at entry `index`: the newest kept at or before it, else the oldest kept after it
+    (what the mesh had before a UV tool first changed it)."""
+    out: dict = {}
+    for i, entry in enumerate(steps.entries):
+        kept = entry.state.get("uvs") if isinstance(entry.state, dict) else None
+        for name, uvs in (kept or {}).items():
+            if i <= index or name not in out:
+                out[name] = uvs
+    return out
+
+
 def jump(context, index: int) -> bool:
-    """Go back (or forward) to History entry `index`, as a new step, so Ctrl+Z undoes the jump."""
+    """Go back (or forward) to History entry `index`, as a new step, so Ctrl+Z undoes the jump. The meshes' UVs and
+    the baked images' pixels a UV tool changed come back too."""
     if not 0 <= index < len(steps.entries):
         return False
     before(context)
@@ -253,7 +308,15 @@ def jump(context, index: int) -> bool:
     if snap is None:
         return False
     restore(context, snap, sliders=True)
+    uvs = _uvs_at(index)
+    for name, kept in uvs.items():
+        mesh = bpy.data.meshes.get(name)
+        if mesh is not None:
+            _write_uvs(mesh, kept)
     record(context, f"Back to: {entry.name}", entry.numbers, push=True)
+    if uvs:
+        new = steps.entries[-1]
+        new.state = dict(new.state, uvs=uvs)  # the same arrays: later jumps read this step's UVs from here
     return True
 
 

@@ -28,7 +28,8 @@ from .atlasq import (
     split_soft_failures,
 )
 from .metrics import MeshDiagnostics, mesh_diagnostics, uv_mapping_is_valid
-from .textures import bake_selected_to_active, ensure_target_uvs
+from . import sliced
+from .textures import bake_selected_to_active_steps, ensure_target_uvs_steps
 from .triadq.flatquad import FlatQuadOptions, flatten_regions, pair_and_close
 from .triadq import (
     MeshData,
@@ -1537,13 +1538,16 @@ def _project_uvs_bvh(source: bpy.types.Object, target: bpy.types.Object) -> bool
     return assigned > 0 and uv_mapping_is_valid(target)
 
 
-def _preserve_textures(
+def _preserve_textures_steps(
     source: bpy.types.Object,
     target: bpy.types.Object,
     config: RemeshConfig,
     *,
     allow_python_bvh: bool = True,
-) -> str:
+):
+    """The UVs of the result, as timer steps (`sliced`). Stop falls back to Blender's transfer below."""
+    yield from ()
+    sliced.tick("Carrying the UVs over")
     mode = str(config.texture_mode or "PROJECT").upper()
     if mode == "NONE":
         return "SKIPPED"
@@ -1562,8 +1566,8 @@ def _preserve_textures(
             projected = _project_uvs_bvh(source, target)
     if mode == "BAKE" or (config.bake_fallback and not uv_mapping_is_valid(target)):
         try:
-            ensure_target_uvs(target)
-            bake_selected_to_active(
+            yield from ensure_target_uvs_steps(target)
+            yield from bake_selected_to_active_steps(
                 source,
                 target,
                 maps={"COLOR"},
@@ -1686,6 +1690,11 @@ def _topology_status(profile: ScanProfile | None, topology_policy: str) -> str:
 
 
 def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
+    return sliced.finish(run_curiomesh_steps(obj, config))
+
+
+def run_curiomesh_steps(obj: bpy.types.Object, config: RemeshConfig):
+    """`run_curiomesh` (the remesh) as timer steps (`sliced`): the remesh runs at once, then the UV transfer in short pieces."""
     start = time.perf_counter()
     source_snapshot: bpy.types.Object | None = None
     source_surface: bpy.types.Object | None = None
@@ -1964,7 +1973,7 @@ def run_curiomesh(obj: bpy.types.Object, config: RemeshConfig) -> RemeshResult:
                     allow_python_bvh=bounded_source_evidence is None,
                 )
 
-            uv_status = _preserve_textures(
+            uv_status = yield from _preserve_textures_steps(
                 source_surface,
                 work_obj,
                 config,

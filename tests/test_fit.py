@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _nobvh  # noqa: E402,F401  (no BVH outside Blender)
 
-from triadq.fit import corner_normals, fit_vertices, untangled  # noqa: E402
+from triadq.fit import _run, corner_normals_steps, fit_vertices, untangled  # noqa: E402
 
 
 def grid(count: int, z: float = 0.0):
@@ -70,7 +70,7 @@ class CornerNormalTests(unittest.TestCase):
         points, quads = grid(2)
         normals = np.array([[0.0, 0.3, 1.0], [0.0, -0.3, 1.0]])
         normals /= np.linalg.norm(normals, axis=1, keepdims=True)
-        out = corner_normals(points, [tuple(q) for q in quads.tolist()], normals, np.ones(2), np.array([0, 1]), np.zeros(4, dtype=np.int64), lambda p, c: [(None, 0, 0.1), (None, 1, 0.1)], 2)
+        out = _run(corner_normals_steps(points, [tuple(q) for q in quads.tolist()], normals, np.ones(2), np.array([0, 1]), np.zeros(4, dtype=np.int64), lambda p, c: [(None, 0, 0.1), (None, 1, 0.1)], 2))
         np.testing.assert_allclose(np.abs(out), np.tile(np.abs(normals[0]), (4, 1)), atol=2e-3)
 
     def test_a_corner_hears_its_own_side_of_a_hard_edge(self):
@@ -83,7 +83,7 @@ class CornerNormalTests(unittest.TestCase):
             on_floor = point[2] < point[0]
             return [(None, 0 if on_floor else 1, 0.1)]
 
-        out = corner_normals(points, faces, normals, np.ones(2), np.zeros(2, dtype=np.int64), np.zeros(6, dtype=np.int64), find_n, 1)
+        out = _run(corner_normals_steps(points, faces, normals, np.ones(2), np.zeros(2, dtype=np.int64), np.zeros(6, dtype=np.int64), find_n, 1))
         np.testing.assert_allclose(np.abs(out[:4]), np.tile([0.0, 0.0, 1.0], (4, 1)), atol=1e-9)
         np.testing.assert_allclose(np.abs(out[4:]), np.tile([1.0, 0.0, 0.0], (4, 1)), atol=1e-9)
 

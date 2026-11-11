@@ -9,6 +9,7 @@ import bmesh
 import bpy
 import numpy as np
 
+from . import sliced
 from .triadq import tasks, texsets
 from .triadq.uvs import is_see_through, uv_overlap
 
@@ -17,8 +18,10 @@ MIN_UV_FILL = 0.4  # share of the UV square a new unwrap must use before its isl
 MOST_OVERLAP = 0.01  # share of texels a UV map may reuse and still hold a bake
 
 
-def ensure_target_uvs(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02) -> None:
-    """Unwrap a mesh with no UVs. With new_layer, always unwrap, into a new layer that becomes the active one."""
+def ensure_target_uvs_steps(obj: bpy.types.Object, method: str = "SMART", new_layer: str = "", island_margin: float = 0.02):
+    """Unwrap a mesh with no UVs. With new_layer, always unwrap, into a new layer that becomes the active one. Timer steps
+    (`sliced`): a long unwrap yields between short pieces; Stop falls back to Smart Project."""
+    yield from ()
     if obj.type != "MESH" or (obj.data.uv_layers and not new_layer):
         return
     if new_layer:
@@ -195,7 +198,11 @@ def _keep_see_through(mesh: bpy.types.Mesh, old: np.ndarray, glass: dict, uv_lay
     mesh.uv_layers[uv_layer].data.foreach_set("uv", ours)
 
 
-def bake_detail(
+def bake_detail(source_obj: bpy.types.Object, target_obj: bpy.types.Object, **kw) -> list[bpy.types.Image]:
+    return sliced.finish(bake_detail_steps(source_obj, target_obj, **kw))
+
+
+def bake_detail_steps(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
     *,
@@ -203,8 +210,10 @@ def bake_detail(
     resolution: int,
     cage: float,
     new_uvs: bool = False,
-) -> list[bpy.types.Image]:
-    """Bake the source's detail onto the target. The source and its materials are only read.
+):
+    """`bake_detail` as timer steps (`sliced`): the unwrap runs in short pieces, the bake itself is Blender's.
+
+    Bake the source's detail onto the target. The source and its materials are only read.
 
     With color, the target ends up with one new material holding both maps, and see-through materials stay as they are:
     a bake has no way to hold glass. Without color, it keeps its own materials, as private copies, with the normal map
@@ -215,7 +224,7 @@ def bake_detail(
     margin = max(4, int(resolution) // 128)  # padding that survives the texture's smaller mip levels
     if new_uvs or not _uv_layer_can_hold_bake(mesh):
         while True:
-            ensure_target_uvs(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
+            yield from ensure_target_uvs_steps(target_obj, new_layer=BAKE_LAYER, island_margin=2.0 * margin / resolution)
             if margin <= 2 or _uv_fill(mesh) >= MIN_UV_FILL:
                 break
             # Thousands of small islands: the gaps between them would eat the texture, and every face gets a few texels.
@@ -226,7 +235,7 @@ def bake_detail(
     mesh.uv_layers.active.active_render = True
     _harden_uv_seams(mesh)
     _keep_triangles(target_obj)
-    images = bake_selected_to_active(
+    images = yield from bake_selected_to_active_steps(
         source_obj, target_obj, maps=("NORMAL", "COLOR") if with_color else ("NORMAL",),
         resolution=resolution, margin=margin, cage=cage, ray_limit=3.0 * cage,
     )
@@ -251,7 +260,7 @@ def bake_detail(
     return images
 
 
-def bake_texture_sets(
+def bake_texture_sets_steps(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
     *,
@@ -259,8 +268,10 @@ def bake_texture_sets(
     labels,
     resolution: int,
     cage: float,
-) -> list[bpy.types.Image]:
-    """Bake Normal + Color onto `count` sets of maps, each set its own material and its own 0-1 UV square.
+):
+    """Timer steps (`sliced`): each set's unwrap runs in short pieces, as in `bake_detail_steps`.
+
+    Bake Normal + Color onto `count` sets of maps, each set its own material and its own 0-1 UV square.
 
     Whole parts (`labels`, per face, or None) go together where they fit, in sets of about equal area. Each set is cut
     off into its own object, baked, and the sets are joined back into the target. Faces on either side of a set's border
@@ -273,7 +284,7 @@ def bake_texture_sets(
     mesh.polygons.foreach_get("center", centres)
     sets = texsets.texture_sets(np.zeros(n, np.int32) if labels is None else labels, area, centres.reshape(-1, 3), count)
     if sets.max() == 0:
-        return bake_detail(source_obj, target_obj, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
+        return (yield from bake_detail_steps(source_obj, target_obj, with_color=True, resolution=resolution, cage=cage, new_uvs=True))
     images, parts = [], []
     try:
         for k in range(int(sets.max()) + 1):
@@ -289,7 +300,7 @@ def bake_texture_sets(
             bmesh.ops.delete(bm, geom=[f for f in bm.faces if sets[f.index] != k], context="FACES")
             bm.to_mesh(part.data)
             bm.free()
-            images += bake_detail(source_obj, part, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
+            images += yield from bake_detail_steps(source_obj, part, with_color=True, resolution=resolution, cage=cage, new_uvs=True)
         for part in parts:  # the joined mesh gets one, with the same triangles
             for modifier in [m for m in part.modifiers if m.name == "CurioMesh Bake Triangles"]:
                 part.modifiers.remove(modifier)
@@ -312,7 +323,7 @@ def bake_texture_sets(
             mesh.polygons.foreach_set("material_index", np.maximum(slots - 1, 0))
         _keep_triangles(target_obj)
         return images
-    except Exception:
+    except BaseException:  # also a closed generator: the set copies never stay behind
         for part in parts:
             if part.name in bpy.data.objects:
                 data = part.data
@@ -465,7 +476,7 @@ def _rollback_bake_data(
     return errors
 
 
-def bake_selected_to_active(
+def bake_selected_to_active_steps(
     source_obj: bpy.types.Object,
     target_obj: bpy.types.Object,
     *,
@@ -475,12 +486,15 @@ def bake_selected_to_active(
     uv_method: str = "SMART",
     cage: float = 0.04,
     ray_limit: float = 0.0,
-) -> list[bpy.types.Image]:
+):
+    """Bake `maps` from the source onto the target, as timer steps (`sliced`): the unwrap of a mesh without UVs runs in short pieces
+    (Stop: Smart Project makes them); the bake itself is Blender's, in one piece."""
     jobs = _bake_jobs(maps)
     if not jobs:
         return []
 
-    ensure_target_uvs(target_obj, uv_method)
+    yield from ensure_target_uvs_steps(target_obj, uv_method)
+    sliced.tick("Baking")
     baked: list[bpy.types.Image] = []
     created_images: list[bpy.types.Image] = []
     created_materials: list[bpy.types.Material] = []

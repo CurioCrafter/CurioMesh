@@ -271,13 +271,13 @@ def run_bake_rollback_case():
     textures._execute_bake = lambda _bake_type: {"CANCELLED"}
     try:
         try:
-            textures.bake_selected_to_active(
+            sys.modules["curiomesh.sliced"].finish(textures.bake_selected_to_active_steps(
                 source,
                 target,
                 maps=("COLOR",),
                 resolution=64,
                 margin=3,
-            )
+            ))
         except RuntimeError as exc:
             if "did not finish" not in str(exc):
                 raise AssertionError(f"bake_rollback: unexpected failure: {exc}") from exc
