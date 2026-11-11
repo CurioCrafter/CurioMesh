@@ -368,7 +368,7 @@ MESSAGES = {
     "Cutting the guide curves in, try {0}": "ガイドカーブを入れています、{0} 回目",
     "Dashboard": "ダッシュボード",
     "HUD On": "HUD オン",
-    "Shows the dashboard in every open scene at once, and in new scenes and files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene": "開いているすべてのシーンにダッシュボードを一度に表示し、新しいシーンや開いたファイルにも表示します。オフにするとすべてで隠します。「ダッシュボードを表示」と「非表示」は引き続き1つのシーンで使えます",
+    "Shows the dashboard in every open scene at once, and in files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene": "開いているすべてのシーンにダッシュボードを一度に表示し、開いたファイルにも表示します。オフにするとすべてで隠します。「ダッシュボードを表示」と「非表示」は引き続き1つのシーンで使えます",
     "Dashboard (HUD)": "ダッシュボード (HUD)",
     "Dashboard Button": "ダッシュボードボタン",
     "Debug": "デバッグ",

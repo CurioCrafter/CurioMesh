@@ -126,7 +126,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
 
     hud_on: bpy.props.BoolProperty(
         name="HUD On",
-        description="Shows the dashboard in every open scene at once, and in new scenes and files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene",
+        description="Shows the dashboard in every open scene at once, and in files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene",
         default=False,
         update=lambda self, _context: overlay.set_hud_everywhere(self.hud_on),
     )

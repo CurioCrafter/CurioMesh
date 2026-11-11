@@ -368,7 +368,7 @@ MESSAGES = {
     "Cutting the guide curves in, try {0}": "Cortando las curvas guía, intento {0}",
     "Dashboard": "Panel",
     "HUD On": "HUD activado",
-    "Shows the dashboard in every open scene at once, and in new scenes and files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene": "Muestra el panel en todas las escenas abiertas a la vez, y en las escenas y archivos nuevos que abras. Desactivado lo oculta en todas. Mostrar panel y Ocultar siguen funcionando en una escena",
+    "Shows the dashboard in every open scene at once, and in files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene": "Muestra el panel en todas las escenas abiertas a la vez, y en los archivos que abras. Desactivado lo oculta en todas. Mostrar panel y Ocultar siguen funcionando en una escena",
     "Dashboard (HUD)": "Panel (HUD)",
     "Dashboard Button": "Botón del panel",
     "Debug": "Depurar",
