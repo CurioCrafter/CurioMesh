@@ -89,6 +89,26 @@ class Twin(unittest.TestCase):
         for x in (0.0, 2.0):  # lower levels stay disks too
             self.assertEqual(tree.level(x)[2][1], 0)
 
+    def test_array_helpers_match_their_loops(self):
+        rng = np.random.default_rng(2)
+        for n in (1, 7, 60):
+            a, b = rng.integers(0, n, 2 * n), rng.integers(0, n, 2 * n)
+            d = uvchart._Dsu(n)
+            for x, y in zip(a.tolist(), b.tolist()):
+                d.union(x, y)
+            self.assertEqual(uvhide._components(n, a, b).tolist(), [d.find(i) for i in range(n)])
+            x, y, c = rng.integers(0, n + 2, 3 * n), rng.integers(0, n + 2, 3 * n), rng.integers(1, 9, 3 * n)
+            keep = x != y
+            g = uvhide._Flow(n + 2)
+            for p, q, w in zip(x[keep].tolist(), y[keep].tolist(), c[keep].tolist()):
+                g.add(p, q, w)
+            h = uvhide._Flow.from_arcs(n + 2, x[keep], y[keep], c[keep])
+            self.assertEqual((g.head, g.to, g.nxt, g.cap), (h.head, h.to, h.nxt, h.cap))
+        square = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        self.assertFalse(uvhide._border_crosses(np.array([0.0, 0, 1, 0, 1, 1, 0, 1]), square))
+        self.assertTrue(uvhide._border_crosses(np.array([0.0, 0, 1, 0, 0, 1, 1, 1]), square))  # a bow tie
+        self.assertEqual(uvhide._min_box(np.array([0.0, 0, 2, 0, 2, 1, 0, 1, 1, 0.5]), [0, 1, 2, 3]), (2.0, 2.0))
+
     def test_twin_names_no_compiled_core(self):
         text = (common.ROOT / "triadq" / "uvhide.py").read_text(encoding="utf-8").lower()
         for word in ("turbo", "native", "rust", "gpu"):
