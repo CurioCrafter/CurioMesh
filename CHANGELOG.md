@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **HUD On** (Preferences, Dashboard): the checkbox now shows or hides the viewport dashboard immediately in every open
+  scene, not only in new ones. It is still the starting state of scenes that have not used CurioMesh yet.
+
 ## 0.9.8 - 2026-11-06
 
 ### Hard surface

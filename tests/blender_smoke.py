@@ -1080,6 +1080,13 @@ def run_ui_prefs_case(module):
     if not settings.hud_enabled:
         raise AssertionError("ui prefs: hud default applied twice")
     prefs.hud_default = True
+    # The preference is also a live switch: it flips the HUD of the open scenes at once.
+    if not settings.hud_enabled:
+        raise AssertionError("ui prefs: hud_default True did not switch the HUD back on live")
+    prefs.hud_default = False
+    if settings.hud_enabled:
+        raise AssertionError("ui prefs: hud_default False did not hide the HUD live")
+    prefs.hud_default = True
 
     # Every panel draws, in several states, with no unknown icon / property / operator.
     states = []

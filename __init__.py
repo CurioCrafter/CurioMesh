@@ -36,6 +36,10 @@ def _redraw(self, context):
     overlay.tag_redraw()
 
 
+def _hud_default_update(self, context):
+    overlay.set_hud_everywhere(bool(self.hud_default))
+
+
 def _color(name: str, label: str, description: str):
     return bpy.props.FloatVectorProperty(
         name=label,
@@ -108,9 +112,10 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     )
 
     hud_default: bpy.props.BoolProperty(
-        name="HUD On in New Scenes",
-        description="Whether the viewport dashboard starts on in scenes that have not used CurioMesh yet",
+        name="HUD On",
+        description="Show or hide the viewport dashboard right away, in every open scene. Also the starting state of scenes that have not used CurioMesh yet",
         default=D["hud_default"],
+        update=_hud_default_update,
     )
     hud_corner: bpy.props.EnumProperty(
         name="Corner",
@@ -256,6 +261,7 @@ class CURIOMESH_OT_reset_preferences(bpy.types.Operator):
             except Exception:
                 pass
         apply_category()
+        overlay.set_hud_everywhere(bool(prefs.hud_default))  # property_unset skips update callbacks
         overlay.tag_redraw()
         return {"FINISHED"}
 

@@ -249,6 +249,14 @@ def apply_hud_default(scene=None) -> None:
             settings.hud_enabled = False
 
 
+def set_hud_everywhere(enabled: bool) -> None:
+    """Show or hide the HUD right now in every open scene (live switch from the Preferences)."""
+    for sc in bpy.data.scenes:
+        settings = getattr(sc, "curiomesh_settings", None)
+        if settings is not None and settings.hud_enabled != enabled:
+            settings.hud_enabled = enabled  # its update callback redraws the viewports
+
+
 def tag_redraw() -> None:
     wm = bpy.context.window_manager
     if wm is None:
