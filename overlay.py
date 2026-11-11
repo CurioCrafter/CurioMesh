@@ -91,6 +91,7 @@ PREF_DEFAULTS = {
     "show_guided": True,
     "pro_mode": False,
     "flow_editor": False,
+    "hud_on": False,
     "hud_corner": "BOTTOM_LEFT",
     "hud_offset_x": 70,
     "hud_offset_y": 40,
@@ -284,15 +285,17 @@ def wrap_label(layout, text: str, icon: str = "NONE", width: int = 38, limit: in
 
 
 def apply_hud_default(scene=None) -> None:
-    """Set each scene's dashboard once (new scenes and files you open) to the HUD On preference, off by default."""
+    """HUD On shows the dashboard in every scene of each file you open; otherwise each scene starts with it off, once."""
     scenes = [scene] if scene is not None else list(bpy.data.scenes)
     for sc in scenes:
         settings = getattr(sc, "curiomesh_settings", None)
-        if settings is None or sc.get("curiomesh_hud_init"):
+        if settings is None:
             continue
+        if getattr(get_prefs(), "hud_on", False):
+            settings.hud_enabled = True  # HUD On: every file you open shows it, each time
+        elif not sc.get("curiomesh_hud_init"):
+            settings.hud_enabled = False  # off by default, set once, so Show Dashboard in a saved file stays
         sc["curiomesh_hud_init"] = True
-        prefs = get_prefs()
-        settings.hud_enabled = bool(getattr(prefs, "hud_on", False))  # on only when the user turned HUD On in the preferences
 
 
 def set_hud_everywhere(on: bool) -> None:

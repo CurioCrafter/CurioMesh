@@ -127,7 +127,7 @@ class CURIOMESH_AP_preferences(bpy.types.AddonPreferences):
     hud_on: bpy.props.BoolProperty(
         name="HUD On",
         description="Shows the dashboard in every open scene at once, and in files you open. Off hides it everywhere. Show Dashboard and Hide still work in one scene",
-        default=False,
+        default=D["hud_on"],
         update=lambda self, _context: overlay.set_hud_everywhere(self.hud_on),
     )
     hud_corner: bpy.props.EnumProperty(
@@ -278,6 +278,7 @@ class CURIOMESH_OT_reset_preferences(bpy.types.Operator):
             except Exception:
                 pass
         apply_category()
+        overlay.set_hud_everywhere(prefs.hud_on)  # HUD On back to off hides the dashboard everywhere, as ticking it would
         overlay.tag_redraw()
         return {"FINISHED"}
 
