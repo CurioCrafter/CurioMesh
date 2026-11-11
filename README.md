@@ -41,7 +41,7 @@ There are three builds. They share the same ideas, but not the same features.
 | Agent tools | ✓ new in 0.9.9 | ✗ | ✗ command line only (`curiomesh batch`, `curiomesh measure`) |
 | History and Tidy Tools | ✓ new in 0.9.9 | ✗ not in 0.9.8 | ✗ (Redo this spot and Put back only) |
 | Parts exchange | ✓ new in 0.9.9 | ✗ | ✗ |
-| Released | ✓ 0.9.8 is out; 0.9.9 is not | each version goes through the site's review | ✓ 0.4.1 |
+| Released | ✓ 0.9.9 | each version goes through the site's review | ✓ 0.4.1 |
 
 The GitHub add-on is the fastest build inside Blender and has every feature. The Blender Extensions build follows that site's rules, so it is the most limited. Standalone has no Blender in the loop, so it can be faster; that is not measured yet. It has fewer tools.
 

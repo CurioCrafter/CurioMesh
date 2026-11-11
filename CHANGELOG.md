@@ -1,10 +1,33 @@
 # Changelog
 
-## 0.9.9 - unreleased
+## 0.9.9 - 2026-11-11
 
-Merged into main: `v0981-tidytools` (Look First, History and the Tidy Tools sets), `v0981-faceloops2` (Face Loops,
-Ring Round This, Redraw in Rows) and `v0981-sitefixes` (the fixes below, ported from the Blender-site build). Symmetrize
-and the experiment branches are not in this release.
+New UVs and Seam Fit, a calmer panel with a "?" on every step, CurioMesh in four more languages, a Help Make It Better
+panel, agent tools, Auto Fix, History and the Tidy Tools. Symmetrize and the experiment branches are not in this
+release.
+
+### A calmer panel
+- **Nothing jumps while it works.** Status lines, Auto Fix progress, the part-edit warning, the ladder and Tidy Up
+  notes and the verdict's lines each sit in a fixed slot, so sliders and buttons stay where they are.
+- **Fix Bad Spots** is the main action after a result: big, red with the count when there are bad spots, greyed out in
+  the same place when there are none. It walks the spots worst first; mark parts and redo them, or keep the original
+  there. **Try Every Method** runs every method on a part, one job at a time, as one Ctrl+Z step.
+- The clicked part's card sits in the sidebar, with progress, status and Stop in a fixed three-row slot; Back to How
+  It Was stays in place, greyed out, after use.
+- A **step strip** shows where you are, and a small **?** next to each step explains it in plain words.
+- The **Dashboard** in the 3D view (quad count, quality, live progress, Stop, Hide, Collapse) is off until you press
+  Show Dashboard.
+
+### Your language
+- CurioMesh in **Spanish, Portuguese (Brazil), Japanese and Simplified Chinese**: labels, buttons, tooltips, status
+  lines, reports and the dashboard follow Blender's interface language. The language switch in the add-on preferences
+  and the Options popover changes all of Blender, and its tooltip says so. The classic Pro tools stay in English.
+
+### Help make it better
+- A **Help Make It Better** panel: pick the bad spots, **Send as a Problem** (a zip with the parts, your settings and
+  a report, and the issue form opened with your versions filled in), **Share a Fix**, **Report a Bug** and **How to
+  Help**. Nothing is uploaded; you attach the zip yourself.
+- **Write a Prompt for My AI** copies a ready prompt with your model and settings filled in. Nothing is sent anywhere.
 
 ### Fixes from the Blender-site review
 - Previews are found by the add-on's own mark, never by name, so an object of yours called like a preview is never
