@@ -4,7 +4,7 @@
 """The Tools section of the main tab and one small operator per Tidy Tool.
 
 Tools: "Work on" (Selection, Part, Whole Result), the first-time button, five group popovers (Relax, Loops & Strips,
-Poles, Cleanup, Hard Surface; a group with no tool in this build is not drawn), and the Last line with Again and Undo.
+Poles, Cleanup, Hard Surface; a group with no registered tool is not drawn), and the Last line with Again and Undo.
 While a tool is open the section shows only that tool with Apply and Cancel. History, below it, lists every step.
 How to add a tool: see the developer note at the top of `tidylive.py`.
 """
