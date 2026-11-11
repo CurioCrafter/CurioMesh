@@ -207,7 +207,7 @@ BANNED_CODE = (
     (r"addons\[__name__\]", "preferences keyed by __name__ (use __package__)"),
     (r"[\"'][A-Za-z]:[\/]", "absolute Windows paths"),
     (r"__pycache__|\.pyc\b", "bytecode"),
-    (r"except ImportError", "import fallbacks (relative imports only)"),
+    (r"except\s*\(?[\w\s,]*(ImportError|ModuleNotFoundError)", "import fallbacks (relative imports only)"),
     (r"keyconfigs|keymap_items\.new", "keymaps"),
     (r"preferences\.view\.\w+\s*=(?!=)", "changes to the user's preferences"),
     (r"[\"']wm\.url_open[\"'](?![^\n]*\(opens browser\))", "a browser link on a button that does not say (opens browser)"),

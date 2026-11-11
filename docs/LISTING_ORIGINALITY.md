@@ -35,6 +35,13 @@ CurioMesh contains Python code only and no compiled or third-party code. Its bun
 | `flowstroke.py`, `flowedit.py`, `guides.py`, `loops.py` | Drawn strokes, rings and edge loops the quads follow | Our design | |
 | `triadq/texsets.py` | Groups faces into texture sets or engine-sized pieces | Our design | Plain longest-axis cut |
 | `bridge.py`, `atlasq.py`, `rows_worker.py`, `multires.py`, `blockout.py` | Drive Blender's own QuadriFlow, Voxel Remesh, Decimate and Multires; Blockout fits simple solids | Our design around Blender operators | QuadriFlow is reached only through `bpy.ops.object.quadriflow_remesh` |
+| `triadq/uvseams.py`, `triadq/uvclassic.py` | UV islands, seams and side regions of your mesh; the per-side UV transfer of Classic Remesh | Published pieces: closest point on a triangle (Ericson 2005), convex-combination fill (Tutte 1963, Floater 1997) | The side rules are our own |
+| `triadq/uvsight.py` | What the camera sees of each face and edge | Published idea: Sheffer and Hart 2002 (Seamster); Saff and Kuijlaars 1997 view directions | Depth pictures and pixel counts are our own |
+| `triadq/uvchart.py`, `triadq/uvhide.py` | Charts from quad patches, merge tree, seams slid out of sight | Published: Eppstein et al. 2008 (motorcycle graphs), Eppstein 2003 (tree-cotree), Garland, Willmott and Heckbert 2001, Julius, Kraevoy and Sheffer 2005 (D-Charts), Sander et al. 2003, Floater 2003, Boykov and Jolly 2001, Dinic 1970, Toussaint 1983 | Merge order, rules and the slide are our own |
+| `triadq/uvflat.py` | Flattens each chart with straight rows | Published: Liu et al. 2008 (local/global ARAP), Smith and Schaefer 2015 (injective steps), Tutte 1963, Floater 1997, Hestenes and Stiefel 1952 (CG) | Straight-rows handling is our own |
+| `triadq/uvpack.py`, `triadq/uvnew.py` | Packs charts on the page with a mip-safe gap; the New UVs pipeline | Published: Jylanki 2010 (MaxRects), Baker, Coffman and Rivest 1980, Chazelle 1983, Carr, Hoberock, Crane and Hart 2006, Andrew 1979 | The gap rule and the pipeline are our own |
+| `triadq/uvscore.py` | UV Check numbers and verdict | Published: Sander, Snyder, Gortler and Hoppe 2001 (L2 stretch), Pineda 1988 (fill rule) | Thresholds are our own |
+| `triadq/uvbake.py`, `triadq/uvtrial.py`, `uv_panel.py`, `uv_draw.py`, `uv_layers.py` | The bake's own unwrap, the UV tools (New UVs, New page layout, Cut here, Bake those spots) and their preview | Our design | |
 | `icons/` | Panel icons | Drawn by our own script, CC0 | See `icons/LICENSE.txt` |
 
 Names in the panel are plain descriptions of what each control does. A few are standard Blender or modelling terms

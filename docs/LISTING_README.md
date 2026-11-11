@@ -34,6 +34,12 @@ CurioMesh contains Python code only and no compiled or third-party code.
   Editor (experimental, off by default).
 - **Finish:** Apply, Bake Detail (normal or normal + color maps), LOD sets, Multires Detail and Export for Game Engine:
   presets for Unreal, Unity, Godot, Roblox, glTF/web and DirectX engines (CryEngine, O3DE), or Custom (FBX, glTF or OBJ).
+- **UVs:** the UVs row in the Finish step chooses what the result's UVs are: Auto, Keep source (your mesh's UVs carried over;
+  Seam Fit Exact keeps every UV seam as a border, as Keep UV Seams does), New or Off. On the applied mesh, **New UVs**
+  (few seams, out of sight, straight rows), **New page layout**, **Cut here / Join here** and **Bake those spots**
+  (faces across a seam get their own island and only those are baked) show their change first, with Apply, Cancel,
+  Before/After, Again and Keep going; each Apply is one Ctrl+Z step and a History entry. A bake makes its UVs with New
+  UVs (Smart Project when UVs are Off), and Classic Remesh carries UVs over island by island.
 - **Job folders:** Export Job writes a folder with a Python script, `run_job.py`, that you run yourself in any
   Blender that has CurioMesh installed (`blender --background --python run_job.py`). Import Result brings the result
   back.
@@ -67,9 +73,13 @@ CurioMesh contains Python code only and no compiled or third-party code.
   slider starts it. While it runs the panel says so. It works in the same short steps and leaves Blender idle at
   least twice as long as each step took, so it uses about a third of Blender's time at most. Working out all the
   sizes can take several minutes; **Stop Working Out Sizes** ends it at any time (the sizes already made stay).
+- The UV tools, the bake's unwrap and the UV work of Apply and Classic Remesh run in the same short steps. On a
+  60,000-face mesh the longest single step we measured was about 0.4 seconds in the UV tools and the bake's unwrap,
+  and about 0.9 seconds in Classic Remesh's UV transfer. **Esc** stops Apply's or Classic Remesh's UV work:
+  the bake then unwraps with Smart Project, and Classic Remesh uses Blender's own UV transfer; both say so.
 - Some tools run in one go, like Blender's own Remesh, with the wait cursor, and Blender is busy until they finish:
-  the Advanced tab's Classic Remesh and Batch (about 10-20 seconds per 20,000-60,000-face mesh; Batch reads Esc
-  between meshes), Classic Guided's Whole Mesh and Points Only updates, Lock Faces, Unlock All and Redraw Strip,
+  the remesh itself of the Advanced tab's Classic Remesh and Batch (about 10-20 seconds per 20,000-60,000-face mesh;
+  Batch reads Esc between meshes), Classic Guided's Whole Mesh and Points Only updates, Lock Faces, Unlock All and Redraw Strip,
   Redo Inside Shapes, Fix Selection, Bake Detail (Blender's own bake), Add Multires Detail and the Multires Detail
   step of Apply.
 - A Classic Remesh result carries a few CurioMesh custom properties (such as `curiomesh_engine`,

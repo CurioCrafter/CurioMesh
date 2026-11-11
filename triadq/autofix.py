@@ -425,18 +425,15 @@ GROUPS = ("leftovers", "seam", "poles", "patches", "hard", "rows", "shape")
 
 
 def plan(on) -> list:
-    """The pass order of AUTO_FIX.md 3.2 for the groups switched on: [(Trial class, kinds or None)]. A tool that is not
-    built yet, is manual only, or cannot find spots yet is left out; it joins the day it can."""
+    """The pass order of AUTO_FIX.md 3.2 for the groups switched on: [(Trial class, kinds or None)]. A tool that is
+    manual only or cannot find spots yet is left out; it joins the day it can."""
     import importlib
 
     out = []
     for group, module, name, kinds in PASSES:
         if group not in on:
             continue
-        try:
-            cls = getattr(importlib.import_module(f"{__package__}.{module}"), name)
-        except (ImportError, AttributeError):
-            continue
+        cls = getattr(importlib.import_module(f"{__package__}.{module}"), name)
         if cls.auto and cls.spots is not T.Trial.spots:
             out.append((cls, kinds))
     return out
